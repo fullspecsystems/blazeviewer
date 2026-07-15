@@ -1,4 +1,4 @@
-//! PhotoBlaze CLI surface (task #78): the clap argument parser and the pure mapping
+//! Blaze Viewer CLI surface (task #78): the clap argument parser and the pure mapping
 //! into [`pb_app_core::LaunchOverrides`].
 //!
 //! This is a **library**, not part of the `pb-app` binary, so the parser is shareable:
@@ -34,10 +34,10 @@ pub use clap;
 
 const AFTER_HELP: &str = "\
 EXAMPLES:
-  photoblaze ~/Photos
-  photoblaze ~/Photos --slideshow=3s --shuffle
-  photoblaze album.zip --fullscreen --scale fill
-  photoblaze ~/Photos --reverse --start-at 100";
+  blaze ~/Photos
+  blaze ~/Photos --slideshow=3s --shuffle
+  blaze album.zip --fullscreen --scale fill
+  blaze ~/Photos --reverse --start-at 100";
 
 /// Help colouring for terminals that support it. clap's `color` feature auto-detects a TTY and
 /// falls back to plain text when piped / redirected, so this never garbles captured output. One
@@ -48,12 +48,22 @@ const HELP_STYLES: Styles = Styles::styled()
     .literal(AnsiColor::BrightCyan.on_default())
     .placeholder(AnsiColor::BrightGreen.on_default());
 
-/// The PhotoBlaze command line. Every flag maps to existing viewer state via
+/// The Blaze Viewer command line. Every flag maps to existing viewer state via
 /// [`Cli::to_overrides`]; nothing here persists to `settings.toml`.
 #[derive(Parser, Debug)]
 #[command(
-    name = "photoblaze",
-    bin_name = "photoblaze",
+    // `blaze` is the COMMAND — the name a human types. It's what the macOS
+    // "Install Command-Line Tool…" action symlinks into /usr/local/bin, and it drives
+    // clap's usage line. The ripgrep convention this file already follows: short command
+    // (`rg`), product name in the version/help header (`ripgrep`) — here `blaze` and
+    // `display_name(APP_NAME)` = "Blaze Viewer".
+    //
+    // Deliberately NOT `blazeviewer` (nobody wants to type it) and NOT derived from
+    // argv[0] (the Swift host synthesizes argv, and the bundle's executable is
+    // "Blaze Viewer" — a usage line reading `Usage: Blaze Viewer [OPTIONS]` would be
+    // wrong and ugly). Pinning it keeps the help identical on every shell and platform.
+    name = "blaze",
+    bin_name = "blaze",
     // A placeholder version so clap wires up the `--version` flag; the shell overrides
     // the string with the real build id (same as the About box) in `parse_from`.
     version,
@@ -66,7 +76,7 @@ const HELP_STYLES: Styles = Styles::styled()
 )]
 pub struct Cli {
     /// Image files, a folder, or an archive (.zip / .7z) to open. With no path,
-    /// PhotoBlaze opens empty.
+    /// Blaze Viewer opens empty.
     #[arg(value_name = "PATH")]
     pub paths: Vec<PathBuf>,
 
@@ -226,7 +236,7 @@ where
     let cmd = Cli::command()
         .version(version)
         // The ripgrep convention (binary `rg`, version line "ripgrep X.Y"): usage lines
-        // keep the lowercase COMMAND the user types (`blazeviewer`, the bin name);
+        // keep the COMMAND the user types (`blaze`);
         // the PRODUCT-name contexts wear the brand — `--version` prints
         // "Blaze Viewer <version>" via display_name, and the help header (about) below.
         .display_name(pb_app_core::APP_NAME)
@@ -314,7 +324,7 @@ mod tests {
 
     /// Parse just the flags (no runtime version needed) via the derive entry.
     fn parse(args: &[&str]) -> Cli {
-        let mut full = vec!["photoblaze"];
+        let mut full = vec!["blaze"];
         full.extend_from_slice(args);
         Cli::try_parse_from(full).expect("should parse")
     }
@@ -425,11 +435,11 @@ mod tests {
         // Minutes above the ceiling clamp (Mixed strictness), same as bare seconds.
         assert_eq!(secs(&["--slideshow=5m"]), Some(60.0));
         // Unknown units / internal whitespace / bare unit are parse errors.
-        assert!(Cli::try_parse_from(["photoblaze", "--slideshow=3h"]).is_err());
-        assert!(Cli::try_parse_from(["photoblaze", "--slideshow=3 s"]).is_err());
-        assert!(Cli::try_parse_from(["photoblaze", "--slideshow=m"]).is_err());
+        assert!(Cli::try_parse_from(["blaze", "--slideshow=3h"]).is_err());
+        assert!(Cli::try_parse_from(["blaze", "--slideshow=3 s"]).is_err());
+        assert!(Cli::try_parse_from(["blaze", "--slideshow=m"]).is_err());
         // "100ms" strips the trailing s and fails on "100m" — not silently milliseconds.
-        assert!(Cli::try_parse_from(["photoblaze", "--slideshow=100ms"]).is_err());
+        assert!(Cli::try_parse_from(["blaze", "--slideshow=100ms"]).is_err());
     }
 
     #[test]
@@ -499,27 +509,27 @@ mod tests {
 
     #[test]
     fn unknown_flag_and_bad_enum_are_errors() {
-        assert!(Cli::try_parse_from(["photoblaze", "--nope"]).is_err());
-        assert!(Cli::try_parse_from(["photoblaze", "--scale", "huge"]).is_err());
+        assert!(Cli::try_parse_from(["blaze", "--nope"]).is_err());
+        assert!(Cli::try_parse_from(["blaze", "--scale", "huge"]).is_err());
         // A bad interval value (not a number) is a parse error, not a clamp.
-        assert!(Cli::try_parse_from(["photoblaze", "--slideshow=abc"]).is_err());
+        assert!(Cli::try_parse_from(["blaze", "--slideshow=abc"]).is_err());
     }
 
     #[test]
     fn parse_from_never_exits_help_and_version_are_errors() {
         use clap::error::ErrorKind;
-        let help = parse_from(["photoblaze", "--help"], "test-build").unwrap_err();
+        let help = parse_from(["blaze", "--help"], "test-build").unwrap_err();
         assert_eq!(help.kind(), ErrorKind::DisplayHelp);
         assert_eq!(help.exit_code(), 0);
 
-        let ver = parse_from(["photoblaze", "--version"], "test-build").unwrap_err();
+        let ver = parse_from(["blaze", "--version"], "test-build").unwrap_err();
         assert_eq!(ver.kind(), ErrorKind::DisplayVersion);
         assert_eq!(ver.exit_code(), 0);
         // The shell-supplied build string is what --version prints.
         assert!(ver.to_string().contains("test-build"));
 
         // A usage error exits 2.
-        let bad = parse_from(["photoblaze", "--nope"], "test-build").unwrap_err();
+        let bad = parse_from(["blaze", "--nope"], "test-build").unwrap_err();
         assert_eq!(bad.exit_code(), 2);
     }
 }

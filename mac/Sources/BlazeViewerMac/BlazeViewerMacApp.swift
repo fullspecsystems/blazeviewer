@@ -12,7 +12,7 @@ import SwiftUI
 /// NOTE the launch gotcha that was chased for a whole evening: it was NOT activation —
 /// AppKit treats a bare path in `argv[1]` as a document-open launch and (racily)
 /// suppresses the initial `WindowGroup` window (windowless app, live menu bar).
-/// **Resolved** (task #78.10): `PhotoBlazeMacApp.init` registers
+/// **Resolved** (task #78.10): `BlazeViewerMacApp.init` registers
 /// `NSTreatUnknownArgumentsAsOpen = NO`, so AppKit never converts argv paths to
 /// document-opens — the shared pb-cli parser owns argv, and `photoblaze ~/Photos`
 /// works bare. `--pb-open <path>` survives as a hidden compat alias.
@@ -68,7 +68,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 }
 
 @main
-struct PhotoBlazeMacApp: App {
+struct BlazeViewerMacApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var delegate
     @State private var model: CoreModel
 

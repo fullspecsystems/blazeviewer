@@ -241,7 +241,8 @@ mod linux {
         // feed. (A toast-based "update available" notify for the read-only case is a future add.)
         let dir = target.parent().ok_or("$APPIMAGE has no parent directory")?;
         let tmp = dir.join(format!(
-            ".photoblaze-update-{}.AppImage.part",
+            ".{}-update-{}.AppImage.part",
+            pb_app_core::APP_SLUG,
             manifest.version
         ));
 

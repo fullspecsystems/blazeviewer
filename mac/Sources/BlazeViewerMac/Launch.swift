@@ -6,7 +6,7 @@
 // `cli_preflight` FFI (one flag vocabulary across shells). This file owns the two
 // Mac-specific policies:
 //
-// 1. **When**: `PhotoBlazeMacApp.init` runs the preflight before the `CoreModel`
+// 1. **When**: `BlazeViewerMacApp.init` runs the preflight before the `CoreModel`
 //    (and its decode-pool engine) is built, before SwiftUI materializes a window,
 //    and before Sparkle starts — a terminal `photoblaze --help` prints and exits
 //    without flashing any GUI or doing unrelated startup work.

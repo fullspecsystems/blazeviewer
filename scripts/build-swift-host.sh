@@ -107,7 +107,7 @@ cargo run -q -p pb-mac-ffi --features package --bin create-package -- "--$PROFIL
 
 echo "==> swift build ($PROFILE)"
 swift build --package-path mac -c "$PROFILE" $FF_LINK_ARGS
-BIN="$(swift build --package-path mac -c "$PROFILE" --show-bin-path)/PhotoBlazeMac"
+BIN="$(swift build --package-path mac -c "$PROFILE" --show-bin-path)/BlazeViewerMac"
 [[ -x "$BIN" ]] || { echo "error: $BIN not found" >&2; exit 1; }
 
 # Version in lockstep with the app crate (crates/pb-app/Cargo.toml).
@@ -121,7 +121,7 @@ fi
 # The shipped bundle + its inner executable. The space is deliberate and matches
 # CFBundleName/CFBundleExecutable in Info-swift-host.plist: spaces are the macOS
 # convention ("Visual Studio Code.app") and Finder shows the exact brand. Every use of
-# these MUST stay quoted. (The SwiftPM product is still PhotoBlazeMac — an internal
+# these MUST stay quoted. (The SwiftPM product is BlazeViewerMac — an internal
 # target name, renamed separately.) The DMG deliberately does NOT take the space — see
 # release-macos.sh.
 APP_NAME="Blaze Viewer"

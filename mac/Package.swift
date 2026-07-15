@@ -10,7 +10,7 @@
 import PackageDescription
 
 let package = Package(
-    name: "PhotoBlazeMac",
+    name: "BlazeViewerMac",
     platforms: [.macOS(.v14)],
     dependencies: [
         .package(path: "../crates/pb-mac-ffi/PbMacFfi"),
@@ -27,7 +27,7 @@ let package = Package(
         // NSErrors so a format/device failure degrades instead of abort()ing.
         .target(name: "PBCatch"),
         .executableTarget(
-            name: "PhotoBlazeMac",
+            name: "BlazeViewerMac",
             dependencies: [
                 "PBCatch",
                 .product(name: "PbMacFfi", package: "PbMacFfi"),

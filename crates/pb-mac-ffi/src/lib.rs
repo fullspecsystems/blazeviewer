@@ -2744,7 +2744,11 @@ fn cli_preflight(
                 if !p.exists() {
                     return ffi::LaunchPreflightFfi {
                         proceed: false,
-                        text: format!("photoblaze: no such file or folder: {}", p.display()),
+                        text: format!(
+                            "{}: no such file or folder: {}",
+                            pb_app_core::APP_NAME,
+                            p.display()
+                        ),
                         use_stderr: true,
                         exit_code: 2,
                     };
@@ -4335,7 +4339,7 @@ mod tests {
             )
         };
         // argv[0] regression: --help is argv[1] and must parse as help, not the bin name.
-        let help = pf(&["photoblaze", "--help"]);
+        let help = pf(&["blazeviewer", "--help"]);
         assert!(!help.proceed);
         assert_eq!(help.exit_code, 0);
         assert!(!help.use_stderr, "help goes to stdout");
@@ -4347,7 +4351,7 @@ mod tests {
 
         // A terminal stdout gets the colored help (the styling Windows shows).
         let colored = cli_preflight(
-            vec!["photoblaze".into(), "--help".into()],
+            vec!["blazeviewer".into(), "--help".into()],
             "9.9.9-test".into(),
             true,
             false,
@@ -4357,7 +4361,7 @@ mod tests {
             "TTY stdout renders ANSI-styled help"
         );
 
-        let ver = pf(&["photoblaze", "--version"]);
+        let ver = pf(&["blazeviewer", "--version"]);
         assert!(!ver.proceed);
         assert_eq!(ver.exit_code, 0);
         assert!(
@@ -4369,14 +4373,14 @@ mod tests {
             "--version wears the product name (display_name), not the bin name"
         );
 
-        let bad = pf(&["photoblaze", "--nope"]);
+        let bad = pf(&["blazeviewer", "--nope"]);
         assert!(!bad.proceed);
         assert_eq!(bad.exit_code, 2);
         assert!(bad.use_stderr, "usage errors go to stderr");
 
         // Mixed strictness: a nonexistent path is a usage error with the winit shell's
         // exact message (argv[0] regression for positionals too — the path is argv[1]).
-        let missing = pf(&["photoblaze", "/definitely/not/here.jpg"]);
+        let missing = pf(&["blazeviewer", "/definitely/not/here.jpg"]);
         assert!(!missing.proceed);
         assert_eq!(missing.exit_code, 2);
         assert!(missing.use_stderr);
@@ -4385,7 +4389,7 @@ mod tests {
             .contains("no such file or folder: /definitely/not/here.jpg"));
 
         // A clean flag-only launch proceeds with no text.
-        let ok = pf(&["photoblaze", "--shuffle", "--theme", "dark"]);
+        let ok = pf(&["blazeviewer", "--shuffle", "--theme", "dark"]);
         assert!(ok.proceed);
         assert!(ok.text.is_empty());
         assert_eq!(ok.exit_code, 0);
@@ -4404,7 +4408,7 @@ mod tests {
         let dir = std::env::temp_dir();
         h.apply_launch_args(
             vec![
-                "photoblaze".into(),
+                "blazeviewer".into(),
                 "--theme".into(),
                 "dark".into(),
                 "--shuffle".into(),
@@ -4442,7 +4446,7 @@ mod tests {
         let mut h = test_handle(800, 600, 1.0);
         h.apply_launch_args(
             vec![
-                "photoblaze".into(),
+                "blazeviewer".into(),
                 "--fullscreen".into(),
                 "--theme".into(),
                 "dark".into(),
@@ -4459,7 +4463,7 @@ mod tests {
         let mut w = test_handle(800, 600, 1.0);
         w.apply_launch_args(
             vec![
-                "photoblaze".into(),
+                "blazeviewer".into(),
                 "-w".into(),
                 "--theme".into(),
                 "light".into(),
@@ -4491,14 +4495,14 @@ mod tests {
         let mut h = test_handle(800, 600, 1.0);
         let dir = std::env::temp_dir().to_string_lossy().into_owned();
         h.apply_launch_args(
-            vec!["photoblaze".into(), "--pb-open".into(), dir],
+            vec!["blazeviewer".into(), "--pb-open".into(), dir],
             "v".into(),
         );
         assert!(h.open_launch_paths(), "first call opens the stashed paths");
         assert!(!h.open_launch_paths(), "second call is a no-op");
         // With nothing stashed at all, it is also a no-op.
         let mut empty = test_handle(800, 600, 1.0);
-        empty.apply_launch_args(vec!["photoblaze".into()], "v".into());
+        empty.apply_launch_args(vec!["blazeviewer".into()], "v".into());
         assert!(!empty.open_launch_paths());
     }
 

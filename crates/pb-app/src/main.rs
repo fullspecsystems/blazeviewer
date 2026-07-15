@@ -4445,7 +4445,11 @@ fn main() {
     let launch_paths = cli.launch_paths();
     for p in &launch_paths {
         if !p.exists() {
-            let msg = format!("photoblaze: no such file or folder: {}", p.display());
+            let msg = format!(
+                "{}: no such file or folder: {}",
+                pb_app_core::APP_NAME,
+                p.display()
+            );
             if have_output {
                 eprintln!("{msg}");
             } else {
