@@ -28,8 +28,9 @@ with any pre-release suffix carried only by the tag.
   hasn't got that language, it falls back to its usual choice instead of showing nothing.
 - **Choose the audio track** (macOS): **Playback ▸ Audio** lists every track a film carries —
   the director's commentary, the second language, the stereo mix beside the 5.1 — with a tick
-  on the one you're hearing. It changes the sound without interrupting the picture. Blaze
-  Viewer only ever says a track changed once it actually has, so the message can be trusted.
+  on the one you're hearing, or press **`A`** to step through them (**`Shift+A`** goes back).
+  It changes the sound without interrupting the picture. Blaze Viewer only ever says a track
+  changed once it actually has, so the message can be trusted.
 - **A new Playback menu** (macOS) gathers the things that only apply to something playing —
   Play/Pause, frame stepping, audio and subtitle tracks, and Live Photo audio — instead of
   leaving them scattered through View and Image.

@@ -142,6 +142,12 @@ pub enum Action {
     // toggle because subtitles have two verbs — an on/off AND a pick — which is also
     // why `Shift` reads as "cycle" here and will read as "reverse" on audio's `A`.
     SubtitleCycle,
+    /// `A` / `Shift+A` — step to the next/previous **audio** track (task #99).
+    ///
+    /// There is no audio on/off twin to `C`: you cannot turn audio off from a track list —
+    /// that is Mute, a different question with its own key.
+    AudioNext,
+    AudioPrev,
     // Docked windowed toolbar (Windows/Linux winit shell only; #61). macOS uses its native
     // toolbar's own Hide Toolbar, so this action is inert there.
     ToggleToolbar,
@@ -209,6 +215,8 @@ impl Action {
         Action::MuteLiveAudio,
         Action::ToggleSubtitles,
         Action::SubtitleCycle,
+        Action::AudioNext,
+        Action::AudioPrev,
         Action::ToggleToolbar,
         Action::Settings,
         Action::About,
@@ -272,6 +280,8 @@ impl Action {
             Action::MuteLiveAudio => "mute_live_audio",
             Action::ToggleSubtitles => "toggle_subtitles",
             Action::SubtitleCycle => "subtitle_cycle",
+            Action::AudioNext => "audio_next",
+            Action::AudioPrev => "audio_prev",
             Action::ToggleToolbar => "toggle_toolbar",
             Action::Settings => "settings",
             Action::About => "about",
@@ -359,6 +369,8 @@ impl Action {
             Action::MuteLiveAudio => "Mute Live Photo audio",
             Action::ToggleSubtitles => "Subtitles",
             Action::SubtitleCycle => "Next Subtitle Track",
+            Action::AudioNext => "Next Audio Track",
+            Action::AudioPrev => "Previous Audio Track",
             Action::ToggleToolbar => "Show toolbar",
             Action::Settings => "Settings",
             Action::About => "About",

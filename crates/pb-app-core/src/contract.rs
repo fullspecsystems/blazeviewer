@@ -445,6 +445,15 @@ pub enum CoreEffect {
         session_id: crate::video::VideoSessionId,
         muted: bool,
     },
+    /// Switch the playing video's audio to picker row `row` (task #99) — `A` / `Shift+A`.
+    ///
+    /// The core decides WHICH row and stops there: it cannot perform the switch. The player
+    /// lives in the shell, the two macOS routes reach a track by different locators (a
+    /// container stream index vs. a serialized AVMediaSelectionOption), and the switch can
+    /// be refused. The shell does it and reports back via `AppCore::audio_track_switched`,
+    /// which is the same path the Playback ▸ Audio menu takes — so a key and a click cannot
+    /// drift apart.
+    SelectAudioTrack { row: usize },
     /// Drop the video audio player (session ended / stopped / navigated away).
     StopVideoAudio,
     /// Pause the video audio (session paused or rebuffering — freeze together).

@@ -426,6 +426,8 @@ impl AppCore {
                 self.show_toast_icon(msg, icon);
             }
             Action::SubtitleCycle => self.cycle_subtitle_track(),
+            Action::AudioNext => self.cycle_audio_track(true),
+            Action::AudioPrev => self.cycle_audio_track(false),
             Action::MuteLiveAudio => {
                 // An explicit toggle supersedes a `--mute` launch override and persists the
                 // user's choice (clearing the session override so it no longer masks the setting).
@@ -8106,6 +8108,62 @@ impl AppCore {
         self.audio_active = usize::try_from(row).ok().and_then(|r| self.audio_row_id(r));
     }
 
+    /// `A` / `Shift+A` — step to the next/previous audio track (task #99).
+    ///
+    /// **Emits an effect rather than switching**, because the core cannot switch audio: the
+    /// player lives in the shell, the two routes reach a track by different locators, and
+    /// the switch can fail. So this only decides *which row*, and the shell does it and
+    /// reports back through the same `audio_track_switched` path the menu uses — one route
+    /// in, one route out, so a key and a menu click cannot behave differently.
+    ///
+    /// Steps from **what is playing**, not from a remembered request: `audio_active` is the
+    /// shell's report, so a stale pick that quietly fell back to the policy still advances
+    /// from the track you can actually hear.
+    pub fn cycle_audio_track(&mut self, forward: bool) {
+        let Some(item) = self.displayed_item.filter(|_| self.video_showing()) else {
+            return; // not a video: the key says nothing rather than lying
+        };
+        self.ensure_exif_cached(item);
+        let Some(catalog) = self.showing_catalog() else {
+            self.show_toast_icon("Reading tracks…", ToastIcon::AudioTrack);
+            return;
+        };
+        // Only tracks we can actually play are steps — one we'd refuse would be a dead stop
+        // in the rotation.
+        let rows: Vec<usize> = catalog
+            .audio
+            .tracks
+            .iter()
+            .enumerate()
+            .filter(|(_, t)| t.capability != pb_decode::TrackCapability::Unsupported)
+            .map(|(i, _)| i)
+            .collect();
+        if rows.len() < 2 {
+            // Nothing to step to. Say so rather than no-op: a key that does nothing is
+            // indistinguishable from a key that is broken.
+            let msg = if rows.is_empty() {
+                "No audio tracks"
+            } else {
+                "Only one audio track"
+            };
+            self.show_toast_icon(msg, ToastIcon::AudioTrackFailed);
+            return;
+        }
+        let here = self
+            .audio_active
+            .and_then(|id| catalog.audio.tracks.iter().position(|t| t.id == id))
+            .and_then(|i| rows.iter().position(|r| *r == i));
+        let next = match here {
+            Some(i) if forward => rows[(i + 1) % rows.len()],
+            Some(i) => rows[(i + rows.len() - 1) % rows.len()],
+            // Not told what is playing yet (the probe or the open is still landing) — start
+            // at the first rather than guessing at the policy's pick.
+            None => rows[0],
+        };
+        self.effects
+            .push(crate::contract::CoreEffect::SelectAudioTrack { row: next });
+    }
+
     /// The shell reports the outcome of a switch it attempted: toast, and re-state the tick.
     ///
     /// **Only on a confirmed switch** (#99's rule, and the asymmetry with subtitles is
@@ -9321,6 +9379,109 @@ mod tests {
             .iter()
             .map(|r| format!("{}{}", if r.active { "✓ " } else { "" }, r.label))
             .collect()
+    }
+
+    // -- A / Shift+A audio cycling (#99) ------------------------------------
+
+    /// A playing video whose catalog carries `n` audio tracks.
+    fn core_with_audio_tracks(n: u64) -> AppCore {
+        let mut core = core_with_a_native_video();
+        core.native_toast = true;
+        let tracks: Vec<pb_decode::MediaTrack> = (0..n)
+            .map(|i| {
+                let mut t = track("AAC", if i == 0 { "eng" } else { "fra" });
+                t.id.local_id = i;
+                t
+            })
+            .collect();
+        let catalog = pb_decode::MediaTrackCatalog::new(
+            1,
+            pb_decode::MediaBackend::FFmpeg,
+            pb_decode::TrackSet::complete(tracks),
+            pb_decode::TrackSet::complete(vec![]),
+        );
+        seed_details(&mut core, 0, Some(catalog), Some(true));
+        core
+    }
+
+    fn selected_audio_rows(core: &mut AppCore) -> Vec<usize> {
+        core.effects
+            .drain(..)
+            .filter_map(|e| match e {
+                crate::contract::CoreEffect::SelectAudioTrack { row } => Some(row),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// **The core cannot switch audio — only ask for it.** The player is the shell's, the
+    /// two routes reach a track by different locators, and the switch can be refused. So the
+    /// key emits an effect and nothing else; the shell reports the outcome back through the
+    /// same path the menu uses.
+    #[test]
+    fn audio_cycling_asks_the_shell_rather_than_switching() {
+        let mut core = core_with_audio_tracks(3);
+        core.set_active_audio_row(0);
+
+        core.dispatch_action(Action::AudioNext);
+        assert_eq!(selected_audio_rows(&mut core), vec![1], "asked for row 1");
+        assert!(
+            core.toast_native.is_none(),
+            "and said NOTHING — the toast is the shell's to trigger once the switch is real"
+        );
+    }
+
+    /// Steps wrap in both directions, from **what is playing** rather than a remembered ask.
+    #[test]
+    fn audio_cycling_steps_from_what_is_playing_and_wraps() {
+        let mut core = core_with_audio_tracks(3);
+
+        core.set_active_audio_row(2); // the shell reports the last track
+        core.dispatch_action(Action::AudioNext);
+        assert_eq!(selected_audio_rows(&mut core), vec![0], "wraps forward");
+
+        core.set_active_audio_row(0);
+        core.dispatch_action(Action::AudioPrev);
+        assert_eq!(selected_audio_rows(&mut core), vec![2], "wraps backward");
+
+        core.set_active_audio_row(1);
+        core.dispatch_action(Action::AudioPrev);
+        assert_eq!(selected_audio_rows(&mut core), vec![0]);
+    }
+
+    /// Before the shell has reported anything, start at the first track rather than guess
+    /// which one the decoder's policy chose.
+    #[test]
+    fn audio_cycling_with_nothing_reported_starts_at_the_first() {
+        let mut core = core_with_audio_tracks(2);
+        assert!(core.audio_active.is_none());
+        core.dispatch_action(Action::AudioNext);
+        assert_eq!(selected_audio_rows(&mut core), vec![0]);
+    }
+
+    /// One track is not a rotation. Say so — a key that silently does nothing is
+    /// indistinguishable from a key that is broken.
+    #[test]
+    fn audio_cycling_a_single_track_says_so_instead_of_no_oping() {
+        let mut core = core_with_audio_tracks(1);
+        core.dispatch_action(Action::AudioNext);
+        assert!(
+            selected_audio_rows(&mut core).is_empty(),
+            "asks for nothing"
+        );
+        let t = core.toast_native.as_ref().expect("the user is told");
+        assert_eq!(t.message, "Only one audio track");
+    }
+
+    /// A still is not a video: the key says nothing rather than lying about a photo.
+    #[test]
+    fn audio_cycling_on_a_still_is_silent() {
+        let mut core = test_core();
+        core.native_toast = true;
+        core.displayed_item = Some(0);
+        core.dispatch_action(Action::AudioNext);
+        assert!(selected_audio_rows(&mut core).is_empty());
+        assert!(core.toast_native.is_none());
     }
 
     /// **Regression — the silent one.** A `TrackId`'s whole contract is that `local_id` means

@@ -296,9 +296,26 @@ final class NativeVideoPlayer {
     /// An option's identity as bytes, in the **same binary-plist encoding** the catalog
     /// stored (`option_identity` in pb-decode). Comparing these is how a row is matched to a
     /// live option without trusting an ordinal — the phase-0 spike proved the round-trip.
+    ///
+    /// ⚠ **`propertyList()` is a METHOD, not a property.** Writing `option.propertyList`
+    /// compiles happily and hands `PropertyListSerialization` a *function reference*, which
+    /// it rejects ("property lists cannot contain objects of type 'CFType'") — and `try?`
+    /// swallows that, so every identity silently came back `nil`. Nil compares equal to nil,
+    /// so the failure even looked like a match. That killed the whole AVPlayer path: no
+    /// locator resolved, no MP4 track could be selected, and no row could tick. Measured
+    /// against a real two-track MP4: `propertyList` → serialize error; `propertyList()` →
+    /// 208 bytes that round-trip back to an `isEqual:` option.
     private func identity(of option: AVMediaSelectionOption) -> Data? {
-        try? PropertyListSerialization.data(
-            fromPropertyList: option.propertyList, format: .binary, options: 0)
+        do {
+            return try PropertyListSerialization.data(
+                fromPropertyList: option.propertyList(), format: .binary, options: 0)
+        } catch {
+            // Never silently: a nil identity disables audio selection on this whole route,
+            // and nil-compares-equal-to-nil made the last failure look like a match. If this
+            // ever fires, the locator contract with pb-decode's `option_identity` has broken.
+            pbTrace("audio: option identity failed to serialize (#99): \(error)")
+            return nil
+        }
     }
 
     /// Which picker row AVFoundation is **actually playing** (`-1` = unknown), by matching

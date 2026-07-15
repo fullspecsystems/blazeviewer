@@ -3304,6 +3304,7 @@ fn map_effect(e: contract::CoreEffect) -> ffi::CoreEffectFfi {
         // Rust FFmpeg decoder behind it is driven through the video_audio_* accessors.
         // (StartVideoAudio is intercepted in `next_effect` — the input must be stashed.)
         C::StopVideoAudio => E::StopVideoAudio,
+        C::SelectAudioTrack { row } => E::SelectAudioTrack(row),
         C::PauseVideoAudio => E::PauseVideoAudio,
         C::ResumeVideoAudio => E::ResumeVideoAudio,
         C::SeekVideoAudio { position } => E::SeekVideoAudio(position.as_secs_f64()),
@@ -4190,6 +4191,10 @@ mod ffi {
         // when the player is parked at EOS the host seeks to 0 before playing.
         PauseVideo(u64),
         ResumeVideo(u64),
+        // A / Shift+A picked audio picker row N (task #99). The host routes it to whichever
+        // presenter owns the file and reports the outcome back via audio_track_switched --
+        // the same path the Playback > Audio menu uses, so a key and a click cannot drift.
+        SelectAudioTrack(usize),
         // Seek the native player by a signed millisecond delta (session_id, generation,
         // delta_ms) — the ±2 s / Shift ±10 s arrow-seek. The host resolves it against
         // AVPlayer's clock, clamps to the seekable range, and reports back via

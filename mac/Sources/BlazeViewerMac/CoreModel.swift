@@ -2209,6 +2209,12 @@ final class CoreModel {
         case .ResumeVideo(let sessionId):
             if nativeVideo?.sessionId == sessionId { nativeVideo?.resume() }
             if sampleBufferVideo?.sessionId == sessionId { sampleBufferVideo?.resume() }
+        case .SelectAudioTrack(let row):
+            // `A` / `Shift+A`. The rows are the core's, but the switch is ours — and the
+            // core stepped from a row index, so refresh the snapshot before acting or the
+            // locator lookup would read a list that no longer matches.
+            core.audio_picker_refresh()
+            selectAudioTrack(Int(row))
         case .SeekVideoBy(let sessionId, let generation, let deltaMs):
             // Arrow-key seek (±2s / Shift ±10s). The player resolves + clamps the delta and
             // reports back so the proxy's in-flight/generation bookkeeping stays honest.

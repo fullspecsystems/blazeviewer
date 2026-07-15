@@ -653,6 +653,8 @@ fn default_bindings() -> Vec<(Action, Vec<KeyChord>)> {
         // borrowing it would hand the wrong verb to the fingers it claimed to borrow
         // from. See task #99 for the full argument; don't re-derive it.
         one(Action::SubtitleCycle, "Shift+C"),
+        one(Action::AudioNext, "A"),
+        one(Action::AudioPrev, "Shift+A"),
         // Show/hide the docked windowed toolbar (#61) — View-menu only, no default key.
         (Action::ToggleToolbar, vec![]),
         one(Action::Settings, "Ctrl+,"),

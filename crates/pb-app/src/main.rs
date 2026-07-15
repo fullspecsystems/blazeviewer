@@ -3096,6 +3096,12 @@ impl App {
                                 });
                         }
                     }
+                    // Audio track selection (task #99) is macOS-only so far. This shell's
+                    // audio is the Session route, where audio is the MASTER CLOCK — a
+                    // mid-playback re-open has to re-prime it, which is the genuinely hard
+                    // half and deliberately not attempted yet. Ignoring the ask is the
+                    // honest response: `A` simply does nothing here rather than half-work.
+                    contract::CoreEffect::SelectAudioTrack { .. } => {}
                     contract::CoreEffect::StopVideoAudio => self.video_audio = None,
                     contract::CoreEffect::PauseVideoAudio => {
                         if let Some(a) = &self.video_audio {
