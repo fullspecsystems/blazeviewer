@@ -9096,9 +9096,10 @@ mod tests {
     #[test]
     fn the_engine_starts_from_the_saved_preferences() {
         use crate::subtitle::SubtitleMode;
-        let mut s = settings::Settings::default();
-
-        s.subtitles = true;
+        let mut s = settings::Settings {
+            subtitles: true,
+            ..Default::default()
+        };
         s.subtitle_style.size_pct = 0.077;
         let e = crate::subtitle_engine::SubtitleEngine::from_settings(&s);
         assert_eq!(e.mode, SubtitleMode::Automatic);

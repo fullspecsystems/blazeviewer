@@ -1479,6 +1479,52 @@ final class CoreModel {
     }
 
     /// Begin editing (draft = the live keymap). Called when the Settings window opens.
+    // ---- The Subtitles settings tab (task #90.4) ----------------------------------
+    //
+    // Its own pull/push pair, deliberately not folded into the 37-field settings form —
+    // the live preview needs the DRAFT style every slider tick, and it debounces on its
+    // own schedule. See `SubtitlesPane`.
+
+    func subtitleStyleForm() -> SubtitleStyleFfi {
+        core.subtitle_style_form()
+    }
+
+    func subtitleStyleEdited(_ form: SubtitleStyleFfi) {
+        core.subtitle_style_edited(form)
+    }
+
+    /// The preview swatch as an `NSImage`, drawn by Rust with the **same** rasterizer and
+    /// placement math the real overlay uses — so it cannot drift from what a film shows.
+    ///
+    /// `nil` while the font system is still building (261 ms, on a worker): the pane shows
+    /// a spinner rather than an empty frame that reads as "the preview is broken".
+    ///
+    /// `w`/`h` are **physical pixels**. Rasterizing at a logical size and letting the layer
+    /// scale it up is what makes text blurry, and this project's known sharp edge is
+    /// exactly that (a 1× ultrawide beside 2× Studios).
+    func subtitlePreviewImage(_ form: SubtitleStyleFfi, _ w: Int, _ h: Int) -> NSImage? {
+        guard w > 0, h > 0 else { return nil }
+        let rgba = core.subtitle_preview_rgba(form, UInt32(w), UInt32(h))
+        guard rgba.len() == w * h * 4 else { return nil }
+        let data = Data(bytes: UnsafeRawPointer(rgba.as_ptr()), count: rgba.len())
+        guard let provider = CGDataProvider(data: data as CFData),
+              let cg = CGImage(
+                  width: w, height: h,
+                  bitsPerComponent: 8, bitsPerPixel: 32, bytesPerRow: w * 4,
+                  space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                  bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.last.rawValue),
+                  provider: provider, decode: nil, shouldInterpolate: false,
+                  intent: .defaultIntent)
+        else { return nil }
+        return NSImage(cgImage: cg, size: NSSize(width: w, height: h))
+    }
+
+    /// The curated font list the picker offers. Indexed accessors rather than a
+    /// `Vec<String>`, which does not cross back to Swift.
+    func subtitleFontChoices() -> [String] {
+        (0..<Int(subtitle_font_count())).map { subtitle_font_name(UInt($0)).toString() }
+    }
+
     func keymapBeginEdit() {
         core.keymap_begin_edit()
     }

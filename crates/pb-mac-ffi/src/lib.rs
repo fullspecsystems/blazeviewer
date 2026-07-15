@@ -1752,6 +1752,57 @@ impl AppCoreHandle {
         ));
     }
 
+    // ---- The Subtitles tab (task #90.4) -------------------------------------------
+
+    /// The saved style, for the pane to open on.
+    fn subtitle_style_form(&self) -> ffi::SubtitleStyleFfi {
+        subtitle_style_to_form(&self.core.settings.subtitle_style)
+    }
+
+    /// An edited style → settings + the live engine.
+    ///
+    /// Diffs first and **hard no-ops when unchanged**, exactly like `settings_edited`:
+    /// the pane echoes its form back on open, and that echo must never reach the disk.
+    fn subtitle_style_edited(&mut self, form: ffi::SubtitleStyleFfi) {
+        self.core.now = Instant::now();
+        let style = subtitle_style_from_form(&form).clamped();
+        if style == self.core.settings.subtitle_style {
+            return;
+        }
+        let mut s = self.core.settings.clone();
+        s.subtitle_style = style;
+        // Through the same DialogResolved path as every other settings edit, so `apply_settings`
+        // is the one place a style reaches the engine and the disk.
+        self.core.handle(CoreEvent::DialogResolved(
+            contract::DialogResult::SettingsEdited {
+                settings: Some(Box::new(s)),
+                keymap: None,
+            },
+        ));
+    }
+
+    /// The live preview swatch. See the bridge declaration.
+    fn subtitle_preview_rgba(&mut self, form: ffi::SubtitleStyleFfi, w: u32, h: u32) -> Vec<u8> {
+        // The user's real letterbox colour for the current theme, so the bars match what
+        // they will actually see behind a film rather than an invented black.
+        let dark = self.core.effective_dark();
+        let letterbox = self.core.settings.letterbox_for(dark);
+        // Clamped, not raw: a draft mid-drag is bounded by the sliders anyway, but a
+        // hand-edited config could have reached the pane.
+        let style = subtitle_style_from_form(&form).clamped();
+        let Some(raster) = self.core.subtitles.rasterizer_mut() else {
+            return Vec::new(); // the font worker hasn't landed; the pane shows a placeholder
+        };
+        pb_app_core::subtitle_preview::render_preview(raster, &style, w, h, letterbox)
+    }
+
+    /// Has the font system landed? Also *starts* it — opening the Subtitles tab is the
+    /// trigger, so the 261 ms is spent while the user is reading the pane rather than on
+    /// the first cue of a film.
+    fn subtitle_preview_ready(&mut self) -> bool {
+        self.core.subtitles.rasterizer_mut().is_some()
+    }
+
     // ---- The Shortcuts editor (NS2.6): a Rust-side draft keymap edited through
     // per-gesture calls, mirroring the egui Shortcuts tab exactly (same
     // `EDITOR_GROUPS`, two slots, steal-with-note, reset). The host renders rows and
@@ -2623,6 +2674,103 @@ impl AppCoreHandle {
         self.core
             .effects
             .push(contract::CoreEffect::ReportError(msg));
+    }
+}
+
+// ---- The Subtitles tab's form conversions (task #90.4) -------------------------
+//
+// Pure and total in both directions, so they are unit-testable without touching the
+// user's real settings.toml — which matters here more than usual, because
+// `apply_settings` does NOT check `persist_prefs` and a test that drove the FFI end to
+// end WOULD overwrite the owner's config.
+
+/// The curated font list's length — see [`pb_app_core::subtitle::FONT_CHOICES`].
+///
+/// Indexed accessors rather than a `Vec<String>`: that does not cross back to Swift (the
+/// same constraint that shaped the keymap editor).
+fn subtitle_font_count() -> usize {
+    pb_app_core::subtitle::FONT_CHOICES.len()
+}
+
+/// The font at `i`, or `""` past the end (which the picker reads as the system font, so
+/// an out-of-range index degrades to the default rather than panicking across the FFI).
+fn subtitle_font_name(i: usize) -> String {
+    pb_app_core::subtitle::FONT_CHOICES
+        .get(i)
+        .map(|s| s.to_string())
+        .unwrap_or_default()
+}
+
+/// [`SubtitleStyle`](pb_app_core::subtitle::SubtitleStyle) → the flat form.
+fn subtitle_style_to_form(s: &pb_app_core::subtitle::SubtitleStyle) -> ffi::SubtitleStyleFfi {
+    // A shadow that is off still carries its last values across, so toggling it off and
+    // back on doesn't forget how it was tuned. `Default` supplies them when there has
+    // never been one.
+    let sh = s.shadow.unwrap_or_default();
+    ffi::SubtitleStyleFfi {
+        // The FFI cannot carry Option<String>; "" is the system font.
+        font_family: s.font_family.clone().unwrap_or_default(),
+        size_pct: s.size_pct,
+        color_r: s.color[0],
+        color_g: s.color[1],
+        color_b: s.color[2],
+        color_a: s.color[3],
+        outline_pct: s.outline_pct,
+        outline_r: s.outline_color[0],
+        outline_g: s.outline_color[1],
+        outline_b: s.outline_color[2],
+        outline_a: s.outline_color[3],
+        shadow_on: s.shadow.is_some(),
+        shadow_dx_pct: sh.dx_pct,
+        shadow_dy_pct: sh.dy_pct,
+        shadow_blur_pct: sh.blur_pct,
+        shadow_r: sh.color[0],
+        shadow_g: sh.color[1],
+        shadow_b: sh.color[2],
+        shadow_a: sh.color[3],
+        background_r: s.background[0],
+        background_g: s.background[1],
+        background_b: s.background[2],
+        background_a: s.background[3],
+        background_radius_pct: s.background_radius_pct,
+        background_pad_pct: s.background_pad_pct,
+        vertical_offset_pct: s.vertical_offset_pct,
+        max_line_pct: s.max_line_pct,
+        line_spacing: s.line_spacing,
+    }
+}
+
+/// The flat form → [`SubtitleStyle`](pb_app_core::subtitle::SubtitleStyle).
+///
+/// The caller clamps. Every field is exposed, so unlike `fold_settings_form` there is no
+/// `base` to preserve anything from.
+fn subtitle_style_from_form(f: &ffi::SubtitleStyleFfi) -> pb_app_core::subtitle::SubtitleStyle {
+    pb_app_core::subtitle::SubtitleStyle {
+        // "" (the picker's "System" row) means the system font, exactly as an absent
+        // `font_family` key does — `SubtitleStyle::font` enforces the same rule again on
+        // the read side, so a stray whitespace name can't reach the shaper either.
+        font_family: Some(f.font_family.clone()).filter(|s| !s.trim().is_empty()),
+        size_pct: f.size_pct,
+        color: [f.color_r, f.color_g, f.color_b, f.color_a],
+        outline_pct: f.outline_pct,
+        outline_color: [f.outline_r, f.outline_g, f.outline_b, f.outline_a],
+        shadow: f.shadow_on.then_some(pb_app_core::subtitle::Shadow {
+            dx_pct: f.shadow_dx_pct,
+            dy_pct: f.shadow_dy_pct,
+            blur_pct: f.shadow_blur_pct,
+            color: [f.shadow_r, f.shadow_g, f.shadow_b, f.shadow_a],
+        }),
+        background: [
+            f.background_r,
+            f.background_g,
+            f.background_b,
+            f.background_a,
+        ],
+        background_radius_pct: f.background_radius_pct,
+        background_pad_pct: f.background_pad_pct,
+        vertical_offset_pct: f.vertical_offset_pct,
+        max_line_pct: f.max_line_pct,
+        line_spacing: f.line_spacing,
     }
 }
 
@@ -3896,6 +4044,64 @@ mod ffi {
         speak_descriptions: bool,
     }
 
+    // The Subtitles tab's flat form — a mirror of pb_app_core::subtitle::SubtitleStyle
+    // (task #90.4).
+    //
+    // DELIBERATELY SEPARATE from SettingsFormFfi rather than 28 more fields on it. Three
+    // reasons: that struct is already 37 fields; the preview needs the DRAFT style on
+    // every slider tick, which would mean shipping all 65 fields per frame to render one
+    // swatch; and the two panes then debounce independently.
+    //
+    // Every size is a % of VIEWPORT HEIGHT, never points — sized against the viewport it
+    // reads the same on a 1x ultrawide and a 2x Studio, which is the whole point of a
+    // legibility setting. The Swift side shows them as percentages; nothing converts to
+    // pixels until `to_params`.
+    //
+    // Shapes swift-bridge forces: `font_family` "" = the system font (no Option<String>);
+    // `shadow_on` + flat dx/dy/blur/rgba stands in for Option<Shadow>; every [u8; 4]
+    // colour is four fields (no arrays cross).
+    #[swift_bridge(swift_repr = "struct")]
+    struct SubtitleStyleFfi {
+        // "" = system font. Otherwise one of pb_app_core::subtitle::FONT_CHOICES — a
+        // curated shortlist, not an enumeration (owner call: fontdb finds ~1114 faces,
+        // nearly all unusable as subtitles). The stored value is a NAME, so growing this
+        // into a full picker later never invalidates a saved setting.
+        font_family: String,
+        size_pct: f32,
+        color_r: u8,
+        color_g: u8,
+        color_b: u8,
+        color_a: u8,
+        outline_pct: f32,
+        outline_r: u8,
+        outline_g: u8,
+        outline_b: u8,
+        outline_a: u8,
+        // Option<Shadow>, flattened. `shadow_on` false = None; the rest keep their last
+        // values so toggling a shadow off and on again doesn't forget how it was tuned.
+        shadow_on: bool,
+        shadow_dx_pct: f32,
+        shadow_dy_pct: f32,
+        shadow_blur_pct: f32,
+        shadow_r: u8,
+        shadow_g: u8,
+        shadow_b: u8,
+        shadow_a: u8,
+        // background_a 0 = no background.
+        background_r: u8,
+        background_g: u8,
+        background_b: u8,
+        background_a: u8,
+        background_radius_pct: f32,
+        background_pad_pct: f32,
+        // SIGNED, from the video's bottom edge: 0 = on the edge, >0 up into the picture,
+        // <0 DOWN INTO THE LETTERBOX (the owner's ask — the thing almost no player gets
+        // right). See pb_app_core::subtitle::place.
+        vertical_offset_pct: f32,
+        max_line_pct: f32,
+        line_spacing: f32,
+    }
+
     // The Test-connection result for the AI settings tab: reachability + a one-line
     // summary (model count, or the reason it failed). `ok` colors the line. `models` is the
     // served model ids (vision-capable first), newline-joined — the host splits it to fill
@@ -4204,6 +4410,24 @@ mod ffi {
         fn play_hint_seq(&self) -> u64;
         fn settings_form(&self) -> SettingsFormFfi;
         fn settings_edited(&mut self, form: SettingsFormFfi);
+
+        // The Subtitles settings tab (task #90.4). Its own pull/push pair, separate from
+        // the 37-field settings form — see SubtitleStyleFfi.
+        fn subtitle_style_form(&self) -> SubtitleStyleFfi;
+        fn subtitle_style_edited(&mut self, form: SubtitleStyleFfi);
+        // The curated font list the picker shows. Indexed accessors, not a Vec<String>:
+        // that does not cross back to Swift (same reason the keymap editor is indexed).
+        fn subtitle_font_count() -> usize;
+        fn subtitle_font_name(i: usize) -> String;
+        // The live preview swatch: RGBA8, w*h, top-left origin. Takes the DRAFT style so
+        // it tracks a slider drag with no save round-trip. Drawn with the SAME rasterizer,
+        // to_params, and place() the real overlay uses, so it cannot drift from what a
+        // film actually shows. Costs one shape+raster (~0.15 ms) plus the backdrop fill.
+        fn subtitle_preview_rgba(&mut self, form: SubtitleStyleFfi, w: u32, h: u32) -> Vec<u8>;
+        // Whether the preview can draw yet. FontSystem::new() is 261 ms, so it is built on
+        // a worker; until it lands the preview would be a blank frame. The pane shows a
+        // placeholder rather than a lie.
+        fn subtitle_preview_ready(&mut self) -> bool;
 
         // The AI tab's Test-connection probe (task #44). A free function — stateless (just
         // an HTTP GET /models), so it's safe to call from a Swift background task without
@@ -5117,5 +5341,121 @@ mod tests {
             assert_eq!(session_audio_state(ptr), 0, "still Ok after seek");
             session_audio_free(ptr);
         }
+    }
+
+    // ---- The Subtitles tab's form (task #90.4) --------------------------------
+
+    /// The round trip that keeps a tuned look tuned. Every axis, including the ones the
+    /// FFI has to reshape (Option<String>, Option<Shadow>, four [u8; 4] colours).
+    #[test]
+    fn a_subtitle_style_survives_the_form_round_trip() {
+        let want = pb_app_core::subtitle::SubtitleStyle {
+            font_family: Some("Verdana".into()),
+            size_pct: 0.061,
+            color: [255, 240, 10, 220],
+            outline_pct: 0.004,
+            outline_color: [10, 20, 30, 250],
+            shadow: Some(pb_app_core::subtitle::Shadow {
+                dx_pct: 0.003,
+                dy_pct: 0.0042,
+                blur_pct: 0.0051,
+                color: [1, 2, 3, 180],
+            }),
+            background: [4, 5, 6, 153],
+            background_radius_pct: 0.007,
+            background_pad_pct: 0.009,
+            vertical_offset_pct: -0.11,
+            max_line_pct: 0.83,
+            line_spacing: 1.35,
+        };
+        let got = subtitle_style_from_form(&subtitle_style_to_form(&want));
+        assert_eq!(got, want);
+    }
+
+    /// The FFI cannot carry `Option<String>`, so "System" is `""` on the wire. It must
+    /// mean exactly what an absent `font_family` means — not a hunt for a face named "".
+    #[test]
+    fn the_empty_font_name_round_trips_as_the_system_font() {
+        let mut s = pb_app_core::subtitle::SubtitleStyle::default();
+        assert_eq!(s.font_family, None);
+        assert_eq!(subtitle_style_to_form(&s).font_family, "", "None -> \"\"");
+
+        // ...and back the other way, including the whitespace a text field could produce.
+        for name in ["", "   "] {
+            let mut f = subtitle_style_to_form(&s);
+            f.font_family = name.into();
+            assert_eq!(
+                subtitle_style_from_form(&f).font(),
+                None,
+                "{name:?} = System"
+            );
+        }
+        s.font_family = Some("Georgia".into());
+        assert_eq!(subtitle_style_to_form(&s).font_family, "Georgia");
+    }
+
+    /// Turning a shadow off must not forget how it was tuned — the values ride across so
+    /// toggling it back on restores the shadow you had, not the default one.
+    #[test]
+    fn a_shadow_toggled_off_keeps_its_values_for_when_it_comes_back() {
+        let tuned = pb_app_core::subtitle::Shadow {
+            dx_pct: 0.01,
+            dy_pct: 0.02,
+            blur_pct: 0.03,
+            color: [9, 8, 7, 111],
+        };
+        let on = pb_app_core::subtitle::SubtitleStyle {
+            shadow: Some(tuned),
+            ..Default::default()
+        };
+        let mut form = subtitle_style_to_form(&on);
+        form.shadow_on = false;
+        // Off means None...
+        assert_eq!(subtitle_style_from_form(&form).shadow, None);
+        // ...but the tuning survived the trip, so flipping it back returns what you had.
+        form.shadow_on = true;
+        assert_eq!(subtitle_style_from_form(&form).shadow, Some(tuned));
+    }
+
+    /// A style with no shadow still hands the pane usable slider values, rather than
+    /// zeroes that would make "turn the shadow on" produce an invisible shadow.
+    #[test]
+    fn a_style_with_no_shadow_still_offers_default_shadow_values() {
+        let none = pb_app_core::subtitle::SubtitleStyle::default();
+        assert_eq!(none.shadow, None);
+        let f = subtitle_style_to_form(&none);
+        assert!(!f.shadow_on);
+        assert_eq!(
+            f.shadow_blur_pct,
+            pb_app_core::subtitle::Shadow::default().blur_pct
+        );
+        assert!(f.shadow_a > 0, "a shadow you turn on must be visible");
+    }
+
+    /// The font list the picker renders: indexed, and out-of-range degrades to "" (the
+    /// system font) rather than panicking across the FFI.
+    #[test]
+    fn the_font_list_is_indexable_and_total() {
+        let n = subtitle_font_count();
+        assert!(n > 0);
+        for i in 0..n {
+            assert!(!subtitle_font_name(i).is_empty());
+        }
+        assert_eq!(
+            subtitle_font_name(n),
+            "",
+            "past the end = System, not a panic"
+        );
+        assert_eq!(subtitle_font_name(9999), "");
+    }
+
+    /// The pane echoes its form back on open; that echo must never reach the disk. The
+    /// no-op guard is what stops it — and it has to survive the clamp, since the form
+    /// arrives unclamped and the saved value is clamped.
+    #[test]
+    fn a_saved_style_round_trips_to_itself_so_the_open_echo_is_a_no_op() {
+        let saved = pb_app_core::subtitle::SubtitleStyle::default().clamped();
+        let echoed = subtitle_style_from_form(&subtitle_style_to_form(&saved)).clamped();
+        assert_eq!(echoed, saved, "opening the pane must not look like an edit");
     }
 }

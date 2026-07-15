@@ -68,6 +68,12 @@ struct SettingsView: View {
             aiPane
                 .settingsTab(cap: settingsHeightCap)
                 .tabItem { tabLabel("AI", symbol: "sparkles") }
+            // Its own pane + draft (task #90.4): the live preview needs the DRAFT style on
+            // every slider tick, which folding into `SettingsDraft` would turn into
+            // shipping all 37 of its fields per frame to redraw one swatch.
+            SubtitlesPane(model: model)
+                .settingsTab(cap: settingsHeightCap)
+                .tabItem { tabLabel("Subtitles", symbol: "captions.bubble") }
             ShortcutsPane(model: model)
                 .settingsTab(cap: settingsHeightCap)
                 .tabItem { tabLabel("Shortcuts", symbol: "keyboard") }

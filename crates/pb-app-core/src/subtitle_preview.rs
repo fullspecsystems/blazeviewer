@@ -236,9 +236,11 @@ mod tests {
         let mut r = SubtitleRasterizer::new();
         let (w, h) = (500u32, 220u32);
         let shown = render_preview(&mut r, &SubtitleStyle::default(), w, h, [0, 0, 0]);
-        let mut invisible = SubtitleStyle::default();
-        invisible.color = [255, 255, 255, 0];
-        invisible.outline_pct = 0.0;
+        let invisible = SubtitleStyle {
+            color: [255, 255, 255, 0],
+            outline_pct: 0.0,
+            ..Default::default()
+        };
         let blank = render_preview(&mut r, &invisible, w, h, [0, 0, 0]);
         assert_ne!(shown, blank, "the sample must actually render");
     }
@@ -260,12 +262,16 @@ mod tests {
                 .count()
         };
 
-        let mut inside = SubtitleStyle::default();
-        inside.vertical_offset_pct = 0.05; // up into the picture
+        let inside = SubtitleStyle {
+            vertical_offset_pct: 0.05, // up into the picture
+            ..Default::default()
+        };
         assert_eq!(rows_lit(&inside, &mut r), 0, "must not touch the bar");
 
-        let mut below = SubtitleStyle::default();
-        below.vertical_offset_pct = -0.2; // down into the bar
+        let below = SubtitleStyle {
+            vertical_offset_pct: -0.2, // down into the bar
+            ..Default::default()
+        };
         assert!(
             rows_lit(&below, &mut r) > 0,
             "a negative offset must reach the letterbox"
@@ -277,8 +283,10 @@ mod tests {
     #[test]
     fn an_oversized_block_clips_rather_than_panicking() {
         let mut r = SubtitleRasterizer::new();
-        let mut huge = SubtitleStyle::default();
-        huge.size_pct = 0.25; // the clamp ceiling
+        let huge = SubtitleStyle {
+            size_pct: 0.25, // the clamp ceiling
+            ..Default::default()
+        };
         let rgba = render_preview(&mut r, &huge, 80, 40, [0, 0, 0]);
         assert_eq!(rgba.len(), 80 * 40 * 4);
     }
@@ -311,23 +319,39 @@ mod tests {
         let mut shots: Vec<(&str, SubtitleStyle)> = Vec::new();
         shots.push(("default", SubtitleStyle::default()));
 
-        let mut below = SubtitleStyle::default();
-        below.vertical_offset_pct = -0.16;
-        shots.push(("in-the-letterbox", below));
+        shots.push((
+            "in-the-letterbox",
+            SubtitleStyle {
+                vertical_offset_pct: -0.16,
+                ..Default::default()
+            },
+        ));
 
-        let mut boxed = SubtitleStyle::default();
-        boxed.background = [0, 0, 0, 153];
-        boxed.outline_pct = 0.0;
-        shots.push(("background", boxed));
+        shots.push((
+            "background",
+            SubtitleStyle {
+                background: [0, 0, 0, 153],
+                outline_pct: 0.0,
+                ..Default::default()
+            },
+        ));
 
-        let mut shadowed = SubtitleStyle::default();
-        shadowed.shadow = Some(crate::subtitle::Shadow::default());
-        shots.push(("shadow", shadowed));
+        shots.push((
+            "shadow",
+            SubtitleStyle {
+                shadow: Some(crate::subtitle::Shadow::default()),
+                ..Default::default()
+            },
+        ));
 
-        let mut big = SubtitleStyle::default();
-        big.size_pct = 0.10;
-        big.color = [255, 235, 59, 255];
-        shots.push(("big-yellow", big));
+        shots.push((
+            "big-yellow",
+            SubtitleStyle {
+                size_pct: 0.10,
+                color: [255, 235, 59, 255],
+                ..Default::default()
+            },
+        ));
 
         for (name, style) in shots {
             let rgba = render_preview(&mut r, &style, w, h, [12, 12, 14]);

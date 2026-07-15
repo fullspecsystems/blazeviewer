@@ -701,17 +701,19 @@ mod tests {
     /// The round trip that keeps a saved look saved.
     #[test]
     fn the_style_survives_a_toml_round_trip() {
-        let mut want = SubtitleStyle::default();
-        want.font_family = Some("Verdana".into());
-        want.size_pct = 0.06;
-        want.color = [255, 240, 0, 220];
-        want.shadow = Some(Shadow {
-            dx_pct: 0.003,
-            dy_pct: 0.004,
-            blur_pct: 0.005,
-            color: [0, 0, 0, 180],
-        });
-        want.background = [0, 0, 0, 153];
+        let want = SubtitleStyle {
+            font_family: Some("Verdana".into()),
+            size_pct: 0.06,
+            color: [255, 240, 0, 220],
+            shadow: Some(Shadow {
+                dx_pct: 0.003,
+                dy_pct: 0.004,
+                blur_pct: 0.005,
+                color: [0, 0, 0, 180],
+            }),
+            background: [0, 0, 0, 153],
+            ..Default::default()
+        };
         let toml = toml::to_string_pretty(&want).expect("serialize");
         let got: SubtitleStyle = toml::from_str(&toml).expect("deserialize");
         assert_eq!(got, want);

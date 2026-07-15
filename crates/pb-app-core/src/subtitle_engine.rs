@@ -188,6 +188,40 @@ impl SubtitleEngine {
         self.raster_rx.is_some() || self.load.is_some()
     }
 
+    /// Start building the rasterizer if it isn't already, and hand it over once it lands.
+    ///
+    /// **One `FontSystem` per process, ever.** It costs 261 ms and a lot of RAM to build
+    /// (1114 faces), so the Settings preview (#90.4) borrows the engine's rather than
+    /// standing up a second one — the alternative is paying that twice and holding two
+    /// copies of every font for the lifetime of the app.
+    ///
+    /// `None` means "not yet" — the worker is running. Callers show a placeholder; nobody
+    /// blocks the event loop for a quarter of a second.
+    pub fn rasterizer_mut(&mut self) -> Option<&mut SubtitleRasterizer> {
+        if self.raster.is_none() && self.raster_rx.is_none() {
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let _ = tx.send(SubtitleRasterizer::new());
+            });
+            self.raster_rx = Some(rx);
+        }
+        // Opening Settings is not a tick, so take the result here too rather than waiting
+        // for `poll` — which only runs while a video plays.
+        if self.raster.is_none() {
+            if let Some(rx) = &self.raster_rx {
+                match rx.try_recv() {
+                    Ok(r) => {
+                        self.raster = Some(r);
+                        self.raster_rx = None;
+                    }
+                    Err(TryRecvError::Empty) => {}
+                    Err(TryRecvError::Disconnected) => self.raster_rx = None,
+                }
+            }
+        }
+        self.raster.as_mut()
+    }
+
     /// The track whose cues are loaded or loading, if any — what the #99 picker checks to
     /// put its checkmark on the right row.
     pub fn active_track(&self) -> Option<u64> {
