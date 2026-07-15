@@ -678,7 +678,21 @@ To cut a release:
    signing creds). **Run it from native PowerShell, not the Bash tool / Git Bash** — the ssh
    config's YubiKey `Match exec` hook has a Windows path that Git Bash mangles, so the upload fails
    `Permission denied (publickey)`. The build + sign + pack still succeed there; only the `-Upload`
-   scp/rsync needs native PowerShell (the feed is already in `dist\feed`, so a retry is upload-only).
+   scp/rsync needs native PowerShell.
+   > 🪤 **A re-run is NOT upload-only.** `-Upload` is the last step of the *whole* pipeline, and
+   > `vpk pack` **hard-fails** on a second run — *"There is a release in channel win which is equal
+   > or greater to the current version"* — because the version it just packed is sitting in
+   > `dist\feed`. So if the pack succeeded and only the upload failed, do **not** re-run the script:
+   > `scp` the already-signed feed yourself (`cd dist\feed; scp * jdlien.com:/var/www/downloads.blazeviewer.app/win/`).
+   > Re-running means clearing `dist\feed` first, which re-signs everything for no gain (hit on 0.2.1).
+
+   > 🪤 **`dist\feed` is a *cumulative* feed, and `vpk` merges whatever it finds there — including a
+   > different product.** On 0.2.1 the dir still held the PhotoBlaze packages, so `releases.win.json`
+   > advertised PhotoBlaze 0.1.0/0.1.1/0.2.0 *beside* BlazeViewer 0.2.1 and vpk built a delta **across
+   > the packId rename** (PhotoBlaze 0.2.0 → BlazeViewer 0.2.1). Upload sends the whole directory, so
+   > that would have published the old product to the new feed. `vpk` keys deltas on channel+version,
+   > **not packId**. Check `dist\feed` holds only this product before packing.
+
    Prune superseded packages on the server periodically.
 3. **macOS (all on your Mac):** `./scripts/release-macos.sh --release` builds the signed +
    notarized DMG **and** EdDSA-signs it into `dist/appcast.xml` (Sparkle auto-update, task #65),
