@@ -3269,6 +3269,11 @@ const MAX_TRANSIENT_STRIKES: u32 = 6;
 #[cfg(feature = "ffvideo")]
 struct SessionAudioDecoder {
     inner: pb_app_core::FfAudioDecoder,
+    /// The container this was opened from, kept so a **track switch** (#99) can re-open
+    /// without going back to `AUDIO_STASH` — that slot is consumed on success and the next
+    /// video overwrites it, so it is not a session-lifetime store. Cheap either way: a
+    /// `PathBuf`, or an `Arc` clone of bytes the video producer is already holding.
+    input: pb_app_core::video::VideoInput,
     failed: bool,
     transient_strikes: u32,
 }
@@ -3306,9 +3311,9 @@ fn open_stashed_session_audio(session_id: u64) -> usize {
             }
         };
         // Capped at stereo: AVAudioEngine's graph rejects wider standard formats
-        // (the MKV-5.1 abort) — 5.1/7.1 folds down in the decoder. R10 track
-        // selection happens inside `open_capped`.
-        match pb_app_core::FfAudioDecoder::open_capped(&input, 2) {
+        // (the MKV-5.1 abort) — 5.1/7.1 folds down in the decoder. `track: None` =
+        // the R10 policy picks; `session_audio_set_track` overrides it later (#99).
+        match pb_app_core::FfAudioDecoder::open_track(&input, 2, None) {
             Ok(inner) => {
                 let mut guard = AUDIO_STASH.lock().unwrap_or_else(|e| e.into_inner());
                 if guard.as_ref().is_some_and(|(id, _)| *id == session_id) {
@@ -3316,6 +3321,7 @@ fn open_stashed_session_audio(session_id: u64) -> usize {
                 }
                 Box::into_raw(Box::new(SessionAudioDecoder {
                     inner,
+                    input,
                     failed: false,
                     transient_strikes: 0,
                 })) as usize
@@ -3330,6 +3336,72 @@ fn open_stashed_session_audio(session_id: u64) -> usize {
     {
         let _ = session_id;
         0
+    }
+}
+
+/// Which stream the owned decoder is playing (`-1` if `ptr` is null) — the container's real
+/// index, comparable to the catalog's `local_id` (task #99).
+///
+/// The tick in Playback ▸ Audio comes from **this**, never from re-running the selection
+/// policy in the core: a guess that disagreed with what you are hearing would be worse than
+/// no tick. It is also how a rejected switch stays honest — ask for a stale track, get the
+/// policy's pick, and this reports which one that was.
+fn session_audio_stream_index(ptr: usize) -> i64 {
+    #[cfg(feature = "ffvideo")]
+    {
+        if ptr == 0 {
+            return -1;
+        }
+        // SAFETY: nonzero `ptr` is a live `Box::into_raw(SessionAudioDecoder)`;
+        // the host guarantees single-threaded, non-freed access (feeder queue).
+        let d = unsafe { &*(ptr as *const SessionAudioDecoder) };
+        d.inner.stream_index() as i64
+    }
+    #[cfg(not(feature = "ffvideo"))]
+    {
+        let _ = ptr;
+        -1
+    }
+}
+
+/// Re-open the owned decoder on audio stream `track` (task #99), **in place**: the pointer
+/// stays valid either way, so the host never has to swap or free anything.
+///
+/// `true` = switched; the caller must then rebuild its format (rate/channels can differ —
+/// a 5.1 commentary beside a stereo main is the normal case, not an edge one), re-base its
+/// PTS clock, and re-arm feeding.
+///
+/// `false` = **the old decoder is untouched and still playing**. That is the whole shape of
+/// this call: a failed switch must cost you the choice, not the sound. (A `track` that is
+/// stale or isn't audio doesn't even reach here as a failure — `open_track` falls back to
+/// the policy and returns `true`, with `session_audio_stream_index` reporting what you
+/// actually got.)
+fn session_audio_set_track(ptr: usize, track: usize) -> bool {
+    #[cfg(feature = "ffvideo")]
+    {
+        if ptr == 0 {
+            return false;
+        }
+        // SAFETY: as above — the host serializes every pointer call on its feeder queue,
+        // so there is no concurrent read while this replaces the decoder.
+        let d = unsafe { &mut *(ptr as *mut SessionAudioDecoder) };
+        match pb_app_core::FfAudioDecoder::open_track(&d.input, 2, Some(track)) {
+            Ok(inner) => {
+                d.inner = inner; // the old decoder drops here
+                d.failed = false;
+                d.transient_strikes = 0;
+                true
+            }
+            Err(e) => {
+                eprintln!("video audio: track switch failed, keeping the current track: {e}");
+                false
+            }
+        }
+    }
+    #[cfg(not(feature = "ffvideo"))]
+    {
+        let _ = (ptr, track);
+        false
     }
 }
 
@@ -4390,6 +4462,14 @@ mod ffi {
         fn open_stashed_session_audio(session_id: u64) -> usize;
         fn session_audio_rate(ptr: usize) -> u32;
         fn session_audio_channels(ptr: usize) -> u32;
+        // Audio track selection (task #99). set_track re-opens IN PLACE, so the pointer
+        // stays valid; false = the switch failed and the old track is still playing (a
+        // failed switch must cost the choice, not the sound). stream_index reports what is
+        // ACTUALLY playing -- the picker's tick reads this rather than re-deriving the
+        // policy, so it can never disagree with what you hear. After a true, the caller
+        // must rebuild its format: rate/channels differ between tracks.
+        fn session_audio_set_track(ptr: usize, track: usize) -> bool;
+        fn session_audio_stream_index(ptr: usize) -> i64;
         fn session_audio_read(ptr: usize, max_frames: u32) -> Vec<f32>;
         fn session_audio_state(ptr: usize) -> u8;
         fn session_audio_seek(ptr: usize, secs: f64) -> f64;

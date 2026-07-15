@@ -163,6 +163,66 @@ final class AudioSampleFeeder: @unchecked Sendable {
         return sb
     }
 
+    /// Switch to audio stream `track`, resuming at `seconds` (task #99).
+    ///
+    /// The decoder re-opens **in place** (the Rust pointer stays valid), then this does the
+    /// same dance as `seek` — flush, re-base the PTS clock, re-arm — plus the one step a
+    /// seek never needs: **rebuild the format**. Rate and channel count differ between
+    /// tracks (a 5.1 commentary beside a stereo main is the ordinary case), and feeding
+    /// buffers described by the *old* format would mis-stride every frame: garbled audio, no
+    /// error anywhere. That is the real hazard in this function, not the re-open.
+    ///
+    /// Cheap by design on this route: audio is **not** the master clock — the audio renderer
+    /// and the video layer share one `AVSampleBufferRenderSynchronizer` — so the picture
+    /// never stops and there is no clock to re-prime.
+    ///
+    /// `then(ok)` runs on the main actor. `ok == false` means the switch was refused and the
+    /// **previous track is still playing**: the caller must not report a switch that did not
+    /// happen (task #99's confirmed-switch rule).
+    func switchTrack(
+        _ track: Int, at seconds: Double, renderer: AVSampleBufferAudioRenderer,
+        then: @escaping @Sendable (Bool) -> Void
+    ) {
+        queue.async { [weak self] in
+            guard let self, self.ptr != 0 else {
+                DispatchQueue.main.async { then(false) }
+                return
+            }
+            guard session_audio_set_track(self.ptr, UInt(track)) else {
+                DispatchQueue.main.async { then(false) } // old decoder still feeding
+                return
+            }
+            renderer.flush()
+            // The new track's own format — never the old one's.
+            self.rate = Int32(bitPattern: session_audio_rate(self.ptr))
+            self.channels = Int(session_audio_channels(self.ptr))
+            guard self.rate > 0, self.channels > 0, self.buildFormat() else {
+                DispatchQueue.main.async { then(false) }
+                return
+            }
+            // Resume where the picture is, not at zero.
+            let landed = session_audio_seek(self.ptr, seconds)
+            self.ptsFrames = Int64((landed.isFinite ? landed : seconds) * Double(self.rate))
+            self.done = false
+            self.armFeeding()
+            DispatchQueue.main.async { then(true) }
+        }
+    }
+
+    /// Which audio stream is playing — the container's real index, or `nil` before the
+    /// decoder opens. The picker's tick reads this, so it reports what you are *hearing*
+    /// rather than what was requested.
+    func currentTrack(then: @escaping @Sendable (Int?) -> Void) {
+        queue.async { [weak self] in
+            guard let self, self.ptr != 0 else {
+                DispatchQueue.main.async { then(nil) }
+                return
+            }
+            let i = session_audio_stream_index(self.ptr)
+            DispatchQueue.main.async { then(i < 0 ? nil : Int(i)) }
+        }
+    }
+
     /// Seek the audio decoder to `seconds`, flush the renderer, and re-anchor the
     /// PTS clock so audio lines up with the video after a seek (§3D).
     func seek(seconds: Double, renderer: AVSampleBufferAudioRenderer) {
