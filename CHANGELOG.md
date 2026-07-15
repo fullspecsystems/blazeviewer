@@ -7,6 +7,23 @@ with any pre-release suffix carried only by the tag.
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-07-14
+
+### Highlights
+
+**PhotoBlaze is now Blaze Viewer** — new name, new home at blazeviewer.app. The feature
+this app exists for, holding a key to race through your images, is now called **Blaze**.
+
+⚠️ **Install this one, then remove the old PhotoBlaze.** Because the name changed, your
+computer sees Blaze Viewer as a different program: it installs *alongside* PhotoBlaze
+rather than replacing it, and PhotoBlaze will never update itself into it. Your settings
+and shortcuts don't carry over, so any custom keys need setting once more.
+
+Also in this release: **subtitles on videos** (drop a `.srt` or `.vtt` beside the file and
+press `C`), **audio and subtitle tracks listed properly** in the Details panel instead of a
+bare "Audio: Yes", **MKV and WebM playing through the system decoder on macOS** with correct
+Dolby Vision, and **video posters appearing 2–4× faster**.
+
 ### Changed
 - **PhotoBlaze is now Blaze Viewer.** The app, its website (blazeviewer.app), and everything
   in it have been renamed. The fast-flick feature this app exists for is now called
@@ -23,7 +40,7 @@ with any pre-release suffix carried only by the tag.
 
 ### Added
 - **Subtitles on videos.** If a subtitle file sits next to a video — the usual
-  `Movie.eng.srt` or `Movie.vtt` beside `Movie.mkv` — PhotoBlaze can now show it. Press `C`
+  `Movie.eng.srt` or `Movie.vtt` beside `Movie.mkv` — Blaze Viewer can now show it. Press `C`
   (or View ▸ Subtitles) to turn captions on and off; your choice is remembered. Text is
   rendered sharply at your display's real resolution, with a black outline so it stays
   readable over bright scenes. SubRip (`.srt`) and WebVTT (`.vtt`) are supported, including
@@ -36,10 +53,10 @@ with any pre-release suffix carried only by the tag.
   last few seconds isn't remembered (it just starts over), and a video you watched to the end restarts
   from the top. Works for every video and format on all platforms.
 - **Opening photos from Explorer now reuses the running window (Windows).** Double-clicking a
-  photo, or selecting several and pressing Open, hands them to the PhotoBlaze you already have open
+  photo, or selecting several and pressing Open, hands them to the Blaze Viewer you already have open
   instead of launching a separate copy for each file. A multi-selection opens as one playlist, and
   the existing window comes to the front.
-- **About now credits the open-source libraries PhotoBlaze builds on** — libheif, libde265, dav1d
+- **About now credits the open-source libraries Blaze Viewer builds on** — libheif, libde265, dav1d
   and FFmpeg — with each one's copyright and license. Their full license texts now ship alongside
   the app (in the `licenses` folder next to it on Windows and Linux, or inside the app bundle on
   macOS).
@@ -68,7 +85,7 @@ with any pre-release suffix carried only by the tag.
 - **Video details now list every audio and subtitle track, instead of just "Audio: Yes".** The
   Inspector's Details tab (`Shift+I`) shows each track on its own line — language, codec, channel
   layout, sample rate, and whether it's the default, forced, a commentary, or SDH — so a film with a
-  director's commentary and three subtitle tracks reads as exactly that. Subtitle formats PhotoBlaze
+  director's commentary and three subtitle tracks reads as exactly that. Subtitle formats Blaze Viewer
   can't display (image-based ones like PGS or VobSub) are still listed, marked "Unsupported". Details
   that genuinely can't be read say so, rather than claiming a file has no audio. Copy all details
   (`Shift+I` → copy) includes the tracks; if you copy while a video is still being read, the copy
@@ -971,7 +988,8 @@ Initial beta — a fast, keyboard-driven Windows photo viewer.
 - Signed WiX/MSI installer with file associations and an "Open with PhotoBlaze"
   folder verb.
 
-[Unreleased]: https://github.com/fullspecsystems/blazeviewer/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/fullspecsystems/blazeviewer/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/fullspecsystems/blazeviewer/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/fullspecsystems/blazeviewer/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/fullspecsystems/blazeviewer/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/fullspecsystems/blazeviewer/compare/v0.1.0-beta.4...v0.1.0
