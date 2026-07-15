@@ -20,7 +20,7 @@ is linked, and why that linkage complies). It points here; this is the legal tex
 |---|---|---|
 | `libheif-COPYING.txt` | libheif 1.23.0 | LGPL-3.0-or-later (+ GPL-3.0, + MIT for samples) |
 | `libde265-COPYING.txt` | libde265 1.1.1 | LGPL-3.0-or-later (+ GPL-3.0, + MIT for samples) |
-| `ffmpeg-COPYING.LGPLv2.1.txt` | FFmpeg 8.1.2 | LGPL-2.1-or-later |
+| `ffmpeg-COPYING.LGPLv2.1.txt` | FFmpeg 8.1.2 (Windows) · 8.1.1 (macOS) | LGPL-2.1-or-later |
 | `dav1d-COPYING.txt` | dav1d 1.5.3 | BSD-2-Clause |
 
 ## Provenance
