@@ -63,19 +63,25 @@ pub enum ProbeState {
 
 /// Spawn the probe for `item`, returning the handle to poll. The worker owns an `Arc` of
 /// the source, so it stays alive even if the deck is rebuilt underneath it.
+/// `deck_gen` and `catalog_gen` answer **different questions and must not be the same
+/// number** — passing one value for both was a real defect (see [`crate::app_core::AppCore`]'s
+/// `catalog_seq`). `deck_gen` guards the *result* ("is index `item` still this file?");
+/// `catalog_gen` stamps the *ids* ("which catalog is this `local_id` from?"). A deck
+/// generation shared by every file in a folder made the second guard unable to fire.
 pub fn spawn(
     source: &Arc<dyn ItemSource>,
     item: usize,
-    gen: u64,
+    deck_gen: u64,
+    catalog_gen: u64,
     identity: String,
 ) -> DetailsProbe {
     let source = Arc::clone(source);
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
-        let _ = tx.send(probe_job(source.as_ref(), item, gen));
+        let _ = tx.send(probe_job(source.as_ref(), item, catalog_gen));
     });
     DetailsProbe {
-        gen,
+        gen: deck_gen,
         item,
         identity,
         copy_when_done: false,

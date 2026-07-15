@@ -122,6 +122,7 @@ impl AppCore {
             exif_cache: std::collections::HashMap::new(),
             details_probe: None,
             details_gen: 0,
+            catalog_seq: 0,
             subtitles: crate::subtitle_engine::SubtitleEngine::from_settings(&settings),
             recognized_text: std::collections::HashMap::new(),
             text_scan: None,
@@ -6525,10 +6526,16 @@ impl AppCore {
             // pick the result up.
             self.exif_cache
                 .insert(item, crate::app_core::ItemDetails::loading());
+            // Two generations, deliberately: the deck's (has index `item` been reassigned
+            // under us?) and a fresh one for this catalog alone (which file's tracks are
+            // these?). See `AppCore::catalog_seq` — handing the deck's to both is what let a
+            // picked track resolve against the next film's catalog.
+            self.catalog_seq += 1;
             self.details_probe = Some(crate::media_details::spawn(
                 &self.source,
                 item,
                 self.details_gen,
+                self.catalog_seq,
                 self.source.name(item).to_string(),
             ));
             return;
@@ -6606,7 +6613,8 @@ impl AppCore {
     /// [`Self::poll_details_probe`] exists to prevent.
     #[cfg(test)]
     pub fn probe_details_blocking(&mut self, item: usize) {
-        let d = crate::media_details::probe_job(self.source.as_ref(), item, self.details_gen);
+        self.catalog_seq += 1;
+        let d = crate::media_details::probe_job(self.source.as_ref(), item, self.catalog_seq);
         self.exif_cache.insert(item, d);
     }
 
@@ -9186,6 +9194,39 @@ mod tests {
             .iter()
             .map(|r| format!("{}{}", if r.active { "✓ " } else { "" }, r.label))
             .collect()
+    }
+
+    /// **Regression — the silent one.** A `TrackId`'s whole contract is that `local_id` means
+    /// something only within the generation it carries. The probe was handed the **deck**
+    /// generation, which every film in a folder shares, so an id minted on one film compared
+    /// equal against the next film's catalog and matched whatever stream sat at that
+    /// `local_id`: a subtitle track picked as Arabic came back as **Korean** on the next
+    /// episode — ticked, no error, no way to tell. `resolve_track`'s stale guard could never
+    /// fire, because the two generations were the same number.
+    ///
+    /// Each catalog must mint its own generation, and the deck's must stay a separate count.
+    /// (Verified to fail without the fix: both sides read 0.)
+    #[test]
+    fn each_probe_mints_its_own_catalog_generation() {
+        let mut core = test_core();
+        core.source = five_photos();
+
+        core.probe_details_blocking(0);
+        let first = core.catalog_seq;
+        core.probe_details_blocking(1);
+        let second = core.catalog_seq;
+
+        assert_ne!(
+            first, second,
+            "two files in one deck must not share a catalog generation — that is the bug"
+        );
+        assert!(second > first, "and it advances rather than cycling");
+        // The deck did not change, so its own generation must not have moved: conflating
+        // these two counts is exactly what caused the defect.
+        assert_eq!(
+            core.details_gen, 0,
+            "the deck generation is a separate question"
+        );
     }
 
     /// The picker lists Off + the file's tracks, and selecting a row puts that track on.

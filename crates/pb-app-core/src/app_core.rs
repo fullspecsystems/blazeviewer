@@ -263,6 +263,22 @@ pub struct AppCore {
     /// **Not** [`AppCore::epoch`], which is the *geometry* generation (a window resize
     /// bumps it) and would both invalidate good catalogs and miss real rebuilds.
     pub details_gen: u64,
+    /// Catalog generation: bumped for **every catalog minted**, so a
+    /// [`pb_decode::TrackId`] names exactly one *file's* catalog.
+    ///
+    /// **Deliberately not `details_gen`**, which was the bug: that one identifies the
+    /// *deck* ("what file is at index i"), so every film in a folder minted its ids in the
+    /// same generation. `TrackId`'s entire contract is that `local_id` means something only
+    /// within its generation — sharing one across files broke it *silently*. A subtitle
+    /// track picked on one film then resolved against the next film's catalog, matching
+    /// whatever stream happened to sit at that `local_id`: a chosen Arabic track came back
+    /// as Korean on the following episode, ticked, with no error. `resolve_track`'s guard
+    /// could never fire, because the two generations were equal.
+    ///
+    /// The two are separate questions and now have separate counters: `details_gen` answers
+    /// "is this probe result still about the right file", this answers "is this id still
+    /// about this catalog".
+    pub catalog_seq: u64,
     /// Subtitle overlay state (task #90): the cue clock, the loaded track, and the
     /// bitmap + rect the shells composite. Shares `details_gen` as its staleness
     /// generation — both describe "what file is at index i", which is the same question.
