@@ -215,22 +215,57 @@ Why the redirect rather than pointing feeds straight at GitHub:
 - If you ever leave GitHub, you change the Worker — **installed apps never notice**
 - `…/releases/latest/download/<name>` gives a stable "latest" URL (the symlink equivalent)
 
-### ⚠ Must verify before committing to this
+### ✅ VERIFIED 2026-07-14 (against the actual velopack 0.0.70 source, not docs)
 
-I'm confident about the shape, not these specifics — **check them, don't trust me**:
-1. **Velopack + 302 on `.nupkg`.** Velopack's flat feed may resolve package paths
-   *relative to the feed base*. If it won't follow a cross-origin redirect, use Velopack's
-   native **`GithubSource`** for Windows instead (first-class, `vpk upload github`) and
-   accept that Windows' feed lives on GitHub.
-2. **Private-repo assets need auth** — this is why the releases repo must be *public*.
-   Confirm that's acceptable before creating it (it makes release artifacts + version
-   history public while the source stays closed).
-3. Sparkle following a 302 to a GitHub asset — standard and widely used, but smoke-test
-   with `scripts/test-sparkle-update.sh` before relying on it.
+An earlier draft of this plan said "if Velopack won't follow a redirect, fall back to its
+native `GithubSource`." **That fallback does not exist** — `update.rs` already documented
+it and the source confirms:
 
-**Sequencing:** D is independent of B and C. But if you're doing the one-time manual
-reinstall in C anyway, **do D at the same time** — that reinstall is the only free moment
-to change the feed URL without stranding anything.
+1. **The Rust binding has no `GithubSource`** — only `HttpSource` / `FileSource`
+   (`velopack-0.0.70/src/sources.rs`). GitHub's per-release asset layout is something
+   `HttpSource` cannot walk, and a flat dir is also what keeps **delta updates** working.
+2. **`download_release_entry` does `url.join(&asset.FileName)`** — the `.nupkg` URL is
+   *strictly* `FEED_URL + FileName`. `releases.win.json` carries a **filename, not a URL**,
+   so Windows can never be pointed straight at GitHub. **The flat dir is mandatory** and
+   the 302 is the only route to off-host bytes.
+3. **The 302 works.** velopack builds its agent as
+   `ureq::AgentBuilder::new().tls_connector(..).build()` and **never** calls `.redirects(0)`,
+   so ureq's default `redirects: 5` applies (`ureq-2.12.1/src/agent.rs:262`).
+
+**macOS and Linux don't need the redirect at all** — both carry absolute URLs:
+Sparkle's `<enclosure url=…>` (`generate-mac-appcast.sh`, base already overridable via
+`PB_APPCAST_BASE_URL`) and the Linux manifest's `Asset.url` (whose sibling `file` field is
+literally commented *"informational; the URL is what we fetch"*).
+
+| Platform | Feed metadata | Bytes | Redirect? |
+|---|---|---|---|
+| Windows | `releases.win.json` on the Worker | `.nupkg` → **302** → GitHub | **required** |
+| macOS | `appcast.xml` on the Worker | enclosure → GitHub direct | no |
+| Linux | `latest.json` on the Worker | `Asset.url` → GitHub direct | no |
+
+⚠ **Worker gotcha:** velopack appends `?localVersion=<v>&id=<id>` to the
+`releases.win.json` request. The Worker must ignore that query rather than 404 on it.
+
+⚠ **The releases repo must be PUBLIC** — a private repo's release assets require auth.
+That exposes artifacts + version history while the source stays closed. Confirm before
+creating it.
+
+### The sequencing that actually matters
+
+**Decouple the URL from the bytes — they have completely different deadlines.**
+
+- **Moving the feed URL is only free during a forced reinstall.** It's compiled into every
+  binary, so the Phase C cutover is the *one* moment it can change without stranding an
+  install. Miss it and you need *another* forced reinstall later.
+- **Moving the bytes is free forever, afterwards.** Once the URL is
+  `downloads.blazeviewer.app`, switching from DigitalOcean to GitHub (or anywhere) is a
+  Worker config change that no installed app ever notices.
+
+**Therefore:** point the feed at our own domain **in Phase C**, and treat GitHub hosting as
+a *later, independent* decision. Right now the product is stealth with one user, so the
+bandwidth bill is ~zero and GitHub buys nothing yet — but if the URL isn't moved during C,
+the option costs a reinstall forever after. Do the cheap irreversible thing now; defer the
+reversible one.
 
 ---
 
