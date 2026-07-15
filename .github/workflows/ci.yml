@@ -143,6 +143,19 @@ jobs:
         run: Add-Content $env:GITHUB_PATH "C:\Program Files\Git\bin"
       - name: Install Rust (rustup bootstrap; version from rust-toolchain.toml)
         uses: dtolnay/rust-toolchain@stable
+      # ⚠ This must precede EVERY cargo step on this lane, not just the ffprobe ones, and it is
+      # the only step that puts clang.exe on PATH. `ring` — pulled in unconditionally via
+      # pb-app-core → ureq → rustls (the AI-description backend, task #44; NOT the Linux
+      # updater, which is correctly target-gated) — builds its aarch64 assembly with cc-rs,
+      # and cc-rs SPAWNS clang.exe off PATH. LIBCLANG_PATH does not help: that is bindgen's
+      # load-a-library knob, a different mechanism.
+      # Why x64 passes with the identical order: ring only needs clang on aarch64-pc-windows-msvc.
+      # So this is genuinely an ordering bug that only ARM64 can see — but note reordering ALONE
+      # was not enough, because PATH crosses steps via GITHUB_PATH (not GITHUB_ENV); vs-dev-env.ps1
+      # now exports it there.
+      - name: VS Developer environment (clang for ring/cc-rs + FFmpeg bindgen)
+        shell: pwsh
+        run: pwsh scripts/vs-dev-env.ps1 -Arch arm64
       - name: Test (native aarch64-pc-windows-msvc)
         run: cargo test --workspace --locked
       # The shipped native features must not rot on the ARM64 channel either
@@ -162,9 +175,6 @@ jobs:
           } else {
             Write-Host "libheif + dav1d + ffmpeg already present at $env:VCPKG_ROOT"
           }
-      - name: VS Developer environment (FFmpeg bindgen)
-        shell: pwsh
-        run: pwsh scripts/vs-dev-env.ps1 -Arch arm64
       - name: Test with libheif + dav1d + ffprobe (native arm64)
         run: cargo test -p pb-decode --features libheif,dav1d,ffprobe --locked
       - name: Test pb-app-core with ffprobe (native arm64)

@@ -44,22 +44,46 @@ $vcComponents = @(
 )
 $candidates = & $vswhere -latest -products * -requires $vcComponents -requiresAny -property installationPath
 
-# Trust but verify: the install must have the DevShell module and a libclang for this arch.
+# Trust but verify: the install must have the DevShell module and BOTH clang artifacts for this
+# arch. They are two different consumers and checking only one hides the other's failure:
+#   * libclang.dll — bindgen loads it as a library, located via LIBCLANG_PATH (never PATH).
+#   * clang.exe    — cc-rs SPAWNS it as a program, located via PATH (never LIBCLANG_PATH).
+# `ring` needs the latter on aarch64-pc-windows-msvc, so a libclang-only check passed happily on a
+# box that could not build the workspace at all ("failed to find tool clang"). Both ship in the
+# same VS component, so a box missing one is usually missing both — but assert them separately, so
+# the error names the artifact that is actually absent.
 $llvmDir = if ($Arch -eq 'arm64') { 'ARM64' } else { 'x64' }
 $vsPath = $candidates | Where-Object {
     (Test-Path "$_\Common7\Tools\Microsoft.VisualStudio.DevShell.dll") -and
-    (Test-Path "$_\VC\Tools\Llvm\$llvmDir\bin\libclang.dll")
+    (Test-Path "$_\VC\Tools\Llvm\$llvmDir\bin\libclang.dll") -and
+    (Test-Path "$_\VC\Tools\Llvm\$llvmDir\bin\clang.exe")
 } | Select-Object -First 1
 
 if (-not $vsPath) {
     $found = if ($candidates) { ($candidates -join '; ') } else { '(none)' }
+    # Say which artifact each candidate is missing — "(none)" alone sent someone hunting for an
+    # uninstalled VS when the real answer was a half-installed one. Note a candidate whose VS
+    # Installer is still finalizing reports nothing at all here: vswhere omits the install until
+    # setup.exe exits, so an empty list right after a component install means "wait", not "absent".
+    $detail = foreach ($c in $candidates) {
+        $miss = @()
+        if (-not (Test-Path "$c\Common7\Tools\Microsoft.VisualStudio.DevShell.dll")) { $miss += 'DevShell.dll' }
+        if (-not (Test-Path "$c\VC\Tools\Llvm\$llvmDir\bin\libclang.dll"))           { $miss += 'libclang.dll' }
+        if (-not (Test-Path "$c\VC\Tools\Llvm\$llvmDir\bin\clang.exe"))              { $miss += 'clang.exe' }
+        "  $c  → missing: $($miss -join ', ')"
+    }
     throw @"
 No usable Visual Studio C++ install found for $Arch.
 Checked: $found
-Each needs BOTH:
+$($detail -join "`n")
+Each needs ALL of:
   * Common7\Tools\Microsoft.VisualStudio.DevShell.dll   (Developer shell)
-  * VC\Tools\Llvm\$llvmDir\bin\libclang.dll               (VS component: 'C++ Clang tools for Windows')
-Install the missing component via the Visual Studio Installer, then re-run.
+  * VC\Tools\Llvm\$llvmDir\bin\libclang.dll             (bindgen — FFmpeg `ffprobe` feature)
+  * VC\Tools\Llvm\$llvmDir\bin\clang.exe                (cc-rs — `ring`, on aarch64 only)
+All three come from VS component 'C++ Clang tools for Windows'. Install it via the Visual Studio
+Installer GUI (Modify → Individual components → search "clang"), then re-run. The quiet
+`vs_installer.exe ... --quiet` CLI is not a reliable substitute: it refuses to self-elevate
+(exit 5007) and, even elevated, can die on a temp-cache lock while AV scans its downloads.
 "@
 }
 
@@ -101,4 +125,12 @@ if ($env:GITHUB_ENV) {
     "LIBCLANG_PATH=$env:LIBCLANG_PATH" | Add-Content $env:GITHUB_ENV
     if ($env:VCPKG_ROOT) { "VCPKG_ROOT=$env:VCPKG_ROOT" | Add-Content $env:GITHUB_ENV }
     Write-Host "==> exported INCLUDE / LIB / LIBCLANG_PATH / VCPKG_ROOT to GITHUB_ENV"
+
+    # PATH does NOT travel via GITHUB_ENV — Actions has a separate GITHUB_PATH file for it, and
+    # forgetting that is silent: Enter-VsDevShell puts the LLVM bin dir on PATH for THIS step, the
+    # step ends, and every later step is back to a PATH with no clang.exe. `ring` then fails its
+    # cc-rs "failed to find tool clang" on aarch64 while LIBCLANG_PATH sits there looking correct —
+    # the two are unrelated mechanisms (load-a-library vs spawn-a-program).
+    $env:LIBCLANG_PATH | Add-Content $env:GITHUB_PATH
+    Write-Host "==> exported $env:LIBCLANG_PATH to GITHUB_PATH (clang.exe for cc-rs/ring)"
 }
