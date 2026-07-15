@@ -1,9 +1,9 @@
-# PhotoBlaze — Project Guide
+# Blaze Viewer — Project Guide
 
-PhotoBlaze is a photo viewer with exactly one obsession: **how fast you can flick
-through thousands of images.** No chrome, fit-to-screen, keyboard-driven, with
-photos decoded ahead of time and held resident in GPU memory so the next frame is
-already there when you press a key.
+Blaze Viewer is an image viewer with exactly one obsession: **how fast you can flick
+through thousands of images.** No chrome, fit-to-screen, keyboard-driven, with images
+decoded ahead of time and held resident in GPU memory so the next frame is already
+there when you press a key.
 
 ## Prime directive
 

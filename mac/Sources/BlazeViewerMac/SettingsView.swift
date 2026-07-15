@@ -235,7 +235,7 @@ struct SettingsView: View {
             Section("File Associations") {
                 HStack {
                     VStack(alignment: .leading, spacing: 2) {
-                        Text("Default photo viewer")
+                        Text("Default image viewer")
                         Text(defaultViewerSubline)
                             .font(.caption)
                             .foregroundStyle(.secondary)
@@ -280,7 +280,7 @@ struct SettingsView: View {
                 )
                 Toggle(isOn: $draft.glassToolbar) {
                     Text("Transparent toolbar")
-                    Text("Photos extend under a translucent toolbar when zoomed or filled")
+                    Text("Images and videos extend under a translucent toolbar when zoomed or filled")
                 }
             }
             // The one-line info readout (`i`): whether it starts shown, where it sits, and
@@ -398,7 +398,7 @@ struct SettingsView: View {
             Section {
                 Text("Images are sent to the model server you set above, so keep it local "
                     + "(this Mac or your own network) and one you trust — with auto-describe "
-                    + "on, each photo is sent automatically. Online services may keep images "
+                    + "on, each image is sent automatically. Online services may keep images "
                     + "and use them to train. Apple's on-device model (coming later) will run "
                     + "here with no server.")
                     .font(.caption).foregroundStyle(.secondary)
@@ -508,7 +508,7 @@ struct SettingsView: View {
         }
     }
 
-    // MARK: - Default photo viewer (file associations)
+    // MARK: - Default image viewer (file associations)
 
     /// The image content types PhotoBlaze offers to become the default handler for.
     /// Resolved from the file extensions it decodes (mirrors the Info.plist associations)
@@ -555,7 +555,7 @@ struct SettingsView: View {
         }
     }
 
-    /// The caption under "Default photo viewer": translocated → move-first hint; else
+    /// The caption under "Default image viewer": translocated → move-first hint; else
     /// full / none / partial — never changing the row count (the pane height is fixed).
     private var defaultViewerSubline: String {
         if isAppTranslocated {

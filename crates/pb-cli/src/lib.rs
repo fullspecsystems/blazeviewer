@@ -138,7 +138,7 @@ pub struct Cli {
     #[arg(long)]
     pub mute: bool,
 
-    /// Open at photo N (1-based), or the first file whose name matches.
+    /// Open at item N (1-based), or the first file whose name matches.
     #[arg(long, value_name = "N|NAME")]
     pub start_at: Option<String>,
 

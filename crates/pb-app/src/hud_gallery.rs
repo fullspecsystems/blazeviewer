@@ -87,7 +87,7 @@ fn build_sheet(hud: &Hud) -> Sheet {
     let sec_catalog = text(hud, "Components", sp(17.0));
     let sec_composite = text(
         hud,
-        "Real-layout composite (overlays over a photo)",
+        "Real-layout composite (overlays over an image)",
         sp(17.0),
     );
     let tiles = build_tiles(hud);

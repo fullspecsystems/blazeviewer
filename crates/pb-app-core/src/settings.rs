@@ -392,7 +392,7 @@ impl Settings {
             return false;
         };
         let body = format!(
-            "# {} settings (preferences only, never photo data)\n{toml}",
+            "# {} settings (preferences only, never viewing data)\n{toml}",
             crate::APP_NAME
         );
         let tmp = path.with_extension("toml.tmp");

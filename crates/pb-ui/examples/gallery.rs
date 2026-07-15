@@ -214,7 +214,7 @@ impl Gallery {
                 p,
                 None,
                 "Start speed",
-                Some("Photos per second when you first hold a key"),
+                Some("Images per second when you first hold a key"),
                 |ui| {
                     pb_ui::slider(ui, &mut self.start_speed, 1.0..=30.0, "/s");
                 },

@@ -1,7 +1,7 @@
-# PhotoBlaze
+# Blaze Viewer
 
-A photo viewer with one obsession: **how fast you can flick through thousands of
-images.** No chrome, fit-to-screen, keyboard-driven, with photos held in GPU
+An image viewer with one obsession: **how fast you can flick through thousands of
+images.** No chrome, fit-to-screen, keyboard-driven, with images held in GPU
 memory so the next frame is already there when you press a key.
 
 > Prime directive: *will this make it faster, or have basically zero performance

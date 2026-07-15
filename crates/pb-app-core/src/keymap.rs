@@ -424,7 +424,7 @@ impl Keymap {
         root.insert("keys".to_string(), toml::Value::Table(keys));
         let body = toml::to_string_pretty(&toml::Value::Table(root)).unwrap_or_default();
         format!(
-            "# {} keymap (preferences only, never photo data)\n{body}",
+            "# {} keymap (preferences only, never viewing data)\n{body}",
             crate::APP_NAME
         )
     }

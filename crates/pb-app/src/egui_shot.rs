@@ -518,9 +518,9 @@ fn sample_frame(dark: bool, tab: InspectorTab, welcome: bool) -> PanelFrame {
             HelpSection {
                 title: "Navigation".into(),
                 rows: vec![
-                    ("Next photo".into(), "Space / →".into()),
-                    ("Previous photo".into(), "⌫ / ←".into()),
-                    ("Random photo".into(), "Enter".into()),
+                    ("Next image".into(), "Space / →".into()),
+                    ("Previous image".into(), "⌫ / ←".into()),
+                    ("Random image".into(), "Enter".into()),
                     ("Quit".into(), "Esc".into()),
                 ],
             },
