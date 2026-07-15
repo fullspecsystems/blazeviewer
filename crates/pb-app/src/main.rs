@@ -726,6 +726,7 @@ impl App {
             exif_cache: HashMap::new(),
             details_probe: None,
             details_gen: 0,
+            catalog_seq: 0,
             // Subtitles (task #90) are wired through the core, but this shell has no
             // presenter yet — `Renderer::set_subtitle_overlay` is the remaining piece.
             // Off costs nothing, so the state rides along until it exists.

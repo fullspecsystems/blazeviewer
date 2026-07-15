@@ -405,12 +405,11 @@ impl AppCore {
             // The engine picks the change up on the next tick — no reload, because the cue
             // track stays loaded while it's off; only drawing stops.
             Action::ToggleSubtitles => {
-                let on = self.subtitles.mode == crate::subtitle::SubtitleMode::Off;
-                self.subtitles.mode = if on {
-                    crate::subtitle::SubtitleMode::Automatic
-                } else {
-                    crate::subtitle::SubtitleMode::Off
-                };
+                // Flips on/off ONLY. It must not touch which track you picked — that was
+                // the defect: `C` used to set the mode to Automatic on the way back on, so
+                // picking Chinese and pressing `C` twice returned English.
+                self.subtitles.selection.toggle();
+                let on = self.subtitles.selection.enabled;
                 self.settings.subtitles = on;
                 // Gated on `persist_prefs`, unlike the older toggles that call `save()`
                 // straight — so a unit test can dispatch this without writing the real
@@ -7918,10 +7917,15 @@ impl AppCore {
     /// switched off by a routing change. On `Session` that's the session's own
     /// `desired_position`; on `Native` (macOS AVPlayer *and* the sample-buffer route) it's
     /// the shell's ~20 Hz report, which is ~50 ms granular against cues that last seconds.
-    /// `Shift+C` — the next subtitle track, `Off` included (#99).
+    /// `Shift+C` — the next subtitle *track* (#99).
     ///
-    /// Toasts **optimistically**, which is safe here and would not be for audio: swapping
-    /// a subtitle track only re-aims a cue reader, so there is no clock to re-prime and
+    /// Tracks only: `Off` belongs to `C` now, and `Automatic` is not a step (it resolves to
+    /// one of these tracks anyway, so it would show the same subtitles twice under two
+    /// names). It also switches subtitles **on** — asking for the next track when they are
+    /// off can only mean you want to see one.
+    ///
+    /// Toasts **optimistically**, which is safe here and would not be for audio: swapping a
+    /// subtitle track only re-aims a cue reader, so there is no clock to re-prime and
     /// nothing to fail silently. (Task #99's rule that audio must toast only on a
     /// *confirmed* switch stands — it is a different risk, not the same one.)
     pub fn cycle_subtitle_track(&mut self) {
@@ -7933,30 +7937,23 @@ impl AppCore {
             self.show_toast_icon("Reading tracks…", ToastIcon::Captions);
             return;
         };
-        let choices = crate::subtitle::cycle_choices(catalog);
-        // Off plus nothing = nothing to cycle. Say so rather than no-op'ing: a key that
-        // does nothing is indistinguishable from a key that is broken.
-        if choices.len() < 2 {
+        // What is *currently showing* — so the cycle advances from the track on screen
+        // rather than jumping back to it (which is what Automatic would otherwise do).
+        let showing = self
+            .subtitles
+            .selection
+            .resolve(catalog, crate::subtitle::audio_language_of(catalog))
+            .map(|t| t.id);
+        let Some(next) = crate::subtitle::next_track(catalog, showing) else {
+            // Nothing to step through. Say so rather than no-op'ing: a key that does
+            // nothing is indistinguishable from a key that is broken.
             self.show_toast_icon("No subtitle tracks", ToastIcon::CaptionsOff);
             return;
-        }
-        // What Automatic is *currently showing* — so the cycle advances from the track on
-        // screen rather than jumping back to it.
-        let resolved = crate::subtitle::resolve_track(
-            self.subtitles.mode,
-            catalog,
-            crate::subtitle::audio_language_of(catalog),
-        )
-        .map(|t| t.id);
-        let Some(next) = crate::subtitle::next_choice(&choices, self.subtitles.mode, resolved)
-        else {
-            return;
         };
-        self.apply_subtitle_choice(next);
+        self.apply_subtitle_choice(crate::subtitle::SubtitleChoice::Track(next));
     }
 
-    /// Commit a chosen subtitle mode: the state, the persisted on/off preference, and the
-    /// toast.
+    /// Commit a picker choice: the state, the persisted on/off preference, and the toast.
     ///
     /// Shared by `Shift+C` and the picker (#99) so a choice made either way behaves
     /// identically — the alternative is two paths that agree until one of them is edited.
@@ -7964,36 +7961,46 @@ impl AppCore {
     /// The picker toasts too, even though its tick already moved: a track can be silent for
     /// half a minute, so without it "did that work?" has no answer until a cue happens to be
     /// due.
-    fn apply_subtitle_choice(&mut self, next: crate::subtitle::SubtitleMode) {
+    fn apply_subtitle_choice(&mut self, choice: crate::subtitle::SubtitleChoice) {
+        use crate::subtitle::SubtitleChoice;
+
+        let Some(catalog) = self
+            .displayed_item
+            .and_then(|item| self.exif_cache.get(&item))
+            .and_then(|d| d.media.as_ref())
+        else {
+            return; // nothing to choose from, and no catalog to read a preference out of
+        };
         // The label through the same `track_summary` the Details panel uses (#98) — two
-        // formatters would drift. Resolved before the mutable borrows below.
-        let label = match next {
-            crate::subtitle::SubtitleMode::Off => "Subtitles off".to_string(),
-            crate::subtitle::SubtitleMode::Track(id) => self
-                .displayed_item
-                .and_then(|item| self.exif_cache.get(&item))
-                .and_then(|d| d.media.as_ref())
-                .and_then(|c| c.subtitles.tracks.iter().find(|t| t.id == id))
+        // formatters would drift. Built before the mutable borrows below.
+        let label = match choice {
+            SubtitleChoice::Off => "Subtitles off".to_string(),
+            SubtitleChoice::Automatic => "Subtitles automatic".to_string(),
+            SubtitleChoice::Track(id) => catalog
+                .subtitles
+                .tracks
+                .iter()
+                .find(|t| t.id == id)
                 .map(crate::tracks::track_summary)
                 .unwrap_or_else(|| "Subtitles on".into()),
-            crate::subtitle::SubtitleMode::Automatic => "Subtitles automatic".to_string(),
         };
-        let off = next == crate::subtitle::SubtitleMode::Off;
+        let catalog = catalog.clone(); // ends the borrow of `exif_cache`
+        self.subtitles.selection.apply(choice, &catalog);
 
-        self.subtitles.mode = next;
-        // `settings.subtitles` is the on/off preference the toggle persists; keep it
-        // honest when the cycle passes through Off, or `C` would come back on to a state
-        // the file no longer describes.
-        self.settings.subtitles = !off;
+        let on = self.subtitles.selection.enabled;
+        // `settings.subtitles` is the on/off preference `C` persists; keep it honest when a
+        // picker row turns them off, or `C` would come back on to a state the file no
+        // longer describes.
+        self.settings.subtitles = on;
         if self.persist_prefs {
             self.settings.save();
         }
         self.show_toast_icon(
             &label,
-            if off {
-                ToastIcon::CaptionsOff
-            } else {
+            if on {
                 ToastIcon::Captions
+            } else {
+                ToastIcon::CaptionsOff
             },
         );
     }
@@ -8014,7 +8021,7 @@ impl AppCore {
         };
         crate::tracks::subtitle_picker_rows(
             catalog,
-            self.subtitles.mode,
+            &self.subtitles.selection,
             crate::subtitle::audio_language_of(catalog),
         )
     }
@@ -8025,7 +8032,7 @@ impl AppCore {
     /// own state the way play/pause does. Not the same question as "is a cue on screen":
     /// subtitles are on through every silent gap between cues.
     pub fn subtitles_on(&self) -> bool {
-        self.subtitles.mode != crate::subtitle::SubtitleMode::Off
+        self.subtitles.selection.enabled
     }
 
     /// Has the track probe landed for the video on screen? `false` = "still reading", which
@@ -8050,7 +8057,7 @@ impl AppCore {
         let Some(catalog) = self.exif_cache.get(&item).and_then(|d| d.media.as_ref()) else {
             return;
         };
-        let Some(&next) = crate::subtitle::cycle_choices(catalog).get(row) else {
+        let Some(&next) = crate::subtitle::picker_choices(catalog).get(row) else {
             return;
         };
         self.apply_subtitle_choice(next);
@@ -8064,7 +8071,7 @@ impl AppCore {
         // so pressing `C` left the last cue frozen on screen forever. One exit, one rule:
         // an overlay can never outlive the state that produced it.
         let (displayed, active) = (self.displayed_item, self.video_showing());
-        let on = self.subtitles.mode != crate::subtitle::SubtitleMode::Off;
+        let on = self.subtitles.selection.enabled;
         let Some(item) = displayed.filter(|_| active && on) else {
             self.subtitles.trace(|| {
                 format!("idle: displayed_item={displayed:?} session_active={active} on={on}")
@@ -8984,9 +8991,9 @@ mod tests {
     /// this pins the derivation itself: whatever the settings say, the engine must agree.
     #[test]
     fn the_engine_mode_is_derived_from_the_loaded_settings_not_the_defaults() {
-        use crate::subtitle::SubtitleMode;
+        use crate::subtitle::SubtitleWant;
         let mut core = test_core();
-        assert_eq!(core.subtitles.mode, SubtitleMode::Off);
+        assert!(!core.subtitles.selection.enabled);
 
         // What `new_host` does after `Settings::load()` returns captions-on.
         let loaded = settings::Settings {
@@ -8997,8 +9004,8 @@ mod tests {
         core.settings = loaded;
 
         assert_eq!(
-            core.subtitles.mode,
-            SubtitleMode::Automatic,
+            core.subtitles.selection.want,
+            SubtitleWant::Automatic,
             "the engine must follow the settings that were actually loaded"
         );
     }
@@ -9092,13 +9099,13 @@ mod tests {
     /// which is where the bug actually lived.
     #[test]
     fn switching_subtitles_off_clears_a_cue_that_is_on_screen() {
-        use crate::subtitle::SubtitleMode;
+        use crate::subtitle::SubtitleSelection;
         let mut core = core_with_a_playing_video();
-        core.subtitles.mode = SubtitleMode::Automatic;
+        core.subtitles.selection = SubtitleSelection::automatic();
         core.subtitles.force_showing_for_test();
         let before = core.subtitles.gen();
 
-        core.subtitles.mode = SubtitleMode::Off;
+        core.subtitles.selection = SubtitleSelection::off();
         core.tick_subtitles();
 
         assert!(
@@ -9116,7 +9123,7 @@ mod tests {
     #[test]
     fn a_stale_overlay_is_cleared_when_nothing_is_playing() {
         let mut core = test_core(); // no session
-        core.subtitles.mode = crate::subtitle::SubtitleMode::Automatic;
+        core.subtitles.selection = crate::subtitle::SubtitleSelection::automatic();
         core.subtitles.force_showing_for_test();
         core.tick_subtitles();
         assert!(core.subtitles.bitmap().is_none());
@@ -9126,16 +9133,15 @@ mod tests {
     /// which way it went — the whole switch, replacing the old dev env flag.
     #[test]
     fn toggle_subtitles_flips_the_mode_and_the_preference() {
-        use crate::subtitle::SubtitleMode;
         let mut core = test_core();
         // The native toast carries the message + icon as data; the CPU one needs a HUD
         // rasterizer a headless core has no reason to build.
         core.native_toast = true;
-        assert_eq!(core.subtitles.mode, SubtitleMode::Off, "off by default");
+        assert!(!core.subtitles.selection.enabled, "off by default");
         assert!(!core.settings.subtitles);
 
         core.dispatch_action(Action::ToggleSubtitles);
-        assert_eq!(core.subtitles.mode, SubtitleMode::Automatic);
+        assert!(core.subtitles.selection.enabled);
         assert!(core.settings.subtitles, "the preference records the choice");
         let t = core.toast_native.as_ref().expect("the user is told");
         assert_eq!(
@@ -9144,7 +9150,7 @@ mod tests {
         );
 
         core.dispatch_action(Action::ToggleSubtitles);
-        assert_eq!(core.subtitles.mode, SubtitleMode::Off);
+        assert!(!core.subtitles.selection.enabled);
         assert!(!core.settings.subtitles);
         let t = core.toast_native.as_ref().expect("told again");
         assert_eq!(
@@ -9229,20 +9235,21 @@ mod tests {
         );
     }
 
-    /// The picker lists Off + the file's tracks, and selecting a row puts that track on.
+    /// The picker lists Off, Automatic, then the file's tracks; selecting a row applies it.
     #[test]
     fn selecting_a_picker_row_applies_that_track() {
-        use crate::subtitle::SubtitleMode;
+        use crate::subtitle::SubtitleWant;
         let mut core = core_with_subtitle_tracks(vec![sub(0, "eng"), sub(1, "fra")]);
         assert_eq!(
             labels(&mut core),
-            vec!["✓ Off", "English · SubRip", "French · SubRip"]
+            vec!["✓ Off", "Automatic", "English · SubRip", "French · SubRip"]
         );
 
-        core.select_subtitle_row(2);
+        core.select_subtitle_row(3); // French
+        assert!(core.subtitles.selection.enabled);
         assert_eq!(
-            core.subtitles.mode,
-            SubtitleMode::Track(pb_decode::TrackId {
+            core.subtitles.selection.want,
+            SubtitleWant::Track(pb_decode::TrackId {
                 catalog_generation: 1,
                 local_id: 1
             }),
@@ -9251,7 +9258,7 @@ mod tests {
         // The tick moves with it, and the toast names what was picked.
         assert_eq!(
             labels(&mut core),
-            vec!["Off", "English · SubRip", "✓ French · SubRip"]
+            vec!["Off", "Automatic", "English · SubRip", "✓ French · SubRip"]
         );
         let t = core.toast_native.as_ref().expect("the user is told");
         assert_eq!(
@@ -9261,17 +9268,50 @@ mod tests {
 
         // ...and row 0 is a real way back to off.
         core.select_subtitle_row(0);
-        assert_eq!(core.subtitles.mode, SubtitleMode::Off);
+        assert!(!core.subtitles.selection.enabled);
         assert!(!core.settings.subtitles);
         assert_eq!(labels(&mut core)[0], "✓ Off");
     }
 
-    /// **The point of the shared list.** The picker's row order and `Shift+C`'s cycle are
-    /// one list, so walking the keyboard cycle must visit exactly the picker's rows in
-    /// exactly its order. If these ever diverge, clicking row *i* selects a different track
-    /// than the picker drew there — silently.
+    /// **The owner's bug, pinned** (2026-07-15, on Ad Astra): pick Chinese, press `C` twice,
+    /// and English came back. `C` set the mode to `Automatic` on the way back on, because
+    /// one enum held both "are subtitles on" and "which one" — so turning them off *had* to
+    /// destroy the choice.
+    ///
+    /// `C` must flip exactly one of those and leave the other alone.
     #[test]
-    fn the_picker_and_shift_c_walk_the_same_list() {
+    fn c_toggles_without_forgetting_the_picked_track() {
+        use crate::subtitle::SubtitleWant;
+        let mut core = core_with_subtitle_tracks(vec![sub(0, "eng"), sub(1, "zho")]);
+        core.select_subtitle_row(3); // Chinese — not what Automatic would choose
+        let picked = core.subtitles.selection.want;
+        assert!(matches!(picked, SubtitleWant::Track(_)));
+
+        core.dispatch_action(Action::ToggleSubtitles); // off
+        assert!(!core.subtitles.selection.enabled);
+        assert_eq!(
+            core.subtitles.selection.want, picked,
+            "off must not destroy the choice"
+        );
+
+        core.dispatch_action(Action::ToggleSubtitles); // on again
+        assert!(core.subtitles.selection.enabled);
+        assert_eq!(
+            core.subtitles.selection.want, picked,
+            "and on must bring back what was picked, not Automatic"
+        );
+        assert_eq!(
+            labels(&mut core),
+            vec!["Off", "Automatic", "English · SubRip", "✓ Chinese · SubRip"],
+            "Chinese is back on screen — this is the bug the owner reported"
+        );
+    }
+
+    /// **The point of the shared list.** `Shift+C` steps through *tracks* — the very rows the
+    /// picker draws, in its order. Off is `C`'s job and Automatic is not a step (it resolves
+    /// to one of these tracks, so it would show the same subtitles twice under two names).
+    #[test]
+    fn shift_c_walks_the_pickers_track_rows() {
         let mut core = core_with_subtitle_tracks(vec![sub(0, "eng"), sub(1, "fra")]);
         let rows: Vec<String> = core
             .subtitle_picker_rows()
@@ -9279,9 +9319,9 @@ mod tests {
             .map(|r| r.label.clone())
             .collect();
 
-        // Cycle right round and record which row is ticked at each step.
+        // From off, three presses: first track, second track, wrap to the first.
         let mut visited = Vec::new();
-        for _ in 0..rows.len() {
+        for _ in 0..3 {
             core.dispatch_action(Action::SubtitleCycle);
             let ticked = core
                 .subtitle_picker_rows()
@@ -9290,10 +9330,14 @@ mod tests {
                 .expect("something is always ticked");
             visited.push(ticked.label);
         }
-        // Starting from Off, the cycle steps to row 1, 2, then wraps to row 0.
         assert_eq!(
             visited,
-            vec![rows[1].clone(), rows[2].clone(), rows[0].clone()]
+            vec![rows[2].clone(), rows[3].clone(), rows[2].clone()],
+            "the track rows, in the picker's order, wrapping"
+        );
+        assert!(
+            core.subtitles.selection.enabled,
+            "asking for the next track when they're off can only mean you want to see one"
         );
     }
 
@@ -9301,10 +9345,9 @@ mod tests {
     /// ignored — never clamped onto a neighbouring track the user did not click.
     #[test]
     fn an_out_of_range_row_selects_nothing() {
-        use crate::subtitle::SubtitleMode;
         let mut core = core_with_subtitle_tracks(vec![sub(0, "eng")]);
         core.select_subtitle_row(99);
-        assert_eq!(core.subtitles.mode, SubtitleMode::Off, "unchanged");
+        assert!(!core.subtitles.selection.enabled, "unchanged");
         assert!(core.toast_native.is_none(), "and says nothing");
     }
 
@@ -9349,20 +9392,20 @@ mod tests {
     /// is post-mortem bug #2 wearing a different hat.
     #[test]
     fn the_engine_starts_from_the_saved_preferences() {
-        use crate::subtitle::SubtitleMode;
+        use crate::subtitle::SubtitleSelection;
         let mut s = settings::Settings {
             subtitles: true,
             ..Default::default()
         };
         s.subtitle_style.size_pct = 0.077;
         let e = crate::subtitle_engine::SubtitleEngine::from_settings(&s);
-        assert_eq!(e.mode, SubtitleMode::Automatic);
+        assert!(e.selection.enabled);
         assert_eq!(e.style.size_pct, 0.077, "the saved style must come with it");
 
         s.subtitles = false;
         assert_eq!(
-            crate::subtitle_engine::SubtitleEngine::from_settings(&s).mode,
-            SubtitleMode::Off
+            crate::subtitle_engine::SubtitleEngine::from_settings(&s).selection,
+            SubtitleSelection::off()
         );
     }
 

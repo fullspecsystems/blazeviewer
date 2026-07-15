@@ -8,8 +8,8 @@ with any pre-release suffix carried only by the tag.
 ## [Unreleased]
 
 ### Added
-- **Subtitles on videos.** Press `C` to turn captions on and off; your choice is remembered. Blaze Viewer reads both the subtitle tracks stored **inside** an MKV
-  or MP4 and a subtitle file sitting **beside** the video (the usual `Movie.eng.srt` or
+- **Subtitles on videos.** Press `C` to turn captions on and off; your choice is remembered.
+  Blaze Viewer reads both the subtitle tracks stored **inside** an MKV or MP4 and a subtitle file sitting **beside** the video (the usual `Movie.eng.srt` or
   `Movie.vtt`) — SubRip (`.srt`), WebVTT (`.vtt`), ASS/SSA, and MP4's own timed text, all
   including non-Latin scripts and right-to-left languages. Text is rendered sharply at your
   display's real resolution, with a black outline so it stays readable over bright scenes.
@@ -18,11 +18,16 @@ with any pre-release suffix carried only by the tag.
   still not shown.)
 - **Pick a subtitle track from a list** (macOS): a button on the playback bar, just right of
   the running time, opens every track the file carries — named by language and format
-  ("English · SubRip · Forced"), with a tick on the one you're watching and **Off** at the
-  top. The same list is in the new **Playback ▸ Subtitles** menu. `Shift+C` still steps
-  through the very same tracks in order if you'd rather not reach for the mouse.
+  ("English · SubRip · Forced"), with a tick on the one you're watching. The same list is in
+  the new **Playback ▸ Subtitle Track** menu, and `Shift+C` steps through the very same
+  tracks if you'd rather not reach for the mouse. Turning subtitles off and on again brings
+  back the track *you* chose, rather than reverting to the app's guess.
+- **Your subtitle language follows you to the next film.** Choose "Arabic (SDH)" on one
+  episode and the next one starts on its Arabic track — even though the two files number
+  their tracks differently, and even if one says `ara` where the other says `ar`. If a film
+  hasn't got that language, it falls back to its usual choice instead of showing nothing.
 - **A new Playback menu** (macOS) gathers the things that only apply to something playing —
-  Play/Pause, frame stepping, subtitle tracks, and Live Photo audio — instead of leaving them
+  Play/Pause, frame stepping, subtitles, and Live Photo audio — instead of leaving them
   scattered through View and Image.
 - **Garbled subtitles repair themselves.** Subtitle text that arrives mangled — `â™ª`
   instead of `♪`, `Iâ€™m` instead of `I'm` — is a mis-encoding that has been quietly

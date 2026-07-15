@@ -107,9 +107,9 @@ final class MenuBar: NSObject {
         check("fullscreen", s.fullscreen)
         check("slideshow", s.slideshow)
         check("mute_live_audio", s.mute_live_audio)
-        // `s.subtitles` deliberately drives nothing here: the Subtitles flyout replaced the
-        // old checkmark toggle, and it marks the *track* on screen (radio semantics) rather
-        // than a binary the field could carry. The winit menu still reads the field.
+        // The on/off half only. WHICH track is the flyout's business, and it is pulled at
+        // open rather than pushed through this fixed struct.
+        check("toggle_subtitles", s.subtitles)
         check("compare_pin", s.compare_pinned_here)
         items["compare_pin"]?.isEnabled = s.compare_pin_enabled
         items["compare_toggle"]?.isEnabled = s.compare_toggle_enabled
@@ -155,11 +155,11 @@ final class MenuBar: NSObject {
     /// answers this — the delegate fires just before the menu opens, so the list is built
     /// from the file that is on screen *at that moment*. No push, no sync, never stale.
     private func subtitlesFlyout() -> NSMenuItem {
-        let menu = NSMenu(title: "Subtitles")
+        let menu = NSMenu(title: "Subtitle Track")
         menu.autoenablesItems = false
         menu.delegate = self
         subtitlesMenu = menu
-        let holder = NSMenuItem(title: "Subtitles", action: nil, keyEquivalent: "")
+        let holder = NSMenuItem(title: "Subtitle Track", action: nil, keyEquivalent: "")
         holder.submenu = menu
         subtitlesHolder = holder
         return holder
@@ -371,9 +371,12 @@ final class MenuBar: NSObject {
             item("frame_next", "Next Frame"),
             item("frame_prev", "Previous Frame"),
             sep(),
-            // The Subtitles flyout REPLACES View's old checkmark toggle: its first row is
-            // Off, so it carries radio semantics (the tick marks what's on screen) that a
-            // checkbox can't. `C` still toggles regardless — the keymap owns that key.
+            // Two items, because they answer two different questions and neither may
+            // clobber the other (owner, 2026-07-15): "Subtitles" is on/off — the `C` key's
+            // twin — and "Subtitle Track" is *which*. Fusing them (an Off row inside the
+            // flyout, and no toggle) was the defect: turning subtitles off had to forget
+            // the track you had picked, so picking Chinese and toggling twice gave English.
+            item("toggle_subtitles", "Subtitles"),
             subtitlesFlyout(),
             sep(),
             item("mute_live_audio", "Mute Live Photo Audio"),
@@ -424,7 +427,11 @@ extension MenuBar: NSMenuDelegate {
         }
         subtitlesHolder?.isEnabled = true
 
-        let rows = model.subtitleTrackRows()
+        // Row 0 is Off, which the "Subtitles" toggle above this item owns — so it is
+        // dropped here while every other row KEEPS ITS CANONICAL INDEX. Hiding a row is
+        // fine; renumbering would silently select the wrong track, since `row.id` is the
+        // index the core applies.
+        let rows = model.subtitleTrackRows().filter { $0.id != 0 }
         guard !rows.isEmpty else {
             menu.addItem(note(model.subtitleTracksKnown ? "No Subtitle Tracks" : "Reading Tracks…"))
             return
@@ -437,6 +444,11 @@ extension MenuBar: NSMenuDelegate {
             item.state = row.active ? .on : .off
             item.isEnabled = true
             menu.addItem(item)
+            // A rule off the Automatic row: it is a different kind of answer from the
+            // tracks under it ("you choose" vs "this one"), so it gets a divider.
+            if row.label == "Automatic" {
+                menu.addItem(.separator())
+            }
         }
     }
 }

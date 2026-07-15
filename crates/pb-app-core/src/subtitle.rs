@@ -10,156 +10,325 @@ use std::time::Duration;
 use pb_decode::tracks::{language_display, MediaTrack, MediaTrackCatalog, TrackId};
 use serde::{Deserialize, Serialize};
 
-/// What the user asked for.
+/// What the user wants — **two questions, deliberately kept apart**.
 ///
-/// Owner decisions (2026-07-14), both chosen for predictability over cleverness:
+/// `C` owns *whether* subtitles show. The picker owns *which*. Fusing them into one enum
+/// (an `Off` variant sitting beside `Automatic` and `Track`) was a real defect, because it
+/// left `C` no way to turn subtitles off without destroying the answer to the other
+/// question: you picked Chinese on Ad Astra, pressed `C` twice, and got English back. The
+/// two answers can only survive each other if they are stored separately.
 ///
-/// - **`Off` means off.** Forced subtitles do *not* leak through. The alternative
-///   (VLC-style: "off" still shows forced signs) means text appears on screen while the
-///   UI says subtitles are off, with no way to get true silence.
-/// - **`Automatic` prefers forced-and-matching-the-audio**, then falls back. It first
-///   looks for the signs and alien dialogue *in the film you chose to watch*; failing
-///   that, the container author's default track; failing that, anything renderable. It
-///   deliberately does **not** follow the system language or OS accessibility settings:
-///   turning subtitles on by itself is the kind of surprise that makes people hunt
-///   through Settings.
+/// Owner decisions (2026-07-14, reaffirmed 2026-07-15), both chosen for predictability:
 ///
-///   ⚠ **The fallbacks extend the owner's frozen 2026-07-14 rule, which said forced-only.
-///   Flagged for review.** The reasoning: that rule was written to stop `Automatic` from
-///   enabling subtitles *by itself*, and it is exactly right for that. But `Off` is the
-///   default, so the mode is only ever `Automatic` because the user pressed `C` and got a
-///   toast reading "Subtitles on" — at which point strict forced-only shows **nothing**
-///   for the overwhelmingly common case (an English film with a full English track and no
-///   forced track), which is the same surprise pointing the other way. It would also have
-///   silently regressed the behaviour the owner validated on 2026-07-14, where `C` showed
-///   the first renderable sidecar. Nothing here can turn subtitles on by itself; the
-///   fallback can only fire once you have asked.
+/// - **Off means off.** Forced subtitles do *not* leak through. The alternative
+///   (VLC-style: "off" still shows forced signs) means text appears on screen while the UI
+///   says subtitles are off, with no way to get true silence.
+/// - **Automatic prefers forced-and-matching-the-audio**, then falls back to the
+///   container's default, then to anything renderable. It deliberately does **not** follow
+///   the system language or OS accessibility settings: turning subtitles on by itself is
+///   the kind of surprise that makes people hunt through Settings. Nothing here can turn
+///   subtitles on — [`enabled`](Self::enabled) is the user's, and only `C` and the picker
+///   set it.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct SubtitleSelection {
+    /// `C`. Whether subtitles show at all. Persisted as `settings.subtitles` — an on/off
+    /// preference is not a record of what you watched.
+    pub enabled: bool,
+    /// WHICH subtitles show, when [`enabled`](Self::enabled). Never expresses "off": that
+    /// is the field above, and keeping them apart is the whole point.
+    pub want: SubtitleWant,
+    /// The intent behind the last track picked **by hand**, carried across files.
+    ///
+    /// A [`TrackId`] cannot survive a nav — it names exactly one file's catalog by
+    /// construction, and must (sharing ids across files is what once showed Korean where
+    /// Arabic was picked). But what you *meant* by choosing "Chinese · ASS" was **Chinese**,
+    /// not *stream 5*. The index means nothing in the next film; the language means
+    /// everything. So the id dies at the file boundary and this crosses it.
+    ///
+    /// RAM-only — never written to disk, so it is a preference rather than a viewing trace
+    /// (privacy #2).
+    pub preference: Option<SubtitlePreference>,
+}
+
+/// Which subtitles, when they are on.
+///
+/// There is deliberately no `Off` variant — that is [`SubtitleSelection::enabled`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum SubtitleMode {
-    /// Nothing shows, ever.
+pub enum SubtitleWant {
+    /// Let the app choose, per file.
     #[default]
-    Off,
-    /// A forced track whose language matches the audio, if there is one.
     Automatic,
-    /// Exactly this track. Session-only: a per-file choice is never persisted (privacy
-    /// #2 — it would be a record of what you watched).
+    /// Exactly this track. Bound to one file's catalog by the id's generation; on any
+    /// *other* file it falls back to the preference chain rather than to nothing.
     Track(TrackId),
 }
 
-/// Which track should be on screen, given the mode.
-///
-/// `audio_language` is the language of the audio actually playing — the tag as the
-/// container reported it (`"en"` or `"eng"`; both resolve).
-///
-/// Returns `None` for "show nothing", which is a normal answer, not a failure.
-pub fn resolve_track<'a>(
-    mode: SubtitleMode,
-    catalog: &'a MediaTrackCatalog,
-    audio_language: Option<&str>,
-) -> Option<&'a MediaTrack> {
-    match mode {
-        // Off means off. No forced exception.
-        SubtitleMode::Off => None,
+/// What the user last picked by hand, as an **intent** rather than a track.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SubtitlePreference {
+    /// The container's language tag, **verbatim** (`"cmn"`, `"zh-Hans"`, `"ara"`).
+    ///
+    /// Compared through [`language_display`], never by raw string equality: the *same file*
+    /// reports `"en"` through AVFoundation and `"eng"` through FFmpeg, so a raw compare
+    /// would fail to match a language against itself.
+    pub language: String,
+    /// Whether the picked track was SDH. Choosing "Arabic (SDH)" over plain Arabic is a
+    /// deliberate accessibility choice, so it should survive to the next episode.
+    pub hearing_impaired: bool,
+}
 
-        // A preference chain, not a single rule. See `AUTOMATIC` below for why the
-        // fallbacks exist and why they are safe.
-        SubtitleMode::Automatic => {
-            let renderable = || catalog.subtitles.tracks.iter().filter(|t| renderable(t));
+/// One row of the track picker — a **command**, not the state.
+///
+/// `Off` is a row here even though the state expresses it as `enabled = false`, because the
+/// playback bar's popover has no other off switch. The Playback menu, which has a real
+/// toggle above its flyout, simply omits row 0 while keeping these indices. **One canonical
+/// list, two presentations** — which is what lets a row cross the FFI as a bare index.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SubtitleChoice {
+    Off,
+    Automatic,
+    Track(TrackId),
+}
 
-            // 1. The owner's rule (frozen 2026-07-14): forced *and* the same language as
-            //    what you're hearing — the signs and alien dialogue in the film you chose.
-            //    An unknown audio language matches nothing: guessing here would show
-            //    French signs over an English film.
-            if let Some(audio) = audio_language {
-                if let Some(t) = renderable().find(|t| t.flags.forced && same_language(t, audio)) {
-                    return Some(t);
-                }
-            }
-            // 2. The track the container's author marked default.
-            // 3. Anything we can render.
-            renderable()
-                .find(|t| t.flags.default)
-                .or_else(|| renderable().next())
+impl SubtitleSelection {
+    /// Subtitles off, nothing picked — the default.
+    pub fn off() -> Self {
+        Self::default()
+    }
+
+    /// Subtitles on, app-chosen: the state `C` produces when you have picked nothing.
+    pub fn automatic() -> Self {
+        Self {
+            enabled: true,
+            want: SubtitleWant::Automatic,
+            preference: None,
         }
+    }
 
-        SubtitleMode::Track(id) => {
-            // The generation check is the stale guard: an id minted against a catalog the
-            // deck has since replaced must not resolve to whatever now sits at that
-            // local_id. Selecting the wrong file's track is worse than selecting none.
-            if id.catalog_generation != catalog.generation {
-                return None;
+    /// Subtitles on, showing exactly `id`. (Carries no preference: only
+    /// [`apply`](Self::apply) can build one, because only it has the catalog to read the
+    /// track's language from.)
+    pub fn track(id: TrackId) -> Self {
+        Self {
+            enabled: true,
+            want: SubtitleWant::Track(id),
+            preference: None,
+        }
+    }
+
+    /// `C`. Flips on/off and **never touches `want` or `preference`** — that is the entire
+    /// reason this type is a struct and not an enum. Toggling off and back on returns to the
+    /// track you picked, not to whatever Automatic would have chosen.
+    pub fn toggle(&mut self) {
+        self.enabled = !self.enabled;
+    }
+
+    /// Apply a picker row.
+    pub fn apply(&mut self, choice: SubtitleChoice, catalog: &MediaTrackCatalog) {
+        match choice {
+            // Off leaves `want` and `preference` untouched, so `C` (or the Off row again)
+            // brings back exactly what you had.
+            SubtitleChoice::Off => self.enabled = false,
+            SubtitleChoice::Automatic => {
+                self.enabled = true;
+                self.want = SubtitleWant::Automatic;
+                // Explicitly asking the app to choose retires the language you had pinned —
+                // otherwise "Automatic" would go on obeying a preference you just cancelled,
+                // and there would be no way to un-pin it.
+                self.preference = None;
             }
-            catalog
+            SubtitleChoice::Track(id) => {
+                self.enabled = true;
+                self.want = SubtitleWant::Track(id);
+                // Remember the *intent*. A track with no language tag leaves nothing to
+                // remember, and correctly clears any older preference: we cannot carry
+                // "the untagged one" to another file.
+                self.preference = catalog
+                    .subtitles
+                    .tracks
+                    .iter()
+                    .find(|t| t.id == id)
+                    .and_then(preference_of);
+            }
+        }
+    }
+
+    /// Which track is on screen, given this selection and this file. `None` = show nothing,
+    /// which is a normal answer rather than a failure.
+    pub fn resolve<'a>(
+        &self,
+        catalog: &'a MediaTrackCatalog,
+        audio_language: Option<&str>,
+    ) -> Option<&'a MediaTrack> {
+        if !self.enabled {
+            return None; // Off means off. No forced exception.
+        }
+        if let SubtitleWant::Track(id) = self.want {
+            if let Some(t) = catalog
                 .subtitles
                 .tracks
                 .iter()
                 .find(|t| t.id == id)
-                // A track we cannot render (PGS, VobSub) is listed in Details but must
-                // never end up active — the picker won't offer it, but a stale id could.
                 .filter(|t| renderable(t))
+            {
+                return Some(t);
+            }
+            // The id belongs to another file's catalog (it names exactly one, by design), or
+            // to a track we cannot draw. Fall through to the chain below — **not** to
+            // nothing: what you meant by picking Chinese was Chinese, and the next film
+            // very likely has it.
         }
+        automatic(catalog, audio_language, self.preference.as_ref())
     }
 }
 
-/// The subtitle choices a user can cycle through with `Shift+C`, in order (#99).
+/// The app's own choice, in preference order.
+fn automatic<'a>(
+    catalog: &'a MediaTrackCatalog,
+    audio_language: Option<&str>,
+    preference: Option<&SubtitlePreference>,
+) -> Option<&'a MediaTrack> {
+    let renderable = || catalog.subtitles.tracks.iter().filter(|t| renderable(t));
+
+    // 0. The language you last picked by hand. An explicit choice outranks every heuristic
+    //    below it — including the forced rule, which is only a guess at what you'd want.
+    if let Some(pref) = preference {
+        if let Some(t) = best_for_preference(catalog, pref) {
+            return Some(t);
+        }
+    }
+    // 1. The owner's frozen rule: forced *and* the same language as what you're hearing —
+    //    the signs and alien dialogue in the film you chose. An unknown audio language
+    //    matches nothing: guessing would show French signs over an English film.
+    if let Some(audio) = audio_language {
+        if let Some(t) = renderable().find(|t| t.flags.forced && same_language(t, audio)) {
+            return Some(t);
+        }
+    }
+    // 2. The track the container's author marked default.
+    // 3. Anything we can render.
+    renderable()
+        .find(|t| t.flags.default)
+        .or_else(|| renderable().next())
+}
+
+/// The renderable track best matching a remembered preference, or `None` when this film
+/// simply does not carry that language.
 ///
-/// `Off` is a **real row**, not the absence of a selection — it is first, so the cycle
-/// always has a way back to no subtitles without hunting. Only renderable tracks appear:
-/// a PGS track we cannot draw would be a dead stop in the rotation.
+/// **Ranked, not exact-matched.** A "Portuguese (BR)" pick must still land on a plain
+/// "Portuguese" track next episode rather than falling through to English, and an SDH pick
+/// should *prefer* an SDH track without *requiring* one.
+fn best_for_preference<'a>(
+    catalog: &'a MediaTrackCatalog,
+    pref: &SubtitlePreference,
+) -> Option<&'a MediaTrack> {
+    let mut best: Option<(&MediaTrack, u8)> = None;
+    for t in catalog.subtitles.tracks.iter().filter(|t| renderable(t)) {
+        let Some(rank) = language_rank(t, &pref.language) else {
+            continue;
+        };
+        // Language dominates; the SDH match only breaks ties within one language.
+        let score = rank * 2 + u8::from(t.flags.hearing_impaired == pref.hearing_impaired);
+        if best.is_none_or(|(_, b)| score > b) {
+            best = Some((t, score));
+        }
+    }
+    best.map(|(t, _)| t)
+}
+
+/// How well a track's language matches a remembered tag: `2` = the same display name
+/// ("Portuguese (BR)"), `1` = the same primary subtag ("Portuguese" against
+/// "Portuguese (BR)"), `None` = a different language.
 ///
-/// `Automatic` is deliberately **not** a step. It resolves to one of these tracks anyway,
-/// so including it would show the same subtitles twice under two names — and once you are
-/// explicitly picking, "let the app choose" is not a choice you are trying to make.
-pub fn cycle_choices(catalog: &MediaTrackCatalog) -> Vec<SubtitleMode> {
-    std::iter::once(SubtitleMode::Off)
-        .chain(
-            catalog
-                .subtitles
-                .tracks
-                .iter()
-                .filter(|t| renderable(t))
-                .map(|t| SubtitleMode::Track(t.id)),
-        )
+/// Both tiers compare **display names, not tags**, so `"pt-BR"` and `"por"` are one
+/// language — the raw tags share no substring at all.
+fn language_rank(track: &MediaTrack, want: &str) -> Option<u8> {
+    let have = track.language.as_deref()?;
+    if language_display(have).eq_ignore_ascii_case(&language_display(want)) {
+        return Some(2);
+    }
+    if language_display(primary_subtag(have))
+        .eq_ignore_ascii_case(&language_display(primary_subtag(want)))
+    {
+        return Some(1);
+    }
+    None
+}
+
+/// The primary subtag of a language tag: `"pt-BR"` → `"pt"`, `"por"` → `"por"`.
+fn primary_subtag(tag: &str) -> &str {
+    tag.split(['-', '_']).next().unwrap_or(tag)
+}
+
+/// What to remember about a track the user picked. `None` when it carries no language —
+/// there is no intent to carry to another file.
+fn preference_of(t: &MediaTrack) -> Option<SubtitlePreference> {
+    Some(SubtitlePreference {
+        language: t.language.clone()?,
+        hearing_impaired: t.flags.hearing_impaired,
+    })
+}
+
+/// The picker's canonical rows: `Off`, `Automatic`, then every renderable track.
+///
+/// **A row's index is its index into this list** — that correspondence is what lets a
+/// selection cross the FFI as a bare index, and it is why the popover, the menu flyout and
+/// `Shift+C` cannot drift apart. Surfaces may *hide* rows (the menu omits `Off`, which its
+/// own toggle owns) but must never *renumber* them.
+///
+/// Only renderable tracks appear: a PGS track we cannot draw would be an offer we can't
+/// honour. When there are none, the list is just `[Off]` — `Automatic` with nothing to
+/// resolve to would be a row that does nothing.
+pub fn picker_choices(catalog: &MediaTrackCatalog) -> Vec<SubtitleChoice> {
+    let tracks: Vec<SubtitleChoice> = catalog
+        .subtitles
+        .tracks
+        .iter()
+        .filter(|t| renderable(t))
+        .map(|t| SubtitleChoice::Track(t.id))
+        .collect();
+    if tracks.is_empty() {
+        return vec![SubtitleChoice::Off];
+    }
+    std::iter::once(SubtitleChoice::Off)
+        .chain(std::iter::once(SubtitleChoice::Automatic))
+        .chain(tracks)
         .collect()
 }
 
-/// The next choice after `current`, wrapping.
+/// The track after the one showing, wrapping — `Shift+C`.
 ///
-/// `current` is matched by *identity*, so `Automatic` — which is not itself a step — lands
-/// on whatever it currently resolves to and advances from there. Pressing `Shift+C` while
-/// Automatic is showing the English track therefore moves to the *next* track, not back to
-/// the one already on screen. That is the whole reason this takes the resolved track
-/// rather than just the mode.
-pub fn next_choice(
-    choices: &[SubtitleMode],
-    current: SubtitleMode,
-    resolved: Option<TrackId>,
-) -> Option<SubtitleMode> {
-    if choices.is_empty() {
-        return None;
+/// **Tracks only.** `Off` is `C`'s job now, and `Automatic` is not a step: it resolves to
+/// one of these tracks anyway, so including it would show the same subtitles twice under
+/// two names. `None` when the file has no renderable track — there is nothing to step to.
+///
+/// `showing` is the track *on screen*, not the mode, so `Shift+C` under `Automatic` advances
+/// from what you can see rather than jumping back to it.
+pub fn next_track(catalog: &MediaTrackCatalog, showing: Option<TrackId>) -> Option<TrackId> {
+    let ids: Vec<TrackId> = catalog
+        .subtitles
+        .tracks
+        .iter()
+        .filter(|t| renderable(t))
+        .map(|t| t.id)
+        .collect();
+    let here = showing.and_then(|id| ids.iter().position(|x| *x == id));
+    match here {
+        Some(i) => Some(ids[(i + 1) % ids.len()]),
+        // Nothing on screen (off, or a stale pick): start at the first rather than nowhere.
+        None => ids.first().copied(),
     }
-    // Where are we now? An explicit track, else whatever Automatic resolved to, else Off.
-    let here = match current {
-        SubtitleMode::Off => Some(SubtitleMode::Off),
-        SubtitleMode::Track(id) => Some(SubtitleMode::Track(id)),
-        SubtitleMode::Automatic => resolved.map(SubtitleMode::Track),
-    };
-    let i = here
-        .and_then(|h| choices.iter().position(|c| *c == h))
-        // Not in the list (a stale id, or Automatic resolving to nothing) — start over.
-        .unwrap_or(choices.len() - 1);
-    Some(choices[(i + 1) % choices.len()])
 }
 
-/// The language of the audio the user is hearing — what [`resolve_track`]'s `Automatic`
-/// forced rule matches against.
+/// The language of the audio the user is hearing — what [`automatic`]'s forced rule matches
+/// against.
 ///
 /// *Which* audio track is playing is #99's business (nothing switches them yet), so this
 /// answers with the container author's default and falls back to the first. That is the
-/// honest best answer rather than a placeholder: it is exactly right for the
-/// overwhelming majority of files, which carry one audio track — and when it is wrong,
-/// the cost is that `Automatic` misses a forced track and falls through to its ordinary
-/// fallback, not that it shows the wrong language's signs.
+/// honest best answer rather than a placeholder: it is exactly right for the overwhelming
+/// majority of files, which carry one audio track — and when it is wrong, the cost is that
+/// the forced rule misses and we fall through to the ordinary chain, not that we show the
+/// wrong language's signs.
 pub fn audio_language_of(catalog: &MediaTrackCatalog) -> Option<&str> {
     catalog
         .audio
@@ -174,9 +343,9 @@ fn renderable(t: &MediaTrack) -> bool {
     t.capability.is_renderable_text()
 }
 
-/// Do the track and the audio speak the same language? Compared through the shared
-/// display map, so `"en"` and `"eng"` — which different backends report for the *same
-/// file* — are one language rather than two.
+/// Do the track and the audio speak the same language? Compared through the shared display
+/// map, so `"en"` and `"eng"` — which different backends report for the *same file* — are
+/// one language rather than two.
 fn same_language(track: &MediaTrack, audio: &str) -> bool {
     match &track.language {
         Some(l) => language_display(l).eq_ignore_ascii_case(&language_display(audio)),
@@ -723,7 +892,7 @@ mod tests {
             true,
             TrackCapability::SupportedText,
         )]);
-        assert!(resolve_track(SubtitleMode::Off, &c, Some("en")).is_none());
+        assert!(SubtitleSelection::off().resolve(&c, Some("en")).is_none());
     }
 
     /// Owner decision: Automatic = forced, matching the audio language.
@@ -734,7 +903,9 @@ mod tests {
             sub(1, Some("fr"), true, TrackCapability::SupportedText),  // French forced
             sub(2, Some("en"), true, TrackCapability::SupportedText),  // English forced ✓
         ]);
-        let got = resolve_track(SubtitleMode::Automatic, &c, Some("en")).expect("match");
+        let got = SubtitleSelection::automatic()
+            .resolve(&c, Some("en"))
+            .expect("match");
         assert_eq!(got.id.local_id, 2, "forced AND the audio's language");
     }
 
@@ -750,7 +921,9 @@ mod tests {
             false,
             TrackCapability::SupportedText,
         )]);
-        let got = resolve_track(SubtitleMode::Automatic, &c, Some("en")).expect("fallback");
+        let got = SubtitleSelection::automatic()
+            .resolve(&c, Some("en"))
+            .expect("fallback");
         assert_eq!(got.id.local_id, 0);
 
         // French forced over English audio: not our film's signs, so rule 1 declines it —
@@ -762,7 +935,9 @@ mod tests {
             true,
             TrackCapability::SupportedText,
         )]);
-        assert!(resolve_track(SubtitleMode::Automatic, &c, Some("en")).is_some());
+        assert!(SubtitleSelection::automatic()
+            .resolve(&c, Some("en"))
+            .is_some());
     }
 
     /// Rule 1 beats the fallbacks: a forced track matching the audio wins even when
@@ -775,7 +950,9 @@ mod tests {
         ];
         tracks[0].flags.default = true;
         let c = catalog(tracks);
-        let got = resolve_track(SubtitleMode::Automatic, &c, Some("en")).expect("match");
+        let got = SubtitleSelection::automatic()
+            .resolve(&c, Some("en"))
+            .expect("match");
         assert_eq!(got.id.local_id, 1, "forced+matching outranks default");
     }
 
@@ -789,7 +966,9 @@ mod tests {
         ];
         tracks[1].flags.default = true;
         let c = catalog(tracks);
-        let got = resolve_track(SubtitleMode::Automatic, &c, Some("en")).expect("default");
+        let got = SubtitleSelection::automatic()
+            .resolve(&c, Some("en"))
+            .expect("default");
         assert_eq!(got.id.local_id, 1);
     }
 
@@ -801,7 +980,9 @@ mod tests {
             sub(0, Some("en"), false, TrackCapability::Bitmap),
             sub(1, Some("en"), true, TrackCapability::Bitmap),
         ]);
-        assert!(resolve_track(SubtitleMode::Automatic, &c, Some("en")).is_none());
+        assert!(SubtitleSelection::automatic()
+            .resolve(&c, Some("en"))
+            .is_none());
     }
 
     /// The backends disagree on tag form for the same file ("en" vs "eng"); Automatic must
@@ -814,14 +995,18 @@ mod tests {
             true,
             TrackCapability::SupportedText,
         )]);
-        assert!(resolve_track(SubtitleMode::Automatic, &c, Some("en")).is_some());
+        assert!(SubtitleSelection::automatic()
+            .resolve(&c, Some("en"))
+            .is_some());
         let c = catalog(vec![sub(
             0,
             Some("en"),
             true,
             TrackCapability::SupportedText,
         )]);
-        assert!(resolve_track(SubtitleMode::Automatic, &c, Some("eng")).is_some());
+        assert!(SubtitleSelection::automatic()
+            .resolve(&c, Some("eng"))
+            .is_some());
     }
 
     /// The language guard survives the fallback chain: an unknown audio language must
@@ -837,7 +1022,9 @@ mod tests {
             sub(0, Some("fr"), true, TrackCapability::SupportedText),
             sub(1, Some("en"), true, TrackCapability::SupportedText),
         ]);
-        let got = resolve_track(SubtitleMode::Automatic, &c, None).expect("fallback");
+        let got = SubtitleSelection::automatic()
+            .resolve(&c, None)
+            .expect("fallback");
         assert_eq!(
             got.id.local_id, 0,
             "the fallback's order, not a language guess"
@@ -850,7 +1037,9 @@ mod tests {
         ];
         tracks[1].flags.default = true;
         let c = catalog(tracks);
-        let got = resolve_track(SubtitleMode::Automatic, &c, Some("en")).expect("fallback");
+        let got = SubtitleSelection::automatic()
+            .resolve(&c, Some("en"))
+            .expect("fallback");
         assert_eq!(
             got.id.local_id, 1,
             "rule 1 can't match, so the default wins"
@@ -1138,84 +1327,321 @@ mod tests {
         assert_eq!(sorted.len(), n, "no duplicate font names");
     }
 
-    // -- the Shift+C cycle (#99) -------------------------------------------
+    // -- the picker's rows + the Shift+C cycle (#99) -----------------------
 
-    /// Off is a real row and it is first: the cycle must always have a way back to no
-    /// subtitles. And an unrenderable track is never a step — it would be a dead stop.
+    /// The canonical list: Off, Automatic, then the renderable tracks. An unrenderable
+    /// track is never offered — it would be an offer we cannot honour.
     #[test]
-    fn the_cycle_offers_off_first_and_skips_what_it_cannot_draw() {
+    fn the_picker_offers_off_then_automatic_then_what_it_can_draw() {
         let c = catalog(vec![
             sub(0, Some("en"), false, TrackCapability::SupportedText),
-            sub(1, Some("fr"), false, TrackCapability::Bitmap), // PGS — not a step
+            sub(1, Some("fr"), false, TrackCapability::Bitmap), // PGS — never a row
             sub(2, Some("de"), false, TrackCapability::SupportedText),
         ]);
-        let choices = cycle_choices(&c);
-        assert_eq!(choices.len(), 3, "Off + the two renderable ones");
-        assert_eq!(choices[0], SubtitleMode::Off);
-        assert!(matches!(choices[1], SubtitleMode::Track(id) if id.local_id == 0));
-        assert!(matches!(choices[2], SubtitleMode::Track(id) if id.local_id == 2));
+        let choices = picker_choices(&c);
+        assert_eq!(
+            choices.len(),
+            4,
+            "Off + Automatic + the two renderable ones"
+        );
+        assert_eq!(choices[0], SubtitleChoice::Off);
+        assert_eq!(choices[1], SubtitleChoice::Automatic);
+        assert!(matches!(choices[2], SubtitleChoice::Track(id) if id.local_id == 0));
+        assert!(matches!(choices[3], SubtitleChoice::Track(id) if id.local_id == 2));
     }
 
-    /// A clip with no renderable track has nothing to cycle — Off alone is not a rotation.
+    /// With nothing renderable there is only Off — an `Automatic` row that could resolve to
+    /// nothing would be a row that does nothing.
     #[test]
-    fn a_clip_with_no_renderable_track_has_nothing_to_cycle() {
+    fn a_clip_with_no_renderable_track_offers_only_off() {
         let c = catalog(vec![sub(0, Some("en"), false, TrackCapability::Bitmap)]);
-        assert_eq!(cycle_choices(&c).len(), 1, "just Off");
+        assert_eq!(picker_choices(&c), vec![SubtitleChoice::Off]);
     }
 
+    /// `Shift+C` steps through tracks and wraps. No Off step (that is `C`'s) and no
+    /// Automatic step (it resolves to one of these anyway).
     #[test]
-    fn the_cycle_advances_and_wraps_through_off() {
+    fn the_cycle_advances_through_tracks_and_wraps() {
         let c = catalog(vec![
             sub(0, Some("en"), false, TrackCapability::SupportedText),
             sub(1, Some("de"), false, TrackCapability::SupportedText),
         ]);
-        let ch = cycle_choices(&c);
-        let t0 = ch[1];
-        let t1 = ch[2];
-        assert_eq!(next_choice(&ch, SubtitleMode::Off, None), Some(t0));
-        assert_eq!(next_choice(&ch, t0, None), Some(t1));
-        // ...and back round to Off, so you're never trapped in the rotation.
-        assert_eq!(next_choice(&ch, t1, None), Some(SubtitleMode::Off));
+        let t0 = c.subtitles.tracks[0].id;
+        let t1 = c.subtitles.tracks[1].id;
+        assert_eq!(
+            next_track(&c, None),
+            Some(t0),
+            "nothing showing → the first"
+        );
+        assert_eq!(next_track(&c, Some(t0)), Some(t1));
+        assert_eq!(next_track(&c, Some(t1)), Some(t0), "wraps");
     }
 
-    /// The reason `next_choice` takes the *resolved* track: cycling from `Automatic` must
-    /// move past what is currently on screen, not land back on it.
+    /// The reason `next_track` takes the *showing* track rather than the selection: cycling
+    /// while Automatic is on must move past what is on screen, not land back on it.
     #[test]
     fn cycling_from_automatic_advances_past_what_it_is_showing() {
         let c = catalog(vec![
             sub(0, Some("en"), false, TrackCapability::SupportedText),
             sub(1, Some("de"), false, TrackCapability::SupportedText),
         ]);
-        let ch = cycle_choices(&c);
-        // Automatic is showing track 0 (the fallback's first renderable).
-        let showing = resolve_track(SubtitleMode::Automatic, &c, Some("en"))
+        let showing = SubtitleSelection::automatic()
+            .resolve(&c, Some("en"))
             .unwrap()
             .id;
-        assert_eq!(showing.local_id, 0);
+        assert_eq!(showing.local_id, 0, "Automatic fell back to the first");
         assert_eq!(
-            next_choice(&ch, SubtitleMode::Automatic, Some(showing)),
-            Some(ch[2]),
+            next_track(&c, Some(showing)).map(|id| id.local_id),
+            Some(1),
             "must advance to track 1, not re-select track 0"
         );
     }
 
-    /// A stale id (or an Automatic resolving to nothing) must not strand the cycle —
-    /// it restarts rather than doing nothing forever.
+    /// A file with nothing renderable has nothing to step to — the caller says so rather
+    /// than silently doing nothing.
     #[test]
-    fn an_unknown_current_choice_restarts_the_cycle() {
-        let c = catalog(vec![sub(
+    fn the_cycle_has_no_answer_with_no_renderable_tracks() {
+        let c = catalog(vec![sub(0, Some("en"), false, TrackCapability::Bitmap)]);
+        assert_eq!(next_track(&c, None), None);
+    }
+
+    // -- `C` and the picker own different questions ------------------------
+
+    /// **The owner's bug** (2026-07-15): pick Chinese, press `C` twice, get English. `C`
+    /// must flip on/off and touch *nothing* else.
+    #[test]
+    fn toggling_off_and_on_never_forgets_the_picked_track() {
+        let c = catalog(vec![
+            sub(0, Some("en"), false, TrackCapability::SupportedText),
+            sub(1, Some("zh"), false, TrackCapability::SupportedText),
+        ]);
+        let zh = c.subtitles.tracks[1].id;
+        let mut sel = SubtitleSelection::off();
+        sel.apply(SubtitleChoice::Track(zh), &c);
+        assert_eq!(sel.resolve(&c, Some("en")).unwrap().id, zh);
+
+        sel.toggle();
+        assert!(!sel.enabled);
+        assert!(sel.resolve(&c, Some("en")).is_none(), "off means off");
+
+        sel.toggle();
+        assert_eq!(
+            sel.resolve(&c, Some("en")).unwrap().id,
+            zh,
+            "back to Chinese — not to whatever Automatic would have chosen"
+        );
+    }
+
+    /// Off must not disturb the choice, so the Off row and `C` agree.
+    #[test]
+    fn the_off_row_leaves_the_choice_intact() {
+        let c = catalog(vec![
+            sub(0, Some("en"), false, TrackCapability::SupportedText),
+            sub(1, Some("zh"), false, TrackCapability::SupportedText),
+        ]);
+        let zh = c.subtitles.tracks[1].id;
+        let mut sel = SubtitleSelection::off();
+        sel.apply(SubtitleChoice::Track(zh), &c);
+        sel.apply(SubtitleChoice::Off, &c);
+        assert!(!sel.enabled);
+        assert_eq!(sel.want, SubtitleWant::Track(zh), "the choice survives Off");
+        sel.toggle();
+        assert_eq!(sel.resolve(&c, Some("en")).unwrap().id, zh);
+    }
+
+    // -- the language memory -----------------------------------------------
+
+    /// **The headline.** A `TrackId` names one file's catalog by construction, so it cannot
+    /// survive a nav — but the *intent* must. What you meant by picking Chinese was Chinese,
+    /// not stream 1.
+    #[test]
+    fn a_picked_language_carries_to_the_next_film() {
+        let film_a = catalog(vec![
+            sub(0, Some("en"), false, TrackCapability::SupportedText),
+            sub(1, Some("zh"), false, TrackCapability::SupportedText),
+        ]);
+        let mut sel = SubtitleSelection::off();
+        sel.apply(
+            SubtitleChoice::Track(film_a.subtitles.tracks[1].id),
+            &film_a,
+        );
+
+        // The next film: a different catalog (different generation), Chinese elsewhere in
+        // the list, and English first — which is what a naive fallback would pick.
+        let mut film_b = catalog(vec![
+            sub(0, Some("en"), true, TrackCapability::SupportedText), // default!
+            sub(1, Some("fr"), false, TrackCapability::SupportedText),
+            sub(2, Some("zho"), false, TrackCapability::SupportedText), // the 639-2 spelling
+        ]);
+        film_b.generation = 999;
+        for t in film_b.subtitles.tracks.iter_mut() {
+            t.id.catalog_generation = 999;
+        }
+
+        let got = sel
+            .resolve(&film_b, Some("en"))
+            .expect("Chinese, found again");
+        assert_eq!(
+            got.language.as_deref(),
+            Some("zho"),
+            "the remembered language wins over the container's own default track — and \
+             matches across spellings (picked \"zh\", found \"zho\")"
+        );
+    }
+
+    /// ...and when the next film simply hasn't got it, the ordinary chain takes over rather
+    /// than showing nothing.
+    #[test]
+    fn a_remembered_language_absent_from_the_film_falls_through() {
+        let film_a = catalog(vec![sub(
             0,
-            Some("en"),
+            Some("zh"),
             false,
             TrackCapability::SupportedText,
         )]);
-        let ch = cycle_choices(&c);
-        let stale = SubtitleMode::Track(TrackId {
-            catalog_generation: 999,
-            local_id: 42,
-        });
-        assert_eq!(next_choice(&ch, stale, None), Some(ch[0]));
-        assert_eq!(next_choice(&ch, SubtitleMode::Automatic, None), Some(ch[0]));
+        let mut sel = SubtitleSelection::off();
+        sel.apply(
+            SubtitleChoice::Track(film_a.subtitles.tracks[0].id),
+            &film_a,
+        );
+
+        let mut film_b = catalog(vec![
+            sub(0, Some("en"), true, TrackCapability::SupportedText),
+            sub(1, Some("fr"), false, TrackCapability::SupportedText),
+        ]);
+        film_b.generation = 999;
+        for t in film_b.subtitles.tracks.iter_mut() {
+            t.id.catalog_generation = 999;
+        }
+        let got = sel.resolve(&film_b, Some("en")).expect("the default track");
+        assert_eq!(got.language.as_deref(), Some("en"));
+    }
+
+    /// The tags must be compared through `language_display`, never raw: the *same file*
+    /// reports "en" through AVFoundation and "eng" through FFmpeg, and "pt-BR" must still
+    /// find a plain "por" track rather than fall through.
+    #[test]
+    fn the_memory_matches_languages_not_tag_spellings() {
+        let a = catalog(vec![sub(
+            0,
+            Some("pt-BR"),
+            false,
+            TrackCapability::SupportedText,
+        )]);
+        let mut sel = SubtitleSelection::off();
+        sel.apply(SubtitleChoice::Track(a.subtitles.tracks[0].id), &a);
+
+        let mut b = catalog(vec![
+            sub(0, Some("eng"), true, TrackCapability::SupportedText),
+            sub(1, Some("por"), false, TrackCapability::SupportedText),
+        ]);
+        b.generation = 5;
+        for t in b.subtitles.tracks.iter_mut() {
+            t.id.catalog_generation = 5;
+        }
+        assert_eq!(
+            sel.resolve(&b, Some("eng")).unwrap().language.as_deref(),
+            Some("por"),
+            "pt-BR is Portuguese; por is Portuguese — the raw tags share nothing"
+        );
+    }
+
+    /// An exact region match beats a bare primary-subtag match.
+    #[test]
+    fn an_exact_region_match_wins_over_the_bare_language() {
+        let a = catalog(vec![sub(
+            0,
+            Some("pt-BR"),
+            false,
+            TrackCapability::SupportedText,
+        )]);
+        let mut sel = SubtitleSelection::off();
+        sel.apply(SubtitleChoice::Track(a.subtitles.tracks[0].id), &a);
+
+        let mut b = catalog(vec![
+            sub(0, Some("pt"), false, TrackCapability::SupportedText),
+            sub(1, Some("pt-BR"), false, TrackCapability::SupportedText),
+        ]);
+        b.generation = 5;
+        for t in b.subtitles.tracks.iter_mut() {
+            t.id.catalog_generation = 5;
+        }
+        assert_eq!(
+            sel.resolve(&b, None).unwrap().language.as_deref(),
+            Some("pt-BR")
+        );
+    }
+
+    /// Picking "Arabic (SDH)" over plain Arabic is a deliberate accessibility choice, so an
+    /// SDH track should win the tie on the next film.
+    #[test]
+    fn an_sdh_pick_prefers_an_sdh_track_next_time() {
+        let mut sdh = sub(1, Some("ar"), false, TrackCapability::SupportedText);
+        sdh.flags.hearing_impaired = true;
+        let a = catalog(vec![
+            sub(0, Some("en"), false, TrackCapability::SupportedText),
+            sdh,
+        ]);
+        let mut sel = SubtitleSelection::off();
+        sel.apply(SubtitleChoice::Track(a.subtitles.tracks[1].id), &a);
+        assert!(sel.preference.as_ref().unwrap().hearing_impaired);
+
+        let mut b_sdh = sub(2, Some("ara"), false, TrackCapability::SupportedText);
+        b_sdh.flags.hearing_impaired = true;
+        let mut b = catalog(vec![
+            sub(1, Some("ara"), false, TrackCapability::SupportedText),
+            b_sdh,
+        ]);
+        b.generation = 7;
+        for t in b.subtitles.tracks.iter_mut() {
+            t.id.catalog_generation = 7;
+        }
+        let got = sel.resolve(&b, None).expect("Arabic");
+        assert!(
+            got.flags.hearing_impaired,
+            "the SDH Arabic track, not the plain one"
+        );
+        // ...but SDH only breaks a tie *within* the language — it never drags in another.
+        assert_eq!(got.language.as_deref(), Some("ara"));
+    }
+
+    /// Explicitly asking for Automatic retires the pinned language — otherwise there would
+    /// be no way to un-pin it, and "Automatic" would go on obeying a cancelled choice.
+    #[test]
+    fn choosing_automatic_clears_the_remembered_language() {
+        let c = catalog(vec![
+            sub(0, Some("en"), true, TrackCapability::SupportedText),
+            sub(1, Some("zh"), false, TrackCapability::SupportedText),
+        ]);
+        let mut sel = SubtitleSelection::off();
+        sel.apply(SubtitleChoice::Track(c.subtitles.tracks[1].id), &c);
+        assert!(sel.preference.is_some());
+
+        sel.apply(SubtitleChoice::Automatic, &c);
+        assert!(sel.preference.is_none(), "the pin is released");
+        assert_eq!(
+            sel.resolve(&c, Some("en")).unwrap().language.as_deref(),
+            Some("en"),
+            "back to the container's default"
+        );
+    }
+
+    /// A track with no language tag leaves nothing to carry — and must clear any older
+    /// preference rather than let it linger over an unrelated pick.
+    #[test]
+    fn picking_an_untagged_track_carries_no_language() {
+        let c = catalog(vec![
+            sub(0, Some("zh"), false, TrackCapability::SupportedText),
+            sub(1, None, false, TrackCapability::SupportedText),
+        ]);
+        let mut sel = SubtitleSelection::off();
+        sel.apply(SubtitleChoice::Track(c.subtitles.tracks[0].id), &c);
+        assert!(sel.preference.is_some());
+        sel.apply(SubtitleChoice::Track(c.subtitles.tracks[1].id), &c);
+        assert!(
+            sel.preference.is_none(),
+            "there is no intent to carry, and the old one must not survive"
+        );
     }
 
     #[test]
@@ -1225,28 +1651,41 @@ mod tests {
             sub(1, Some("fr"), false, TrackCapability::StyledText),
         ]);
         let id = c.subtitles.tracks[1].id;
-        let got = resolve_track(SubtitleMode::Track(id), &c, Some("en")).expect("explicit");
+        let got = SubtitleSelection::track(id)
+            .resolve(&c, Some("en"))
+            .expect("explicit");
         assert_eq!(
             got.id.local_id, 1,
             "an explicit pick ignores the audio language"
         );
     }
 
-    /// The stale guard: an id from a catalog the deck has replaced must not resolve to
-    /// whatever now sits at that local_id. The wrong file's track is worse than none.
+    /// The stale guard, and what now happens *after* it fires.
+    ///
+    /// An id from another catalog must never resolve to whatever now sits at that
+    /// `local_id` — that is the roulette that showed Korean where Arabic was picked. But it
+    /// must not resolve to *nothing* either: a `TrackId` names one file by construction, so
+    /// every nav would silently lose subtitles. It falls through to the ordinary chain, and
+    /// (when one was remembered) to the picked language first.
     #[test]
-    fn a_track_id_from_a_stale_catalog_never_resolves() {
-        let c = catalog(vec![sub(
-            0,
-            Some("en"),
-            false,
-            TrackCapability::SupportedText,
-        )]);
+    fn a_track_id_from_another_catalog_falls_back_rather_than_matching_or_vanishing() {
+        let c = catalog(vec![
+            sub(0, Some("en"), true, TrackCapability::SupportedText),
+            sub(1, Some("fr"), false, TrackCapability::SupportedText),
+        ]);
+        // Same local_id as the French track, minted against a catalog that is not this one.
         let stale = TrackId {
             catalog_generation: 99,
-            local_id: 0,
+            local_id: 1,
         };
-        assert!(resolve_track(SubtitleMode::Track(stale), &c, Some("en")).is_none());
+        let got = SubtitleSelection::track(stale)
+            .resolve(&c, Some("en"))
+            .expect("falls back — never to nothing");
+        assert_eq!(
+            got.language.as_deref(),
+            Some("en"),
+            "the default track, NOT the French one that happens to share local_id 1"
+        );
     }
 
     /// A bitmap track is listed in Details but can never be active — the picker won't
@@ -1258,21 +1697,29 @@ mod tests {
             sub(1, Some("en"), true, TrackCapability::Unsupported),
         ]);
         let id = c.subtitles.tracks[0].id;
-        assert!(resolve_track(SubtitleMode::Track(id), &c, Some("en")).is_none());
+        assert!(SubtitleSelection::track(id)
+            .resolve(&c, Some("en"))
+            .is_none());
         assert!(
-            resolve_track(SubtitleMode::Automatic, &c, Some("en")).is_none(),
+            SubtitleSelection::automatic()
+                .resolve(&c, Some("en"))
+                .is_none(),
             "Automatic must not pick a PGS track just because it's forced"
         );
         // ...but styled text is renderable.
         let c = catalog(vec![sub(0, Some("en"), true, TrackCapability::StyledText)]);
-        assert!(resolve_track(SubtitleMode::Automatic, &c, Some("en")).is_some());
+        assert!(SubtitleSelection::automatic()
+            .resolve(&c, Some("en"))
+            .is_some());
     }
 
     #[test]
     fn an_empty_catalog_resolves_to_nothing() {
         let c = catalog(vec![]);
-        assert!(resolve_track(SubtitleMode::Automatic, &c, Some("en")).is_none());
-        assert!(resolve_track(SubtitleMode::Off, &c, Some("en")).is_none());
+        assert!(SubtitleSelection::automatic()
+            .resolve(&c, Some("en"))
+            .is_none());
+        assert!(SubtitleSelection::off().resolve(&c, Some("en")).is_none());
     }
 
     // -- style --------------------------------------------------------------

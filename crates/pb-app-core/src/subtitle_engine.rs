@@ -42,7 +42,7 @@ use pb_hud::subtitle::{SubtitleBitmap, SubtitleRasterizer};
 use pb_source::ItemSource;
 
 use crate::cues::{CueTrack, SubtitleCue};
-use crate::subtitle::{place, resolve_track, Rect, SubtitleMode, SubtitleStyle};
+use crate::subtitle::{place, Rect, SubtitleSelection, SubtitleStyle};
 
 /// Which track's cues are loaded / loading: an item plus a track's `local_id`.
 ///
@@ -77,7 +77,9 @@ impl Drop for CueLoad {
 
 #[derive(Default)]
 pub struct SubtitleEngine {
-    pub mode: SubtitleMode,
+    /// What the user wants: on/off (`C`) and which track (the picker), deliberately apart —
+    /// see [`SubtitleSelection`].
+    pub selection: SubtitleSelection,
     pub style: SubtitleStyle,
     /// Built once on a worker; `None` until it lands.
     raster: Option<SubtitleRasterizer>,
@@ -99,9 +101,9 @@ pub struct SubtitleEngine {
 }
 
 impl SubtitleEngine {
-    pub fn new(mode: SubtitleMode) -> Self {
+    pub fn new(selection: SubtitleSelection) -> Self {
         Self {
-            mode,
+            selection,
             ..Default::default()
         }
     }
@@ -122,10 +124,12 @@ impl SubtitleEngine {
     /// only; it never turns subtitles on.
     pub fn from_settings(settings: &crate::settings::Settings) -> Self {
         Self {
-            mode: if settings.subtitles {
-                SubtitleMode::Automatic
+            // Only the on/off half is persisted; WHICH track is a per-file, session-only
+            // choice (privacy #2 -- it would be a record of what you watched).
+            selection: if settings.subtitles {
+                SubtitleSelection::automatic()
             } else {
-                SubtitleMode::Off
+                SubtitleSelection::off()
             },
             style: settings.subtitle_style.clone(),
             tracing: std::env::var_os("PB_SUBTITLE_TRACE").is_some_and(|v| v == "1"),
@@ -283,7 +287,7 @@ impl SubtitleEngine {
         };
         // The selection. `resolve_track` was written against the catalog long before
         // anything called it; this is that bridge finally carrying traffic.
-        let Some(track) = resolve_track(self.mode, catalog, audio_language) else {
+        let Some(track) = self.selection.resolve(catalog, audio_language) else {
             let n = catalog.subtitles.tracks.len();
             self.trace(|| format!("no track resolved from {n} subtitle track(s)"));
             // Not an error — "show nothing" is a normal answer. But it must actually
@@ -419,7 +423,7 @@ impl SubtitleEngine {
         let before = self.gen;
         // Off means off — the earliest possible exit, and zero work when subtitles aren't
         // in use (the plan's "zero per-frame work when off").
-        if self.mode == SubtitleMode::Off {
+        if !self.selection.enabled {
             self.hide();
             return self.gen != before;
         }
@@ -629,7 +633,7 @@ mod tests {
     #[test]
     fn off_shows_nothing_and_needs_no_rasterizer() {
         let mut e = SubtitleEngine {
-            mode: SubtitleMode::Off,
+            selection: SubtitleSelection::off(),
             cues: Some(cue_track()),
             ..Default::default()
         };
@@ -645,7 +649,7 @@ mod tests {
     #[test]
     fn nothing_draws_before_the_rasterizer_arrives() {
         let mut e = SubtitleEngine {
-            mode: SubtitleMode::Automatic,
+            selection: SubtitleSelection::automatic(),
             cues: Some(cue_track()),
             ..Default::default()
         };
@@ -659,7 +663,7 @@ mod tests {
     #[test]
     fn a_cue_renders_in_its_window_and_clears_outside_it() {
         let mut e = SubtitleEngine {
-            mode: SubtitleMode::Automatic,
+            selection: SubtitleSelection::automatic(),
             cues: Some(cue_track()),
             raster: Some(SubtitleRasterizer::new()),
             ..Default::default()
@@ -696,7 +700,7 @@ mod tests {
     #[test]
     fn the_rect_is_logical_points_while_the_bitmap_is_physical() {
         let mut e = SubtitleEngine {
-            mode: SubtitleMode::Automatic,
+            selection: SubtitleSelection::automatic(),
             cues: Some(cue_track()),
             raster: Some(SubtitleRasterizer::new()),
             ..Default::default()
@@ -727,7 +731,7 @@ mod tests {
             source_order: order,
         };
         let mut e = SubtitleEngine {
-            mode: SubtitleMode::Automatic,
+            selection: SubtitleSelection::automatic(),
             cues: Some(CueTrack::from_cues(vec![dup(0), dup(1)])),
             raster: Some(SubtitleRasterizer::new()),
             ..Default::default()
@@ -739,7 +743,7 @@ mod tests {
         // The same cue alone must produce the SAME bitmap — i.e. the duplicate added
         // nothing. Comparing heights is what catches a second line being stacked.
         let mut single = SubtitleEngine {
-            mode: SubtitleMode::Automatic,
+            selection: SubtitleSelection::automatic(),
             cues: Some(CueTrack::from_cues(vec![dup(0)])),
             raster: Some(SubtitleRasterizer::new()),
             ..Default::default()
@@ -765,7 +769,7 @@ mod tests {
             source_order: order,
         };
         let mut both = SubtitleEngine {
-            mode: SubtitleMode::Automatic,
+            selection: SubtitleSelection::automatic(),
             cues: Some(CueTrack::from_cues(vec![
                 cue("A SIGN ON THE WALL", 0),
                 cue("And a line of dialogue", 1),
@@ -777,7 +781,7 @@ mod tests {
         both.update(Duration::from_millis(1500), vp, video, 0.0, 1.0);
 
         let mut one = SubtitleEngine {
-            mode: SubtitleMode::Automatic,
+            selection: SubtitleSelection::automatic(),
             cues: Some(CueTrack::from_cues(vec![cue("A SIGN ON THE WALL", 0)])),
             raster: Some(SubtitleRasterizer::new()),
             ..Default::default()
@@ -861,7 +865,7 @@ mod tests {
         }
 
         let mut e = SubtitleEngine {
-            mode: SubtitleMode::Automatic,
+            selection: SubtitleSelection::automatic(),
             ..Default::default()
         };
         e.ensure_loaded(&source, 0, 7, Some(&catalog), Some("en"));
@@ -884,7 +888,7 @@ mod tests {
     #[test]
     fn clear_item_forgets_the_track_and_hides() {
         let mut e = SubtitleEngine {
-            mode: SubtitleMode::Automatic,
+            selection: SubtitleSelection::automatic(),
             cues: Some(cue_track()),
             loaded_for: Some((3, 0)),
             raster: Some(SubtitleRasterizer::new()),
@@ -990,7 +994,7 @@ mod tests {
             catalog.subtitles.tracks.push(track);
             catalog.set_locator(id, locator);
         }
-        e.mode = SubtitleMode::Track(catalog.subtitles.tracks[0].id);
+        e.selection = SubtitleSelection::track(catalog.subtitles.tracks[0].id);
         e.ensure_loaded(&source, 1, 3, Some(&catalog), Some("en"));
 
         assert!(old.load(Ordering::Relaxed), "the old read is cancelled");
@@ -1008,7 +1012,7 @@ mod tests {
     fn resolving_to_no_track_forgets_the_previous_one() {
         let source: Arc<dyn ItemSource> = Arc::new(pb_source::FsSource::new(vec![]));
         let mut e = SubtitleEngine {
-            mode: SubtitleMode::Automatic,
+            selection: SubtitleSelection::automatic(),
             cues: Some(cue_track()),
             loaded_for: Some((0, 0)),
             ..Default::default()
@@ -1026,7 +1030,7 @@ mod tests {
     fn no_catalog_yet_starts_nothing() {
         let source: Arc<dyn ItemSource> = Arc::new(pb_source::FsSource::new(vec![]));
         let mut e = SubtitleEngine {
-            mode: SubtitleMode::Automatic,
+            selection: SubtitleSelection::automatic(),
             ..Default::default()
         };
         e.ensure_loaded(&source, 0, 0, None, None);
