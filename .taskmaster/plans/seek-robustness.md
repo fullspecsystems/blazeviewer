@@ -1,9 +1,23 @@
 # Seek robustness — fix the pre-roll clock, and make seeking regression-testable
 
-> Status: **PLAN — not started** · Owner: JD
+> Status: **PLAN v2 — revised per Codex review (2026-07-15), not started** · Owner: JD
 > Scope: the **macOS sample-buffer route** (MKV/WebM), which is what `97f80bb4` changed.
-> AVPlayer (MP4/MOV) owns its own clock and is not implicated — *confirm that first*
-> (§0), because it splits the diagnosis in half.
+> AVPlayer (MP4/MOV) owns its own clock and is not implicated — *prove that in §0*, because
+> it splits the diagnosis in half.
+>
+> **v1 was not execution-ready.** A review found three ways its fix could ship while seeking
+> stayed broken, and every finding was re-verified against the tree before this rewrite.
+> Recorded honestly, because each one is a trap the next reader could fall into too:
+>
+> | v1 said | Reality |
+> |---|---|
+> | `setRate(pendingRate, time: target)` unblocks the pre-roll | `pendingRate` is **0** when paused, and `step()` *pauses before seeking* — so it fixes playing seeks and leaves paused seeks and `,`/`.` deadlocked, which is where the fix would have looked done |
+> | §0's trace confirms H1 | `framesFed` is a **lifetime** counter (`<= 3 \|\| % 300`), never reset per seek — the trace would print almost nothing, and absence of an anchor cannot tell starvation from a demux stall |
+> | H2 = video anchors at `target`, audio at its own landing | Rust's `FfAudioDecoder::seek` **returns the target**, not an independent landing — rebasing both to `target` is a no-op. The real audio risks are elsewhere (§H2') |
+> | `demux_seek(t)` never lands after `t` (T4) | `demux.rs:236` **retries with `i64::MAX`** when nothing exists at/before the target — landing *after* it is a documented branch, not a violation |
+>
+> The through-line: **v1 asserted contracts the code does not honour.** Verify against the
+> tree, not the comments.
 
 ## The report (owner, 2026-07-15)
 
@@ -14,15 +28,15 @@ Three symptoms, all on seek:
    was → lands on the target again.
 3. **Audio sometimes disappears entirely** after a seek.
 
-They are almost certainly **one bug wearing three hats**, and the hat is the clock.
+Probably **one bug wearing three hats**, and the hat is the clock — but see §0: that is a
+hypothesis, not a finding.
 
 ## Where this came from — and where it did *not*
 
 `97f80bb4` ("forward seek jumped BACK to the keyframe", 2026-07-15) rewrote the
-sample-buffer seek. Before it, `demux_seek` landed on the keyframe *at or before* the
-target and the clock anchored **there**, so `→` sent the film backwards. The fix: decode
-from the keyframe forward, mark every frame before the target `DoNotDisplay`, and anchor
-the clock at the **target**.
+sample-buffer seek. Before it, `demux_seek` landed on the keyframe *at or before* the target
+and the clock anchored **there**, so `→` sent the film backwards. The fix: decode from the
+keyframe forward, mark every frame before the target `DoNotDisplay`, anchor at the **target**.
 
 `.taskmaster/current-status.md` (rev 6) flagged it, verbatim:
 
@@ -30,225 +44,313 @@ the clock at the **target**.
 > before settling, the pre-roll's reference frames are being dropped and the clock needs
 > holding differently.
 
-That prediction has now come true, with interest.
+**Ruled out — the audio-track work (#99).** Checked before blaming it: the audio branch is
+*purely additive* to `SampleBufferPresenter`, touches **zero** of `performSeek` /
+`onDecodeAnchor` / `pendingRate` / `seekTargetSecs`, and its decoder change
+(`open_track(…, None)`) falls through to the old `select_audio_stream` call. The seek path on
+today's `main` is byte-for-byte what `97f80bb4` left.
 
-**Ruled out — the audio-track work (#99).** Checked before blaming it, not after: the
-audio branch is *purely additive* to `SampleBufferPresenter`, touches **zero** of
-`performSeek` / `onDecodeAnchor` / `pendingRate` / `seekTargetSecs`, and its decoder change
-(`open_track(…, None)`) falls straight through to the old `select_audio_stream` call.
-`seek`/`read`/discard are untouched. The seek path on today's `main` is byte-for-byte what
-`97f80bb4` left.
-
-## The mechanism (read this before touching anything)
-
-The seek, as it stands today:
+## The mechanism
 
 ```
 performSeek(target):
-    pendingRate = (rate != 0) ? 1 : 0
-    synchronizer.rate = 0                    ← THE CLOCK IS HELD
+    pendingRate = (rate != 0) ? 1 : 0        ← 0 WHEN PAUSED, and step() pauses first
+    synchronizer.rate = 0                    ← the clock is held
     audioFeeder.seek(target)                 → flush, session_audio_seek, re-base ptsFrames
+                                               ⚠ silently returns if ptr == 0 (audio not open yet)
     reader.seek(target):
-        layer.flush(); demux_seek(target)    → lands on the keyframe AT OR BEFORE target
+        layer.flush(); demux_seek(target)    → keyframe at/before target (usually — see T4)
         seekTargetSecs = target; firstFrameSent = false; armFeeding()
+        then(landed)                         ⚠ fires HERE — "demux command done", not "frame visible"
+                                               and this is the ONLY epoch-gated callback
 
-provide()  (on the reader queue, driven by layer.requestMediaDataWhenReady):
+provide()  (reader queue, driven by layer.requestMediaDataWhenReady):
     while layer.isReadyForMoreMediaData:
         preroll = pts < target - 0.001
         if preroll: markDoNotDisplay(sb)
         layer.enqueue(sb)
         if !firstFrameSent && !preroll:
             onFirstFrame(anchor = target) → onDecodeAnchor:
-                synchronizer.setRate(pendingRate, time: anchor)   ← THE ONLY UNHOLD
+                synchronizer.setRate(pendingRate, time: anchor)   ← the ONLY unhold, and NOT epoch-gated
 ```
 
-**`onDecodeAnchor` is the only thing that ever restores the rate**, and it only fires on the
-first frame whose `pts >= target`. Everything before that is pre-roll.
+Three separate defects live in that listing. They must be fixed together; any one alone
+leaves a broken case that looks fixed.
 
-### H1 — pre-roll starvation deadlock (primary hypothesis; explains all three)
+### H1 — pre-roll starvation (hypothesis, **not yet measured**)
 
-`AVSampleBufferDisplayLayer` only reports `isReadyForMoreMediaData == false` once its
-internal queue fills, and it only drains that queue **as the clock advances**. With
-`synchronizer.rate == 0`, it never drains.
+`onDecodeAnchor` is the only thing that restores the rate, and it only fires on the first
+frame with `pts >= target`. `AVSampleBufferDisplayLayer` reports
+`isReadyForMoreMediaData == false` once its internal queue fills, and drains as samples are
+decoded/displayed. If the pre-roll (keyframe → target) outgrows that queue while the clock is
+held, the feed stalls before reaching the target, the anchor never fires, and **the only thing
+that could un-pause playback is the thing that starved.**
 
-So if the pre-roll (keyframe → target) is **deeper than the layer's queue**, the feed loop
-stalls before ever reaching a `pts >= target` frame. The anchor never fires. The rate is
-never restored. **Playback is paused forever, and the only thing that could un-pause it is
-the thing that starved.**
+Predicts all three symptoms together: (1) the rate is never restored; (3) audio is on the
+*same synchronizer*, so rate 0 = silence — not a separate bug; (2) `currentTime()` stays at
+the pre-seek position for the whole stall, so the scrubber snaps back to it. GOP-dependent,
+which is the "sometimes".
 
-This predicts every symptom, and predicts them *together*:
+> ⚠ **Apple documents readiness as internal-queue occupancy that changes as samples are
+> decoded/displayed. It does *not* guarantee that a stopped clock is the sole reason a queue
+> cannot drain.** H1 stays a hypothesis until §0 measures it.
 
-- **(1) pause** — the rate is never restored.
-- **(3) audio gone** — the audio renderer is on the *same* synchronizer. Rate 0 = silence.
-  Not a separate bug.
-- **(2) scrubber flash** — `synchronizer.currentTime()` stays at the **pre-seek** position
-  for the whole pre-roll (rate 0 doesn't move or reset it). The scrubber drops `dragFraction`
-  on release and shows `videoFraction`, which is still the old spot — so it snaps back, and
-  only jumps to the target when/if the anchor lands. The flash *is* the stall, made visible.
+### H1b — the paused case, which H1's obvious fix does not reach
 
-It is **GOP-length dependent**, which explains "sometimes": a 1 s GOP fits in the queue and
-works; a 5 s GOP at 24 fps is ~120 frames of pre-roll and does not.
+`pendingRate` is **0** for a paused seek, and `step(forward:)` sets `rate = 0` *before*
+calling `performSeek`. So "anchor at the target and let it drain" — v1's fix — still hands the
+layer a **non-advancing clock** for paused scrubbing and for `,`/`.`. It would have shipped
+looking correct on the one case anyone tested.
 
-### H2 — anchor/audio-base mismatch (secondary; survives even if H1 is fixed)
+The concepts must be separated:
 
-`97f80bb4` changed the **video** anchor to `target` but left audio re-basing to where the
-**audio decoder** landed (`AudioSampleFeeder.seek`: `ptsFrames = landed * rate`). Audio seeks
-are near-exact and video's target is exact, so these usually agree — but they are now two
-independent notions of "where we are", and nothing asserts they match. Any drift enqueues
-audio at timestamps the synchronizer has already passed → dropped → silence.
+- **`desiredRateAfterSeek`** (0 or 1) — the user's intent, preserved across the seek.
+- **A pre-roll drain strategy that works regardless of desired rate** — the clock cannot be
+  both "held so nothing shows" and "running so the queue drains".
+- **A precise transition that parks at the landed frame** when the desired rate is 0.
 
-### H3 — the flash is partly unavoidable latency
+Candidate strategies (the §"clock-strategy spike" A/Bs these; do not pick one on paper):
 
-Even with H1 fixed, a long-GOP pre-roll takes real time to decode. If the clock stays held
-throughout, the scrubber will always snap back for that duration. **The scrubber must not
-report the pre-seek position while a seek is in flight** — that is a UI-truth bug independent
-of the decode.
+- **S1 — run the clock through the pre-roll, then re-park.** `setRate(1, time: …)` to drain,
+  then `setRate(0, time: landed)` on the first displayable frame. Risk: a paused step briefly
+  runs the clock; audio must be held/muted through it.
+- **S2 — drain without the clock.** If the layer can be made to consume `DoNotDisplay`
+  samples with the rate at 0, no strategy is needed — **this is exactly what §0 must
+  measure**, and if true, H1 is wrong and the bug is elsewhere.
+- **S3 — bound the pre-roll.** If `target - keyframe` exceeds a budget, land at the keyframe
+  (or the next one) instead of promising accuracy we cannot decode in time. Sub-GOP accuracy
+  is not worth a stall. Needed as a backstop under S1 regardless.
 
-## §0 — Confirm the split before fixing (one run, ~2 minutes)
+**Mandatory cases before choosing:** playing seek · paused seek · frame-step forward ·
+frame-step backward · seek after EOS.
 
-Do not skip this. It is cheap and it can invalidate the whole diagnosis.
+### H1c — the landing callback is not generation-gated (independent bug)
 
-```sh
-PB_TRACE=1 "target/swift-host/debug/Blaze Viewer.app/Contents/MacOS/Blaze Viewer" 2>&1 \
-  | grep -E "sb-demux|seek anchor"
-```
+`seekEpoch` gates only `reader.seek`'s completion — which fires right after `demux_seek`,
+meaning *"the demux command finished"*, **not** *"the target frame is visible"*. The callback
+that actually moves the clock, `onDecodeAnchor`, carries **no epoch** and unconditionally
+sets rate and time.
 
-Seek once forward on a long-GOP MKV (Ad Astra), and read:
+The scrubber issues **up to ~16 seeks/second** (`seekInterval = 0.06`). A stale anchor
+overwriting a newer seek is not a corner case; it is the expected traffic. This is a live bug
+today, independent of H1, and it would survive any pre-roll fix.
+
+**Introduce a `SeekContext`** — `{ epoch, target, desiredRateAfterSeek, source }` — carried
+through the video anchor, the audio completion, EOS, failure, and the UI landing. **Every**
+callback rejects a stale epoch *before* touching the clock, the renderers, or the scrubber.
+
+### H2' — audio coordination (v1's H2 was the wrong mismatch)
+
+v1 claimed video anchors at `target` while audio re-bases to its own landing. It does not:
+`FfAudioDecoder::seek` **forward-discards to the requested target and returns that target**
+(`audio_decoder.rs:411`). Rebasing both to `target` would change almost nothing.
+
+The real risks, all verified:
+
+- **Audio and video seek on independent queues with no readiness barrier.** Nothing makes the
+  clock wait for the audio flush/seek to complete.
+- **A seek before the audio decoder opens is silently discarded** — `AudioSampleFeeder.seek`
+  is `guard self.ptr != 0 else { return }`. The seek is simply lost; nothing retries it.
+- **`startSecs` seeks the video reader only** — and this one is worth pulling out on its own:
+
+  > ### ⚠ The resume-audio bug — separately shippable, and new **today**
+  >
+  > `audioFeeder.open` enqueues **0-based** (`SampleBufferPresenter.swift:152`). Then
+  > `startSecs` seeks **only `reader`** (`:178` — the video). Then the first frame anchors the
+  > clock at **`startSecs`**. So on a resumed film the audio is sitting ~`startSecs` *in the
+  > past* and the renderer discards it; it must grind forward through the whole gap before a
+  > sample is ever in-window.
+  >
+  > **Introduced by `3b12ec69` (2026-07-15) — the MKV-resume fix, same day as `97f80bb4` but a
+  > different commit.** Before it, this route never resumed at all: video *and* audio both
+  > started at 0, so they agreed. The resume fix moved the picture and left the sound behind.
+  >
+  > It therefore explains **audio loss on a *resumed* MKV** — and nothing else. It is not the
+  > seek regression, and it cannot explain any A/V problem older than today (those belong to
+  > the overhaul's R2/R4/R5 — `.taskmaster/docs/video-playback-overhaul.md`).
+  >
+  > Fix independently of the seek work: seek the audio feeder to `startSecs` too — or, since
+  > audio may not be open yet, **queue it as a pending seek applied at open** (which is the
+  > same machinery H2' needs anyway, so build it once).
+
+- **Audio seek failure is not reported** to the presenter as a typed result.
+
+**Replace H2 with a coordination contract:** `AudioSampleFeeder.seek` returns an
+epoch-tagged completion/result; a seek issued before audio opens is **held and applied at
+open**, not dropped; the clock/unmute waits on an explicit A/V readiness condition; failures
+surface.
+
+### H3 — the scrubber has no landing lifecycle
+
+Fractional scrub seeks have **no render-landing callback at all** — the reader completion
+means "demux command done". So "pin until the seek lands" has nothing to land on.
+
+Define pending UI state as `(session, epoch, targetFraction)`:
+
+- set/updated on each fractional seek;
+- while pending, progress publications **cannot** overwrite the displayed target;
+- cleared only on the current visual landing, failure, EOS, or teardown;
+- a superseding seek **replaces** it.
+
+Keep AVPlayer's scrubber behaviour separate unless §0 shows it needs the same treatment.
+
+## §0 — Instrumentation first, then measure (nothing is fixed before this)
+
+v1's §0 could not have worked: `framesFed` is a **lifetime** counter (`framesFed <= 3 ||
+framesFed % 300 == 0`), never reset per seek, so "look for a run of `preroll=true`" would
+print nothing. And an absent anchor cannot distinguish starvation from a demux stall, a
+renderer failure, or a superseded seek.
+
+**Add seek-scoped diagnostics** (one line per seek, reset per seek):
+
+- epoch · target · `desiredRateAfterSeek` · source (arrow / scrub / step / resume)
+- first post-seek keyframe PTS **and** DTS
+- pre-roll frame count · last pre-roll PTS
+- the first `isReadyForMoreMediaData == false`, and **whether the callback is ever invoked
+  again** ← *this is the direct H1 discriminator*
+- audio seek start / completion / result
+- anchor · EOS · failure · elapsed seek time
+
+Then one seek on a long-GOP MKV tells us:
 
 | Observation | Verdict |
 |---|---|
-| A run of `preroll=true`, **no** `seek anchor at target` line | **H1 confirmed** — starvation deadlock |
-| `seek anchor at target` fires, but audio still drops | **H2** — anchor/audio-base mismatch |
-| Reproduces on **MP4** too | Diagnosis is **wrong** — AVPlayer owns its own clock and shares none of this code |
+| pre-roll count climbs → `isReady == false` → **callback never re-invoked** → no anchor | **H1 confirmed** — starvation |
+| callback re-invoked, anchor fires, audio still gone | **H2'** — coordination / the `startSecs` resume bug |
+| anchor fires but a *stale* one lands last during scrubbing | **H1c** — epoch gating |
+| reproduces on **MP4** | Diagnosis **wrong** — AVPlayer shares none of this code |
+| **short-GOP** file is fine, long-GOP is not | Strong H1 corroboration (costs one extra seek) |
 
-Also record: does it reproduce on a **short-GOP** file? H1 predicts *no*. That asymmetry is
-the strongest single piece of evidence available, and it costs one more seek.
+## Testing — the actual deliverable
 
-## The fix (shape, pending §0)
+The bug shipped because **nothing could have caught it**: the decision logic lives inside a
+Swift feed loop entangled with `AVSampleBufferDisplayLayer`, and there is no Swift test target.
 
-**If H1: stop holding the clock through the pre-roll.** Anchor at the target *immediately*
-in `performSeek` — `setRate(pendingRate, time: target)` before feeding — so the layer has a
-clock, drains, and keeps asking for data. The pre-roll frames are already `DoNotDisplay` and
-already in the past, so they are consumed and discarded as fast as VideoToolbox decodes
-them; the first displayable frame is at the target and shows on time. The picture holds the
-last frame meanwhile (the existing reveal rule).
+### T1 — Extract a pure `SeekFramePolicy` — **in Swift**
 
-Two risks to design against, both real:
+Given (`seekTarget`, `pts`, `dts`, `firstFrameSent`) → (pre-roll? anchor? at what time?).
 
-- **Audio may start before the picture catches up** on a long pre-roll. Options: keep the
-  *audio renderer* muted/held until the first displayable frame while the clock runs; or
-  bound the pre-roll (below).
-- **Pre-roll longer than real time.** If decode can't outrun the clock, the first displayable
-  frame arrives late and is dropped — the smear the status doc predicted. A **pre-roll budget**
-  is the honest answer: if `target - keyframe` exceeds ~N seconds, accept landing at the
-  keyframe (or seek to the *next* keyframe) rather than promising an exact landing we cannot
-  decode in time. Sub-GOP accuracy is not worth a stall.
+> v1 wanted this in Rust (`pb-app-core`). **Rejected:** it is macOS-specific
+> `AVSampleBufferDisplayLayer` policy, not shared navigation semantics, and it would put an
+> **FFI call on every compressed frame** of the decode path to serve exactly one platform.
+> Keep it as a pure Swift struct over primitive numbers, in a testable Swift target, with
+> AVFoundation conversion at the edge.
 
-**H2 regardless:** make one side the authority. The audio feeder should re-base to the
-**same** value the video anchors at, not to its own landing — or the two must be asserted
-equal within a tolerance and reconciled. Two independent "where we are" values is the defect,
-whatever the numbers currently do.
+Cases: forward seek inside a GOP (the `97f80bb4` bug) · backward seek · target before the
+first keyframe · **seek past EOS** (must anchor anyway) · initial playback (`seekTarget ==
+nil`) anchors at **DTS**, not PTS (the negative-DTS B-frame rule — currently a comment) ·
+pre-roll beyond budget.
 
-**H3 regardless:** the scrubber must show the **seek target** while a seek is in flight, not
-`videoFraction`. `VideoScrubber` already pins to `dragFraction` during a drag; it needs to
-keep pinning until the seek lands rather than dropping to the player's stale clock on
-release. This kills the flash even if the decode stays slow.
+> ⚠ **This unit test cannot catch the deadlock.** It validates *classification*; the deadlock
+> is *progress*, and only the harness (T2) can see it. Do not let a green T1 read as "seek
+> works".
 
-## Regression testing — the actual deliverable
+### T2 — Renderer harness, behind a **proof gate**
 
-The seek bug shipped because **nothing could have caught it**: the decision logic lives inside
-a Swift feed loop, entangled with `AVSampleBufferDisplayLayer`, and there is no Swift test
-target. That is the thing to fix, not just the symptom.
+The `propertyList` script proved AVFoundation is drivable from a script — it did **not** prove
+a display layer and synchronizer will decode and drain **without a live layer tree**.
 
-### T1 — Extract the pre-roll/anchor decision into a pure function (highest value)
+**Gate: before building the harness, prove one compressed fixture decodes and exposes a landed
+pixel/timestamp headlessly.** If that fails, the harness needs a window and the design changes.
 
-Today the rule is smeared across `DemuxReader.provide`. It is *pure logic* wearing I/O:
+Then assert what matters:
 
-> given (`seekTarget`, frame `pts`, `dts`, `firstFrameSent`) → (is this pre-roll? do we
-> anchor? at what time?)
+- after `seek(to: T)`, **`rate` returns to `desiredRateAfterSeek` within N seconds** ← a
+  *timeout*, which is what a deadlock looks like
+- `currentTime()` reaches ≈T and does not sit at the old position
+- audio and video anchor to the **same** time
+- **no frame with `pts < T` is ever displayed** — ⚠ *define how this is observed;* clock
+  position alone does not prove it
 
-Extract it — ideally into **`pb-app-core`** (Rust, where the test culture already is; the
-reader can call it over the existing FFI), or failing that a pure Swift struct with no
-AVFoundation types. Then the interesting cases become ordinary unit tests:
+Prefer a real SwiftPM test target + `swift test` over a permanent loose script.
 
-- forward seek inside a GOP → pre-roll marked, anchor at target (**the `97f80bb4` bug**)
-- backward seek → lands before target, same rule
-- seek to a target *before* the first keyframe → anchors immediately, no pre-roll
-- **seek past EOS** → must anchor anyway (the existing "never leave the clock held" guard)
-- initial playback (`seekTarget == nil`) → anchors at **DTS**, not PTS (the negative-DTS
-  B-frame rule — currently a comment, should be a test)
-- a pre-roll longer than the budget → whatever §0's fix decides
+> **Deprecation:** macOS 14 is the floor, and Apple has deprecated the display-layer
+> readiness/enqueue APIs in favour of `AVSampleBufferVideoRenderer` /
+> `sampleBufferRenderer`. This bug fix must **not** become that migration — but the harness
+> must **deliberately choose** whether it tests the legacy app path or the replacement, and
+> say so, or it will test something the app does not do.
 
-### T2 — A headless Swift harness (new capability; **proven to work**)
+### T3 — Fixtures, generated not borrowed
 
-`swift script.swift <fixture>` drives real AVFoundation objects outside the app. This is not
-speculative: it is exactly how the **`propertyList` bug** was found today — a 100 %-dead
-AVPlayer audio path that had passed review, compiled clean, and would have shipped. It took
-twenty minutes and one purpose-built fixture.
-
-Build `mac/Tests/seek-harness.swift` to drive a real `AVSampleBufferRenderSynchronizer` +
-`AVSampleBufferDisplayLayer` + `DemuxReader` against a fixture and assert the properties that
-actually matter:
-
-- after `seek(to: T)`, **`synchronizer.rate` returns to its pre-seek value within N seconds**
-  (this is symptom 1, directly — and it is a *timeout*, which is what a deadlock looks like)
-- **`currentTime()` reaches ≈T** and does not sit at the old position
-- audio and video anchor to the **same** time (H2)
-- no frame with `pts < T` is ever displayed (the pre-roll contract)
-
-Run it against **both** a short-GOP and a **long-GOP** fixture — the long one is the whole
-point, since H1 is GOP-dependent and a short fixture would pass while the bug is live.
-
-> ⚠ The harness must import the reader, which links Rust. If that proves awkward from a bare
-> script, the fallback is a `swift-testing`/XCTest target in `mac/Package.swift` — more setup,
-> same idea. **Do not let the packaging question kill the harness**; it is the only thing that
-> can test the real thing.
-
-### T3 — Fixtures, built not found
-
-Generate with `ffmpeg` and check in (they are tiny), rather than depending on
-`/Volumes/Media`, which CI and a fresh clone do not have:
+Checked in (they are tiny), not `/Volumes/Media`, which CI and a fresh clone lack:
 
 ```sh
-# long GOP (~5 s) — the H1 repro; keyint 120 @ 24 fps
+# long GOP (~5 s) — the H1 repro
 ffmpeg -f lavfi -i testsrc=size=320x240:rate=24:duration=30 -f lavfi -i sine=frequency=440:duration=30 \
   -c:v libx264 -g 120 -keyint_min 120 -sc_threshold 0 -c:a aac -shortest longgop.mkv
-# short GOP (~0.5 s) — the control; should pass before AND after
+# short GOP (~0.5 s) — the control; must pass before AND after
 ffmpeg -f lavfi -i testsrc=size=320x240:rate=24:duration=30 -f lavfi -i sine=frequency=440:duration=30 \
   -c:v libx264 -g 12 -keyint_min 12 -sc_threshold 0 -c:a aac -shortest shortgop.mkv
 ```
 
-A frame-accurate visual check needs a **burnt-in timecode** (`drawtext`), so a seek to T can
-be asserted against the picture rather than trusted.
+Burn in a timecode (`drawtext`) so a seek to T is asserted against the **picture**, not trusted.
 
-### T4 — Keep the Rust half honest
+> ⚠ **320×240 fixtures validate correctness; they cannot choose the pre-roll budget.** That
+> needs measurement on representative **1080p/4K H.264 and HEVC** corpus files.
 
-`demux.rs` already has `seek_returns_to_readable_keyframe`. Extend it to state the property
-the Swift side *depends on* and currently only assumes: **`demux_seek(t)` lands at or before
-`t`, never after.** The whole pre-roll design rests on that; nothing asserts it.
+### T4 — The Rust demux contract, as it actually is
+
+v1 asserted `demux_seek(t)` never lands after `t`. **False:** `demux.rs:236` retries with
+`i64::MAX` when nothing exists at/before the target (a start-offset edge), which is a
+deliberate branch. The real contract:
+
+- **normal:** keyframe at or before target;
+- **fallback:** no earlier keyframe → the first usable keyframe, which **may be after** target;
+- **expose or record the actual first post-seek packet timestamp** instead of `reader.seek`
+  fabricating `CMTime(target)` — the pre-roll rule and the anchor both depend on the real one;
+- test **both** branches.
+
+`seek_returns_to_readable_keyframe` today only seeks to **zero** — it does not exercise the
+property the Swift side leans on.
+
+### T5 — CI can't run any of this yet
+
+`mac-swift` builds `--no-ffvideo` (`ci.yml:219`) — deliberate, historical. **The demux harness
+cannot run there.** Adding a macOS lane built with `ffvideo` is part of this work, not an
+afterthought; without it the harness rots the first time someone forgets to run it. (Note the
+runner reality: `mac-swift`/`linux-gate` currently queue forever — **no macOS self-hosted
+runner is registered** — so this lands green only after that is fixed.)
+
+## Acceptance gates
+
+Before owner verification, all of:
+
+- playing **and paused** seeks on short- and long-GOP H.264 MKV
+- rapid **A→B→C** scrubbing, **only C** allowed to anchor
+- frame-step forward **and** backward while paused
+- initial resume at nonzero `startSecs` **with audio**
+- **seek issued before audio open completes**
+- seek near EOS · exactly on a keyframe · before the first usable keyframe
+- audio-seek failure and video-decode failure both **clear pending state**
+- a **measured** pre-roll policy on 1080p/4K H.264 + HEVC corpus files
 
 ## Order of work
 
-1. **§0** — one traced seek. Confirms H1/H2, or refutes the lot. Do not start at step 2.
-2. **T1** — extract the decision function + tests. Valuable whatever §0 says, and it makes
-   the fix reviewable instead of a guess.
-3. **The fix** — per §0's verdict.
-4. **T3 → T2** — fixtures, then the harness. The harness is what stops this recurring.
-5. **T4** — the Rust seek property.
-6. Re-run §0's trace on the corpus (Ad Astra, Grey's Anatomy) and **have the owner confirm by
-   ear and eye** — audio continuity and the scrubber are both things a test can only
-   approximate.
+1. **Instrumentation** (§0) — seek-scoped diagnostics. Nothing is fixed before this.
+2. **`SeekContext` state machine + pure Swift `SeekFramePolicy` tests** (H1c, T1) — a live bug
+   today, and it makes the fix reviewable rather than a guess.
+3. **Renderer-harness proof gate** (T2) — before committing to the harness design.
+4. **A/V coordination** (H2') — the readiness contract, the pending-seek-before-open, and the
+   `startSecs` audio resume.
+5. **Clock-strategy A/B spike** (H1b) — S1/S2/S3 against all four mandatory cases. **Do not
+   pick the implementation on paper.**
+6. **UI pending target** (H3).
+7. **Fixtures + CI lane** (T3, T5).
+8. **Corpus measurement + owner verification** — audio continuity and the scrubber are things
+   a test can only approximate.
 
 ## Notes carried in
 
 - **Don't drive the app from a tool session while the owner is testing** — `pkill` kills their
   window, and a tool-launched bare binary comes up windowless (`--pb-open` is the workaround).
-  The §0 trace is the owner's to run, or must be coordinated.
+  §0's trace is the owner's to run, or must be coordinated.
 - The **winit/Windows** shell shares none of this: its video is the Session route, where audio
-  is the master clock. Any fix here is macOS-only, and the Session route's own seek is a
-  separate question.
-- Two bugs in the #99 audio work were the *same shape* as H1 — **state cached at a moment when
-  the facts were not in yet** (a flyout disabled before a video existed; a tick resolved against
-  rows that had not been built). The subtitle picker has never had either, because it derives
-  everything from the catalog at draw time. When fixing the seek, prefer **deriving at the
-  moment of truth** over caching at the moment of the event.
+  *is* the master clock. Any fix here is macOS-only.
+- Two bugs in the #99 audio work were the same shape as H1 — **state cached at a moment when
+  the facts were not in yet** (a flyout disabled before a video existed; a tick resolved
+  against rows not yet built). The subtitle picker has had neither, because it derives from the
+  catalog at draw time. Prefer **deriving at the moment of truth** over caching at the moment
+  of the event.
+- **The lesson of v1:** every contract it asserted (`demux_seek` never overshoots; audio
+  reports its own landing; the trace prints per-seek) was contradicted by the code. Read the
+  implementation, not the comment.
