@@ -642,6 +642,14 @@ binary) or the AppImage's directory isn't writable (installed read-only) — the
 > shows in the About dialog. Commit (or `.gitignore`) everything first: both release scripts build
 > fresh from the working tree, so a stray file (a local `vendor/` dir, a scratch note) silently
 > ships a `-dirty` build. Check `git status` is clean before running a release script.
+>
+> 🪤 **The version bump dirties `Cargo.lock` — run cargo BEFORE you commit.** This one bites
+> every release and `git status` won't warn you: bumping `crates/pb-app/Cargo.toml` changes
+> `pb-app`'s entry in `Cargo.lock`, but *nothing rewrites the lockfile until a cargo command
+> runs* — which is the release build itself. So a "clean" tree goes dirty **mid-build**, and
+> the DMG ships `0.2.1 (abc1234-dirty)` having been verified clean minutes earlier (hit on
+> 0.2.1, 2026-07-14). After bumping the version: run any cargo command (`cargo check -p
+> pb-app-core` is enough), commit the lockfile with the bump, *then* release.
 
 > **Never let a tool auto-invoke a paid CI run.** Hosted runners cost real money (a macOS run is
 > billed at 10×), so releases are scripted and run locally — the `v*`-tag trigger was removed from

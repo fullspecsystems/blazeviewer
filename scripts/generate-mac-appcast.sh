@@ -53,19 +53,28 @@ PUB_DATE="$(date -u "+%a, %d %b %Y %H:%M:%S +0000")"
 # present on macOS, so the release stays dependency-free (no pandoc/cmark needed).
 md_to_html() {
 	perl -e '
-		my (@out, $in_list, $li);
+		my (@out, $in_list, $li, $p);
 		sub esc { my $s = shift; $s =~ s/&/&amp;/g; $s =~ s/</&lt;/g; $s =~ s/>/&gt;/g; return $s; }
-		sub inl { my $s = shift; $s =~ s{\*\*(.+?)\*\*}{<strong>$1</strong>}g; $s =~ s{`(.+?)`}{<code>$1</code>}g; return $s; }
+		# Inline markdown. Bold MUST run before italic: consuming ** first leaves only single
+		# * pairs for the em rule, so **bold** never degrades into <em>*bold*</em>. Without the
+		# italic rule, *alongside* reached the Sparkle dialog as literal asterisks (0.2.1).
+		sub inl { my $s = shift; $s =~ s{\*\*(.+?)\*\*}{<strong>$1</strong>}g; $s =~ s{\*(.+?)\*}{<em>$1</em>}g; $s =~ s{`(.+?)`}{<code>$1</code>}g; return $s; }
 		sub flush_li { if (defined $li && length $li) { push @out, "<li>".inl($li)."</li>"; $li=undef; } }
 		sub close_list { if ($in_list) { flush_li(); push @out, "</ul>"; $in_list=0; } }
+		# A paragraph accumulates its hard-wrapped continuation lines and flushes on a blank
+		# line, a heading, or a list — the same continuation the list branch already does for
+		# $li. Without this, every wrap in CHANGELOG.md became its own <p>, so Sparkle broke
+		# the update dialog mid-sentence at each source line ending (hit on 0.2.1).
+		sub flush_p { if (defined $p && length $p) { push @out, "<p>".inl($p)."</p>"; $p=undef; } }
 		while (my $l = <STDIN>) {
 			chomp $l; $l =~ s/\s+$//;
-			if    ($l =~ /^#{1,6}\s+(.*)/) { close_list(); push @out, "<h3>".inl(esc($1))."</h3>"; }
-			elsif ($l =~ /^[-*]\s+(.*)/)   { flush_li(); unless ($in_list) { push @out, "<ul>"; $in_list=1; } $li = esc($1); }
-			elsif ($l =~ /^\s*$/)          { close_list(); }
-			else  { my $t = $l; $t =~ s/^\s+//; if ($in_list) { $li .= " ".esc($t); } else { push @out, "<p>".inl(esc($t))."</p>"; } }
+			if    ($l =~ /^#{1,6}\s+(.*)/) { close_list(); flush_p(); push @out, "<h3>".inl(esc($1))."</h3>"; }
+			elsif ($l =~ /^[-*]\s+(.*)/)   { flush_p(); flush_li(); unless ($in_list) { push @out, "<ul>"; $in_list=1; } $li = esc($1); }
+			elsif ($l =~ /^\s*$/)          { close_list(); flush_p(); }
+			else  { my $t = $l; $t =~ s/^\s+//; if ($in_list) { $li .= " ".esc($t); } else { $p = defined $p ? $p." ".esc($t) : esc($t); } }
 		}
 		close_list();
+		flush_p();
 		print join("", @out);
 	'
 }
