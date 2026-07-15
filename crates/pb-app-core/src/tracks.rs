@@ -923,6 +923,31 @@ mod tests {
         assert_eq!(rows.iter().filter(|r| r.active).count(), 0);
     }
 
+    /// **The invariant the tick resolution rests on:** row *i* is `catalog.audio.tracks[i]`.
+    ///
+    /// The shell finds "which row am I playing?" by looping rows and asking the core for
+    /// each one's *stream index* — which the core answers by indexing the **catalog**, while
+    /// the loop counts the **snapshot**. If those two ever ordered differently, the menu
+    /// would tick a track you are not hearing, silently.
+    #[test]
+    fn audio_rows_are_the_catalogs_audio_tracks_in_order() {
+        let mut a = audio("AAC", 2, Some("eng"), 48000);
+        a.id.local_id = 7; // ids are NOT ordinals — the row index must not come from them
+        let mut b = audio("AC-3", 6, Some("fra"), 48000);
+        b.id.local_id = 3;
+        let c = catalog(TrackSet::complete(vec![a, b]), TrackSet::complete(vec![]));
+
+        let rows = audio_picker_rows(&c, None);
+        assert_eq!(rows.len(), c.audio.tracks.len());
+        for (i, row) in rows.iter().enumerate() {
+            assert_eq!(
+                row.label,
+                track_summary(&c.audio.tracks[i]),
+                "row {i} must be catalog.audio.tracks[{i}]"
+            );
+        }
+    }
+
     /// A track we can't play is still listed — it is a fact about the file — but says so.
     #[test]
     fn an_unplayable_audio_track_is_listed_and_marked() {

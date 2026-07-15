@@ -2914,8 +2914,16 @@ final class CoreModel {
 
     /// The Playback ▸ Audio rows, pulled fresh — same per-file reasoning as the subtitle
     /// flyout: read at open, never cached.
+    ///
+    /// **The order here is the fix, not a detail.** The rows are built first, then what is
+    /// playing is resolved *into* one of them. Resolving earlier — when the player opened —
+    /// could not work: the row list needs the track catalog, whose probe is still in flight
+    /// at that moment, so the lookup ran against an empty list, concluded "nothing is
+    /// playing", and stuck there. The menu then had no tick until you picked a track by
+    /// hand. Both halves only exist together at menu-open, so that is where they are joined.
     func audioTrackRows() -> [AudioTrackRow] {
         core.audio_picker_refresh()
+        resolveActiveAudioRow()
         let n = Int(core.audio_track_count())
         return (0..<n).map { i in
             AudioTrackRow(
@@ -2923,6 +2931,22 @@ final class CoreModel {
                 label: core.audio_track_label(UInt(i)).toString(),
                 active: core.audio_track_active(UInt(i))
             )
+        }
+    }
+
+    /// Ask whichever presenter owns this file what it is playing, and tick that row.
+    ///
+    /// Each route answers in its own currency and on its own schedule: the sample-buffer
+    /// route caches a raw stream index (its decoder lives behind a serial queue, so it
+    /// cannot be asked synchronously), while AVPlayer's current selection is readable on the
+    /// spot. Both resolve to a row only here, against rows that definitely exist.
+    private func resolveActiveAudioRow() {
+        if let sbv = sampleBufferVideo {
+            reportActiveAudioStream(sbv.activeAudioStream)
+        } else if let nv = nativeVideo {
+            reportActiveAudioRow(nv.currentAudioRow())
+        } else {
+            reportActiveAudioRow(-1)
         }
     }
 

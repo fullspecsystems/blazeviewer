@@ -386,18 +386,24 @@ final class SampleBufferPresenter {
 
     // MARK: - Audio track selection (task #99)
 
-    /// Tell the core which audio track is **actually playing**, by finding the picker row
-    /// whose FFmpeg stream index matches what the decoder reports.
+    /// The container stream index this route is **actually playing** (`nil` until the
+    /// decoder has opened and answered).
     ///
-    /// The match happens against the row list rather than the raw index because the tick is
-    /// a row, and because the core's ids are backend-specific — `local_id` is a stream index
-    /// on this route but a running counter on AVPlayer's, so nothing may assume the two are
-    /// interchangeable.
+    /// Cached as the **raw fact**, not resolved to a picker row, because the two are known
+    /// at different times: the decoder answers the moment audio opens, while the rows need
+    /// the track catalog, whose probe is still in flight then. Resolving early was the bug —
+    /// it produced "nothing is playing" against an empty row list and stuck there, so the
+    /// menu had no tick until you picked something. The row is derived at menu-open instead,
+    /// when both halves exist.
+    private(set) var activeAudioStream: Int?
+
+    /// Re-read which stream the decoder is on, and cache it. Async (the feeder owns the
+    /// pointer on its serial queue), which is the other reason this cannot be resolved
+    /// inside the synchronous `menuNeedsUpdate`.
     func reportActiveAudioTrack() {
         audioFeeder.currentTrack { [weak self] stream in
             MainActor.assumeIsolated {
-                guard let self, let model = self.model else { return }
-                model.reportActiveAudioStream(stream)
+                self?.activeAudioStream = stream
             }
         }
     }
@@ -422,6 +428,7 @@ final class SampleBufferPresenter {
                 // the toast may trust the request.
                 self.audioFeeder.currentTrack { stream in
                     MainActor.assumeIsolated {
+                        self.activeAudioStream = stream
                         model.reportActiveAudioStream(stream)
                         model.audioTrackSwitched(row: row, ok: ok)
                     }

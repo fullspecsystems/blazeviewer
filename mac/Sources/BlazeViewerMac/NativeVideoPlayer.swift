@@ -301,21 +301,30 @@ final class NativeVideoPlayer {
             fromPropertyList: option.propertyList, format: .binary, options: 0)
     }
 
-    /// Tell the core which audio track is playing, by matching AVFoundation's current
-    /// selection against the picker rows' stored property lists.
+    /// Which picker row AVFoundation is **actually playing** (`-1` = unknown), by matching
+    /// its current selection against the rows' stored property lists.
     ///
-    /// Cheap (a handful of tracks, only on open/switch) and honest: it reports what the
-    /// player *selected*, including AVFoundation's automatic choice, rather than predicting
-    /// it.
-    func reportActiveAudioTrack() {
-        guard let model, let group = audibleGroup else { return }
-        guard let current = item.currentMediaSelection.selectedMediaOption(in: group),
+    /// Synchronous, unlike the sample-buffer route's decoder: `currentMediaSelection` is
+    /// readable on the spot, so this can be asked at menu-open — which is exactly when it
+    /// must be asked. It reports what the player *selected*, including AVFoundation's own
+    /// automatic choice, rather than predicting it.
+    ///
+    /// Requires the picker rows to be built already (it compares against them), so callers
+    /// must refresh first — `CoreModel.audioTrackRows()` owns that order.
+    func currentAudioRow() -> Int {
+        guard let model, let group = audibleGroup,
+            let current = item.currentMediaSelection.selectedMediaOption(in: group),
             let want = identity(of: current)
         else {
-            model.reportActiveAudioRow(-1)
-            return
+            return -1
         }
-        model.reportActiveAudioRow(model.audioRowMatching(plist: want))
+        return model.audioRowMatching(plist: want)
+    }
+
+    /// Push the current selection to the core (used right after a switch, where the tick
+    /// must move without waiting for the next menu open).
+    func reportActiveAudioTrack() {
+        model?.reportActiveAudioRow(currentAudioRow())
     }
 
     /// Switch to the audio track at picker row `row`.
