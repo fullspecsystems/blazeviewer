@@ -21,6 +21,11 @@ the track catalog, so `resolve_track` was a finished bridge with no traffic on i
 - **Cues stream** — see the perf note below; this is the design decision worth knowing.
 - **Mojibake repair** (`pb_app_core::mojibake`) — `â™ª` → `♪`, provable-only.
 - **`Shift+C` cycles subtitle tracks** with a toast (#99's first slice).
+- **Real-ASS handling**, both found by *printing real cues* rather than by any assertion:
+  ASS **drawing mode** (`{\p1}`…`{\p0}` = vector geometry for logos/signs) was rendering as
+  screenfuls of coordinates on a real Chinese track; and **Half-SBS 3D rips author every
+  subtitle twice** (one per eye, identical but for the margins we ignore), which drew as
+  literal double vision. Both fixed + tested.
 
 Verified: 18/18 suites green (both feature sets), clippy clean, macOS host builds, Windows
 cross-check passes.
@@ -74,10 +79,22 @@ has 163 more (several with forced tracks + ASS worth trying).
    On a Grey's episode you should be able to switch between the embedded track and the
    sidecar and see they're the same content.
 3. **Mojibake:** on Grey's, the `♪` should now render as a music note, not `â™ª`.
-4. **Nothing regressed:** a plain `.srt` beside an MP4 still works via `C`.
-5. **Nav mid-load:** press `C` on a big MKV, then immediately arrow to the next photo.
+4. **ASS tracks** (`/Volumes/Media/Movies`): `Ad.Astra…mkv` has Chinese ASS (stream 5) —
+   should show Chinese text, **not** a wall of `m 211 -8 b 217 -6…` coordinates.
+   `Avatar.The.Way.of.Water…3D…mkv` (stream 3) is a 3D rip whose subs are authored twice —
+   should show each line **once**, not doubled.
+5. **Nothing regressed:** a plain `.srt` beside an MP4 still works via `C`.
+6. **Nav mid-load:** press `C` on a big MKV, then immediately arrow to the next photo.
    Should be instant — no hitch (the read cancels).
-6. **`PB_SUBTITLE_TRACE=1`** prints why nothing is on screen if any of the above is blank.
+7. **`PB_SUBTITLE_TRACE=1`** prints why nothing is on screen if any of the above is blank.
+
+**PGS-only files show nothing, correctly** — `Alita.Battle.Angel…mkv` is `hdmv_pgs_subtitle`
+only, which is bitmap, an explicit #90 non-goal. `C` says "No subtitle tracks". Not a bug.
+
+Small reusable ASS test files (subtitle-stream-only remuxes, ~300 KB, read in 8 ms instead
+of 39 s) can be rebuilt with:
+`ffmpeg -i <film>.mkv -map 0:<sub-stream> -c copy /tmp/ass-test.mkv`, then
+`PB_TEST_SUB_MKV=/tmp/ass-test.mkv PB_TEST_SUB_STREAM=0 cargo test -p pb-decode --features ffvideo -- --ignored --nocapture embedded`
 
 ## Next (in priority order)
 

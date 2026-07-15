@@ -399,6 +399,23 @@ mod tests {
         for c in &cues {
             assert!(!c.text.trim().is_empty(), "no empty cue: {c:?}");
         }
+
+        // The envelope is the part most likely to be silently wrong — a `split` instead
+        // of a separator count truncates at the first comma in the dialogue, and the
+        // result still looks like plausible subtitles. So print samples: a human reading
+        // six lines catches that instantly, and no assertion can.
+        eprintln!("--- first cues (check the envelope came off, and only the envelope):");
+        for c in cues.iter().take(6) {
+            eprintln!("  [{:?} → {:?}] {:?}", c.start, c.end, c.text);
+        }
+        // A leaked envelope would leave digits+commas at the head of the line.
+        for c in &cues {
+            assert!(
+                !c.text.starts_with("Dialogue:"),
+                "the ASS envelope leaked: {:?}",
+                c.text
+            );
+        }
     }
 
     /// Cancellation is what keeps a nav from leaving a worker walking 20 GB. Returning

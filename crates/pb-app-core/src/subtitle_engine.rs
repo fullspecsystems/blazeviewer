@@ -387,9 +387,28 @@ impl SubtitleEngine {
         // reached this part of the film yet, which reads the same as "no cue right now".
         let cues = self.cues.as_ref().expect("checked above");
 
-        // Every active cue's lines, stacked in source order (overlaps are kept, #90.2).
+        // Every active cue's lines, stacked in source order (overlaps are kept, #90.2) —
+        // except that two active cues with *identical text* are drawn once.
+        //
+        // Overlaps are deliberately preserved because authors really do run a sign and a
+        // line of dialogue together. But identical text is different in kind: two such
+        // cues can only differ in position, and we deliberately do not honour ASS
+        // positioning, so drawing both is guaranteed-wrong rather than merely
+        // probably-wrong — it is literal double vision.
+        //
+        // Not hypothetical: a Half-SBS 3D rip authors every subtitle **twice**, once per
+        // eye, identical but for `MarginL`/`MarginR` (`4,964` vs `964,4`). Verified with
+        // ffmpeg — the file really does carry 4718 lines for ~2359 subtitles.
+        let mut seen: Vec<&[String]> = Vec::new();
         let lines: Vec<String> = cues
             .active_at(t)
+            .filter(|c| {
+                let fresh = !seen.contains(&c.lines.as_slice());
+                if fresh {
+                    seen.push(&c.lines);
+                }
+                fresh
+            })
             .flat_map(|c| c.lines.iter().cloned())
             .collect();
         if lines.is_empty() {
@@ -642,6 +661,82 @@ mod tests {
             "the rect is half the pixels at 2x: rect {} px {}",
             r.w,
             b.w
+        );
+    }
+
+    /// A Half-SBS 3D rip authors every subtitle TWICE, once per eye — identical text,
+    /// identical timing, differing only in `MarginL`/`MarginR`, which we deliberately do
+    /// not honour. Drawing both is literal double vision. Verified against a real file
+    /// (4718 ASS lines for ~2359 subtitles); found by looking at output, not by a test.
+    #[test]
+    fn two_active_cues_with_identical_text_draw_once() {
+        let dup = |order| SubtitleCue {
+            start: Duration::from_secs(1),
+            end: Duration::from_secs(2),
+            lines: vec!["The forests of Pandora...".into()],
+            forced: false,
+            source_order: order,
+        };
+        let mut e = SubtitleEngine {
+            mode: SubtitleMode::Automatic,
+            cues: Some(CueTrack::from_cues(vec![dup(0), dup(1)])),
+            raster: Some(SubtitleRasterizer::new()),
+            ..Default::default()
+        };
+        let (vp, video) = viewport();
+        e.update(Duration::from_millis(1500), vp, video, 0.0, 1.0);
+        let doubled = e.bitmap().expect("drew").h;
+
+        // The same cue alone must produce the SAME bitmap — i.e. the duplicate added
+        // nothing. Comparing heights is what catches a second line being stacked.
+        let mut single = SubtitleEngine {
+            mode: SubtitleMode::Automatic,
+            cues: Some(CueTrack::from_cues(vec![dup(0)])),
+            raster: Some(SubtitleRasterizer::new()),
+            ..Default::default()
+        };
+        single.update(Duration::from_millis(1500), vp, video, 0.0, 1.0);
+        assert_eq!(
+            doubled,
+            single.bitmap().expect("drew").h,
+            "a duplicated cue must not stack a second copy"
+        );
+    }
+
+    /// ...but a genuine overlap (a sign AND a line of dialogue) still stacks. The dedup
+    /// keys on identical TEXT, not on overlapping at all — losing the sign would be the
+    /// exact failure `active_at`'s overlap rule exists to prevent.
+    #[test]
+    fn a_genuine_overlap_still_stacks_both() {
+        let cue = |text: &str, order| SubtitleCue {
+            start: Duration::from_secs(1),
+            end: Duration::from_secs(2),
+            lines: vec![text.into()],
+            forced: false,
+            source_order: order,
+        };
+        let mut both = SubtitleEngine {
+            mode: SubtitleMode::Automatic,
+            cues: Some(CueTrack::from_cues(vec![
+                cue("A SIGN ON THE WALL", 0),
+                cue("And a line of dialogue", 1),
+            ])),
+            raster: Some(SubtitleRasterizer::new()),
+            ..Default::default()
+        };
+        let (vp, video) = viewport();
+        both.update(Duration::from_millis(1500), vp, video, 0.0, 1.0);
+
+        let mut one = SubtitleEngine {
+            mode: SubtitleMode::Automatic,
+            cues: Some(CueTrack::from_cues(vec![cue("A SIGN ON THE WALL", 0)])),
+            raster: Some(SubtitleRasterizer::new()),
+            ..Default::default()
+        };
+        one.update(Duration::from_millis(1500), vp, video, 0.0, 1.0);
+        assert!(
+            both.bitmap().unwrap().h > one.bitmap().unwrap().h,
+            "two different cues must stack"
         );
     }
 

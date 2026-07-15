@@ -287,7 +287,28 @@ Two things a future editor must not undo:
   quote stays broken while the opening one repairs. **Found by a test failing for a real
   reason** — the spec would have talked you out of it.
 
-## 4. `Automatic` needed a fallback chain (⚠ owner review)
+## 4. Real ASS tracks bite in two ways — both found by *reading the output*
+
+Every unit test passed. The reader was correct. Then the cues were printed, and two
+defects were obvious in six lines. **Assertions cannot catch these; a human glance can.**
+The corpus-gated test now prints samples for exactly this reason.
+
+- **ASS drawing mode.** `{\p1}` … `{\p0}` means *what follows is not text* — it is vector
+  geometry (`m 211 -8 b 217 -6 217 -4 …`) used for logos and signs. `strip_markup` dutifully
+  removed the `{…}` block and rendered **screenfuls of coordinates** as dialogue. Now
+  dropped (`ass_draw_mode`); we don't typeset vector shapes (that's libass, an explicit
+  non-goal), so showing nothing is right. ⚠ The digit check is load-bearing: `\pos(…)` and
+  `\pbo` also start with `\p`, and treating them as drawings would blank most of a
+  typeset track.
+- **Half-SBS 3D rips author every subtitle twice**, once per eye — identical text and
+  timing, differing only in `MarginL`/`MarginR` (`4,964` vs `964,4`). Verified with ffmpeg:
+  the file genuinely holds 4718 lines for ~2359 subtitles. Since we deliberately ignore
+  ASS positioning the two are *indistinguishable to us*, so drawing both is
+  guaranteed-wrong — literal double vision. The engine now draws identical simultaneous
+  text once. Overlaps in general are still stacked: a sign *and* a line of dialogue is
+  real, and the dedup keys on identical text, not on overlapping.
+
+## 5. `Automatic` needed a fallback chain (⚠ owner review)
 
 The frozen rule was forced-only-matching-the-audio. It is exactly right for its stated
 purpose — stopping `Automatic` from enabling subtitles *by itself*. But `Off` is the

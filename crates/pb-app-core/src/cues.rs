@@ -365,6 +365,9 @@ fn parse_timestamp(s: &str) -> Option<Duration> {
 fn strip_markup(line: &str) -> String {
     let mut out = String::with_capacity(line.len());
     let mut chars = line.chars().peekable();
+    // ASS **drawing mode** (`{\p1}` … `{\p0}`): what follows is not text at all, it is
+    // vector geometry. See `ass_draw_mode`.
+    let mut drawing = false;
     while let Some(c) = chars.next() {
         match c {
             // `<i>`, `</i>`, `<font …>`, WebVTT's `<v Speaker>` and `<00:01.000>`.
@@ -377,12 +380,19 @@ fn strip_markup(line: &str) -> String {
             }
             // ASS/SSA override blocks that leak into .srt: `{\an8}`, `{\i1}`.
             '{' if chars.peek() == Some(&'\\') => {
+                let mut block = String::new();
                 for c in chars.by_ref() {
                     if c == '}' {
                         break;
                     }
+                    block.push(c);
+                }
+                if let Some(on) = ass_draw_mode(&block) {
+                    drawing = on;
                 }
             }
+            // Inside a drawing, every character is a coordinate or a command letter.
+            _ if drawing => {}
             '&' => {
                 // An entity, or a literal ampersand. Bounded lookahead so `A & B` stays.
                 let rest: String = chars.clone().take(8).collect();
@@ -400,6 +410,41 @@ fn strip_markup(line: &str) -> String {
         }
     }
     out.trim().to_string()
+}
+
+/// Does this ASS override block switch **drawing mode**? `Some(true)` = on, `Some(false)`
+/// = off, `None` = the block says nothing about it.
+///
+/// `{\p1}` through `{\p9}` mean "the text that follows is not text" — it is a vector
+/// path in ASS's own drawing language (`m 211 -8 b 217 -6 217 -4 …`: move-to, bezier).
+/// `{\p0}` returns to text. Typesetters use it for logos, signs, and karaoke shapes.
+///
+/// Without this, a real film's Chinese track renders as **screenfuls of coordinates**:
+/// `strip_markup` removes the `{…}` block and then faithfully shows the geometry as
+/// dialogue. Found by looking at real output — every unit test passed, because no test
+/// had ever seen a drawing.
+///
+/// We drop drawings rather than render them: ASS vector shapes are a typesetting engine
+/// (libass), which is an explicit #90 non-goal. Showing nothing is right; showing the
+/// coordinates is not.
+///
+/// ⚠ The digit check is load-bearing: `\pos(…)`, `\pbo…`, and `\p` inside `\pos` all
+/// start with `\p` and none of them is drawing mode. Only `\p` **followed by a digit** is.
+fn ass_draw_mode(block: &str) -> Option<bool> {
+    let mut found = None;
+    // A block holds several tags (`{\an5\fad(0,500)\p1\bord2}`); the last `\p<digits>`
+    // wins, as libass reads them left to right.
+    for tag in block.split('\\').skip(1) {
+        let Some(rest) = tag.strip_prefix('p') else {
+            continue;
+        };
+        // ⚠ `\pos(…)` and `\pbo…` also start with `p`. Only digits mean drawing mode.
+        let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+        if !digits.is_empty() {
+            found = Some(digits.parse::<u32>().unwrap_or(0) > 0);
+        }
+    }
+    found
 }
 
 /// Decode the entity beginning just after an `&`. Returns `(char, chars_consumed)`.
@@ -751,6 +796,49 @@ mod tests {
         let t = CueTrack::parse(&decoded, "subrip");
         assert_eq!(t.len(), 1);
         assert_eq!(t.cues()[0].lines, vec!["こんにちは"]);
+    }
+
+    // -- ASS drawing mode --------------------------------------------------
+
+    /// Real ASS typesetting: `{\p1}` switches to vector geometry, not text. Without this,
+    /// a real film's Chinese track renders as screenfuls of coordinates. Found by looking
+    /// at real output — every unit test passed, because none had seen a drawing.
+    #[test]
+    fn ass_drawing_commands_are_not_text() {
+        // Trimmed from Ad.Astra's real chi track.
+        let line = r"{\an5\fad(0,500)\p1\bord2\c&H000000&\clip(30,188,340,210)}m 211 -8 b 217 -6 217 -4 217 -2 l 217 24{\p0}";
+        assert_eq!(strip_markup(line), "");
+    }
+
+    /// A drawing followed by real text on the same line: `{\p0}` returns to text.
+    #[test]
+    fn text_after_a_drawing_still_shows() {
+        assert_eq!(strip_markup(r"{\p1}m 0 0 l 10 10{\p0}Hello"), "Hello");
+        assert_eq!(strip_markup(r"Before{\p1}m 0 0{\p0}After"), "BeforeAfter");
+    }
+
+    /// ⚠ The digit check. `\pos(...)` and `\pbo` both start with `\p` and neither is
+    /// drawing mode — treating them as one would silently blank ordinary positioned
+    /// dialogue, which is most of a typeset track.
+    #[test]
+    fn pos_and_pbo_are_not_drawing_mode() {
+        assert_eq!(
+            strip_markup(r"{\pos(145,227)}Real dialogue"),
+            "Real dialogue"
+        );
+        assert_eq!(strip_markup(r"{\pbo-5}Real dialogue"), "Real dialogue");
+        assert_eq!(strip_markup(r"{\an8\pos(10,20)\c&HFF&}A sign"), "A sign");
+        assert_eq!(ass_draw_mode(r"\pos(145,227)"), None);
+        assert_eq!(ass_draw_mode(r"\p1"), Some(true));
+        assert_eq!(ass_draw_mode(r"\p0"), Some(false));
+        assert_eq!(ass_draw_mode(r"\i1\b1"), None);
+    }
+
+    /// An unterminated drawing must not leak geometry — better to lose one cue than to
+    /// show a wall of coordinates.
+    #[test]
+    fn an_unterminated_drawing_swallows_the_rest_of_the_line() {
+        assert_eq!(strip_markup(r"{\p1}m 0 0 l 10 10"), "");
     }
 
     // -- the embedded tier (#90.2) -----------------------------------------
