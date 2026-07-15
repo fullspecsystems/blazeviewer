@@ -1,6 +1,6 @@
 # Changelog
 
-All notable changes to PhotoBlaze are recorded here. The format follows
+All notable changes to Blaze Viewer are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions match the Git
 tags / GitHub releases; the installer version is the numeric core (e.g. `0.1.0`),
 with any pre-release suffix carried only by the tag.
