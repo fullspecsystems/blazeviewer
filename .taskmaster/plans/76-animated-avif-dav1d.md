@@ -91,7 +91,7 @@ costs nothing.
 ## Design
 
 ```
-bytes (RAM, from PhotoSource) ─┐
+bytes (RAM, from ItemSource) ─┐
                                ▼
    probe_avis (new; used by BOTH detection and decode — one decision, no dead hints)
      ├─ bounded ISOBMFF box reader (normal + extended sizes, size==0, nesting caps)

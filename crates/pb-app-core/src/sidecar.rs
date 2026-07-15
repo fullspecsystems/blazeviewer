@@ -215,7 +215,7 @@ pub fn match_sidecars(
 ///
 /// Read-only and RAM-only; nothing is written and nothing is remembered (privacy #2 — a
 /// per-file subtitle choice would be a record of what you watched).
-pub fn discover(source: &dyn pb_source::PhotoSource, i: usize) -> Vec<SidecarMatch> {
+pub fn discover(source: &dyn pb_source::ItemSource, i: usize) -> Vec<SidecarMatch> {
     let video_name = source.name(i).to_string();
     // How to get *back* to a sibling later: a real path for a loose file, the archive +
     // entry name for an archive entry. Neither → nothing to reopen, so nothing to offer.
@@ -554,7 +554,7 @@ mod tests {
         ] {
             std::fs::write(dir.join(n), b"x").unwrap();
         }
-        use pb_source::PhotoSource;
+        use pb_source::ItemSource;
         let src = pb_source::FsSource::new(vec![dir.join("clip.mkv")]);
         assert_eq!(src.len(), 1, "only the video is a library item");
 

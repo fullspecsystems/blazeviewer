@@ -30,7 +30,7 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
 
 use pb_decode::{DecodeError, DecodedImage, FitBox};
-use pb_source::PhotoSource;
+use pb_source::ItemSource;
 
 /// Which consumer a decode serves. `Display` covers the viewer's whole ladder
 /// (current / previews / sharp-ring fulls / video posters — their relative
@@ -45,7 +45,7 @@ pub enum Purpose {
 
 /// The injected decode step (resolves the item's bytes from the source, then
 /// decodes; a fake in tests). The pool is **source-agnostic** — it carries the
-/// `PhotoSource` and an item index, never a path, so a filesystem listing and a
+/// `ItemSource` and an item index, never a path, so a filesystem listing and a
 /// ZIP archive flow through the same pool. The `bool` is `allow_preview`: true
 /// requests a fast embedded preview where one exists (HEIC thumbnail, RAW
 /// preview), false forces the full-resolution decode. The [`Purpose`] lets the
@@ -55,7 +55,7 @@ pub enum Purpose {
 /// long steps (the video poster walk, task #79) check it mid-job; single-shot
 /// image decodes may ignore it (the result is discarded either way).
 pub type DecodeFn = dyn Fn(
-        &dyn PhotoSource,
+        &dyn ItemSource,
         usize,
         Option<FitBox>,
         bool,
@@ -170,7 +170,7 @@ struct Job {
     /// next `set_targets` — can't make an in-flight decode resolve against the
     /// wrong source; the stale job keeps its original source and its result is
     /// discarded by epoch/want checks.
-    source: Arc<dyn PhotoSource>,
+    source: Arc<dyn ItemSource>,
     fit: Option<FitBox>,
     /// Whether to decode a fast preview (true) or the full resolution (false).
     preview: bool,
@@ -256,7 +256,7 @@ impl DecodePool {
     /// enqueues newly-wanted items. An epoch change cancels everything stale.
     /// Identity is `(item, purpose)`: a thumb want and a display want for the
     /// same item coexist, and dropping one never cancels the other.
-    pub fn set_targets(&self, epoch: u64, source: &Arc<dyn PhotoSource>, prioritized: &[Want]) {
+    pub fn set_targets(&self, epoch: u64, source: &Arc<dyn ItemSource>, prioritized: &[Want]) {
         let mut inner = self.shared.inner.lock().unwrap();
 
         if epoch != inner.epoch {
@@ -467,7 +467,7 @@ mod tests {
     /// cancellation / budget only — the decode fns key off the item index and
     /// never touch the source's bytes.
     struct FakeSource;
-    impl PhotoSource for FakeSource {
+    impl ItemSource for FakeSource {
         fn len(&self) -> usize {
             usize::MAX
         }
@@ -479,7 +479,7 @@ mod tests {
         }
     }
 
-    fn source() -> Arc<dyn PhotoSource> {
+    fn source() -> Arc<dyn ItemSource> {
         Arc::new(FakeSource)
     }
 

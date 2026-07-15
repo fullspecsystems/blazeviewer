@@ -31,7 +31,7 @@ Branch `feat/subtitle-display` (merged to `main` this session). Owner's read on 
 
 **What shipped:**
 - **Sidecar discovery** (#90.1) — `Movie.eng.srt` / `.vtt` beside `Movie.mkv`, pure matching over a
-  sibling list. `PhotoSource` gained `sibling_names`/`sibling_bytes` so **archives work too** (a
+  sibling list. `ItemSource` gained `sibling_names`/`sibling_bytes` so **archives work too** (a
   `.srt` in a ZIP was previously unreachable — `bytes(i)` is index-only and sidecars aren't indexed).
 - **Cues** (#90.2, *sidecars only*) — SubRip + WebVTT → timed plain text, overlaps kept.
 - **Style / placement / rasterizer** (#90.3/.4 core) — the owner's eight axes, one cosmic-text

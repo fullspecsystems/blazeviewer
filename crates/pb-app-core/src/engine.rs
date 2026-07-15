@@ -13,7 +13,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use pb_decode::{decode_named_bytes, DecodeError, DecodedImage, FitBox, PixelFormat};
 use pb_render::{Rotation, ScaleMode};
-use pb_source::PhotoSource;
+use pb_source::ItemSource;
 
 use crate::meta::PhotoMeta;
 use crate::settings::ScaleModePref;
@@ -306,7 +306,7 @@ pub fn rel_to_root(path: &Path, root: &Path) -> String {
 /// file, the archive-relative entry name otherwise) plus the decoded dimensions
 /// and codec.
 pub fn meta_for(
-    source: &dyn PhotoSource,
+    source: &dyn ItemSource,
     item: usize,
     root: &Path,
     img: &DecodedImage,
@@ -329,7 +329,7 @@ pub fn meta_for(
 /// (first-frame / resize / copy) paths, so a filesystem photo and a ZIP entry
 /// decode through exactly the same routing. All reads are RAM-only.
 pub fn decode_item(
-    source: &dyn PhotoSource,
+    source: &dyn ItemSource,
     item: usize,
     fit: Option<FitBox>,
     allow_preview: bool,
@@ -343,7 +343,7 @@ pub fn decode_item(
 /// routing; a `Display` request never does (its previews come from the
 /// format backends' own `allow_preview` paths at display size).
 pub fn decode_item_for(
-    source: &dyn PhotoSource,
+    source: &dyn ItemSource,
     item: usize,
     fit: Option<FitBox>,
     allow_preview: bool,
@@ -376,7 +376,7 @@ pub fn decode_item_for(
 /// decodes ignore the flag (bounded, single-shot); the pool still cancels them at
 /// the queue and discards stale results.
 pub fn decode_item_cancellable(
-    source: &dyn PhotoSource,
+    source: &dyn ItemSource,
     item: usize,
     fit: Option<FitBox>,
     allow_preview: bool,
@@ -534,7 +534,7 @@ pub fn video_placeholder(container: crate::video::VideoContainer) -> DecodedImag
 /// safety fallback; the animation (GIF/APNG/WebP/HEIF sequence) branch below is the live one.
 pub fn decode_motion_job(
     live: Option<PathBuf>,
-    source: &Arc<dyn PhotoSource>,
+    source: &Arc<dyn ItemSource>,
     item: usize,
     fit: Option<FitBox>,
     cancel: &std::sync::atomic::AtomicBool,

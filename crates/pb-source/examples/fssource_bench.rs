@@ -15,7 +15,7 @@
 use std::path::PathBuf;
 use std::time::Instant;
 
-use pb_source::{FsSource, PhotoSource};
+use pb_source::{FsSource, ItemSource};
 
 fn synthetic_paths(n: usize) -> Vec<PathBuf> {
     // A realistic-ish nested layout so `display_name` (which inspects the path) does real work.

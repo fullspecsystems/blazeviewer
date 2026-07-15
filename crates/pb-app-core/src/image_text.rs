@@ -20,7 +20,7 @@
 use std::sync::mpsc::Receiver;
 
 use pb_render::Rotation;
-use pb_source::PhotoSource;
+use pb_source::ItemSource;
 
 use crate::engine::{decode_item, rotate_rgba8, to_clipboard_rgba8};
 
@@ -90,7 +90,7 @@ pub struct TextScan {
 /// rotation override (OCR needs the pixels upright as displayed), then QR + OCR.
 /// Never returns an Err — failures fold into [`ImageText::ocr_error`] so the panel
 /// and toast have one shape to render.
-pub fn scan_job(source: &dyn PhotoSource, item: usize, rot: Rotation) -> ImageText {
+pub fn scan_job(source: &dyn ItemSource, item: usize, rot: Rotation) -> ImageText {
     let img = match decode_item(source, item, None, false) {
         Ok(img) => img,
         Err(e) => {
@@ -108,7 +108,7 @@ pub fn scan_job(source: &dyn PhotoSource, item: usize, rot: Rotation) -> ImageTe
 }
 
 /// QR + OCR over a straight-alpha RGBA8 buffer. Split from [`scan_job`] so tests can
-/// feed synthetic bitmaps without a `PhotoSource`.
+/// feed synthetic bitmaps without a `ItemSource`.
 pub fn analyze_rgba(rgba: Vec<u8>, w: u32, h: u32) -> ImageText {
     let gray = grayscale(&rgba);
     let qr = qr_payloads(&gray, w, h);

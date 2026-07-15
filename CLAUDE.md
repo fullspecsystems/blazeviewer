@@ -54,7 +54,7 @@ crates/
   pb-core    pure nav / precomputed-random / prefetch / cache-residency
              — no I/O, no GPU, deterministic, 100% unit-testable
   pb-decode  decode abstraction (decode-to-fit + preview-first) + swappable backends
-  pb-source  PhotoSource seam: "encoded bytes + name for item i" over a filesystem
+  pb-source  ItemSource seam: "encoded bytes + name for item i" over a filesystem
              listing (FsSource), a ZIP (ZipSource), or a 7z (SevenZSource) — RAM-only,
              read-only on the view path; archive viewing lives here
   pb-render  fit-to-screen geometry now; wgpu presenter (swapchain, ring, draw) later
@@ -497,7 +497,7 @@ pragmatic crate choices differ from the table above and are the current baseline
   replays via seek-to-0. 4K30 software decode is comfortable; 4K60 is borderline — NV12 +
   in-shader YUV or hardware decode is the reserved escalation (ADR-012).
 - **Archive viewing (ZIP + 7z)** (tasks.json #30) is wired in the new `pb-source` crate
-  behind the `PhotoSource` seam, decoded via `pb_decode::decode_named_bytes` (bytes +
+  behind the `ItemSource` seam, decoded via `pb_decode::decode_named_bytes` (bytes +
   extension hint). ZIP = lazy per-entry (handle pool for parallel reads); 7z = **eager
   decode-to-RAM** (solid archives have no cheap random access), opened **off-thread** with
   a RAM **pre-flight that predict-and-refuses** archives that won't fit (a real OOM aborts

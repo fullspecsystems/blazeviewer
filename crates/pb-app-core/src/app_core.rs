@@ -22,7 +22,7 @@ use pb_core::{Playlist, ResidentRing};
 use pb_decode::FitBox;
 use pb_hud::hud::Hud;
 use pb_render::{Renderer, Rotation, ViewTransform};
-use pb_source::PhotoSource;
+use pb_source::ItemSource;
 
 use crate::animation::{AnimDecode, AnimStream, Playback, Prepared};
 use crate::contract::CoreEffect;
@@ -58,7 +58,7 @@ pub struct FsTreeIo {
 /// re-opening the archive file.
 #[derive(Clone)]
 pub struct ArchiveScope {
-    pub full: Arc<dyn PhotoSource>,
+    pub full: Arc<dyn ItemSource>,
     pub prefix: String,
 }
 
@@ -323,7 +323,7 @@ pub struct AppCore {
 
     // --- Nav / playlist (NS0 5.3) ---
     /// The photo source (filesystem / ZIP / 7z) behind the current playlist.
-    pub source: Arc<dyn PhotoSource>,
+    pub source: Arc<dyn ItemSource>,
     /// Archive decks only: the **unscoped** just-opened source plus the active
     /// internal-folder scope (see [`ArchiveScope`]). `None` for disk decks.
     /// Re-scoping (⇧F tree click, Go commands) filters `full` through a

@@ -16,14 +16,14 @@ pub use pb_decode::video::{
     video_content_type, SeekGeneration, VideoColorInfo, VideoFrame, VideoInput, VideoProducerEvent,
     VideoProducerMsg, VideoSessionId,
 };
-use pb_source::PhotoSource;
+use pb_source::ItemSource;
 
 // ---------------------------------------------------------------------------
 // Item model: typed classification, dispatched before any bytes() request.
 // ---------------------------------------------------------------------------
 
 /// What a scanned library entry *is* — decided at scan time from the path, carried on
-/// the item, and dispatched on **before** any `PhotoSource::bytes()` call. Today the
+/// the item, and dispatched on **before** any `ItemSource::bytes()` call. Today the
 /// engine reads bytes unconditionally (`engine.rs::decode_item`); video items are
 /// path-only (the platform readers stream from disk), so the type — not a convention —
 /// keeps whole-file RAM reads off the video path.
@@ -141,8 +141,8 @@ pub fn classify_library_file(path: &Path) -> Option<LibraryItemKind> {
 /// any `source.bytes()` request. O(1) and pure: video is decided by the item **name's**
 /// extension (the same rule the scanner/archive predicate admitted it under). The name
 /// covers both worlds — a filesystem item's file name and an archive entry's
-/// archive-relative name both end in the real extension (a `PhotoSource` contract).
-pub fn item_kind(source: &dyn PhotoSource, item: usize) -> LibraryItemKind {
+/// archive-relative name both end in the real extension (a `ItemSource` contract).
+pub fn item_kind(source: &dyn ItemSource, item: usize) -> LibraryItemKind {
     source
         .name(item)
         .rsplit_once('.')
@@ -522,7 +522,7 @@ mod tests {
     #[test]
     fn item_kind_types_archive_video_entries_by_name() {
         struct FakeArchive;
-        impl pb_source::PhotoSource for FakeArchive {
+        impl pb_source::ItemSource for FakeArchive {
             fn len(&self) -> usize {
                 2
             }

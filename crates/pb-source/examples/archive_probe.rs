@@ -28,7 +28,7 @@
 use std::path::Path;
 use std::time::Instant;
 
-use pb_source::{seven_z_projected_bytes, OpenProgress, PhotoSource, SevenZSource};
+use pb_source::{seven_z_projected_bytes, ItemSource, OpenProgress, SevenZSource};
 
 /// The image extensions the app decodes — a mirror of
 /// `pb_decode::is_supported_extension` for the common photo formats, enough to

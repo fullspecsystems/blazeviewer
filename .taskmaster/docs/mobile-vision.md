@@ -2,7 +2,7 @@
 
 > Status: **vision / design note**, not committed work. Captures a direction that
 > emerged 2026-07-13. The concrete first engineering step is task **#88** (Apple
-> Photos Library as a `PhotoSource`), which doubles as the iOS photo-access foundation.
+> Photos Library as a `ItemSource`), which doubles as the iOS photo-access foundation.
 
 ## The thesis
 
@@ -162,7 +162,7 @@ keyboard does on desktop.
 
 ## Relationship to current work
 
-- **Task #88** (Apple Photos Library `PhotoSource`) is the concrete first step and the
+- **Task #88** (Apple Photos Library `ItemSource`) is the concrete first step and the
   shared Apple foundation. Its Route B (PhotoKit) is the iOS photo access; keep it
   seam-clean so it ports.
 - A **selection + batch-ops** feature in `pb-app-core` is the other prerequisite and

@@ -45,17 +45,25 @@ use sevenz_rust2::{
 };
 use zip::ZipArchive;
 
-/// A uniform, read-only source of encoded image bytes addressed by item index.
+/// A uniform, read-only source of encoded bytes addressed by item index.
+///
+/// **Items, not photos** (the trait was `PhotoSource` until task #101). An item is an
+/// image *or* a video: task #79 made videos first-class, and an archive-hosted clip has
+/// no path, so it plays from [`bytes`] through the `VideoInput::Bytes` seam exactly as an
+/// image decodes from them. Nothing here is necessarily a *file* either — a ZIP/7z entry
+/// is bytes in RAM, which is why [`path`] returns `Option`. Abstracting over both is the
+/// whole point of the seam, so the name stays neutral.
 ///
 /// Implementations must be `Send + Sync`: the decode pool calls [`bytes`] from
 /// many worker threads concurrently.
 ///
-/// [`bytes`]: PhotoSource::bytes
-pub trait PhotoSource: Send + Sync {
-    /// Number of playable images in this source.
+/// [`bytes`]: ItemSource::bytes
+/// [`path`]: ItemSource::path
+pub trait ItemSource: Send + Sync {
+    /// Number of items (images and videos) in this source.
     fn len(&self) -> usize;
 
-    /// Whether the source has no images.
+    /// Whether the source has no items.
     fn is_empty(&self) -> bool {
         self.len() == 0
     }
@@ -78,7 +86,7 @@ pub trait PhotoSource: Send + Sync {
     /// rather than loose files. `None` for a filesystem listing. The info panel
     /// shows it as the location for an entry that has no standalone [`path`].
     ///
-    /// [`path`]: PhotoSource::path
+    /// [`path`]: ItemSource::path
     fn container(&self) -> Option<&Path> {
         None
     }
@@ -100,7 +108,7 @@ pub trait PhotoSource: Send + Sync {
     /// out-of-range `i`. Feeds the info panel's file-size row for archive entries
     /// that are never read whole (videos), and pre-flight size checks.
     ///
-    /// [`path`]: PhotoSource::path
+    /// [`path`]: ItemSource::path
     fn size_hint(&self, i: usize) -> Option<u64> {
         let _ = i;
         None
@@ -114,7 +122,7 @@ pub trait PhotoSource: Send + Sync {
     /// never index it, so it has no item index, so `len()`/`name(i)`/`bytes(i)` cannot
     /// reach it. This is the only door to it.
     ///
-    /// Returns names in the **same shape as [`name`](PhotoSource::name)** for this source:
+    /// Returns names in the **same shape as [`name`](ItemSource::name)** for this source:
     /// bare file names for a filesystem listing, archive-relative names for an archive.
     /// Scoped to item `i`'s own directory — a sidecar is a *sibling*, not any file in the
     /// archive. The video itself and other library items may be included; callers filter.
@@ -129,7 +137,7 @@ pub trait PhotoSource: Send + Sync {
         Vec::new()
     }
 
-    /// Read a sibling that [`sibling_names`](PhotoSource::sibling_names) returned for item
+    /// Read a sibling that [`sibling_names`](ItemSource::sibling_names) returned for item
     /// `i`. Read-only and RAM-only, like every other read here (privacy #2).
     ///
     /// `name` must be one the source itself produced; anything else is `NotFound`. The
@@ -159,7 +167,7 @@ impl FsSource {
     }
 }
 
-impl PhotoSource for FsSource {
+impl ItemSource for FsSource {
     fn len(&self) -> usize {
         self.paths.len()
     }
@@ -465,7 +473,7 @@ impl ZipSource {
     }
 }
 
-impl PhotoSource for ZipSource {
+impl ItemSource for ZipSource {
     fn len(&self) -> usize {
         self.entries.len()
     }
@@ -540,7 +548,7 @@ impl PhotoSource for ZipSource {
     }
 
     /// Read a sibling entry by its exact archive name. Same bomb guards as
-    /// [`bytes`](PhotoSource::bytes) — a sidecar is untrusted input like anything else in
+    /// [`bytes`](ItemSource::bytes) — a sidecar is untrusted input like anything else in
     /// the archive.
     fn sibling_bytes(&self, i: usize, name: &str) -> io::Result<Vec<u8>> {
         // Scope the lookup to item `i`'s own directory, so a name from elsewhere in the
@@ -614,7 +622,7 @@ struct SevenZEntry {
 /// there is no cheap per-entry random access — to read any file you must
 /// decompress the block before it. So this decodes every supported-image entry
 /// once on open (a single sequential pass) into an in-RAM `index → bytes` map,
-/// after which [`bytes`](PhotoSource::bytes) is an instant RAM copy and prefetch /
+/// after which [`bytes`](ItemSource::bytes) is an instant RAM copy and prefetch /
 /// navigation behave normally.
 ///
 /// **Cost:** peak RAM ≈ the sum of the decompressed image bytes, held for the
@@ -916,7 +924,7 @@ impl SevenZSource {
     }
 }
 
-impl PhotoSource for SevenZSource {
+impl ItemSource for SevenZSource {
     fn len(&self) -> usize {
         self.entries.len()
     }
@@ -964,14 +972,14 @@ impl PhotoSource for SevenZSource {
 /// `a/bc/z.jpg`). Names stay full archive-relative paths, so folder grouping,
 /// the title, and the info panel read unchanged. RAM-only, like everything here.
 pub struct ScopedSource {
-    inner: Arc<dyn PhotoSource>,
+    inner: Arc<dyn ItemSource>,
     index: Vec<usize>,
 }
 
 impl ScopedSource {
     /// Scope `inner` to the entries under the forward-slashed folder `prefix`
     /// (`""` = everything). One pass over the in-RAM name list — no I/O.
-    pub fn new(inner: Arc<dyn PhotoSource>, prefix: &str) -> Self {
+    pub fn new(inner: Arc<dyn ItemSource>, prefix: &str) -> Self {
         let index = (0..inner.len())
             .filter(|&i| name_in_scope(inner.name(i), prefix))
             .collect();
@@ -979,7 +987,7 @@ impl ScopedSource {
     }
 }
 
-impl PhotoSource for ScopedSource {
+impl ItemSource for ScopedSource {
     fn len(&self) -> usize {
         self.index.len()
     }
@@ -1291,7 +1299,7 @@ mod tests {
             ],
             None,
         );
-        let full: Arc<dyn PhotoSource> = Arc::new(ZipSource::open(&zip, None, is_img).unwrap());
+        let full: Arc<dyn ItemSource> = Arc::new(ZipSource::open(&zip, None, is_img).unwrap());
 
         let scoped = ScopedSource::new(Arc::clone(&full), "a/b");
         let names: Vec<&str> = (0..scoped.len()).map(|i| scoped.name(i)).collect();
@@ -1951,7 +1959,7 @@ mod tests {
             ],
             None,
         );
-        let inner: Arc<dyn PhotoSource> = Arc::new(ZipSource::open(&z, None, is_img).unwrap());
+        let inner: Arc<dyn ItemSource> = Arc::new(ZipSource::open(&z, None, is_img).unwrap());
         let scoped = ScopedSource::new(inner, "S1");
         assert_eq!(scoped.len(), 1);
         assert!(scoped

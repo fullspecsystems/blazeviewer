@@ -113,18 +113,18 @@ walkdir's symlink/error safety — no hand-rolled walker, no comparator.
 ### Problem 2 — The growable playlist
 
 `FsSource` is immutable: two owned `Vec`s built once (`pb-source/src/lib.rs:96-128`),
-shared as `Arc<dyn PhotoSource>` across decode threads as `&self`, returning **borrowed**
+shared as `Arc<dyn ItemSource>` across decode threads as `&self`, returning **borrowed**
 `&str`/`&Path` (`trait`, `lib.rs:52-94`). True interior mutability is awkward (can't
 borrow through a lock), so:
 
 **Solution — snapshot-swap, built off-thread, time-bounded batching. [R1]** The scan
 worker streams matches and **constructs each `FsSource` snapshot itself, off the event
-loop**, sending a **ready-to-use `Arc<dyn PhotoSource>`** over the channel; the event loop
+loop**, sending a **ready-to-use `Arc<dyn ItemSource>`** over the channel; the event loop
 then swaps `self.source` in **O(1)** (just an `Arc` store). This sidesteps the unmeasured
 "negligible" claim entirely — the per-batch O(N) work (cloning the cumulative `Vec` +
 rebuilding names in `FsSource::new`, `pb-source/src/lib.rs:105`) never touches the hot
 thread. Batches are **time-bounded (~150 ms)**, not per-count (per-count would risk O(N²)).
-No `PhotoSource` trait change.
+No `ItemSource` trait change.
 
 - **[R1] Measure, don't assert:** add a Criterion microbench for snapshot construction at
   **10k / 100k / 1M** paths, and an instrumented per-scan log of snapshot build time. If a

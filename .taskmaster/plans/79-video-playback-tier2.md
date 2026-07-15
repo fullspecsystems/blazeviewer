@@ -45,7 +45,7 @@ escalation), native HDR video output (see Color policy).
 3. **The extension predicate is shared with archive indexing** (`pb-source/src/lib.rs:277,494,
    950` — callers pass `pb_decode::is_supported_extension` in). Broadening it would index
    videos inside ZIPs, violating path-only. Predicates must split (phase 1).
-4. **`PhotoSource::bytes()` is unconditional and `decode_item` always calls it**
+4. **`ItemSource::bytes()` is unconditional and `decode_item` always calls it**
    (`engine.rs:223`) — "check the extension first" is a convention, not enforcement. Video
    needs a **typed item classification** dispatched before any bytes request.
 5. Prior survey facts stand: PTS discarded (`mf_video.rs:206`), Windows negotiates full-size

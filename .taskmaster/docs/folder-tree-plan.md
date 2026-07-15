@@ -92,7 +92,7 @@ uniformly:
   slash-delimited.
 
 This means one small function derives "children of this folder" for any
-`PhotoSource`, and the exact same overlay renders whether you opened a folder
+`ItemSource`, and the exact same overlay renders whether you opened a folder
 or a `.zip`/`.7z`. No archive-specific UI branch.
 
 ## Phase 1 — render only (this pass)
@@ -195,7 +195,7 @@ design that ⌘-chords make unnecessary for now.
 - **Archives navigate too — no dimmed second-class rows** (owner: make it
   *work* rather than styling the gap). Click targets are an enum:
   `Dir(PathBuf)` | `ArchiveScope(String prefix)`. Opening a scope wraps the
-  **original** archive source in a `ScopedSource` (a PhotoSource delegating
+  **original** archive source in a `ScopedSource` (a ItemSource delegating
   through an index map of entries under the prefix — pure RAM, zip + 7z
   identical) and rebuilds via the existing `rebuild_playlist`. The tree keeps
   deriving from the *unscoped* source's names, so out-of-scope siblings stay
@@ -236,7 +236,7 @@ token→theme sweep to avoid a two-writer collision in `hud.rs` /
 ## Implementation order (each step green: tests, clippy -D warnings, fmt)
 
 1. **Phase 1 data helper** — relative-path-segments function over
-   `PhotoSource`, unit-tested against `FsSource` and both archive sources
+   `ItemSource`, unit-tested against `FsSource` and both archive sources
    (including the archive-has-no-disk-path case).
 2. **Action + keymap** — `Action::ToggleFolderTree`, default Shift+F, added to
    `EDITOR_GROUPS`, verified free.

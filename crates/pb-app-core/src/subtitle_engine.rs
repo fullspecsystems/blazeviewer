@@ -19,7 +19,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use pb_hud::subtitle::{SubtitleBitmap, SubtitleRasterizer};
-use pb_source::PhotoSource;
+use pb_source::ItemSource;
 
 use crate::cues::CueTrack;
 use crate::subtitle::{place, Rect, SubtitleMode, SubtitleStyle};
@@ -159,7 +159,7 @@ impl SubtitleEngine {
     }
 
     /// Kick the workers for `item` if needed. Idempotent and cheap when warm.
-    pub fn ensure_loaded(&mut self, source: &Arc<dyn PhotoSource>, item: usize, deck_gen: u64) {
+    pub fn ensure_loaded(&mut self, source: &Arc<dyn ItemSource>, item: usize, deck_gen: u64) {
         // The rasterizer: once, ever. 261 ms is worth paying a single time.
         if self.raster.is_none() && self.raster_rx.is_none() {
             let (tx, rx) = std::sync::mpsc::channel();
@@ -312,7 +312,7 @@ impl SubtitleEngine {
 ///
 /// Read-only and RAM-only (privacy #2): the bytes are parsed and dropped, and nothing
 /// about which subtitle was shown is remembered.
-fn load_cues(source: &dyn PhotoSource, item: usize) -> Option<CueTrack> {
+fn load_cues(source: &dyn ItemSource, item: usize) -> Option<CueTrack> {
     let found = crate::sidecar::discover(source, item);
     // Until the #99 picker exists there is nothing to choose *with*, so take the first
     // renderable one. This is the temporary bit: #99 replaces it with a real selection.
@@ -329,7 +329,7 @@ fn load_cues(source: &dyn PhotoSource, item: usize) -> Option<CueTrack> {
 /// Read a sidecar back through the source that found it — never by building a path
 /// ourselves, so the source's own containment rules still apply.
 fn read_sidecar(
-    source: &dyn PhotoSource,
+    source: &dyn ItemSource,
     item: usize,
     origin: &pb_decode::tracks::SidecarOrigin,
 ) -> Option<Vec<u8>> {
@@ -458,7 +458,7 @@ mod tests {
     }
 
     /// The whole load path over a **real** filesystem, not a fake: an `.srt` beside a
-    /// video is discovered through `PhotoSource`, read back through it, decoded, and
+    /// video is discovered through `ItemSource`, read back through it, decoded, and
     /// parsed into cues. Every piece between "a file exists on disk" and "the engine has
     /// a track" is exercised here — the parts a fake source would paper over.
     #[test]

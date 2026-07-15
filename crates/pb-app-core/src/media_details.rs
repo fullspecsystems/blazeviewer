@@ -18,7 +18,7 @@
 use std::sync::mpsc::Receiver;
 use std::sync::Arc;
 
-use pb_source::PhotoSource;
+use pb_source::ItemSource;
 
 use crate::app_core::ItemDetails;
 
@@ -64,7 +64,7 @@ pub enum ProbeState {
 /// Spawn the probe for `item`, returning the handle to poll. The worker owns an `Arc` of
 /// the source, so it stays alive even if the deck is rebuilt underneath it.
 pub fn spawn(
-    source: &Arc<dyn PhotoSource>,
+    source: &Arc<dyn ItemSource>,
     item: usize,
     gen: u64,
     identity: String,
@@ -90,7 +90,7 @@ pub fn spawn(
 ///
 /// `generation` stamps every [`pb_decode::TrackId`] in the catalog, so a `TrackId` minted
 /// here can never resolve against the deck that replaced this one.
-pub fn probe_job(source: &dyn PhotoSource, item: usize, generation: u64) -> ItemDetails {
+pub fn probe_job(source: &dyn ItemSource, item: usize, generation: u64) -> ItemDetails {
     // The panel's file size comes from a stat, or the archive directory's size hint for an
     // entry — never from reading the file.
     let size = source

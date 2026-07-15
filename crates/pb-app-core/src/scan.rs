@@ -12,17 +12,17 @@ use std::sync::Arc;
 
 use pb_core::open::{self, Source};
 use pb_decode::is_supported_extension;
-use pb_source::{seven_z_projected_bytes, FsSource, PhotoSource, SevenZSource, ZipSource};
+use pb_source::{seven_z_projected_bytes, FsSource, ItemSource, SevenZSource, ZipSource};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
-/// A resolved playlist: the concrete [`PhotoSource`] plus the framing the app needs (display
+/// A resolved playlist: the concrete [`ItemSource`] plus the framing the app needs (display
 /// root, the scan root for `Ctrl+R`, recursive flag, start index). `Clone` is a cheap `Arc`
-/// bump (the source is shared); `Debug` is manual since `dyn PhotoSource` isn't `Debug` — both
+/// bump (the source is shared); `Debug` is manual since `dyn ItemSource` isn't `Debug` — both
 /// let it ride on `CoreEvent::ScanBatch` (NS0 5.6 Step 3).
 #[derive(Clone)]
 pub struct Resolved {
-    pub source: Arc<dyn PhotoSource>,
+    pub source: Arc<dyn ItemSource>,
     pub root: PathBuf,
     pub scan_root: Option<PathBuf>,
     pub recursive: bool,
@@ -80,7 +80,7 @@ pub fn build_resolved(
 
 /// A [`Resolved`] for an archive `source`: the archive path is the display root, and entry names
 /// are already archive-relative (so the info panel uses them).
-pub fn archive_resolved(path: &Path, source: Arc<dyn PhotoSource>) -> Resolved {
+pub fn archive_resolved(path: &Path, source: Arc<dyn ItemSource>) -> Resolved {
     Resolved {
         root: path.to_path_buf(),
         source,
@@ -699,7 +699,7 @@ pub fn load_seven_z(
     Ok(archive_resolved(path, Arc::new(src)))
 }
 
-/// Turn a planned [`Source`] into a concrete [`PhotoSource`] plus playlist framing.
+/// Turn a planned [`Source`] into a concrete [`ItemSource`] plus playlist framing.
 /// Scans and explicit lists become an [`FsSource`]; an archive opens a
 /// [`ZipSource`] (entries read into RAM on demand, never extracted to disk). On a
 /// hard archive failure it logs and falls back to an empty source.

@@ -19,7 +19,7 @@ use pb_core::{
 };
 use pb_decode::{read_exif_fields, FitBox};
 use pb_render::{test_pattern, Rotation, ScaleMode, ViewTransform, MAX_ZOOM, MIN_ZOOM};
-use pb_source::{FsSource, PhotoSource};
+use pb_source::{FsSource, ItemSource};
 
 use hud::Row;
 use pb_hud::{hud, icon};
@@ -68,7 +68,7 @@ impl AppCore {
     /// per event (the core never reads the wall clock itself — NS0 0.3).
     pub fn headless(viewport: crate::Viewport) -> AppCore {
         // A 1-worker pool whose decode always errors: a headless core has no photos, so it's
-        // never invoked. A real host installs a decode closure over its `PhotoSource`.
+        // never invoked. A real host installs a decode closure over its `ItemSource`.
         let decode: Arc<crate::decode_pool::DecodeFn> =
             Arc::new(|_src, _item, _fit, _prev, _purpose, _cancel| {
                 Err(pb_decode::DecodeError::Corrupt("headless".into()))
@@ -76,7 +76,7 @@ impl AppCore {
         let (pool, results) = crate::decode_pool::DecodePool::new(1, 1 << 20, decode);
         let (poster_read_tx, poster_read_rx) = std::sync::mpsc::channel();
         let (video_read_tx, video_read_rx) = std::sync::mpsc::channel();
-        let source: Arc<dyn PhotoSource> = Arc::new(FsSource::new(Vec::new()));
+        let source: Arc<dyn ItemSource> = Arc::new(FsSource::new(Vec::new()));
         let settings = settings::Settings::default();
         AppCore {
             now: Instant::now(),
@@ -701,7 +701,7 @@ impl AppCore {
             .collect();
         let at = index.min(paths.len());
         paths.insert(at, path.to_path_buf());
-        let src: Arc<dyn PhotoSource> = Arc::new(FsSource::new(paths));
+        let src: Arc<dyn ItemSource> = Arc::new(FsSource::new(paths));
         let root = self.root.clone();
         let scan_root = self.scan_root.clone();
         let recursive = self.recursive;
@@ -2656,7 +2656,7 @@ impl AppCore {
         let Some(scope) = self.archive_scope.clone() else {
             return;
         };
-        let source: Arc<dyn PhotoSource> = if prefix.is_empty() {
+        let source: Arc<dyn ItemSource> = if prefix.is_empty() {
             Arc::clone(&scope.full)
         } else {
             Arc::new(pb_source::ScopedSource::new(
@@ -2863,7 +2863,7 @@ impl AppCore {
                     .filter(|&i| i != removed)
                     .filter_map(|i| self.source.path(i).map(Path::to_path_buf))
                     .collect();
-                let src: Arc<dyn PhotoSource> = Arc::new(FsSource::new(remaining));
+                let src: Arc<dyn ItemSource> = Arc::new(FsSource::new(remaining));
                 let root = self.root.clone();
                 let scan_root = self.scan_root.clone();
                 let recursive = self.recursive;
@@ -2937,7 +2937,7 @@ impl AppCore {
     /// old set.
     pub fn rebuild_playlist(
         &mut self,
-        source: Arc<dyn PhotoSource>,
+        source: Arc<dyn ItemSource>,
         root: PathBuf,
         scan_root: Option<PathBuf>,
         recursive: bool,
@@ -3152,7 +3152,7 @@ impl AppCore {
     /// Precedence: an explicit `--start-at` wins; else `--shuffle` starts on a random photo; else
     /// `--reverse` starts on the last. For a **streamed** folder scan `source` is the first batch,
     /// so a large `--start-at N` (or the random pick) is over what has loaded so far.
-    fn launch_start_index(&self, source: &dyn PhotoSource) -> Option<usize> {
+    fn launch_start_index(&self, source: &dyn ItemSource) -> Option<usize> {
         let len = source.len();
         if len == 0 {
             return None;
@@ -5028,7 +5028,7 @@ impl AppCore {
     /// the same photo). New neighbours become decodable, so we re-issue prefetch (still the
     /// scanning, anti-thrash variant — the scan isn't done yet), and the title's "X / N"
     /// total ticks up. A no-op if the snapshot isn't actually larger.
-    pub fn extend_playlist(&mut self, source: Arc<dyn PhotoSource>) {
+    pub fn extend_playlist(&mut self, source: Arc<dyn ItemSource>) {
         let new_len = source.len();
         if new_len <= self.source.len() {
             return;
@@ -9017,7 +9017,7 @@ mod tests {
     }
 
     /// A five-item source named `a.jpg`..`e.jpg` under a folder, for the launch-start tests.
-    fn five_photos() -> Arc<dyn PhotoSource> {
+    fn five_photos() -> Arc<dyn ItemSource> {
         Arc::new(FsSource::new(
             ["a", "b", "c", "d", "e"]
                 .iter()
@@ -9033,7 +9033,7 @@ mod tests {
         // toast shows on the recovered photo).
         let mut core = test_core();
         let root = PathBuf::from("photos");
-        let deck = |names: &[&str]| -> Arc<dyn PhotoSource> {
+        let deck = |names: &[&str]| -> Arc<dyn ItemSource> {
             Arc::new(FsSource::new(
                 names
                     .iter()
@@ -9064,7 +9064,7 @@ mod tests {
         // restored photo is appended rather than lost or panicking.
         let mut core = test_core();
         let root = PathBuf::from("photos");
-        let src: Arc<dyn PhotoSource> = Arc::new(FsSource::new(vec![root.join("a.jpg")]));
+        let src: Arc<dyn ItemSource> = Arc::new(FsSource::new(vec![root.join("a.jpg")]));
         core.rebuild_playlist(src, root.clone(), None, false, 0);
         core.reinsert_after_restore(9, &root.join("z.jpg"));
         assert_eq!(core.source.len(), 2);
@@ -9479,12 +9479,12 @@ mod tests {
             "test cores must never write the real settings.toml"
         );
         let dir = std::env::temp_dir();
-        let source: Arc<dyn PhotoSource> = Arc::new(FsSource::new(vec![dir.join("a.png")]));
+        let source: Arc<dyn ItemSource> = Arc::new(FsSource::new(vec![dir.join("a.png")]));
         core.rebuild_playlist(source, dir.clone(), Some(dir.clone()), true, 0);
         assert_eq!(core.settings.last_folder.as_deref(), Some(dir.as_path()));
 
         // An archive-style rebuild (no scan_root) must not clobber the remembered folder.
-        let source: Arc<dyn PhotoSource> = Arc::new(FsSource::new(vec![dir.join("b.png")]));
+        let source: Arc<dyn ItemSource> = Arc::new(FsSource::new(vec![dir.join("b.png")]));
         core.rebuild_playlist(source, dir.join("x.zip"), None, false, 0);
         assert_eq!(core.settings.last_folder.as_deref(), Some(dir.as_path()));
     }
@@ -9500,11 +9500,11 @@ mod tests {
         let dir = std::env::temp_dir();
         let paths: Vec<PathBuf> = (0..32).map(|i| dir.join(format!("{i}.png"))).collect();
 
-        let source: Arc<dyn PhotoSource> = Arc::new(FsSource::new(paths.clone()));
+        let source: Arc<dyn ItemSource> = Arc::new(FsSource::new(paths.clone()));
         core.rebuild_playlist(source, dir.clone(), Some(dir.clone()), true, 0);
         let first = core.playlist.shuffle().clone();
 
-        let source: Arc<dyn PhotoSource> = Arc::new(FsSource::new(paths));
+        let source: Arc<dyn ItemSource> = Arc::new(FsSource::new(paths));
         core.rebuild_playlist(source, dir.clone(), Some(dir.clone()), true, 0);
         let second = core.playlist.shuffle().clone();
 
@@ -9524,7 +9524,7 @@ mod tests {
         let mut core = test_core();
         let dir = std::env::temp_dir();
         let paths: Vec<PathBuf> = (0..3).map(|i| dir.join(format!("{i}.jpg"))).collect();
-        let source: Arc<dyn PhotoSource> = Arc::new(FsSource::new(paths));
+        let source: Arc<dyn ItemSource> = Arc::new(FsSource::new(paths));
         core.rebuild_playlist(source, dir.clone(), Some(dir.clone()), true, 0);
 
         core.undo_stack.push(crate::undo::UndoAction::SaveRotation {
@@ -9534,7 +9534,7 @@ mod tests {
 
         // A same-root rebuild — e.g. the advance after deleting a *different* photo — keeps it,
         // and the label still names the (path-resolved) file.
-        let remaining: Arc<dyn PhotoSource> =
+        let remaining: Arc<dyn ItemSource> =
             Arc::new(FsSource::new(vec![dir.join("0.jpg"), dir.join("1.jpg")]));
         core.rebuild_playlist(remaining, dir.clone(), Some(dir.clone()), true, 0);
         assert_eq!(
@@ -9546,7 +9546,7 @@ mod tests {
 
         // A genuinely new deck (different root) clears the whole stack.
         let other = dir.join("pb_other_deck");
-        let fresh: Arc<dyn PhotoSource> = Arc::new(FsSource::new(vec![other.join("z.jpg")]));
+        let fresh: Arc<dyn ItemSource> = Arc::new(FsSource::new(vec![other.join("z.jpg")]));
         core.rebuild_playlist(fresh, other.clone(), Some(other), false, 0);
         assert!(
             core.undo_stack.is_empty(),
@@ -9786,7 +9786,7 @@ mod tests {
         core.recognized_text.insert(0, text_result(&[], &["old"]));
         let gen = core.text_gen;
         let dir = std::env::temp_dir();
-        let source: Arc<dyn PhotoSource> = Arc::new(FsSource::new(vec![dir.join("a.png")]));
+        let source: Arc<dyn ItemSource> = Arc::new(FsSource::new(vec![dir.join("a.png")]));
         core.rebuild_playlist(source, dir.clone(), Some(dir), true, 0);
         assert!(core.recognized_text.is_empty());
         assert!(core.text_gen > gen);
@@ -9988,7 +9988,7 @@ mod tests {
         container: PathBuf,
     }
 
-    impl PhotoSource for FakeArchive {
+    impl ItemSource for FakeArchive {
         fn len(&self) -> usize {
             self.names.len()
         }
@@ -10011,7 +10011,7 @@ mod tests {
     fn archive_core(names: &[&str]) -> AppCore {
         let mut core = test_core();
         let container = std::env::temp_dir().join("deck.zip");
-        let source: Arc<dyn PhotoSource> = Arc::new(FakeArchive {
+        let source: Arc<dyn ItemSource> = Arc::new(FakeArchive {
             names: names.iter().map(|s| s.to_string()).collect(),
             container: container.clone(),
         });
@@ -10165,7 +10165,7 @@ mod tests {
             base.join("bravo/3.png"),
             base.join("charlie/4.png"),
         ];
-        let source: Arc<dyn PhotoSource> = Arc::new(FsSource::new(paths));
+        let source: Arc<dyn ItemSource> = Arc::new(FsSource::new(paths));
         core.rebuild_playlist(source, base.clone(), Some(base.clone()), true, 0);
         assert_eq!(core.current_folder_abs(), Some(base.join("alpha")));
         // ⌘→ jumps within the deck to bravo's first photo — no disk worker, no re-scan.
@@ -10201,7 +10201,7 @@ mod tests {
             base.join("a/sub/3.png"),
             base.join("b/4.png"),
         ];
-        let source: Arc<dyn PhotoSource> = Arc::new(FsSource::new(paths));
+        let source: Arc<dyn ItemSource> = Arc::new(FsSource::new(paths));
         core.rebuild_playlist(source, base.clone(), Some(base.clone()), true, 0);
         // From a (index 0), ⌘→ enters the subfolder a/sub — the next different folder.
         core.open_sibling_cmd(1);
@@ -10228,7 +10228,7 @@ mod tests {
         // re-root re-lands the current photo in c. A current-folder anchor would stick.
         let base = std::env::temp_dir().join("pb_climb_test");
         let deep = base.join("a/b/c");
-        let deck = |root: PathBuf| -> (Arc<dyn PhotoSource>, PathBuf) {
+        let deck = |root: PathBuf| -> (Arc<dyn ItemSource>, PathBuf) {
             (Arc::new(FsSource::new(vec![deep.join("1.png")])), root)
         };
         let (src, root) = deck(deep.clone());
@@ -10297,7 +10297,7 @@ mod tests {
         core.rescope_archive("a".to_string());
         assert!(core.archive_scope.is_some());
         let dir = std::env::temp_dir();
-        let source: Arc<dyn PhotoSource> = Arc::new(FsSource::new(vec![dir.join("a.png")]));
+        let source: Arc<dyn ItemSource> = Arc::new(FsSource::new(vec![dir.join("a.png")]));
         core.rebuild_playlist(source, dir.clone(), Some(dir), true, 0);
         assert!(
             core.archive_scope.is_none(),
@@ -10361,7 +10361,7 @@ mod tests {
         let mut core = test_core();
         let dir = std::env::temp_dir();
         let paths: Vec<PathBuf> = (0..n).map(|i| dir.join(format!("cmp_{i}.png"))).collect();
-        let source: Arc<dyn PhotoSource> = Arc::new(FsSource::new(paths));
+        let source: Arc<dyn ItemSource> = Arc::new(FsSource::new(paths));
         core.rebuild_playlist(source, dir.clone(), Some(dir), true, 0);
         core
     }
@@ -10439,7 +10439,7 @@ mod tests {
             .iter()
             .map(|i| dir.join(format!("cmp_{i}.png")))
             .collect();
-        let src: Arc<dyn PhotoSource> = Arc::new(FsSource::new(remaining));
+        let src: Arc<dyn ItemSource> = Arc::new(FsSource::new(remaining));
         core.rebuild_playlist(src, dir.clone(), Some(dir.clone()), true, 0);
         assert_eq!(
             core.compare_pin,
@@ -10449,7 +10449,7 @@ mod tests {
         assert_eq!(core.compare_return, None, "the return point never survives");
         // A genuinely new deck has no matching identity — the pin clears.
         let other: Vec<PathBuf> = (0..3).map(|i| dir.join(format!("other_{i}.png"))).collect();
-        let src: Arc<dyn PhotoSource> = Arc::new(FsSource::new(other));
+        let src: Arc<dyn ItemSource> = Arc::new(FsSource::new(other));
         core.rebuild_playlist(src, dir.clone(), Some(dir), true, 0);
         assert_eq!(core.compare_pin, None);
         assert_eq!(core.compare_pin_id, None);
@@ -11502,7 +11502,7 @@ mod tests {
         use crate::video_session::{ActiveVideo, VideoSession};
 
         struct FakeArchive;
-        impl pb_source::PhotoSource for FakeArchive {
+        impl pb_source::ItemSource for FakeArchive {
             fn len(&self) -> usize {
                 1
             }
@@ -12483,7 +12483,7 @@ mod tests {
         assert!(core.target_caught_up());
 
         let root = PathBuf::from("photos");
-        let src: Arc<dyn PhotoSource> =
+        let src: Arc<dyn ItemSource> =
             Arc::new(FsSource::new(vec![root.join("a.jpg"), root.join("b.jpg")]));
         core.rebuild_playlist(src, root, None, false, 0);
 
@@ -12968,7 +12968,7 @@ mod tests {
         }
         let before = snapshot(&dir);
 
-        let source: Arc<dyn PhotoSource> = Arc::new(FsSource::new(paths));
+        let source: Arc<dyn ItemSource> = Arc::new(FsSource::new(paths));
         // T1 fill path — the Thumb-purpose decode entry (EXIF-IFD1 probe, then
         // the fitted decode of the read bytes).
         for i in 0..source.len() {

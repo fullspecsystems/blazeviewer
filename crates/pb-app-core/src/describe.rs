@@ -22,7 +22,7 @@ use std::sync::mpsc::Receiver;
 
 use base64::Engine as _;
 use pb_render::Rotation;
-use pb_source::PhotoSource;
+use pb_source::ItemSource;
 use serde_json::{json, Value};
 
 use crate::engine::{decode_item, rotate_rgba8, to_clipboard_rgba8};
@@ -174,7 +174,7 @@ pub fn prepare_image(rgba: Vec<u8>, w: u32, h: u32) -> Result<PreparedImage, Des
 /// paths do), prepare the image, then hand it to `describer`. Mirrors
 /// [`image_text::scan_job`](crate::image_text::scan_job); the event loop never blocks.
 pub fn describe_job(
-    source: &dyn PhotoSource,
+    source: &dyn ItemSource,
     item: usize,
     rot: Rotation,
     prompt: &str,

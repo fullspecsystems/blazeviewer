@@ -51,7 +51,7 @@ use pb_core::open::{self, LaunchInput, Source};
 use pb_core::{Playlist, ResidentRing};
 use pb_decode::{decode_bytes, FitBox};
 use pb_render::{Renderer, ViewTransform, WgpuRenderer};
-use pb_source::PhotoSource;
+use pb_source::ItemSource;
 
 mod accent;
 mod clipboard;
@@ -623,7 +623,7 @@ impl App {
     fn new(
         windowed: bool,
         root: PathBuf,
-        source: Arc<dyn PhotoSource>,
+        source: Arc<dyn ItemSource>,
         start: usize,
         recursive: bool,
         scan_root: Option<PathBuf>,
@@ -633,7 +633,7 @@ impl App {
     ) -> Self {
         let playlist = Playlist::new(source.len(), fresh_shuffle_seed()).with_cursor(start);
         let decode: Arc<DecodeFn> = Arc::new(
-            |src: &dyn PhotoSource,
+            |src: &dyn ItemSource,
              item,
              fit,
              allow_preview,
