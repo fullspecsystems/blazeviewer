@@ -1,6 +1,6 @@
 //! Shell-neutral pacing math for the self-paced advance (NS0, ADR-021).
 //!
-//! The hold-to-fly nav pacing and the animation frame-step scrubbing both live on the
+//! The hold-to-blaze nav pacing and the animation frame-step scrubbing both live on the
 //! shell's per-frame loop, but the *decisions* they make are pure time arithmetic — no
 //! winit, no GPU. Lifting them here keeps the pacing testable without the event loop and
 //! shared by every shell (the plan's "move timing into AppCore" bullet).
@@ -8,14 +8,14 @@
 //! Two pieces:
 //! - [`elapsed_since`] — the "has this deadline passed?" gate, used for both the initial
 //!   tap delay and the repeat interval on both the nav and frame-step paths.
-//! - [`advance_interval`] — the accelerating hold-to-fly gap (ramps slow → fast).
+//! - [`advance_interval`] — the accelerating hold-to-blaze gap (ramps slow → fast).
 
 use std::time::{Duration, Instant};
 
 /// Has `now` reached `anchor + delay`? A `None` anchor means "not started yet" and fires
 /// immediately (`true`) — so the first press/tick is never gated, only subsequent repeats
 /// wait out the interval. This is the single gate behind both the initial tap-delay and
-/// the repeat-interval checks on the nav hold-to-fly and frame-step scrubbing paths.
+/// the repeat-interval checks on the nav hold-to-blaze and frame-step scrubbing paths.
 pub fn elapsed_since(anchor: Option<Instant>, now: Instant, delay: Duration) -> bool {
     match anchor {
         Some(t) => now >= t + delay,

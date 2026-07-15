@@ -32,7 +32,7 @@ fn main() {
     println!("file: {} ({} bytes)\n", path.display(), bytes.len());
     probe(&bytes);
 
-    // Preview-path latency (allow_preview = true) — what the fly-by actually shows.
+    // Preview-path latency (allow_preview = true) — what the blaze-by actually shows.
     // If this is slow and returns full-res dims, the file has no fast thumbnail and
     // the "preview" is really a full decode (the Sony-HEIC trap).
     println!("\n=== preview path (allow_preview=true) ===");

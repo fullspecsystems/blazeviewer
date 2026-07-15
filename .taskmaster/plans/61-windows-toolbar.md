@@ -8,7 +8,7 @@ existing Windows-toolbar task), whose old "hidden by default / no reserved strip
 menu); the counter derives from **`displayed_item`** (present-truth), not the nav target; the
 top strip **reuses the existing `set_content_top_inset` seam** (not a `fit_rect` change); the
 "never occludes" guarantee is **Fit-only** (Fill/zoom/pan ride under, per the #59 spike); nav
-buttons need the **pointer hold-to-fly lifecycle**, not one-shot `MenuAction`; icons must
+buttons need the **pointer hold-to-blaze lifecycle**, not one-shot `MenuAction`; icons must
 vendor **both FA families** (the `glyph!` macro requires it); and the plan is reordered
 **test-first**. No unverified "zero cost" claim — a windowed-mode A/B benchmark gates it.
 
@@ -66,7 +66,7 @@ for mouse users; the keyboard already does everything faster.
    `dialog.rs`).
 2. **The action vocabulary is shared.** Every button dispatches the same `Action`
    (`crates/pb-app-core/src/action.rs:28`) the keymap and menu use, via
-   `CoreEvent::MenuAction(Action)` (`contract.rs:307`) — **except** hold-to-fly nav, which uses
+   `CoreEvent::MenuAction(Action)` (`contract.rs:307`) — **except** hold-to-blaze nav, which uses
    the pointer path (below). No parallel command path.
 3. **The top-inset seam exists.** `Renderer::set_content_top_inset(px)`
    (`crates/pb-render/src/gpu.rs:1976`) already reserves a top band; the **Linux shell already
@@ -89,8 +89,8 @@ Left-aligned groups (whitespace-separated), counter + fullscreen pinned right. I
 
 | Group | Button | Action (`action.rs`) | FA glyph | Behavior |
 |---|---|---|---|---|
-| Nav | Prev / Next | `Prev` / `Next` | `chevron-left` / `chevron-right` | **pointer hold-to-fly** |
-| Random | Rand prev / Random | `RandomPrev` / `Random` | `shuffle` (mirrored) / `shuffle` | **pointer hold-to-fly** |
+| Nav | Prev / Next | `Prev` / `Next` | `chevron-left` / `chevron-right` | **pointer hold-to-blaze** |
+| Random | Rand prev / Random | `RandomPrev` / `Random` | `shuffle` (mirrored) / `shuffle` | **pointer hold-to-blaze** |
 | Folder | Prev / Next folder | `PrevFolder` / `NextFolder` | `angles-left` / `angles-right` | one-shot `MenuAction` |
 | Playback | Play / Pause | `PlayPause` | `play` / `pause` | **accent while `motion_playing()`**; disabled when `!current_has_motion()` |
 | Playback | Slideshow | `SlideshowToggle` | `images` + interval text | **accent while running** |
@@ -138,7 +138,7 @@ State sources (all in `crates/pb-app-core/src/app_core_impl.rs` unless noted):
   own convention.
 - **`slideshow_interval`** — `Duration`, formatted at draw time.
 
-## Input lifecycle (nav hold-to-fly)
+## Input lifecycle (nav hold-to-blaze)
 
 Nav/random buttons are **not** one-shot `MenuAction`s. They use the pointer hold path
 (`begin_pointer_nav(action)` / `end_pointer_nav()`) — the same machinery held-Space uses,
@@ -264,7 +264,7 @@ Per the TDD norm, each phase writes its tests before the implementation.
 4. **Responsive width-selection function** (pure). Tests: correct group set at each breakpoint;
    narrow fallback; left/right never overlap at 100/125/150/200% DPI. Then wire it.
 5. **`toolbar.rs` panel** in `EguiOverlay::run`: lays out groups from the atom + width function;
-   non-nav buttons → `MenuAction`; nav/random → pointer hold-to-fly. Tests: button→`Action`
+   non-nav buttons → `MenuAction`; nav/random → pointer hold-to-blaze. Tests: button→`Action`
    mapping table (mirrors `menu.rs` `action_for`); pointer quick-click fires exactly one advance
    (no double), hold/release/drag-off/focus-loss lifecycle. Add the toolbar to
    `overlay_panel_visible()` + the pointer gate.

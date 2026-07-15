@@ -166,10 +166,10 @@ pub struct AppCore {
     /// current by the shell (NS0 5.5 / Phase 0.4) so the core never reads the window directly.
     pub viewport: Viewport,
     /// Physical keys currently held → the [`Action`] each resolved to at press time (the
-    /// hold-to-fly / continuous-action set). OS key-repeat is ignored; focus loss clears it.
+    /// hold-to-blaze / continuous-action set). OS key-repeat is ignored; focus loss clears it.
     pub held: HashMap<PbKey, Action>,
     /// A nav action held by the **pointer** (a toolbar nav/random button pressed and held) —
-    /// a second, single-slot source of hold-to-fly alongside the keyboard's `held` map, so a
+    /// a second, single-slot source of hold-to-blaze alongside the keyboard's `held` map, so a
     /// mouse user can "blaze" by holding the ‹ › / shuffle button exactly like holding Space.
     /// `held_nav()` considers it; focus loss clears it (mouse-up normally does).
     pub pointer_nav: Option<Action>,
@@ -178,9 +178,9 @@ pub struct AppCore {
     pub last_present: Option<Instant>,
     /// The advance cadence cap (one frame per this interval), seeded to the monitor refresh.
     pub frame_interval: Duration,
-    /// When the current nav key-hold began (drives the accelerating hold-to-fly ramp).
+    /// When the current nav key-hold began (drives the accelerating hold-to-blaze ramp).
     pub hold_start: Option<Instant>,
-    /// The tap-vs-hold delay before a held nav key starts flying.
+    /// The tap-vs-hold delay before a held nav key starts blazing.
     pub initial_delay: Duration,
     /// Slideshow state (on/off + dwell interval).
     pub slideshow: Slideshow,
@@ -423,7 +423,7 @@ pub struct AppCore {
     /// above its strip) and is unaffected by `Tab`/`panels.hidden`. This is the
     /// user's on/off preference; `info_line_shown` is the actual drawn state.
     pub info_line: bool,
-    /// Whether the info line is currently *drawn* (hidden while flying / with no
+    /// Whether the info line is currently *drawn* (hidden while blazing / with no
     /// photo, even when `info_line` is on) — mirrors `overlay_shown`.
     pub info_line_shown: bool,
     /// Which item the drawn info line was built for; a mismatch with `displayed_item`

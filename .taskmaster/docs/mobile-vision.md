@@ -122,7 +122,7 @@ mode — "hand off to an editor" is the robust path and fully covers third-party
 
 1. **iPadOS — lead target.** A Magic-Keyboard iPad has a **hardware keyboard,
    pointer, external drives, and multiple windows** — the *desktop* interaction model
-   (Space/arrows/hold-to-fly) runs there almost verbatim, on the same wgpu/Metal +
+   (Space/arrows/hold-to-blaze) runs there almost verbatim, on the same wgpu/Metal +
    AppCore + PhotoKit stack. Big ProMotion screen, real files, **both** interaction
    models. Likely the strongest fit of any mobile target.
 2. **iOS (iPhone)** — the touch-first variant of the same app; smaller memory budget,

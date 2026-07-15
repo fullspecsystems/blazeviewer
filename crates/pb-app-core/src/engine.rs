@@ -49,7 +49,7 @@ pub const UPLOADS_PER_TICK: usize = 2;
 /// parked (`upgrade_set`). The preview window can be much larger (up to the ring's
 /// 64-slot capacity on small windows), but holding more than this many *fulls*
 /// resident is wasted decode — nobody pause-and-steps two dozen photos before
-/// either flying (previews carry that) or stopping. Keeps the on-park decode burst
+/// either blazing (previews carry that) or stopping. Keeps the on-park decode burst
 /// bounded. On a 7680 fullscreen the byte-budgeted capacity (~12–32) binds first.
 pub const MAX_FULL_RING: usize = 24;
 

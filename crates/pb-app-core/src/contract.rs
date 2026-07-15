@@ -590,7 +590,7 @@ pub enum CoreEffect {
 
 /// The core's decision for a physical key-down, routed by the resolved [`Action`]'s
 /// [`ActionKind`]. The pure output of [`resolve_key_down`]: the shell *executes* it (run
-/// the command, begin hold-to-fly, or start tracking a held key), but the decision itself
+/// the command, begin hold-to-blaze, or start tracking a held key), but the decision itself
 /// is shell-neutral — winit and AppKit resolve a key identically.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum KeyResolution {
@@ -598,7 +598,7 @@ pub enum KeyResolution {
     Ignore,
     /// Run a one-shot command now (rotate, copy, toggle a panel, open Settings, …).
     OneShot(Action),
-    /// Begin hold-to-fly navigation: fire once now, then repeat while the key is held.
+    /// Begin hold-to-blaze navigation: fire once now, then repeat while the key is held.
     NavStart(Action),
     /// Begin tracking a continuous held action (pan/zoom, applied each frame).
     HeldStart(Action),
@@ -613,7 +613,7 @@ pub enum KeyResolution {
 ///
 /// - **OS auto-repeat is ignored** (`repeat == true` → [`KeyResolution::Ignore`]) so a
 ///   held key can't queue duplicate dispatches; held actions drive their own repeat from
-///   the frame loop, and nav its hold-to-fly.
+///   the frame loop, and nav its hold-to-blaze.
 /// - **An unbound chord resolves to `Ignore`** — including a Cmd/⌘ chord with no binding,
 ///   so holding ⌘ never falls through to a bare-key action (the [`Modifiers::logo`] rule).
 pub fn resolve_key_down(
@@ -706,7 +706,7 @@ mod tests {
     fn resolve_key_down_routes_each_action_kind() {
         let km = Keymap::defaults();
         let m = Modifiers::NONE;
-        // Nav: Space → Next, started as hold-to-fly.
+        // Nav: Space → Next, started as hold-to-blaze.
         assert_eq!(
             resolve_key_down(&km, PbKey::Space, m, false),
             KeyResolution::NavStart(Action::Next),

@@ -84,7 +84,7 @@ pub struct LaunchOverrides {
 
 impl LaunchOverrides {
     /// The initial `last_nav` direction implied by `--shuffle` / `--reverse`. The
-    /// slideshow and hold-to-fly both auto-advance in `last_nav`
+    /// slideshow and hold-to-blaze both auto-advance in `last_nav`
     /// (`app_core_impl.rs`: the per-tick `advance(self.last_nav)`), and starting a
     /// slideshow does not reset it, so the entire `--shuffle` / `--reverse` feature is
     /// this one mapping over the four existing [`Nav`] variants:

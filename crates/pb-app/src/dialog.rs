@@ -2111,7 +2111,7 @@ fn render_conn_test(
     }
 }
 
-/// The **General** tab: hold-to-fly tuning, startup defaults, and system actions.
+/// The **General** tab: hold-to-blaze tuning, startup defaults, and system actions.
 fn general_tab(ui: &mut egui::Ui, p: &pbui::Palette, d: &mut SettingsDraft) {
     let cap = d.refresh_hz;
     pbui::group_card(ui, p, Some("Navigation Feel"), |ui| {

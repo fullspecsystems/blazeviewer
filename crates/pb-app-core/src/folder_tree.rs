@@ -413,7 +413,7 @@ pub fn disk_counts<'a>(
 
 /// Build the tree **without touching the disk**: sibling/child folder names come
 /// from the keys of a [`disk_counts`] map (every photo-bearing folder in the
-/// deck) instead of `read_dir`. The hold-to-fly fast path — the tree keeps
+/// deck) instead of `read_dir`. The hold-to-blaze fast path — the tree keeps
 /// tracking the current folder mid-flight at pure in-RAM cost; photo-less
 /// folders (which only `read_dir` can see) appear when flight settles and the
 /// full derivation re-runs.

@@ -132,7 +132,7 @@ property tests unaffected — nothing in `pb-core` changes in this phase).
 > **Status (2026-07-03, later): phase 2 IMPLEMENTED for disk decks** (tasks.json
 > #47.6, in review). Everything below landed as designed, plus two owner calls
 > made during the build: **the tree tracks the current folder during
-> hold-to-fly** (a no-I/O `rows_from_paths` derivation over a per-deck cached
+> hold-to-blaze** (a no-I/O `rows_from_paths` derivation over a per-deck cached
 > `disk_counts` map, throttled to one rebuild per 100 ms, upgraded to the full
 > `read_dir` view on settle — the `|lite` signature stamp) and **both count
 > looks shipped for the A/B** (capsule is live in the app; trailing renders in

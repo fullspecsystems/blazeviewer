@@ -231,7 +231,7 @@ overlay shader (`gpu.rs` passes 2–2d). The egui presenter takes exactly the sa
   texture — no CPU round-trip), drawn by the existing `overlay_pipeline` into the
   intermediate;
 - the panel texture is **retained**: egui re-renders only when it requests a repaint
-  (interaction, animation, content-generation bump). During hold-to-fly with a panel open,
+  (interaction, animation, content-generation bump). During hold-to-blaze with a panel open,
   photo frames rebind under an unchanged texture — per-nav-frame egui cost is zero;
 - egui's requested-repaint deadline feeds the existing `SetWake`/`work_pending` scheduling,
   exactly as the dialog-repaint deadline already does in the winit shell.
@@ -360,7 +360,7 @@ The performance contract is concrete:
 - no per-frame allocations or layout happen on the keypress-to-photon path;
 - the photo render pass and resident-ring present path remain untouched;
 - CPU HUD toasts/basic info still rebuild only on change;
-- with a panel **visible**, hold-to-fly still costs no per-nav-frame presenter work: the
+- with a panel **visible**, hold-to-blaze still costs no per-nav-frame presenter work: the
   panel texture is retained and re-renders only on the presenter's own repaint requests —
   never per photo frame;
 - the presenter's requested-repaint deadline feeds the existing `SetWake`/`work_pending`
@@ -371,7 +371,7 @@ instrumentation methodology **does not exist yet** — today only `--metrics` (`
 RAM-only p50/p95/p99) is real. Phase 1 therefore builds a minimal headless replay: pump
 synthetic `CoreEvent::KeyDown`/`Tick` over the pinned corpus (`AppCore` is already
 headless-drivable — the Swift host proves it) and dump `StageTimes` percentiles. Compare
-before/after in three states: panels hidden, panel open + idle, panel open + hold-to-fly.
+before/after in three states: panels hidden, panel open + idle, panel open + hold-to-blaze.
 "It should be zero cost" is not evidence.
 
 ## Sequencing

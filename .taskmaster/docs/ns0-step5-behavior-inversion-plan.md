@@ -25,7 +25,7 @@ shell-side until Phase E**.
 
 Execute top-to-bottom. **Every numbered step ends green** (`cargo test --workspace`,
 `cargo clippy --all-targets -- -D warnings`, `cargo fmt --all`) and is its own commit. Smoke
-the hot path (zoom/pan/rotate/hold-to-fly/nav/info-panel/`--metrics`) at the ★ marks. The
+the hot path (zoom/pan/rotate/hold-to-blaze/nav/info-panel/`--metrics`) at the ★ marks. The
 recipe for every "move X into AppCore" is the proven one from 5.3: **migrate the pb-app-local
 *types* first, then relocate fields/methods, then redirect refs** (hazards: prefix
 over-matches → placeholder swap; multiline `self\n.field` → compiler catches; non-`self` refs

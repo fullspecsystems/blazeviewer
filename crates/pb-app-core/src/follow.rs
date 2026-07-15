@@ -69,7 +69,7 @@ impl FollowState {
         self.issue(current)
     }
 
-    /// A navigation advance (key nav, hold-to-fly, random, slideshow). Always
+    /// A navigation advance (key nav, hold-to-blaze, random, slideshow). Always
     /// follows — the owner rule is "the next nav re-engages", so this issues
     /// even from `Detached`.
     pub fn navigation(&mut self, current: usize) -> Option<ScrollTo> {

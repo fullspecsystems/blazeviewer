@@ -338,7 +338,7 @@ impl AppCore {
     /// view/nav/HUD/animation arms run here in the core; the **flow** arms (dialogs, window
     /// mode, scan, file edits, quit) are routed to the shell/host via
     /// [`CoreEffect::ShellFlowAction`] until 5.6 inverts them into specific effects/events.
-    /// Navigation here is a single step (what the menu wants); the keyboard's held-to-fly nav
+    /// Navigation here is a single step (what the menu wants); the keyboard's held-to-blaze nav
     /// and continuous pan/zoom are driven by the hold loop, not this path.
     pub fn dispatch_action(&mut self, action: Action) {
         match action {
@@ -946,7 +946,7 @@ impl AppCore {
             }
             // Trackpad double-tap ("smart magnify"): toggle 100%, sharing the `0` / menu path.
             CoreEvent::DoubleTap => self.dispatch_action(Action::ToggleOriginal),
-            // The per-tick core loop (hold-to-fly / slideshow / prefetch / animation), stamping
+            // The per-tick core loop (hold-to-blaze / slideshow / prefetch / animation), stamping
             // `now` from the event. Emits `SetWake` with the core's next deadline.
             CoreEvent::Tick(now) => {
                 self.now = now;
@@ -1290,7 +1290,7 @@ impl AppCore {
     }
 
     /// The per-tick core loop (NS0 5.5 Phase C2): absorb finished decodes + uploads, run held
-    /// zoom/pan, the gated self-paced nav advance (hold-to-fly) and the slideshow, re-issue the
+    /// zoom/pan, the gated self-paced nav advance (hold-to-blaze) and the slideshow, re-issue the
     /// sharpen/prefetch when parked, update the info panel / toast / pie, run the deferred
     /// resize decode + debounced geometry save, and drive on-demand animation playback + the
     /// Live Photo revert + eager-prep. Ends by emitting [`CoreEffect::SetWake`] with the earliest
@@ -1394,7 +1394,7 @@ impl AppCore {
         }
 
         // 3c. Slideshow auto-advance (task #23): on, not overridden by a held nav key or an open
-        // dialog, and readiness-gated like hold-to-fly (a not-ready slide holds, never skips).
+        // dialog, and readiness-gated like hold-to-blaze (a not-ready slide holds, never skips).
         // An explicitly-played video suspends the advance until playback ends/stops (task #79
         // action matrix) — the slideshow otherwise lands on posters and moves on normally.
         let video_playing = self.video.as_ref().is_some_and(|v| {
@@ -1431,21 +1431,21 @@ impl AppCore {
             sharpen_pending = !upgrade.is_empty();
         }
 
-        // 4. Info panel visibility. "Blaze mode" = actually flying (a nav key held past the tap
+        // 4. Info panel visibility. "Blaze mode" = actually blazing (a nav key held past the tap
         // delay): hide the panel so it isn't a strobing distraction. Otherwise keep it shown +
         // tracking the current photo. Left untouched mid zoom/pan.
-        let flying = nav.is_some() && past_delay;
+        let blazing = nav.is_some() && past_delay;
         // 4a′. Flash the "Press P to play" hint once on settling on an animated still.
-        self.maybe_show_anim_hint(flying);
+        self.maybe_show_anim_hint(blazing);
         // 4a. The basic info line (`i`) — its own ephemeral layer, so it runs before
         // the rich panel (whose bottom lift reads the line's shown state). Same
-        // fly-hide + settle-track behavior as the panel, but never needs Help's
+        // blaze-hide + settle-track behavior as the panel, but never needs Help's
         // static exception since the line always describes a photo. Also suppressed
         // while `Tab`-hidden — the eager `refresh_info_line_visibility` applies that
         // the instant `hidden` flips, but this tick keeps it from popping back on its
         // own next-photo/settle logic while still hidden.
         if self.info_line {
-            if flying || self.panels.hidden {
+            if blazing || self.panels.hidden {
                 if self.info_line_shown {
                     self.hide_info_line();
                 }
@@ -1457,7 +1457,7 @@ impl AppCore {
             }
         }
         if let Some(slot) = self.slot_content() {
-            if flying {
+            if blazing {
                 if self.overlay_shown {
                     self.hide_overlay();
                 }
@@ -1491,11 +1491,11 @@ impl AppCore {
             // tracks the displayed photo, and on this native path `show_overlay`'s HUD
             // branch — which normally kicks these — is suppressed.
             //
-            // NOT while flying: OCR and describe are expensive (a per-photo OCR thread, or a
-            // describe network round-trip), and at fly speed they'd fire on every photo you
+            // NOT while blazing: OCR and describe are expensive (a per-photo OCR thread, or a
+            // describe network round-trip), and at blaze speed they'd fire on every photo you
             // pass, starving decode and stuttering the flight. Only kick when settled — the
             // current photo gets scanned the moment you stop (the HUD path gets this for free
-            // via its fly-suppressed `show_overlay`; the native path needs the guard explicitly).
+            // via its blaze-suppressed `show_overlay`; the native path needs the guard explicitly).
             //
             // Also hard-cap concurrency: only auto-kick when no scan is already in flight.
             // Each scan `std::thread::spawn`s an uncancellable job that full-res-decodes +
@@ -1503,7 +1503,7 @@ impl AppCore {
             // network volume where each job lives for seconds — piles up resident full-res
             // decodes until OOM. Deferring (vs. superseding) keeps at most one auto job alive;
             // the explicit Copy Text / D commands still supersede for responsiveness.
-            if self.inspector_panel_visible() && self.current.is_some() && !flying {
+            if self.inspector_panel_visible() && self.current.is_some() && !blazing {
                 match self.panels.inspector {
                     // Warm the Details EXIF for the *displayed* photo. Cheap and safe (unlike
                     // the OCR/describe scans below): for a still `ensure_exif_cached` is a
@@ -1514,7 +1514,7 @@ impl AppCore {
                     // native path needs this explicitly (the HUD path warmed it in
                     // `show_overlay`, suppressed here); without it the Details tab shows only
                     // the basic rows until a Describe round-trip warms the cache as a side
-                    // effect. `!flying` keeps it off the fast-flick hot path.
+                    // effect. `!blazing` keeps it off the fast-flick hot path.
                     Some(InspectorTab::Details) => {
                         if let Some(item) = self.displayed_item {
                             self.ensure_exif_cached(item);
@@ -1565,7 +1565,7 @@ impl AppCore {
         }
         if self.native_info {
             // The natively-drawn info readout re-pulls only on a real content change (a photo
-            // swap or a field toggle) — tracks during hold-to-fly like the tree, since the
+            // swap or a field toggle) — tracks during hold-to-blaze like the tree, since the
             // readout answers "which photo is this".
             let snap = self.info_line_snapshot();
             if snap != self.last_info_snap {
@@ -1575,7 +1575,7 @@ impl AppCore {
         }
 
         // 4a″. Folder tree (⇧F): keep it tracking the displayed photo's folder — the
-        // whole point is "you are here", so it tracks **during hold-to-fly too**
+        // whole point is "you are here", so it tracks **during hold-to-blaze too**
         // (owner call, 2026-07-03). The per-tick check is string ops on the
         // signature; a settled rebuild (with its two read_dirs on a disk deck) runs
         // only when the folder actually changes; a mid-flight rebuild uses the
@@ -1631,15 +1631,15 @@ impl AppCore {
             let lite_sig = format!("{sig}|lite");
             let stored = self.folder_tree_sig.as_deref();
             if stored != Some(sig.as_str()) && stored != Some(lite_sig.as_str()) {
-                let throttled = flying
+                let throttled = blazing
                     && self
                         .folder_tree_panel
                         .as_ref()
                         .is_some_and(|p| now.duration_since(p.built) < Self::TREE_FLY_REBUILD);
                 if !throttled {
-                    self.show_folder_tree_mode(flying);
+                    self.show_folder_tree_mode(blazing);
                 }
-            } else if !flying && stored == Some(lite_sig.as_str()) {
+            } else if !blazing && stored == Some(lite_sig.as_str()) {
                 // Flight settled on a folder last drawn by the lite pass — upgrade
                 // to the full read_dir view (it adds photo-less folders), unless
                 // that derivation is already in flight on the worker.
@@ -1737,8 +1737,8 @@ impl AppCore {
         };
 
         // 4h. Eagerly prep an animated still for instant playback once the user has rested on it
-        // — only when settled (never while flying), so it never competes with the fly hot path.
-        let prep_wake = if flying {
+        // — only when settled (never while blazing), so it never competes with the blaze hot path.
+        let prep_wake = if blazing {
             None
         } else {
             self.maybe_prepare_animation(now)
@@ -1784,7 +1784,7 @@ impl AppCore {
 
     /// Bound the regenerable per-item caches (metadata / EXIF / OCR text / AI descriptions) so
     /// browsing tens of thousands of photos in one session can't grow them without limit. Keeps
-    /// the entries **nearest the current photo** — the ones a fly-back or neighbor revisit will
+    /// the entries **nearest the current photo** — the ones a blaze-back or neighbor revisit will
     /// want (and always the current item + the resident window, which is well inside the cap) —
     /// and evicts the farthest. Deliberately does **not** touch `rotations` (unsaved user edits,
     /// not a cache). An evicted entry simply regenerates on revisit (a re-read/-OCR, or a fresh
@@ -1967,7 +1967,7 @@ impl AppCore {
     }
 
     /// Minimum interval between mid-flight folder-tree rebuilds: crossing a folder
-    /// boundary every frame at full fly speed re-rasterizes at most ~10×/s (a ~1 ms
+    /// boundary every frame at full blaze speed re-rasterizes at most ~10×/s (a ~1 ms
     /// CPU composite each), so the tree tracks live without denting the one-frame-
     /// per-vsync advance budget.
     pub const TREE_FLY_REBUILD: Duration = Duration::from_millis(100);
@@ -2833,7 +2833,7 @@ impl AppCore {
         }
     }
 
-    /// Refresh rate in Hz (rounded, ≥1) — caps the Settings fly-speed slider and is
+    /// Refresh rate in Hz (rounded, ≥1) — caps the Settings blaze-speed slider and is
     /// passed to every dialog window.
     pub fn refresh_hz(&self) -> u32 {
         (1.0 / self.frame_interval.as_secs_f32()).round().max(1.0) as u32
@@ -3082,7 +3082,7 @@ impl AppCore {
     }
 
     /// Handle a nav keypress (space / backspace / enter). Tracks the held key for
-    /// hold-to-fly, then either advances, or — when we're still catching up to the
+    /// hold-to-blaze, then either advances, or — when we're still catching up to the
     /// previous target, so the press can't be serviced yet — flashes the loading
     /// pie (brighten-on-keypress) so the input never feels dead.
     pub fn nav_press(&mut self, key: PbKey, action: Action) {
@@ -3118,7 +3118,7 @@ impl AppCore {
             .launch
             .show_info
             .unwrap_or(self.settings.show_image_info);
-        // --shuffle / --reverse pick the launch nav; the slideshow + hold-to-fly auto-advance in
+        // --shuffle / --reverse pick the launch nav; the slideshow + hold-to-blaze auto-advance in
         // it (manual Next/Prev still steer normally). See `LaunchOverrides::launch_nav`.
         self.last_nav = self.launch.launch_nav();
         if self.launch.open_details {
@@ -3201,14 +3201,14 @@ impl AppCore {
         // Any in-deck navigation ends an Open-Parent (⌘↑) climb: the next ⌘↑ must restart
         // from the folder you navigated to, not resume from the stale climb rung (which would
         // surprise-jump to a near-root folder). All photo nav — Next/Prev/Random and the
-        // hold-to-fly re-advance — funnels through here.
+        // hold-to-blaze re-advance — funnels through here.
         self.climb_anchor = None;
         // Settle a deferred delete-advance before navigating, so a keypress during the
         // brief post-delete delay lands cleanly on the rebuilt playlist (no yank-back).
         self.flush_pending_delete();
         // Never advance while the previous target is still pending (a miss in
         // flight): a fast second press would overwrite it and skip that photo.
-        // Holding still flies — `about_to_wait` re-advances once it's caught up.
+        // Holding still blazes — `about_to_wait` re-advances once it's caught up.
         if self.displayed_item != self.target_item {
             return;
         }
@@ -3390,12 +3390,12 @@ impl AppCore {
     }
 
     /// Flash the "▶ Press P to play" hint once when settling on an animated still —
-    /// suppressed while flying (the nag the owner flagged) and once the user has engaged
+    /// suppressed while blazing (the nag the owner flagged) and once the user has engaged
     /// (P / step, tracked via `anim_hint_shown_for`). An eager prep decoding in the
     /// background does *not* suppress it — that's invisible work, and the hint is what
     /// invites the user to press P in the first place.
-    pub fn maybe_show_anim_hint(&mut self, flying: bool) {
-        if flying || self.playback.is_some() {
+    pub fn maybe_show_anim_hint(&mut self, blazing: bool) {
+        if blazing || self.playback.is_some() {
             return;
         }
         let Some(item) = self.displayed_item else {
@@ -4241,7 +4241,7 @@ impl AppCore {
     /// shaded-key / description pair. The key labels are read from the live keymap
     /// (task #8 — single source of truth), so rebinding a key updates the help. A
     /// few rows stay curated: pan (shown as arrow glyphs), help (`/ or ?`), and the
-    /// "hold to fly" hint (no single binding).
+    /// "hold to blaze" hint (no single binding).
     /// The user-facing shortcut hint for an action, formatted for this platform: on macOS the
     /// menu's ⌘-accelerator ([`menu::macos_menu_chord`]) where one exists — so Copy shows ⌘C and
     /// Move to Trash shows ⌘⌫, matching the menu bar rather than the keymap's legacy binding —
@@ -4573,7 +4573,7 @@ impl AppCore {
                 // open (this arm), so it's never a passive background send — the user chose
                 // to be looking at descriptions. Off by default for privacy + token cost; on,
                 // settling on a new photo describes it without another `D`. (This is a settle
-                // path, not a per-frame one, so hold-to-fly doesn't machine-gun the backend.)
+                // path, not a per-frame one, so hold-to-blaze doesn't machine-gun the backend.)
                 if self.settings.describe_auto {
                     self.ensure_describe_scan(None);
                 }
@@ -5045,7 +5045,7 @@ impl AppCore {
     /// of the resident window is re-fetched at full resolution and upgraded in place
     /// (see `upgrade_set`). While a nav key is held the upgrade set is empty, so fast
     /// scrolling stays entirely on the cheap preview tier — the parallel decoders
-    /// aren't tied up on fulls you fly past. (Pre-libheif this was a single on-screen
+    /// aren't tied up on fulls you blaze past. (Pre-libheif this was a single on-screen
     /// full because WIC's HEVC decoder serialized; libheif decodes in parallel, so we
     /// now fill a VRAM-bounded ring of fulls around the cursor.)
     pub fn request_prefetch(&mut self) {
@@ -5094,9 +5094,9 @@ impl AppCore {
         // Build the job list in three priority tiers (the pool decodes by position):
         //   1. `sharpen` — the on-screen photo's full, so what you're looking at goes
         //      sharp ASAP the moment you park.
-        //   2. previews — the whole window, so flying / re-flying is always instant.
+        //   2. previews — the whole window, so blazing / re-blazing is always instant.
         //   3. `ring` fulls — the sharp ring prefetched around the cursor, queued
-        //      behind every preview, so a fast fly stays smooth (these decode only in
+        //      behind every preview, so a fast blaze stays smooth (these decode only in
         //      the pool's spare capacity) and the fulls land ahead of where you're
         //      heading — a stop finds the photo already sharp.
         type Job = crate::decode_pool::Want;
@@ -5125,7 +5125,7 @@ impl AppCore {
         jobs.append(&mut fulls);
         // Thumbnails fills (task #83): appended BELOW every display want (the
         // merged-scheduler order), only while the strip is visible and the user
-        // is parked — an expensive cold fill must never race a fly. T0 capture
+        // is parked — an expensive cold fill must never race a blaze. T0 capture
         // covers the strip during flight anyway.
         if self.thumbs.enabled && self.thumbs_visible() && self.held_nav().is_none() {
             if let Some(cur) = self.playlist.current() {
@@ -5183,7 +5183,7 @@ impl AppCore {
 
     /// The on-screen photo to sharpen FIRST (top decode priority): the displayed one,
     /// but only when parked (no nav key held) and currently a resident preview with a
-    /// better decode to pull. `None` while flying (sharpening a frame that's about to
+    /// better decode to pull. `None` while blazing (sharpening a frame that's about to
     /// change is pointless) and `None` once it's already full.
     pub fn sharpen_now(&self) -> Option<usize> {
         if self.held_nav().is_some() {
@@ -5200,8 +5200,8 @@ impl AppCore {
     /// every preview) — a VRAM-bounded, current-first prefix of the window, filtered
     /// to resident previews, minus `sharpen_now` (requested at high priority instead).
     ///
-    /// Unlike `sharpen_now`, this runs EVEN WHILE FLYING: the fulls are queued behind
-    /// all previews (see `request_prefetch`), so a fast fly stays preview-smooth — the
+    /// Unlike `sharpen_now`, this runs EVEN WHILE BLAZING: the fulls are queued behind
+    /// all previews (see `request_prefetch`), so a fast blaze stays preview-smooth — the
     /// pool decodes them only in spare capacity. But as you slow down or browse, the
     /// fulls for where you're heading land *ahead* of you, so a stop finds the photo
     /// already sharp instead of paying a cold ~115 ms–1 s decode after the fact. The
@@ -5228,7 +5228,7 @@ impl AppCore {
 
     /// Whether `item`'s full decode is a slow RAW demosaic (seconds, and once started
     /// it can't be cancelled). Excluded from the speculative ahead-ring so a few RAWs
-    /// in the window can't tie up the decode workers — starving the previews a fly
+    /// in the window can't tie up the decode workers — starving the previews a blaze
     /// needs — for neighbours you may never visit. The displayed RAW still sharpens
     /// via `sharpen_now`, and a RAW's embedded preview is often near-full-res anyway.
     pub fn is_raw_item(&self, item: usize) -> bool {
@@ -5842,7 +5842,7 @@ impl AppCore {
     /// decode or upload. Updates the pin, title, and info panel.
     pub fn present_item(&mut self, item: usize, slot: usize) {
         // `present` = the whole event-loop-thread cost of one advance (rebind + title +
-        // GPU-submit), the keypress fast path. It's the metric to watch for a hold-to-fly
+        // GPU-submit), the keypress fast path. It's the metric to watch for a hold-to-blaze
         // regression: the NS0 inversion (renderer behind `Box<dyn Renderer>`, window ops as
         // effects) must leave this flat. `--metrics` only; a no-op branch otherwise.
         let t0 = Instant::now();
@@ -5866,7 +5866,7 @@ impl AppCore {
         self.mark_resolved(item);
         self.current = self.meta_cache.get(&item).cloned();
         // The panel (if shown) is now stale for the old photo; `about_to_wait`
-        // rebuilds it for `item` next tick (or hides it while flying), so it
+        // rebuilds it for `item` next tick (or hides it while blazing), so it
         // tracks the photo with no blank flash. The bitmap stays up meanwhile.
         self.last_present = Some(self.now);
         self.draw();
@@ -6151,7 +6151,7 @@ impl AppCore {
                 }
             }
             // reserve == None (no longer wanted): the thumb store still gets the
-            // pixels we paid to decode (the fly-past case IS the behind-strip).
+            // pixels we paid to decode (the blaze-past case IS the behind-strip).
             self.thumbs_capture(outcome);
         }
         self.pending_uploads = leftover;
@@ -6274,7 +6274,7 @@ impl AppCore {
     /// directory from live state (core), then emits an [`CoreEffect::OpenFilePanel`] /
     /// [`OpenFolderPanel`](CoreEffect::OpenFolderPanel); the shell runs the modal panel in
     /// the drain and re-enters via [`App::finish_picker`]. Modal — it blocks the event loop
-    /// while open, which is fine: the app isn't flying through photos with a dialog up.
+    /// while open, which is fine: the app isn't blazing through photos with a dialog up.
     pub fn open_picker(&mut self, folder: bool) {
         let fallback = default_picker_dir();
         let mut start_dir = picker_start_dir(
@@ -8303,10 +8303,10 @@ impl AppCore {
         dir
     }
 
-    /// A toolbar nav/random button was pressed and **held**: begin hold-to-fly for `action`,
+    /// A toolbar nav/random button was pressed and **held**: begin hold-to-blaze for `action`,
     /// reusing the exact keyboard path — the initial tap advance (or pie-glow while catching
-    /// up) plus the self-paced fly timer. `end_pointer_nav` (mouse-up) stops it. A quick click
-    /// is just begin→end with no fly, i.e. a single advance, matching a Space tap.
+    /// up) plus the self-paced blaze timer. `end_pointer_nav` (mouse-up) stops it. A quick click
+    /// is just begin→end with no blaze, i.e. a single advance, matching a Space tap.
     pub fn begin_pointer_nav(&mut self, action: Action) {
         self.pointer_nav = Some(action);
         self.hold_start = Some(self.now);
@@ -8318,7 +8318,7 @@ impl AppCore {
         }
     }
 
-    /// The held toolbar nav/random button was released — stop flying.
+    /// The held toolbar nav/random button was released — stop blazing.
     pub fn end_pointer_nav(&mut self) {
         self.pointer_nav = None;
     }
@@ -8486,7 +8486,7 @@ impl AppCore {
 
     /// The companion motion `.mov` for item `item` if it's a Live Photo, else `None`
     /// (tasks #38 / #39). Filesystem pairing, memoized per item and computed lazily —
-    /// only ever reached when settled on a photo, never on the fly-through path. Always
+    /// only ever reached when settled on a photo, never on the blaze-through path. Always
     /// `None` on platforms without a motion decoder (macOS + Windows have one).
     pub fn live_motion_path(&mut self, item: usize) -> Option<PathBuf> {
         #[cfg(not(any(
@@ -8710,7 +8710,7 @@ impl AppCore {
     /// in the background so pressing `P` is instant (fixes the slow first-play on WebP /
     /// AVIF, ~0.6–2s to decode). Returns the wake deadline while the dwell elapses (so
     /// the idle loop wakes to kick it), else `None`. Strictly off the hot path — only
-    /// when settled (never while flying), exactly when the prefetch pool is idle.
+    /// when settled (never while blazing), exactly when the prefetch pool is idle.
     pub fn maybe_prepare_animation(&mut self, now: Instant) -> Option<Instant> {
         if self.playback.is_some() || self.anim_decode.is_some() || self.anim_stream.is_some() {
             return None; // already playing, or a decode/stream is already in flight
@@ -10563,7 +10563,7 @@ mod tests {
     fn nav_press_stamps_hold_start_from_the_injected_clock() {
         // The core never reads the wall clock (NS0 0.3): timing state is stamped from
         // the injected `self.now`, so a host/test driving synthetic time stays coherent
-        // (hold-to-fly gates against the same clock the Tick events carry).
+        // (hold-to-blaze gates against the same clock the Tick events carry).
         let mut core = test_core();
         let t = core.now + Duration::from_secs(1000);
         core.now = t;
@@ -10728,7 +10728,7 @@ mod tests {
     }
 
     #[test]
-    fn pointer_nav_is_a_second_hold_to_fly_source() {
+    fn pointer_nav_is_a_second_hold_to_blaze_source() {
         let mut core = test_core();
         // A held toolbar nav button makes `held_nav` report a direction, exactly as a held
         // key would — that's what drives the self-paced advance each tick.
@@ -10756,7 +10756,7 @@ mod tests {
     fn os_key_repeat_is_ignored() {
         let mut core = test_core();
         // An OS auto-repeat (`repeat: true`) resolves to `Ignore` regardless of binding, so it
-        // touches no state and emits no effect (the hold loop drives fly-speed, not repeats).
+        // touches no state and emits no effect (the hold loop drives blaze-speed, not repeats).
         core.handle(CoreEvent::KeyDown {
             key: PbKey::Space,
             mods: Modifiers::NONE,

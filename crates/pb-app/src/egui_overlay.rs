@@ -90,7 +90,7 @@ impl EguiOverlay {
     /// Feed a winit event to egui. Returns the response so the caller can gate
     /// fall-through (`consumed`) and honor `repaint` — **but the caller must still let
     /// key *releases* reach the core held-key tracker even when egui consumes them, or a
-    /// swallowed KeyUp on a held nav key strands a fly** (see the plan's input-routing).
+    /// swallowed KeyUp on a held nav key strands a blaze** (see the plan's input-routing).
     pub fn on_window_event(
         &mut self,
         window: &Window,

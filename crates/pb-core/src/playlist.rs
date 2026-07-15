@@ -232,7 +232,7 @@ impl Playlist {
     /// Jump the cursor straight to `index` — absolute navigation (the flicker-compare
     /// flip, task #43). Out of range is a no-op. `last_dir` is deliberately left
     /// untouched: a jump is not a browse direction, so the direction-biased prefetch
-    /// keeps favoring the way the user was actually flying. Like sequential `next`/
+    /// keeps favoring the way the user was actually blazing. Like sequential `next`/
     /// `prev`, it doesn't reseat `shuffle_pos` — the random walk continues from where
     /// it left off (`extend` already reseats when the deck regrows).
     pub fn jump_to(&mut self, index: usize) {

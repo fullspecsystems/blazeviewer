@@ -1,15 +1,15 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 //! PhotoBlaze — the application shell (Phase 3: the prefetch engine).
 //!
-//! A chrome-less, fit-to-screen viewer built to **hold a key and fly**. Decode +
+//! A chrome-less, fit-to-screen viewer built to **hold a key and blaze**. Decode +
 //! file I/O run on a priority worker pool (`decode_pool`), neighbors are decoded
 //! *ahead* of you and uploaded into a resident GPU texture ring, so a keypress is
 //! a **rebind, never a decode or upload**. Advance is **gated on readiness**:
 //! every photo is shown in order (none skipped); a cache miss holds the previous
-//! frame until its decode lands, then shows it — fly speed is min(refresh, decode).
+//! frame until its decode lands, then shows it — blaze speed is min(refresh, decode).
 //!
 //!   space       next photo  ·  ⌫  previous photo
-//!   enter       random photo (precomputed shuffle; hold to fly)
+//!   enter       random photo (precomputed shuffle; hold to blaze)
 //!   shift+enter  previous random photo (step back through the random walk)
 //!   ← ↑ ↓ →     pan around the photo (hold; accelerates)
 //!   = / -       zoom in / out (hold; accelerates; numpad +/- too)
@@ -466,7 +466,7 @@ struct App {
     /// or a nav button is held; an unthrottled render→request_redraw loop would spin the event
     /// loop far above vsync (audible GPU coil-whine). See `update_overlay`.
     last_overlay_render: Option<Instant>,
-    /// The single toolbar nav/random button currently pressed-and-held (hold-to-fly). The core
+    /// The single toolbar nav/random button currently pressed-and-held (hold-to-blaze). The core
     /// tracks one `pointer_nav`; this mirrors which button owns it so press/release edges are
     /// detected across frames. Cleared on release; the core also has a focus-loss safety net.
     toolbar_nav_held: Option<pb_app_core::Action>,
@@ -684,7 +684,7 @@ impl App {
                 scale_factor: 1.0,
             },
             held: HashMap::new(),
-            // Pointer-driven hold-to-fly (toolbar nav/random press-and-hold); the winit
+            // Pointer-driven hold-to-blaze (toolbar nav/random press-and-hold); the winit
             // shell has no such toolbar, so it starts idle like the other constructors.
             pointer_nav: None,
             last_present: None,
@@ -1686,7 +1686,7 @@ impl App {
         }
         // Toolbar (task #61): re-render when a button's state changes (counter, play, toggles)
         // or while a nav button is held (so the mouse-up release edge is observed within a tick,
-        // even if the fly loop is momentarily idle). Retained otherwise — a static toolbar over a
+        // even if the blaze loop is momentarily idle). Retained otherwise — a static toolbar over a
         // still photo re-renders nothing.
         if self.toolbar_visible() {
             let st = self.build_toolbar_state();
@@ -2072,8 +2072,8 @@ impl App {
                     }
                 }
             }
-            // A toolbar nav/random press: begin pointer hold-to-fly (an initial advance now, the
-            // self-paced fly while held). A quick click is begin→release = one advance.
+            // A toolbar nav/random press: begin pointer hold-to-blaze (an initial advance now, the
+            // self-paced blaze while held). A quick click is begin→release = one advance.
             A::ToolbarNavPress(action) => self.core.begin_pointer_nav(action),
             A::ToolbarNavRelease => self.core.end_pointer_nav(),
         }
@@ -2938,7 +2938,7 @@ impl App {
     /// seam an AppKit shell re-implements; NS0, ADR-021). Called at the end of each
     /// `ApplicationHandler` entry that can produce effects. More variants join as their
     /// call sites convert off direct winit access. The `drain` metric times this so a
-    /// hold-to-fly frame's total event-loop cost is `present + drain` (window ops the
+    /// hold-to-blaze frame's total event-loop cost is `present + drain` (window ops the
     /// advance path used to do inline now land here — the total, not `present`, is flat).
     fn drain_effects(&mut self, event_loop: &ActiveEventLoop) {
         let t0 = Instant::now();
@@ -3497,7 +3497,7 @@ impl ApplicationHandler for App {
         //     a monitor move (its own offscreen target is resized separately below).
         // Keyboard is deliberately NOT routed to egui: nav keys, panel hotkeys, and
         // Esc-quits stay with the app, and the held-key KeyUp net must never be swallowed
-        // (a stuck fly is the worst bug here). Panels have no inline text inputs (ADR-023),
+        // (a stuck blaze is the worst bug here). Panels have no inline text inputs (ADR-023),
         // so egui needs no keyboard focus.
         let panel_open = self.overlay_panel_visible();
         let mut overlay_consumed = false;
@@ -3628,7 +3628,7 @@ impl ApplicationHandler for App {
                     // activates, Esc closes the menu (instead of quitting the app). While
                     // a dropdown is open it grabs every key *press* (native menu
                     // behavior); key *releases* still flow to the core's held-key tracker
-                    // below, so a fly can never strand.
+                    // below, so a blaze can never strand.
                     #[cfg(all(unix, not(target_os = "macos")))]
                     if self.menu_bar_visible() {
                         match self.menu_key(code) {
@@ -3670,7 +3670,7 @@ impl ApplicationHandler for App {
                     } else if let Some(key) = pb_key_winit::from_winit(code) {
                         // Translate to a shell-neutral `CoreEvent` and let the core resolve +
                         // route it (`handle`: repeat-gate + ⌘-no-fall-through, then one-shot →
-                        // `dispatch_action`, nav → hold-to-fly, held → track, frame-step). This is
+                        // `dispatch_action`, nav → hold-to-blaze, held → track, frame-step). This is
                         // the SAME entry point the macOS Swift host drives (NS0 Phase C2). Keys the
                         // keymap can't name map to `None` and are ignored. `mods` is the tracked
                         // modifier state (updated by `ModifiersChanged`).
@@ -3945,7 +3945,7 @@ impl ApplicationHandler for App {
         }
         let dialog_wake = dialog_repaint.filter(|&at| at > now);
 
-        // The per-tick CORE loop (hold-to-fly / slideshow / prefetch / animation) — the SAME
+        // The per-tick CORE loop (hold-to-blaze / slideshow / prefetch / animation) — the SAME
         // entry the macOS Swift host drives. It pushes `SetWake(core_wake)` (stored in
         // `self.requested_wake` by the drain below).
         self.core.handle(contract::CoreEvent::Tick(now));

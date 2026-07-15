@@ -191,8 +191,8 @@ flows through the new seams unchanged.
     (incl. the merged `FrameStep`), folding in the repeat gate and the ⌘-no-fall-through
     rule; the four modifier bools were unified into `contract::Modifiers`.
 - **Timing moved into core** — `slideshow` (dwell), `timing::advance_interval` (the
-  accelerating hold-to-fly gap), and `timing::elapsed_since` (the shared tap-delay /
-  repeat gate now used by *both* the nav hold-to-fly and the frame-step scrubbing paths).
+  accelerating hold-to-blaze gap), and `timing::elapsed_since` (the shared tap-delay /
+  repeat gate now used by *both* the nav hold-to-blaze and the frame-step scrubbing paths).
   Pacing *math* is unit-tested in a pure crate; the shell keeps the control flow.
 
 ### Still to do — the keystone (proof-gate; needs a critical call + manual validation)
@@ -213,7 +213,7 @@ the behavior-sensitive part the plan gates on:
 - **Coverage before the Swift target:** focused parity tests for action dispatch, held-key
   state, wake scheduling, dialog/effect sequencing, and scan/archive cancellation.
 - **Why gated:** this touches the self-paced-advance control flow, dialog choreography, and
-  the whole event loop — so it's the proof gate. Run a manual **hold-to-fly + frame-step +
+  the whole event loop — so it's the proof gate. Run a manual **hold-to-blaze + frame-step +
   dialog + shortcut-editor** smoke on the egui-Mac (and ideally Windows) build before/at
   this step, and stop if it gets messy (the egui-Mac beta stays shippable regardless).
 

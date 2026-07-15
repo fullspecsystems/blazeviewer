@@ -20,7 +20,7 @@ architecture), and the viewer paages through folders today:
   orientation, sequential navigation, self-paced advance, linear filtering,
   HiDPI-aware, GPU-adaptive texture limits.
 - **Next — Phase 3:** the decode pool + prefetch ring + self-paced advance that
-  make holding a key *fly* on full-resolution photos.
+  make holding a key *blaze* on full-resolution photos.
 
 The GPU-stack architecture was chosen from measurement (CPU decode ≈ 2.5× and a
 staging-ring upload ≈ 3.4× the 120 Hz budget on the test machine), reviewed, and

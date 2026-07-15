@@ -4,7 +4,7 @@
 //! all items rather than rolling a die per keypress. This is the key trick that
 //! makes random seeks prefetchable: because the next random targets are already
 //! known, the prefetcher can decode them into VRAM ahead of time, so holding
-//! [enter] flies through a shuffled deck just as fast as sequential paging.
+//! [enter] blazes through a shuffled deck just as fast as sequential paging.
 //!
 //! Walking the order visits every item exactly once before a reshuffle, so the
 //! user sees no repeats within a cycle.

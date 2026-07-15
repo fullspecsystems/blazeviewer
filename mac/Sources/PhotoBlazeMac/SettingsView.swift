@@ -142,7 +142,7 @@ struct SettingsView: View {
     }
 
     /// Sections mirror the egui General tab (parity, owner request): Navigation = the
-    /// hold-to-fly sliders + scroll wheel + slideshow interval; Startup = window mode +
+    /// hold-to-blaze sliders + scroll wheel + slideshow interval; Startup = window mode +
     /// the recursive-open default. Appearance is its own tab (egui's Display tab).
     private var generalPane: some View {
         Form {

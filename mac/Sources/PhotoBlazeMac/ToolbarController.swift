@@ -184,7 +184,7 @@ final class ToolbarController: NSObject, NSToolbarDelegate {
         switch id {
         case .navigation:
             // Hold-capable (task #55): press-and-hold blazes like holding Space (the core's
-            // pointer-nav hold-to-fly); a quick click is a single advance.
+            // pointer-nav hold-to-blaze); a quick click is a single advance.
             return holdNav(id, images: [symbol("chevron.left"), symbol("chevron.right")],
                            actionIds: ["prev", "next"], tips: ["Previous", "Next"],
                            priority: .high, palette: "Navigate")
@@ -474,7 +474,7 @@ extension NSToolbarItem.Identifier {
     static let openParent = NSToolbarItem.Identifier("pb.openParent")
 }
 
-/// An `NSSegmentedControl` that reports press-and-**hold** per segment, for toolbar hold-to-fly
+/// An `NSSegmentedControl` that reports press-and-**hold** per segment, for toolbar hold-to-blaze
 /// (task #55). It deliberately bypasses the control's normal click action and modal tracking
 /// loop: `mouseDown` begins the hold (and shows the pressed segment), `mouseUp` ends it — so a
 /// quick press→release is one begin→end (a single advance, like a Space tap) and holding blazes.

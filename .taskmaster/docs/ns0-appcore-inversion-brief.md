@@ -76,7 +76,7 @@ imperceptible.
 
 > **Discovered optimization (separate from the refactor, worth doing later):** the metric
 > surfaced that **`NSWindow.setTitle` is ~0.13 ms — ~half the keypress-fast-path cost.** The
-> title is unreadable while flying, so **throttling it during hold-to-fly** (set only on
+> title is unreadable while flying, so **throttling it during hold-to-blaze** (set only on
 > settle, or a few times/sec) shaves ~0.13 ms off every flown frame. Real win; not NS0.
 
 ## Remaining steps (resume here)
@@ -155,7 +155,7 @@ happens here) and native-fullscreen. Re-measure `present`/`drain` after.
 > to translate+apply; (6) invert the archive/scan/dialog flow (the §4d clean seam) + native
 > fullscreen. Smoke after each group.
 
-Smoke between steps: hold-to-fly + a dialog + the specific paths a step touched.
+Smoke between steps: hold-to-blaze + a dialog + the specific paths a step touched.
 
 ## 0. TL;DR of the move
 
@@ -192,7 +192,7 @@ live loop and fills in the deferred payloads.
   `apply_menu_state()` (replaced the five `refresh_*` methods + caches). Field:
   `App.menu_state: Option<contract::MenuState>`.
 - **Timing** in core: `slideshow` (dwell), `timing::advance_interval`,
-  `timing::elapsed_since` (the shared tap-delay/repeat gate; used by both nav hold-to-fly
+  `timing::elapsed_since` (the shared tap-delay/repeat gate; used by both nav hold-to-blaze
   and frame-step scrubbing).
 - All behavior-preserving; full suite green (374), clippy/fmt clean; animated-image
   support from `main` merged and flowing through the seams.
@@ -326,7 +326,7 @@ Shell-side `apply(effect)` is the *only* place winit/muda/rfd/egui are touched. 
    every `KeyDown`, and keep Escape special-cased *before* the seam.
 3. **Held-key semantics.** Ignore OS key-repeat (`repeat` flag), track *physical* keys in
    `held: HashMap<PbKey, Action>`, and the **focus-loss release net** (`Focused(false)`
-   clears `held`). All three must survive the move — they are the hold-to-fly feature.
+   clears `held`). All three must survive the move — they are the hold-to-blaze feature.
 4. **Never decode/upload on the keypress frame.** The inversion must not move any decode
    or `copy_buffer_to_texture` onto the `KeyDown`/`Redraw` path — keep uploads in the
    prefetch drain on `Tick`. A keypress stays a rebind.
@@ -370,7 +370,7 @@ representative states (already partly covered).
 ## 9. Validation gate (manual — owner runs)
 
 Build the egui-Mac (and ideally Windows) shell and smoke:
-- **hold-to-fly** on a big folder (space/→ held): ramps slow→fast, every photo shown, no
+- **hold-to-blaze** on a big folder (space/→ held): ramps slow→fast, every photo shown, no
   stutter, degrades to preview under decode pressure.
 - **frame-step scrub** `,`/`.` on an animated image; `P` play/pause; the play-hint flash.
 - **dialogs:** Settings save, About, Confirm-delete, Message, Password (archive), the

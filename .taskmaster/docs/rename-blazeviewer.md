@@ -74,6 +74,27 @@ Strings that were already **factually wrong**, independent of the rename:
 
 ---
 
+### "Hold to Fly" → "Hold to Blaze" ✅ DONE
+
+Owner call 2026-07-14: the fast-flick feature is named **Blaze**; "Hold to Fly" becomes
+**"Hold to Blaze"**, and the verb is "blaze", not "fly". Landed across the code comments,
+the canonical docs (README / CLAUDE.md / AGENTS.md / roadmap), and the one `flying` local
++ one test name. It was comments-only — no identifiers of substance, **no user-visible UI
+copy said "fly" at all**.
+
+Two things the sweep turned up, both already leaning this way:
+- `app_core_impl.rs` already commented `"Blaze mode" = actually flying`.
+- The archived Settings plan already grouped these options under **BLAZE**.
+
+**Rule applied:** historical records (`CHANGELOG.md`, `.taskmaster/archive.json`,
+`.taskmaster/docs/*-plan.md`) keep the old term — they describe what shipped, under the
+name it shipped with. Only current-system docs move.
+
+> **Open, owner's call:** the Settings section holding the blaze-speed options is
+> currently labelled **"Navigation"** (`SettingsView.swift:149`) — the original plan
+> called it BLAZE. Renaming it would make the feature name user-visible for the first
+> time. That's UI copy, so it's deliberately *not* done here.
+
 ## Phase B — Internal + cosmetic (no user-visible identity, no reinstall)
 
 Safe to land incrementally, in any order. **None of this changes what the OS sees.**
@@ -132,6 +153,7 @@ reinstalls. **Land them together, cut one release, reinstall once per box.**
 | Config (Win) | `%APPDATA%\PhotoBlaze` | `%APPDATA%\BlazeViewer` |
 | Config (mac) | `~/Library/Application Support/PhotoBlaze` | `…/BlazeViewer` |
 | Config (Linux) | `~/.config/photoblaze` | `~/.config/blazeviewer` |
+| Dispatch queue labels (4, Swift) | `ca.fullspec.photoblaze.*` | `ca.fullspec.blazeviewer.*` |
 | Feed (Win) | `…/photoblaze/win` | `…/blazeviewer/win` |
 | Feed (mac) | `…/photoblaze/mac/appcast.xml` | `…/blazeviewer/mac/appcast.xml` |
 | Feed (Linux) | `…/photoblaze/linux` | `…/blazeviewer/linux` |

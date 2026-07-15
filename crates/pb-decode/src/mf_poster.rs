@@ -405,7 +405,7 @@ fn propvariant_u64(pv: &PROPVARIANT) -> Option<u64> {
 
 /// Bound on readers being torn down concurrently on detached threads. Beyond it we
 /// drop inline (backpressure) rather than grow threads without limit under a fast
-/// fly-through of a video-heavy folder.
+/// blaze-through of a video-heavy folder.
 const MAX_PENDING_RETIREMENTS: usize = 8;
 static PENDING_RETIREMENTS: AtomicUsize = AtomicUsize::new(0);
 

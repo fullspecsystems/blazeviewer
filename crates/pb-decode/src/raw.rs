@@ -44,7 +44,7 @@ impl ImageDecoder for RawPreviewDecoder {
         let has_full_preview = preview_long >= PREVIEW_FULL_MIN;
 
         // Use the camera-baked embedded JPEG directly (fast, ~tens of ms) when EITHER:
-        //  - this is a **preview** request (the fly-by tier): a small thumbnail is
+        //  - this is a **preview** request (the blaze-by tier): a small thumbnail is
         //    exactly the "instant blurry, sharpen on land" placeholder — demosaicing
         //    here is what jammed scrolling through Sony RAW (~1.4 s each, all workers
         //    stuck); or

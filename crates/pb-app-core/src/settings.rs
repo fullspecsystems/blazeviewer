@@ -140,11 +140,11 @@ pub struct Settings {
     pub startup_mode: StartupMode,
     /// Open folders recursively by default (picker / drag-drop / association).
     pub recursive: bool,
-    /// Hold-to-fly: starting advance rate in photos/sec — the ramp's floor (#19).
+    /// Hold-to-blaze: starting advance rate in photos/sec — the ramp's floor (#19).
     pub start_speed: f32,
-    /// Hold-to-fly: seconds to ramp from `start_speed` up to the ceiling (#19).
+    /// Hold-to-blaze: seconds to ramp from `start_speed` up to the ceiling (#19).
     pub ramp_secs: f32,
-    /// Hold-to-fly ceiling in photos/sec; `0` = uncapped (the display refresh, #20).
+    /// Hold-to-blaze ceiling in photos/sec; `0` = uncapped (the display refresh, #20).
     pub max_advance_rate: u32,
     /// Initial delay (ms) before a held nav key begins auto-repeating.
     pub hold_delay_ms: u32,
@@ -271,12 +271,12 @@ impl Default for Settings {
             fullscreen: false,
             startup_mode: StartupMode::Remember,
             recursive: true,
-            // A gentle floor that ramps up to the refresh ceiling, so hold-to-fly
+            // A gentle floor that ramps up to the refresh ceiling, so hold-to-blaze
             // shows off its acceleration by default rather than starting at full tilt.
             start_speed: 2.0,    // photos/sec the ramp starts from (#19)
             ramp_secs: 5.0,      // seconds to reach the ceiling (#19)
             max_advance_rate: 0, // uncapped → display refresh is the ceiling (#20)
-            hold_delay_ms: 250,  // tap→repeat handoff; 200 made accidental flying too easy
+            hold_delay_ms: 250,  // tap→repeat handoff; 200 made accidental blazing too easy
             scroll_action: ScrollAction::Pan, // scroll pans; Ctrl+scroll zooms
             scale_mode: ScaleModePref::Fit,
             appearance_mode: AppearanceMode::System, // follow the OS light/dark theme

@@ -330,7 +330,7 @@ final class CoreModel {
             return event.modifierFlags.contains(.command) ? event : nil
         }
 
-        // The focus-loss release net: held keys are cleared so nothing keeps flying —
+        // The focus-loss release net: held keys are cleared so nothing keeps blazing —
         // on app deactivation AND on the window losing key status (a dialog opening).
         focusObserver = NotificationCenter.default.addObserver(
             forName: NSApplication.didResignActiveNotification,
@@ -579,8 +579,8 @@ final class CoreModel {
         syncToolbar()
     }
 
-    /// A toolbar nav/random button was pressed and **held** — begin hold-to-fly (task #55).
-    /// The initial advance runs now; `kick()` keeps the pump ticking so it flies each frame
+    /// A toolbar nav/random button was pressed and **held** — begin hold-to-blaze (task #55).
+    /// The initial advance runs now; `kick()` keeps the pump ticking so it blazes each frame
     /// (the tick's `held_nav()` sees the pointer hold) until `endPointerNav`. Same machinery a
     /// held Space key uses.
     func beginPointerNav(_ actionId: String) {
@@ -589,7 +589,7 @@ final class CoreModel {
         drainEffects()
     }
 
-    /// The held toolbar button was released — stop flying (the pump re-pauses once idle).
+    /// The held toolbar button was released — stop blazing (the pump re-pauses once idle).
     func endPointerNav() {
         core.end_pointer_nav()
         kick()
@@ -643,7 +643,7 @@ final class CoreModel {
     }
 
     /// The last motion state pushed to the toolbar's Play-Animation button — so the pump
-    /// re-syncs it only on a real change (a new item under hold-to-fly, or playback ending
+    /// re-syncs it only on a real change (a new item under hold-to-blaze, or playback ending
     /// on its own), not every frame.
     @ObservationIgnored private var lastHasMotion = false
     @ObservationIgnored private var lastPlaying = false
@@ -1687,7 +1687,7 @@ final class CoreModel {
             }
         }
         // Keep the toolbar's Play-Animation button in step with motion state the discrete
-        // input paths miss: a new item reached under hold-to-fly, or playback finishing on
+        // input paths miss: a new item reached under hold-to-blaze, or playback finishing on
         // its own. Cheap reads (the current item's motion is cached); full re-sync only on a
         // change. (Both accessors are cache hits here — the tick above primed them.)
         let hasMotion = core.current_has_motion()

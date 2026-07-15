@@ -58,7 +58,7 @@ fn prefetch_targets_impl(pl: &Playlist, ahead: usize, behind: usize, scanning: b
             // Cede up to two look-ahead slots to the random hedges — the
             // next-random (`enter`) and prior-random (`shift+enter`) photos — so
             // jumping into random nav while paging sequentially is an instant hit.
-            // Appended last (prior-random lowest of all), so sequential fly is
+            // Appended last (prior-random lowest of all), so sequential blaze is
             // unaffected; keep ≥1 look-ahead even on a tiny ring (a hedge that then
             // overflows capacity is simply dropped by the ring's rank check). In
             // random mode these are already covered by the random ahead/behind
@@ -94,9 +94,9 @@ fn prefetch_targets_impl(pl: &Playlist, ahead: usize, behind: usize, scanning: b
             // *sequential* neighbours of the current photo (cur±1), appended at
             // LOW priority. This makes the first space/backspace after a random
             // jump an instant ring hit instead of a cold decode; the low priority
-            // means the random fly's look-ahead is filled first (the hedge only
+            // means the random blaze's look-ahead is filled first (the hedge only
             // loads once the pool catches up at rest, so holding [enter] still
-            // flies). Total stays within ahead+behind+1 so the hedge is within
+            // blazes). Total stays within ahead+behind+1 so the hedge is within
             // the ring's capacity.
             const HEDGE: usize = 2; // cur+1, cur-1
             let ahead_random = ahead.saturating_sub(HEDGE);
@@ -293,7 +293,7 @@ mod tests {
         let pos = pl.shuffle_pos();
         let cur = pl.current().unwrap();
         // ahead=5, behind=2 → the random look-ahead is ahead-HEDGE = 3 deep
-        // (high priority, for hold-to-fly), then a cur±1 sequential hedge.
+        // (high priority, for hold-to-blaze), then a cur±1 sequential hedge.
         let t = prefetch_targets(&pl, 5, 2);
         assert_eq!(t[0], cur);
         let expected_random_ahead: Vec<usize> = (1..=3)

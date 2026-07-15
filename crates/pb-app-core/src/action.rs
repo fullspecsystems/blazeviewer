@@ -6,13 +6,13 @@
 //! Pure data (no winit, no I/O), so the id/kind tables are unit-tested here.
 
 /// How an action is driven from the keyboard — the press handler needs this to
-/// know whether to fire once, start a hold-to-fly, or track a continuous hold.
+/// know whether to fire once, start a hold-to-blaze, or track a continuous hold.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ActionKind {
     /// Fires once per key-down (OS auto-repeat ignored): rotate, copy, toggle a
     /// panel, open Settings, etc.
     OneShot,
-    /// Photo navigation — fires on press and then repeats via hold-to-fly
+    /// Photo navigation — fires on press and then repeats via hold-to-blaze
     /// (`about_to_wait`): next / prev / random.
     Nav,
     /// Continuous while the key is held, applied each frame: pan and zoom.
@@ -26,7 +26,7 @@ pub enum ActionKind {
 /// on-disk keymap-config names; `kind` tells the input layer how to drive it.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 pub enum Action {
-    // Navigation (hold-to-fly).
+    // Navigation (hold-to-blaze).
     Next,
     Prev,
     Random,

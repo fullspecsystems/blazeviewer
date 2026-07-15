@@ -145,7 +145,7 @@ Explicit `AppleOnDevice` / `LocalEndpoint` override in Settings.
 Reuse the park detection that drives `EAGER_PREP_DELAY` (animation pre-decode): the
 describe trigger fires from the tick path once parked ≥ 500 ms (constant
 `DESCRIBE_DWELL`, tunable) **and** `describe_auto` is on **and** no cached
-description exists for the item. Never keyed off "image changed" — hold-to-fly must
+description exists for the item. Never keyed off "image changed" — hold-to-blaze must
 not machine-gun the backend. Cancellation is the `scan_gen` pattern: a `u64`
 generation bumped on every navigation; late results with a stale generation are
 dropped on the floor (the HTTP worker also gets a cancel flag; FM results are just

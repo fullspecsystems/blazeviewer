@@ -39,7 +39,7 @@ real wall is **decode throughput**, and the architecture exists to hide it:
    decoded and uploaded *ahead* of the user into a ring of resident GPU
    textures. **A keypress is a rebind, never a decode or an upload.**
 4. **Self-paced advance.** Holding a key advances to the newest *ready* frame
-   each vsync — so you fly when decode keeps up and degrade gracefully (to
+   each vsync — so you blaze when decode keeps up and degrade gracefully (to
    previews) when it can't. Capped at the monitor refresh rate.
 
 The metric that matters is **keypress → photon** (input to the pixel actually
@@ -62,7 +62,7 @@ crates/
              buttons, text fields) + a Windows-tracking light/dark theme. egui-only,
              no app deps; powers the dialogs and the standalone component gallery
   pb-app-core platform-neutral orchestration model (NS0/ADR-021): the action vocabulary,
-             the PbKey key model + keymap, slideshow + hold-to-fly timing, the shared
+             the PbKey key model + keymap, slideshow + hold-to-blaze timing, the shared
              config dir, and the CoreEvent/CoreEffect/MenuState/Modifiers/KeyResolution
              contract. toml-only — no winit/egui/GPU — so the macOS SwiftUI shell and the
              winit shell can drive the same core. The winit App re-exports its modules.

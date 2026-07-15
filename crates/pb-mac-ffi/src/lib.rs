@@ -718,7 +718,7 @@ impl AppCoreHandle {
         }
     }
 
-    /// A toolbar nav/random button was pressed and **held** → begin hold-to-fly for its
+    /// A toolbar nav/random button was pressed and **held** → begin hold-to-blaze for its
     /// action (task #55). The Swift host kicks the pump + drains afterward, exactly like a
     /// keypress, so the self-paced advance runs for as long as the button is held.
     fn begin_pointer_nav(&mut self, action_id: &str) {
@@ -728,7 +728,7 @@ impl AppCoreHandle {
         }
     }
 
-    /// The held toolbar nav/random button was released → stop flying.
+    /// The held toolbar nav/random button was released → stop blazing.
     fn end_pointer_nav(&mut self) {
         self.core.end_pointer_nav();
     }
@@ -934,7 +934,7 @@ impl AppCoreHandle {
     /// The displayed photo's on-disk path ("" for an archive entry or the empty deck) —
     /// the host's title-bar **proxy icon** source (`NSWindow.representedURL`, macOS port
     /// task #12). Pulled on each `SetTitle` (that effect fires exactly when the displayed
-    /// item changes, so the refresh stays off the hold-to-fly hot path). RAM-only, never
+    /// item changes, so the refresh stays off the hold-to-blaze hot path). RAM-only, never
     /// `noteNewRecentDocumentURL:` (no Recents → privacy #2 holds).
     fn current_photo_path(&self) -> String {
         self.core
@@ -3984,7 +3984,7 @@ mod ffi {
 
         // The native menu (NS1 item 8): clicks in by Action id, state out by pull.
         fn menu_action(&mut self, id: &str);
-        // Toolbar hold-to-fly (task #55): press-and-hold a nav/random button to blaze.
+        // Toolbar hold-to-blaze (task #55): press-and-hold a nav/random button to blaze.
         fn begin_pointer_nav(&mut self, action_id: &str);
         fn end_pointer_nav(&mut self);
         fn menu_state(&self) -> MenuStateFfi;

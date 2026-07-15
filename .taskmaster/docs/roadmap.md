@@ -10,7 +10,7 @@ late, gated acceleration spike** (`decisions.md` ADR-002/012/017 + the post-spik
 update). Felt-speed multipliers (previews, preemption, cancellation, resident
 textures, never blocking the UI) come *before* any GPU-decode work.
 
-> Cadence: one photo on screen fast (Phase 1–2) → *hold a key and fly* on the CPU
+> Cadence: one photo on screen fast (Phase 1–2) → *hold a key and blaze* on the CPU
 > engine (Phase 3) → instant previews (Phase 4) → breadth & rigor (5–6) → only then
 > consider the zero-copy escalation, gated by data (Phase 7).
 
@@ -19,7 +19,7 @@ textures, never blocking the UI) come *before* any GPU-decode work.
 ## Progress & learnings (as of 2026-06-27)
 
 **Done:** Phases 0–2, and **Phase 3 — the prefetch engine** (priority decode pool,
-byte-budgeted resident texture ring, gated-advance hold-to-fly, staging-ring
+byte-budgeted resident texture ring, gated-advance hold-to-blaze, staging-ring
 upload; Original/Fill also async). Phase 3 was codex-reviewed clean over 7 rounds.
 Only Phase 3.5b (DXGI photon timing) is deferred.
 
@@ -79,7 +79,7 @@ The Phase-0→8 engine plan is below for reference.
 - **Exit:** page through a folder of JPEGs fit-to-screen; per-image decode + upload
   time logged.
 
-## Phase 3 — Make holding a key fly  *(headline engine)*
+## Phase 3 — Make holding a key blaze  *(headline engine)*
 - Priority decode pool with cancellation + **queue preemption** (on-screen image jumps the line).
 - Prefetch scheduler driving `prefetch_targets` + `plan_residency`.
 - Resident texture ring; staging-ring uploads, prefetch-only (never the keypress frame).
@@ -143,7 +143,7 @@ The Phase-0→8 engine plan is below for reference.
 
 ### Cross-phase performance targets
 - **keypress→photon (cache hit):** ≤ 1 refresh interval (p95).
-- **Hold-to-fly throughput:** ~monitor refresh on the corpus (fit-sized).
+- **Hold-to-blaze throughput:** ~monitor refresh on the corpus (fit-sized).
 - **No stalls:** a cache miss degrades to a preview within 1 frame, never a freeze.
 - **No regressions:** CI instruction-count gate blocks hot-path regressions.
 - **Zero-copy is kept only if it wins** the high-MP stress test by a meaningful

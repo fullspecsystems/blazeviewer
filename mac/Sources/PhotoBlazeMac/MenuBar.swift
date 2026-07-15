@@ -9,7 +9,7 @@ import PbMacFfi
 /// ⌘-accelerators are real NSMenu key-equivalents (safe: an unbound ⌘-chord never falls
 /// through to a bare key — the keymap's logo rule). Bare-key commands (Space, R, `,`/`.`,
 /// …) show plain labels — the keymap owns those keys, and an NSMenu key-equivalent would
-/// steal them (breaking hold-to-fly). macOS auto-injects its own "Enter Full Screen"
+/// steal them (breaking hold-to-blaze). macOS auto-injects its own "Enter Full Screen"
 /// item at the end of View, so the native-fullscreen entry comes for free.
 @MainActor
 final class MenuBar: NSObject {
@@ -68,7 +68,7 @@ final class MenuBar: NSObject {
     /// Right-aligned shortcut hints for the bare-key commands (Space, R, `[`, …) —
     /// egui-menu parity, where every item shows its key. These keys belong to the
     /// viewer's keymap, so they must NOT be NSMenu key-equivalents (the menu would
-    /// steal them from hold-to-fly, and would fire while another window is key); an
+    /// steal them from hold-to-blaze, and would fire while another window is key); an
     /// `NSMenuItemBadge` renders the hint without registering anything. Reads the
     /// LIVE keymap's primary slot (the same display the Shortcuts editor shows), so a
     /// rebind updates the menu bar too — called again after a Settings save.

@@ -137,7 +137,7 @@ fn mix(a: Color32, b: Color32, t: f32) -> Color32 {
     Color32::from_rgba_unmultiplied(l(a.r(), b.r()), l(a.g(), b.g()), l(a.b(), b.b()), 255)
 }
 
-/// Draw a hold-to-fly **nav** button and fold its held-state into `pressed` (the single nav
+/// Draw a hold-to-blaze **nav** button and fold its held-state into `pressed` (the single nav
 /// slot the core tracks). A free fn — not a closure — so it borrows `pressed` only for the
 /// call, leaving `pressed` free to read at the end of the frame.
 #[allow(clippy::too_many_arguments)]
@@ -174,10 +174,10 @@ fn icon_button(
     // can change digits without reflowing the strip — see [`LABEL_W`].
     let label_w = if label.is_some() { LABEL_W } else { 0.0 };
     let size = Vec2::new(BTN + label_w, BTN);
-    // **Drag** sense, not plain click: a hold-to-fly nav button is held far longer than egui's
+    // **Drag** sense, not plain click: a hold-to-blaze nav button is held far longer than egui's
     // `max_click_duration` (0.8 s) and the hand drifts past `max_click_dist` (6 px), both of which
     // drop a click-only widget's `is_pointer_button_down_on` to false mid-hold — the bug where the
-    // fly "stopped after about a second." A drag-sensed widget keeps `potential_drag_id` (and thus
+    // blaze "stopped after about a second." A drag-sensed widget keeps `potential_drag_id` (and thus
     // `is_pointer_button_down_on`) alive until the real mouse-up. One-shot buttons still read
     // `clicked()`, which fires on a normal quick click regardless.
     let sense = if enabled {
@@ -250,7 +250,7 @@ fn icon_button(
 }
 
 /// Draw the toolbar strip. Non-nav buttons push [`PanelAction::ToolbarAction`]; nav/random
-/// buttons are press-and-hold (hold-to-fly), reconciled against `nav_held` and pushing
+/// buttons are press-and-hold (hold-to-blaze), reconciled against `nav_held` and pushing
 /// [`PanelAction::ToolbarNavPress`]/[`ToolbarNavRelease`](PanelAction::ToolbarNavRelease).
 pub fn toolbar(
     ctx: &egui::Context,
@@ -289,7 +289,7 @@ pub fn toolbar(
             ui.horizontal_centered(|ui| {
                 ui.spacing_mut().item_spacing = Vec2::new(ITEM_GAP, 0.0);
 
-                // ── Nav (prev / next) — hold to fly ──
+                // ── Nav (prev / next) — hold to blaze ──
                 nav_btn(
                     ui,
                     &p,
@@ -309,7 +309,7 @@ pub fn toolbar(
                     &mut pressed,
                 );
 
-                // ── Random (prev / next) — hold to fly ──
+                // ── Random (prev / next) — hold to blaze ──
                 if plan.random {
                     ui.add_space(GROUP_GAP - ITEM_GAP);
                     nav_btn(
