@@ -123,6 +123,7 @@ impl AppCore {
             details_probe: None,
             details_gen: 0,
             catalog_seq: 0,
+            audio_active: None,
             subtitles: crate::subtitle_engine::SubtitleEngine::from_settings(&settings),
             recognized_text: std::collections::HashMap::new(),
             text_scan: None,
@@ -8026,6 +8027,122 @@ impl AppCore {
         )
     }
 
+    // ── The audio track picker (task #99) ────────────────────────────────
+    //
+    // Audio differs from subtitles in a way that shapes all of this: the core does not own
+    // the choice. The decoder picks a track at open, the shell owns the player, and only
+    // the shell can say what is coming out of the speakers. So the core formats the rows and
+    // hands out locators; the shell acts and reports back.
+
+    /// The catalog for the video on screen, if its probe has landed.
+    fn showing_catalog(&self) -> Option<&pb_decode::MediaTrackCatalog> {
+        self.displayed_item
+            .filter(|_| self.video_showing())
+            .and_then(|item| self.exif_cache.get(&item))
+            .and_then(|d| d.media.as_ref())
+    }
+
+    /// The Playback ▸ Audio flyout's rows. Empty = offer nothing (no video, or the probe
+    /// hasn't landed — [`subtitle_tracks_known`](Self::subtitle_tracks_known) tells those
+    /// apart, and it answers for the whole catalog, not just subtitles).
+    pub fn audio_picker_rows(&mut self) -> Vec<crate::tracks::PickerRow> {
+        let Some(item) = self.displayed_item.filter(|_| self.video_showing()) else {
+            return Vec::new();
+        };
+        self.ensure_exif_cached(item);
+        let active = self.audio_active;
+        self.showing_catalog()
+            .map(|c| crate::tracks::audio_picker_rows(c, active))
+            .unwrap_or_default()
+    }
+
+    /// Row `row`'s track id, if it exists.
+    fn audio_row_id(&self, row: usize) -> Option<pb_decode::TrackId> {
+        self.showing_catalog()
+            .and_then(|c| c.audio.tracks.get(row))
+            .map(|t| t.id)
+    }
+
+    /// Row `row`'s locator — **how the shell reaches this track on its route**.
+    ///
+    /// The two backends speak different currencies and this is the seam that hides it: the
+    /// FFmpeg catalog locates a track by container stream index, AVFoundation by a
+    /// serialized `AVMediaSelectionOption`. Even `local_id` means different things (a real
+    /// stream index vs. a running counter), which is exactly why nothing outside may treat
+    /// an id as a stream number.
+    fn audio_row_locator(&self, row: usize) -> Option<&pb_decode::tracks::TrackLocator> {
+        let id = self.audio_row_id(row)?;
+        self.showing_catalog()?.locator(id)
+    }
+
+    /// Row `row` as an FFmpeg stream index (`-1` = this row isn't FFmpeg-located) — the
+    /// sample-buffer route's currency, fed straight to `session_audio_set_track`.
+    pub fn audio_row_ff_stream(&self, row: usize) -> i64 {
+        match self.audio_row_locator(row) {
+            Some(pb_decode::tracks::TrackLocator::FfStream(i)) => *i as i64,
+            _ => -1,
+        }
+    }
+
+    /// Row `row`'s serialized `AVMediaSelectionOption` (empty = this row isn't
+    /// AVFoundation-located) — the AVPlayer route's currency. The spike proved this
+    /// round-trips through `mediaSelectionOptionWithPropertyList:` to an option that
+    /// `isEqual:` the original, which is what lets the shell re-find this exact option
+    /// without trusting an ordinal.
+    pub fn audio_row_av_plist(&self, row: usize) -> Vec<u8> {
+        match self.audio_row_locator(row) {
+            Some(pb_decode::tracks::TrackLocator::AvOption { property_list, .. }) => {
+                property_list.clone()
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    /// The shell reports which row it is **actually playing** (`-1` = unknown/none).
+    ///
+    /// Called on open and after every switch — including a *refused* one, where it re-states
+    /// the unchanged track. That is what keeps the tick honest rather than optimistic.
+    pub fn set_active_audio_row(&mut self, row: i64) {
+        self.audio_active = usize::try_from(row).ok().and_then(|r| self.audio_row_id(r));
+    }
+
+    /// The shell reports the outcome of a switch it attempted: toast, and re-state the tick.
+    ///
+    /// **Only on a confirmed switch** (#99's rule, and the asymmetry with subtitles is
+    /// deliberate). Swapping a subtitle track only re-aims a cue reader, so it can toast
+    /// optimistically; audio re-opens a decoder and rebuilds a format, and either can fail
+    /// while the previous track plays on. A toast naming a track over unchanged audio would
+    /// teach the user to distrust every other toast in the app.
+    pub fn audio_track_switched(&mut self, row: usize, ok: bool) {
+        if !ok {
+            self.show_toast_icon("Couldn't switch audio track", ToastIcon::AudioTrackFailed);
+            return;
+        }
+        // The row the shell actually landed on is re-reported separately by
+        // `set_active_audio_row`, so read the label back from the catalog rather than
+        // trusting the request: a stale pick falls back to the policy inside the decoder,
+        // and the toast must name what is *playing*.
+        let label = self
+            .audio_active
+            .and_then(|id| {
+                self.showing_catalog()?
+                    .audio
+                    .tracks
+                    .iter()
+                    .find(|t| t.id == id)
+            })
+            .map(crate::tracks::track_summary)
+            .or_else(|| {
+                self.showing_catalog()?
+                    .audio
+                    .tracks
+                    .get(row)
+                    .map(crate::tracks::track_summary)
+            })
+            .unwrap_or_else(|| "Audio track changed".into());
+        self.show_toast_icon(&label, ToastIcon::AudioTrack);
+    }
+
     /// Are subtitles switched on — the `C` state?
     ///
     /// The playback bar's picker button fills its icon on this, so the control reports its
@@ -8255,6 +8372,10 @@ impl AppCore {
             ToastIcon::Copy => Some(icon::assets::CLIPBOARD),
             ToastIcon::Captions => Some(icon::assets::CAPTIONS),
             ToastIcon::CaptionsOff => Some(icon::assets::CAPTIONS_SLASH),
+            // The winit HUD has no dedicated audio-track glyph; the speaker reads correctly
+            // for "you're now hearing a different track" and the set already carries it.
+            ToastIcon::AudioTrack => Some(icon::assets::VOLUME),
+            ToastIcon::AudioTrackFailed => Some(icon::assets::VOLUME_SLASH),
         };
         if let Some(hud) = self.hud.as_ref() {
             if let Some((rgba, w, h)) = hud.render_panel_icon(msg, px, pad, fa, hud.theme().bg) {

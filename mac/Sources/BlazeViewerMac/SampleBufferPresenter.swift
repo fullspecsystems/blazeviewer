@@ -158,6 +158,9 @@ final class SampleBufferPresenter {
                     guard let self, ok, !self.audioStarted else { return }
                     self.audioStarted = true
                     self.audioFeeder.startFeeding(into: self.audioRenderer)
+                    // Tell the core which track the decoder's policy actually chose, so
+                    // Playback ▸ Audio can tick it (task #99). Reported, never guessed.
+                    self.reportActiveAudioTrack()
                 }
             }
         }
@@ -378,6 +381,52 @@ final class SampleBufferPresenter {
         switch scaleMode {
         case 1: displayLayer.videoGravity = .resizeAspectFill // Fill
         default: displayLayer.videoGravity = .resizeAspect // Fit / Original
+        }
+    }
+
+    // MARK: - Audio track selection (task #99)
+
+    /// Tell the core which audio track is **actually playing**, by finding the picker row
+    /// whose FFmpeg stream index matches what the decoder reports.
+    ///
+    /// The match happens against the row list rather than the raw index because the tick is
+    /// a row, and because the core's ids are backend-specific — `local_id` is a stream index
+    /// on this route but a running counter on AVPlayer's, so nothing may assume the two are
+    /// interchangeable.
+    func reportActiveAudioTrack() {
+        audioFeeder.currentTrack { [weak self] stream in
+            MainActor.assumeIsolated {
+                guard let self, let model = self.model else { return }
+                model.reportActiveAudioStream(stream)
+            }
+        }
+    }
+
+    /// Switch to the audio track at picker row `row`. Reports the outcome to the core, which
+    /// toasts only on a **confirmed** switch.
+    func selectAudioTrack(row: Int) {
+        guard let model else { return }
+        let stream = model.audioRowFfStream(row)
+        guard stream >= 0 else {
+            model.audioTrackSwitched(row: row, ok: false) // not a track this route can reach
+            return
+        }
+        let at = synchronizer.currentTime().seconds
+        audioFeeder.switchTrack(
+            stream, at: at.isFinite ? max(0, at) : 0, renderer: audioRenderer
+        ) { [weak self] ok in
+            MainActor.assumeIsolated {
+                guard let self, let model = self.model else { return }
+                // Re-read what is playing FIRST — on a refusal that is the old track, and on
+                // a stale pick the decoder falls back to its policy, so neither the tick nor
+                // the toast may trust the request.
+                self.audioFeeder.currentTrack { stream in
+                    MainActor.assumeIsolated {
+                        model.reportActiveAudioStream(stream)
+                        model.audioTrackSwitched(row: row, ok: ok)
+                    }
+                }
+            }
         }
     }
 

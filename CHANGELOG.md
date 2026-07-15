@@ -26,9 +26,13 @@ with any pre-release suffix carried only by the tag.
   episode and the next one starts on its Arabic track — even though the two files number
   their tracks differently, and even if one says `ara` where the other says `ar`. If a film
   hasn't got that language, it falls back to its usual choice instead of showing nothing.
+- **Choose the audio track** (macOS): **Playback ▸ Audio** lists every track a film carries —
+  the director's commentary, the second language, the stereo mix beside the 5.1 — with a tick
+  on the one you're hearing. It changes the sound without interrupting the picture. Blaze
+  Viewer only ever says a track changed once it actually has, so the message can be trusted.
 - **A new Playback menu** (macOS) gathers the things that only apply to something playing —
-  Play/Pause, frame stepping, subtitles, and Live Photo audio — instead of leaving them
-  scattered through View and Image.
+  Play/Pause, frame stepping, audio and subtitle tracks, and Live Photo audio — instead of
+  leaving them scattered through View and Image.
 - **Garbled subtitles repair themselves.** Subtitle text that arrives mangled — `â™ª`
   instead of `♪`, `Iâ€™m` instead of `I'm` — is a mis-encoding that has been quietly
   breaking subtitles everywhere for decades. Blaze Viewer now detects and undoes it, and

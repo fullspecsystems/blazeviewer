@@ -1403,6 +1403,8 @@ final class CoreModel {
         case 11: return "doc.on.doc"  // Copy
         case 12: return "captions.bubble.fill"  // Captions on
         case 13: return "captions.bubble"  // Captions off
+        case 14: return "speaker.wave.2.fill"  // Audio track switched
+        case 15: return "speaker.slash.fill"  // Audio track switch refused
         default: return nil  // None
         }
     }
@@ -2907,6 +2909,78 @@ final class CoreModel {
     /// check. (`videoControlsVisible` answers a different question: whether the *chrome* is
     /// revealed, which is false for a playing video whose info line has faded out.)
     var videoShowing: Bool { core.video_showing() }
+
+    // MARK: - The audio track picker (task #99)
+
+    /// The Playback ▸ Audio rows, pulled fresh — same per-file reasoning as the subtitle
+    /// flyout: read at open, never cached.
+    func audioTrackRows() -> [AudioTrackRow] {
+        core.audio_picker_refresh()
+        let n = Int(core.audio_track_count())
+        return (0..<n).map { i in
+            AudioTrackRow(
+                id: i,
+                label: core.audio_track_label(UInt(i)).toString(),
+                active: core.audio_track_active(UInt(i))
+            )
+        }
+    }
+
+    /// Row `i`'s FFmpeg stream index, or `-1` — the sample-buffer route's currency.
+    func audioRowFfStream(_ i: Int) -> Int { Int(core.audio_track_ff_stream(UInt(i))) }
+
+    /// Row `i`'s serialized `AVMediaSelectionOption`, or `nil` — AVPlayer's currency.
+    func audioRowAvPlist(_ i: Int) -> Data? {
+        let v = core.audio_track_av_plist(UInt(i))
+        let n = Int(v.len())
+        guard n > 0 else { return nil }
+        // One bulk copy off the RustVec's buffer — a per-byte `get` would be O(n) FFI calls
+        // for a plist that can run to hundreds of bytes, on every menu open.
+        return Data(UnsafeBufferPointer(start: v.as_ptr(), count: n))
+    }
+
+    /// The picker row whose stored property list equals `plist`, or `-1` — how the AVPlayer
+    /// route turns a live selection back into a row.
+    func audioRowMatching(plist: Data) -> Int {
+        let n = Int(core.audio_track_count())
+        for i in 0..<n where audioRowAvPlist(i) == plist { return i }
+        return -1
+    }
+
+    /// The sample-buffer route reports the container stream index it is playing; find its
+    /// row and tell the core. `nil`/no match ticks nothing, which is the honest answer.
+    func reportActiveAudioStream(_ stream: Int?) {
+        guard let stream else {
+            reportActiveAudioRow(-1)
+            return
+        }
+        let n = Int(core.audio_track_count())
+        for i in 0..<n where audioRowFfStream(i) == stream {
+            reportActiveAudioRow(i)
+            return
+        }
+        reportActiveAudioRow(-1)
+    }
+
+    /// Report which row is **actually playing** (`-1` = unknown). The tick's only source.
+    func reportActiveAudioRow(_ row: Int) {
+        core.set_active_audio_row(Int64(row))
+    }
+
+    /// Report a switch's outcome — the core toasts only when `ok`.
+    func audioTrackSwitched(row: Int, ok: Bool) {
+        core.audio_track_switched(UInt(row), ok)
+        kick()
+    }
+
+    /// Route the selection to whichever presenter owns this file.
+    func selectAudioTrack(_ row: Int) {
+        if let sbv = sampleBufferVideo {
+            sbv.selectAudioTrack(row: row)
+        } else if let nv = nativeVideo {
+            nv.selectAudioTrack(row: row)
+        }
+    }
 
     /// Apply a picker row — the index into whatever `subtitleTrackRows()` last returned.
     func selectSubtitleTrack(_ row: Int) {

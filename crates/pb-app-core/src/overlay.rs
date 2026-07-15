@@ -195,6 +195,12 @@ pub enum ToastIcon {
     Copy = 11,
     Captions = 12,
     CaptionsOff = 13,
+    /// An audio track switched (task #99) — a speaker with waves, distinct from
+    /// [`Unmute`](Self::Unmute): "you are now hearing a different track", not "sound is
+    /// back on".
+    AudioTrack = 14,
+    /// A switch that did **not** happen — the previous track is still playing.
+    AudioTrackFailed = 15,
 }
 
 impl ToastIcon {
