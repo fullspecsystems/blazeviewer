@@ -95,6 +95,70 @@ name it shipped with. Only current-system docs move.
 > called it BLAZE. Renaming it would make the feature name user-visible for the first
 > time. That's UI copy, so it's deliberately *not* done here.
 
+## Vendor identity — settled 2026-07-14, don't re-litigate
+
+**The naming rule:** the full legal name where a field makes a *legal assertion*; the brand
+name where it merely *identifies* us.
+
+| Context | Value |
+|---|---|
+| `©` notices — `LegalCopyright`, `NSHumanReadableCopyright`, About, `LICENSE.md` | **FullSpec Systems Inc.** |
+| Authorship / brand — Velopack `--packAuthors`, marketing | **FullSpec Systems** |
+| Windows `CompanyName` | **FullSpec Systems Inc.** — it names the *vendor*; it said "PhotoBlaze", which was never right |
+
+Word order is **year-first** (`© 2026 FullSpec Systems Inc.`), matching `LICENSE.md`.
+
+### Known-open, deliberately deferred (all the same trigger: **first revenue**)
+
+- **The IP assignment hasn't been executed.** `CLA.md` records it: JD Lien owns the
+  copyright personally, so the shipped `©` names an entity that doesn't own it *yet*.
+  Owner's call to defer — the product is two weeks old with no users, and the CLA's own
+  trigger is "before first revenue". Deferring follows the plan rather than departing
+  from it. Free today, a CRA valuation argument once it earns.
+- **Signing identities don't match the vendor.** Azure Trusted Signing is FullSpec
+  Systems (Windows); Apple notarization uses JD Lien's **personal** Developer ID (macOS).
+  Cosmetic and normal mid-incorporation.
+
+### The Apple question — answered, no action needed
+
+**Changing the Apple Team ID later will NOT break Sparkle auto-update.** Verified against
+the Sparkle 2.9.4 source (`Sparkle/SUUpdateValidator.m`), not docs:
+- `validateDownloadPathWithFallbackOnCodeSigning:` returns `YES` on **EdDSA alone**; the
+  Team-ID check below it is commented *"As fallback for key rotation"* and only runs when
+  EdDSA has **failed**.
+- The post-extraction check rejects only when EdDSA passed **and** the signature doesn't
+  match the old one **and** the new bundle isn't validly signed *in its own right*. A
+  changed Team ID (`!passedCodeSigning`) is tolerated so long as the new build is properly
+  signed.
+
+⇒ So long as the **EdDSA key is preserved** (never regenerate it) and the new build is
+signed + notarized, the Team ID can move whenever. This makes it **unlike** the bundle id
+and feed URL — those were "free now, expensive once you have users"; this one costs the
+same whenever, so there is **no deadline to beat**.
+
+Other Apple facts (knowledge cutoff Jan 2026 — confirm against Apple's docs before acting):
+- Individual and Organization memberships are **both $99/yr**. No premium for the corp.
+- **No self-serve conversion** Individual → Organization: enroll fresh, with a **D-U-N-S
+  number** for FullSpec Systems Inc.
+- An Apple ID holds only **one** membership as Account Holder → the Org needs a **new
+  Apple ID** on the company domain (a role address like `developer@fullspec.ca` beats
+  `jd@`; either beats a personal Apple ID). Then invite the personal Apple ID in as Admin.
+- An Individual membership is bound to your **legal name** — Apple will not display
+  "FullSpec Systems Inc." on it. The Org account is the only real path.
+
+**Where it actually bites: iOS, not macOS.** The App Store shows the **seller name
+publicly** on the product page; Developer ID on macOS surfaces the signer almost nowhere
+(`spctl -a -vv`, Get Info — there is no SmartScreen-style "Verified publisher" banner).
+
+> **The App Store/LGPL blocker is probably macOS-shaped, not App-Store-shaped.** CLAUDE.md
+> says an App Store channel requires re-opening the LGPL question first — but that stems
+> from **macOS bundling FFmpeg** (LGPL) for MKV/WebM/VP9. The mobile vision targets iOS
+> **ImageIO / VideoToolbox / PhotoKit**, and macOS already proves the pattern (Apple Image
+> I/O, *"no libheif exposure at all"*). An iOS build over PhotoKit assets
+> (HEIC/JPEG/MOV/MP4) plausibly links **zero LGPL libraries**, so the conflict never
+> arises. Confirm when iOS is actually scoped — but don't assume the macOS blocker
+> transfers.
+
 ## Phase B — Internal + cosmetic (no user-visible identity, no reinstall)
 
 Safe to land incrementally, in any order. **None of this changes what the OS sees.**
