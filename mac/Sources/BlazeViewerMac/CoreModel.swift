@@ -1525,6 +1525,12 @@ final class CoreModel {
         (0..<Int(subtitle_font_count())).map { subtitle_font_name(UInt($0)).toString() }
     }
 
+    /// Has the font system landed? Also *starts* it, so opening the Subtitles tab spends
+    /// the 261 ms while the user reads the pane rather than on a film's first cue.
+    func subtitlePreviewReady() -> Bool {
+        core.subtitle_preview_ready()
+    }
+
     func keymapBeginEdit() {
         core.keymap_begin_edit()
     }

@@ -20,6 +20,13 @@ with any pre-release suffix carried only by the tag.
   only ever when it can prove the text really was mangled, so correctly-written text
   (`café`, `señor`) is never touched.
 
+- **Subtitle appearance is now yours to set** (macOS): a new **Settings ▸ Subtitles** tab
+  with font, size, colour and opacity, outline, drop shadow, background and rounded
+  corners, and vertical position — including **below the picture, down in the black
+  letterbox bar**, which almost no player lets you do. A live preview shows exactly what
+  you'll get, drawn by the same renderer that draws the real thing, so it can't mislead
+  you. Your choices are remembered.
+
 ### Changed
 - **`C` now reliably shows subtitles when a file has them.** It prefers a forced/signs
   track matching the audio, then the file's own default track, then whatever it can read.

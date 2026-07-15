@@ -4,7 +4,49 @@ _Last updated: 2026-07-15 (rev 5). Supersedes prior status. **0.2.1 shipped.** T
 (video-playback overhaul, Phases 0–3) and **#98** (media-track catalog) are COMPLETE +
 owner-validated. **Task #90.2 (subtitle cues) is now COMPLETE — embedded streams included.**_
 
-## ✅ NEW THIS SESSION (2026-07-15): embedded subtitle streams, streaming cues, mojibake repair
+## ✅ ALSO NEW (2026-07-15, session 2): the Subtitles settings tab (#90.4)
+
+On `main` (`cb7bcadd`). **Not yet owner-tested.** All eight style axes were implemented,
+clamped, and tested — and reachable only from code. Now: a **5th Settings tab**, macOS,
+over a **live preview**.
+
+- **Persistence** — `SubtitleStyle` gained serde + a nested `Settings.subtitle_style`.
+  ⚠ `#[serde(default)]` on it *and* on `Shadow` is load-bearing: it lives **by value**, so
+  a partial `[subtitle_style]` table must fill gaps from `Default` — otherwise a
+  hand-edited config setting one key fails to parse, and `Settings::load`'s "malformed →
+  defaults" rule **discards every other setting in the file** to punish one typo here.
+- **`from_settings` now takes `&Settings`, not a bool** — post-mortem bug #2 was a
+  preference dropped at one of its three call sites. A signature that asks for the object
+  cannot be called while forgetting a field of it.
+- **The preview** uses the **same rasterizer, `to_params`, and `place()`** as the real
+  overlay, so it cannot drift — that *is* the one-rasterizer decision paying off. Because
+  it uses the real `place()`, dragging the vertical offset negative visibly walks the text
+  into the letterbox.
+
+**macOS only, deliberately:** #90.5 isn't done, so the winit shell has no subtitle
+presenter and an egui tab would configure an invisible feature. `SettingsDraft::to_settings`
+preserves unexposed fields, so `subtitle_style` round-trips untouched there meanwhile
+(Windows cross-check clean).
+
+### Test in the morning — the Subtitles tab
+
+Open **Settings ▸ Subtitles** (the `captions.bubble` tab).
+
+1. **The preview draws** within ~0.3 s (a spinner first — that's the 261 ms font system).
+2. **Drag "Vertical" negative** → the text should walk **down into the black bar**. This is
+   the headline feature; the caption under the slider says which way is which.
+3. **Every control moves the preview live**, and the look **persists across a relaunch**.
+4. **Then play a film and press `C`** — the film must match the preview. If it doesn't,
+   that's a real bug: they share one rasterizer, so they cannot legitimately disagree.
+5. **The defaults are still the author's guess** — you said *"slightly large"*. This tab is
+   what lets you settle that; tell me the number you land on and I'll make it the default.
+
+⚠ **Layout is the least-verified part** (I can build the app but not see it). The window is
+a fixed 560×680 and the pane is dense: preview + ~10 rows. Max width / line spacing are
+behind a collapsed **Advanced** group to buy room. If it's cramped or the preview is too
+small to judge, say so — that's a layout tuning pass, not a rework.
+
+## ✅ NEW THIS SESSION (2026-07-15, session 1): embedded subtitle streams, streaming cues, mojibake repair
 
 All on `main` (`38462733`). **Not yet owner-tested — see "Test in the morning" below.**
 
@@ -98,9 +140,8 @@ of 39 s) can be rebuilt with:
 
 ## Next (in priority order)
 
-1. **#90.4 — the subtitle Settings UI.** Still the biggest usability gap: all eight style
-   axes are implemented, clamped, and tested but reachable only from code, and the owner's
-   read on the defaults is *"slightly large"*. Build with `pb-ui` components.
+1. **#90.4 — settle the defaults.** The tab ships; the *numbers* are still the author's
+   guess. Owner verdict wanted (see above).
 2. **#90.3 remainder** — seek generations (no stale cue flash while scrubbing) and wiring
    `controls_h` so cues lift above the transport bar (`place()` supports the lift; nothing
    measures the bar).

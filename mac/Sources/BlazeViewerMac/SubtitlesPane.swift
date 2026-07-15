@@ -169,6 +169,12 @@ struct SubtitlesPane: View {
 private struct SubtitlePreview: View {
     let model: CoreModel
     let draft: SubtitleStyleDraft
+    /// ⚠ Not decoration — the fix for a real seam bug. The font system takes 261 ms on a
+    /// worker, so the first `body` evaluation gets `nil` and shows the spinner. Nothing
+    /// else changes state when the worker lands, so **SwiftUI would never re-render** and
+    /// the spinner would spin forever — until you happened to nudge a slider, at which
+    /// point it would work and look like a fluke. Flipping this drives the redraw.
+    @State private var ready = false
 
     var body: some View {
         GeometryReader { geo in
@@ -180,7 +186,7 @@ private struct SubtitlePreview: View {
             let scale = NSScreen.main?.backingScaleFactor ?? 2
             let w = Int((geo.size.width * scale).rounded())
             let h = Int((geo.size.height * scale).rounded())
-            if let img = model.subtitlePreviewImage(draft.toForm(), w, h) {
+            if ready, let img = model.subtitlePreviewImage(draft.toForm(), w, h) {
                 Image(nsImage: img)
                     .resizable()
                     .frame(width: geo.size.width, height: geo.size.height)
@@ -192,6 +198,14 @@ private struct SubtitlePreview: View {
                     ProgressView().controlSize(.small)
                 }
             }
+        }
+        .task {
+            // Poll until the worker lands. `subtitlePreviewReady` also *starts* it, so
+            // opening this tab is what pays the 261 ms — not a film's first cue.
+            while !Task.isCancelled && !model.subtitlePreviewReady() {
+                try? await Task.sleep(for: .milliseconds(50))
+            }
+            ready = true
         }
     }
 }
