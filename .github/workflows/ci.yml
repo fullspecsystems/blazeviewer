@@ -221,3 +221,17 @@ jobs:
         # now defaults --ffvideo ON (local convenience), and GitHub's macOS runners ship
         # Homebrew ffmpeg — so without this CI would silently start doing a video build.
         run: ./scripts/build-swift-host.sh --debug --no-ffvideo
+      # ── Seek robustness (plan §T5) ─────────────────────────────────────────────────
+      # The seek regression (97f80bb4) shipped because nothing could catch it — the
+      # decision logic lived in a display-layer feed loop with no Swift test target. These
+      # two steps are the guard so it can't rot the first time someone forgets to run it.
+      - name: Seek policy unit tests (pure Swift, no FFI)
+        # PbSeek is dependency-free, so this needs neither the xcframework nor FFmpeg —
+        # it would run on a plain hosted macOS runner too (plan §T1).
+        run: swift test --package-path mac/PbSeek
+      - name: Demux seek-contract tests (--features ffvideo)
+        # The one place CI compiles pb-decode WITH the FFmpeg video backend (the swift host
+        # above is --no-ffvideo). Exercises the demux seek contract the sample-buffer
+        # presenter leans on (plan §T4) against the committed longgop/shortgop fixtures.
+        # Needs Homebrew FFmpeg for pkg-config — present on this runner (it's the dev Mac).
+        run: cargo test --locked -p pb-decode --features ffvideo ffmpeg::demux
