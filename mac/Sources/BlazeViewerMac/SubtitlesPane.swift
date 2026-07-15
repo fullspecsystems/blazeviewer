@@ -263,25 +263,36 @@ private struct SubtitlePreview: View {
 /// open never reaches the disk.
 struct SubtitleStyleDraft: Equatable {
     var fontFamily = ""
-    var sizePct: Double = 0.044
+    var sizePct: Double = 0
     var color = Color.white
     var colorOpacity: Double = 100
-    var outlinePx: Double = 2.85
+    var outlinePx: Double = 0
     var outlineColor = Color.black
     var outlineOpacity: Double = 100
     var shadowOn = false
-    var shadowDxPx: Double = 2
-    var shadowDyPx: Double = 2
-    var shadowBlurPx: Double = 4
+    var shadowDxPx: Double = 0
+    var shadowDyPx: Double = 0
+    var shadowBlurPx: Double = 0
     var shadowColor = Color.black
-    var shadowOpacity: Double = 78
+    var shadowOpacity: Double = 100
     var background = Color.black
     var backgroundOpacity: Double = 0
-    var verticalOffsetPct: Double = 0.05
+    var verticalOffsetPct: Double = 0
     var maxLinePct: Double = 0.9
     var lineSpacing: Double = 1.2
 
-    init() {}
+    /// The shipped defaults — **asked for, never restated**.
+    ///
+    /// ⚠ These used to be Swift literals mirroring `SubtitleStyle::default()`. That is a
+    /// duplication with teeth: the moment either side is tuned, Restore Defaults and a
+    /// fresh config hand back different looks — and tuning these numbers is the entire
+    /// point of this pane, so the drift was a matter of when, not if. (It came due the
+    /// first time the owner moved them.) The field initializers above exist only so the
+    /// `@State` has a value for the instant before `onAppear`; every real default comes
+    /// from Rust.
+    init() {
+        self.init(form: subtitle_style_defaults())
+    }
 
     init(form f: SubtitleStyleFfi) {
         fontFamily = f.font_family.toString()

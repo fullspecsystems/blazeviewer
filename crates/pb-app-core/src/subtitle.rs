@@ -298,12 +298,14 @@ impl Default for SubtitleStyle {
     fn default() -> Self {
         SubtitleStyle {
             font_family: None,
-            // ~4.4% of a 1080p height ≈ 48 px — the broadcast-ish default.
-            size_pct: 0.044,
+            // 4% of a 1080p height ≈ 43 px. Owner-tuned against the live preview
+            // (2026-07-15); the earlier 4.4% read as "slightly large".
+            size_pct: 0.04,
             color: [255, 255, 255, 255],
-            // ~6% of the font = ~2.9 px on 48 px text: the OUTLINE_PX_AT_DEFAULT_SIZE
-            // scale's "3 px".
-            outline_ratio: 0.06,
+            // 2 px on the reference scale — owner-tuned. Written as the division so it
+            // stays tied to the number they actually chose rather than to a ratio nobody
+            // could check.
+            outline_ratio: 2.0 / REFERENCE_FONT_PX,
             outline_color: [0, 0, 0, 255],
             shadow: None,
             // Off by default: the outline already carries legibility, and a box behind
@@ -314,8 +316,10 @@ impl Default for SubtitleStyle {
             // a 1988 caption block or a lozenge.
             background_radius_ratio: 0.22,
             background_pad_ratio: 0.28,
-            // Just inside the picture's bottom edge — the classic position.
-            vertical_offset_pct: 0.05,
+            // Just inside the picture's bottom edge — the classic position. 7%, not the
+            // textbook 5%: it lifts the text clear of the info line and the scrubber, which
+            // live in the same strip (owner, 2026-07-15).
+            vertical_offset_pct: 0.07,
             max_line_pct: 0.9,
             line_spacing: 1.2,
         }
@@ -332,19 +336,23 @@ impl Default for SubtitleStyle {
 /// 17% of viewport height. Past this a line fits about two words (owner, 2026-07-15).
 pub const MAX_SIZE_PCT: f32 = 0.17;
 
-/// The font size every decoration's **px** readout is calibrated against: the default text
-/// size on a 1080p-tall viewport (`0.044 × 1080 ≈ 47.5`).
+/// The font size every decoration's **px** readout is calibrated against: a **fixed
+/// reference** of 47.5 px, which is a 4.4%-of-1080p subtitle.
 ///
 /// Storage is a fraction of the *actual* font size, so decoration holds its proportions as
 /// the text resizes — that is the whole point of the unit rule. This constant only turns
 /// that fraction into the human number a slider shows, because "outline 0.06" is not a
-/// quantity anyone can picture and "3 px" is.
+/// quantity anyone can picture and "2 px" is. The px shown is therefore a px-*equivalent*,
+/// and that equivalent — not any particular measurement — is the stable thing the user is
+/// choosing. A live readout against the real font size would make the handle jump every
+/// time the size moved, which is the exact confusion this removes.
 ///
-/// At the default text size the label is literally true; at other sizes it is the
-/// px-*equivalent* — and that equivalent, not any particular measurement, is the stable
-/// thing the user is actually choosing. The alternative (a live px readout against the
-/// real font size) would make the slider handle jump every time the size moved, which is
-/// the exact confusion this indirection removes.
+/// ⚠ **It is a constant, not a function of the default size, and must stay one.** It began
+/// as `0.044 × 1080` back when 4.4% was the default, and the default has since moved to 4%
+/// — deliberately leaving this behind. If it tracked the default instead, changing that
+/// default would silently renumber every decoration slider *and re-label every user's
+/// already-saved settings*: an outline someone chose as "2 px" would start calling itself
+/// 1.8 px, having not changed at all. The scale has to be an anchor or it is not a scale.
 pub const REFERENCE_FONT_PX: f32 = 47.5;
 
 /// A font-relative ratio → the px number a slider shows. See [`REFERENCE_FONT_PX`].
@@ -971,6 +979,28 @@ mod tests {
         assert!(ratio_to_px(MAX_OUTLINE_RATIO) >= 4.0);
     }
 
+    /// The shipped defaults, owner-tuned against the live preview (2026-07-15). Pinned in
+    /// the units the owner actually chose them in — a ratio drifting silently is exactly
+    /// what a reader of `SubtitleStyle::default()` cannot notice.
+    #[test]
+    fn the_shipped_defaults_are_the_owner_tuned_numbers() {
+        let d = SubtitleStyle::default();
+        assert_eq!(d.size_pct, 0.04, "4% of viewport height");
+        assert!(
+            (d.outline_px_scale() - 2.0).abs() < 0.001,
+            "a 2.00 px outline, not {}",
+            d.outline_px_scale()
+        );
+        assert_eq!(d.outline_color[3], 255, "solid black — opacity stays 100%");
+        assert_eq!(
+            d.vertical_offset_pct, 0.07,
+            "7%: clear of the info line and the scrubber"
+        );
+        // And the defaults must survive their own clamp — a default the clamp would move
+        // is a default nobody actually ships.
+        assert_eq!(d.clone().clamped(), d);
+    }
+
     // -- persistence (#90.4) -----------------------------------------------
 
     /// The round trip that keeps a saved look saved.
@@ -1210,13 +1240,13 @@ mod tests {
     #[test]
     fn size_is_physical_pixels_scaled_from_the_viewport() {
         let s = SubtitleStyle::default();
+        // The property, derived — not the default's current number, which is owner-tuned
+        // and pinned by `the_shipped_defaults_are_the_owner_tuned_numbers`. A test that
+        // restates a tunable constant fails every time someone tunes it, and teaches the
+        // next reader nothing about what it was guarding.
+        assert!((s.size_px(1080.0) - s.size_pct * 1080.0).abs() < 0.01);
         // The same style on a 1x and a 2x display yields different PIXEL sizes — which is
         // exactly what keeps it looking the same and staying sharp.
-        assert!(
-            (s.size_px(1080.0) - 47.5).abs() < 1.0,
-            "{}",
-            s.size_px(1080.0)
-        );
         assert!((s.size_px(2160.0) - s.size_px(1080.0) * 2.0).abs() < 0.01);
         assert!(s.size_px(0.0) >= 1.0, "never zero or negative");
     }

@@ -2720,6 +2720,11 @@ fn subtitle_max_line_spacing() -> f32 {
     pb_app_core::subtitle::MAX_LINE_SPACING
 }
 
+/// The shipped defaults — see the bridge declaration for why this is not a Swift constant.
+fn subtitle_style_defaults() -> ffi::SubtitleStyleFfi {
+    subtitle_style_to_form(&pb_app_core::subtitle::SubtitleStyle::default())
+}
+
 /// [`SubtitleStyle`](pb_app_core::subtitle::SubtitleStyle) → the flat form.
 fn subtitle_style_to_form(s: &pb_app_core::subtitle::SubtitleStyle) -> ffi::SubtitleStyleFfi {
     use pb_app_core::subtitle::ratio_to_px;
@@ -4457,6 +4462,13 @@ mod ffi {
         fn subtitle_max_shadow_blur_px() -> f32;
         fn subtitle_max_shadow_offset_px() -> f32;
         fn subtitle_max_line_spacing() -> f32;
+        // The shipped defaults, for the pane's Restore Defaults button.
+        //
+        // ⚠ A free function, NOT a Swift-side copy of the numbers. The draft used to
+        // hard-code them, which meant Restore Defaults and a fresh config could hand back
+        // different looks the moment either side was tuned — and tuning is the whole point
+        // of this pane. One source, so they cannot drift.
+        fn subtitle_style_defaults() -> SubtitleStyleFfi;
         // The live preview swatch: RGBA8, w*h, top-left origin. Takes the DRAFT style so
         // it tracks a slider drag with no save round-trip. Drawn with the SAME rasterizer,
         // to_params, and place() the real overlay uses, so it cannot drift from what a
