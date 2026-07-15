@@ -40,7 +40,7 @@ final class ToolbarController: NSObject, NSToolbarDelegate {
 
     init(model: CoreModel) {
         self.model = model
-        self.toolbar = NSToolbar(identifier: "PhotoBlazeToolbar")
+        self.toolbar = NSToolbar(identifier: "BlazeViewerToolbar")
         super.init()
         toolbar.delegate = self
         toolbar.allowsUserCustomization = true // the Customize sheet (drag items in/out)

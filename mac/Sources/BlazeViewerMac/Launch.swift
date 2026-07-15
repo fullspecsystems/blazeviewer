@@ -152,7 +152,7 @@ enum Launch {
             // A Finder/`open` launch with a bad flag or missing path must not fail
             // silently — mirror the winit shell's no-console dialog fallback.
             let alert = NSAlert()
-            alert.messageText = "PhotoBlaze"
+            alert.messageText = appName
             alert.informativeText = text
             alert.alertStyle = .warning
             alert.runModal()

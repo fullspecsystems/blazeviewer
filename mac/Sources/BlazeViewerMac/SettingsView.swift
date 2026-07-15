@@ -559,15 +559,15 @@ struct SettingsView: View {
     /// full / none / partial — never changing the row count (the pane height is fixed).
     private var defaultViewerSubline: String {
         if isAppTranslocated {
-            return "Move PhotoBlaze to your Applications folder to set it as the default."
+            return "Move \(appName) to your Applications folder to set it as the default."
         }
         if isDefaultViewer {
-            return "PhotoBlaze opens JPEG, PNG, HEIC, RAW, and more — including Quick Look."
+            return "\(appName) opens JPEG, PNG, HEIC, RAW, and more — including Quick Look."
         }
         if defaultTypeCount == 0 {
-            return "Open JPEG, PNG, HEIC, RAW, and more in PhotoBlaze."
+            return "Open JPEG, PNG, HEIC, RAW, and more in \(appName)."
         }
-        return "PhotoBlaze opens \(defaultTypeCount) of \(Self.defaultTargetTypes.count) image types."
+        return "\(appName) opens \(defaultTypeCount) of \(Self.defaultTargetTypes.count) image types."
     }
 
     /// One click → PhotoBlaze becomes the default for every supported image type. Setting

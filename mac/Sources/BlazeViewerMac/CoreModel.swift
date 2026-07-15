@@ -2210,7 +2210,7 @@ final class CoreModel {
     private func terminateNow() {
         NSApp.terminate(nil)
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
-            NSLog("PhotoBlaze: NSApp.terminate was deferred — hard exit (zombie watchdog)")
+            NSLog("\(appName): NSApp.terminate was deferred — hard exit (zombie watchdog)")
             exit(0)
         }
     }

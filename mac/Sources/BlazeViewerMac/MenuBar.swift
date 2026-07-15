@@ -169,8 +169,8 @@ final class MenuBar: NSObject {
         // 1) The application menu: About / Settings / Quit per convention. Quit routes
         //    through our Action id (→ clean Esc-style teardown, privacy #6), not
         //    terminate: directly.
-        main.addItem(submenu("PhotoBlaze", [
-            item("about", "About PhotoBlaze"),
+        main.addItem(submenu(appName, [
+            item("about", "About \(appName)"),
             // Sparkle's manual "Check for Updates…" (task #65) — only in a Sparkle-configured
             // .app (a bare-binary dev run has no feed). Targets the updater controller directly
             // (not the responder chain) since it isn't a first responder. The convention slot is
@@ -178,12 +178,12 @@ final class MenuBar: NSObject {
         ] + updateMenuItems() + [
             sep(),
             item("settings", "Settings…", key: ","),
-            // The opt-in `photoblaze` CLI symlink (task #78.14) — host-native
+            // The opt-in `blaze` CLI symlink (task #78.14) — host-native
             // target-action (like Check for Updates), not a core Action id: it's pure
             // shell-side filesystem work. Below Settings, the iTerm convention.
             CliTool.shared.menuItem(),
             sep(),
-            system("Hide PhotoBlaze", #selector(NSApplication.hide(_:)), key: "h"),
+            system("Hide \(appName)", #selector(NSApplication.hide(_:)), key: "h"),
             {
                 let hideOthers = system(
                     "Hide Others",
@@ -195,7 +195,7 @@ final class MenuBar: NSObject {
             }(),
             system("Show All", #selector(NSApplication.unhideAllApplications(_:))),
             sep(),
-            item("quit", "Quit PhotoBlaze", key: "q"),
+            item("quit", "Quit \(appName)", key: "q"),
         ]))
 
         main.addItem(submenu("File", [

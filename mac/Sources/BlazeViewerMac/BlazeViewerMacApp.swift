@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// PhotoBlaze's native macOS host (NS1, ADR-021) — slice 1: a minimal SwiftUI app that
+/// Blaze Viewer's native macOS host (NS1, ADR-021) — slice 1: a minimal SwiftUI app that
 /// owns the Rust `AppCore` over the swift-bridge FFI, forwards key events in, and drains
 /// the effects out. The wgpu canvas (item 2), real photo source (item 3), and the rest of
 /// the event/effect surface land in the following slices; the egui-on-Mac beta remains the
@@ -14,7 +14,7 @@ import SwiftUI
 /// suppresses the initial `WindowGroup` window (windowless app, live menu bar).
 /// **Resolved** (task #78.10): `BlazeViewerMacApp.init` registers
 /// `NSTreatUnknownArgumentsAsOpen = NO`, so AppKit never converts argv paths to
-/// document-opens — the shared pb-cli parser owns argv, and `photoblaze ~/Photos`
+/// document-opens — the shared pb-cli parser owns argv, and `blaze ~/Photos`
 /// works bare. `--pb-open <path>` survives as a hidden compat alias.
 final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Finder / Dock / "Open with" URLs. May fire before the model installs its handler
@@ -67,6 +67,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 }
 
+/// The product's display name for every Swift-side surface — the app menu, window titles,
+/// alerts, Settings copy.
+///
+/// Read from the bundle (`CFBundleName`, set in `packaging/macos/Info-swift-host.plist`)
+/// rather than hardcoded, so it can never drift from the bundle's own identity. Mirrors
+/// `pb_app_core::APP_NAME` on the Rust side; the fallback covers a bare `swift run` with
+/// no assembled bundle. The rename (task #101) found this hardcoded in eight places,
+/// including the macOS app menu — hence the single source.
+let appName: String =
+    Bundle.main.object(forInfoDictionaryKey: "CFBundleName") as? String ?? "Blaze Viewer"
+
 @main
 struct BlazeViewerMacApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var delegate
@@ -94,7 +105,7 @@ struct BlazeViewerMacApp: App {
     }
 
     var body: some Scene {
-        WindowGroup("PhotoBlaze") {
+        WindowGroup(appName) {
             ContentView(model: model)
         }
         // ⌘, / App menu ▸ Settings… — reached via ShowDialog("settings") →
