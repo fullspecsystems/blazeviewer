@@ -96,6 +96,10 @@ final class CoreModel {
     /// popover, not over the canvas, so the hover flash stops refreshing and the bar the
     /// popover is anchored to would fade out from under it.
     var videoPickerOpen = false
+    /// Whether subtitles are switched on (the `C` state) — the picker button fills its icon
+    /// on this, so it must be observable rather than read through on each draw. Refreshed in
+    /// `pump()` while the controls are up.
+    private(set) var subtitlesOn = false
 
     /// The subtitle overlay (task #90): the core rasterizes the cue — shaping, outline,
     /// shadow, background, placement — and hands us a bitmap and a rect. The whole Swift
@@ -1726,6 +1730,13 @@ final class CoreModel {
             && (nativeVideo != nil || sampleBufferVideo != nil || sessionVideo)
         if controls != videoControlsVisible {
             withAnimation(Layout.chromeFade) { videoControlsVisible = controls }
+        }
+        // The picker button fills its icon when subtitles are on, so it has to be observable
+        // state (a computed property calling into the core would never re-render) — the same
+        // shape as `videoPlaying` above.
+        if controls {
+            let on = core.subtitles_on()
+            if on != subtitlesOn { subtitlesOn = on }
         }
         syncSubtitle()
         // The native play hint: kind 0 = playing / a still (hide), 1/2 = a motion item. A seq

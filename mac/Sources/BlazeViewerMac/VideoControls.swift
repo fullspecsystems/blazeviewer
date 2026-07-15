@@ -71,7 +71,9 @@ struct TrackPickerButton: View {
             if !open { reload() }
             open.toggle()
         }) {
-            Image(systemName: "captions.bubble")
+            // Filled = on, outline = off — the button reports its own state, the same way
+            // the play/pause icon on the far left of this row does.
+            Image(systemName: model.subtitlesOn ? "captions.bubble.fill" : "captions.bubble")
                 .font(.system(size: 14))
                 .foregroundStyle(.primary)
                 .frame(width: 20, height: 20)
@@ -80,6 +82,7 @@ struct TrackPickerButton: View {
         .buttonStyle(.plain)
         .help("Subtitles")
         .accessibilityLabel("Subtitle track")
+        .accessibilityValue(model.subtitlesOn ? "On" : "Off")
         // `.top`: the playback bar lives at the *bottom* of the window, so the list opens
         // upward, over the picture. (AppKit only treats the edge as a preference and would
         // flip it anyway for want of room — but the preference should still say what we mean.)
@@ -146,6 +149,13 @@ struct TrackPickerPopover: View {
             }
         }
         .frame(minWidth: 220)
+        // SwiftUI focuses the first button when a popover opens and draws a focus ring at the
+        // *button's* bounds — outside the row's rounded highlight, and then clipped by the
+        // ScrollView, so it came out a different width on every side. This is a pointer
+        // affordance whose keyboard paths are `C`, `Shift+C` and the Playback menu, so the
+        // ring buys nothing here; the hover highlight is the feedback. (VoiceOver is
+        // unaffected — that reads the accessibility labels, not the focus effect.)
+        .focusEffectDisabled()
     }
 }
 

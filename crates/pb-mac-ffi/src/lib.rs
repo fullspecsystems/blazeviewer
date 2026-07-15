@@ -275,6 +275,11 @@ impl AppCoreHandle {
         self.core.subtitle_tracks_known()
     }
 
+    /// Are subtitles switched on (the `C` state)? The picker button fills its icon on this.
+    fn subtitles_on(&self) -> bool {
+        self.core.subtitles_on()
+    }
+
     /// Apply row `i` — the index into the list the accessors above just described. Refreshes
     /// the snapshot so the tick has already moved when the caller redraws.
     fn select_subtitle_track(&mut self, i: usize) {
@@ -4444,6 +4449,7 @@ mod ffi {
         fn subtitle_track_label(&self, i: usize) -> String;
         fn subtitle_track_active(&self, i: usize) -> bool;
         fn subtitle_tracks_known(&self) -> bool;
+        fn subtitles_on(&self) -> bool;
         fn select_subtitle_track(&mut self, i: usize);
 
         // The native empty-state Open panel (task #54): its visibility, plus a generic

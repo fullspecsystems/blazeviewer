@@ -8011,6 +8011,15 @@ impl AppCore {
         )
     }
 
+    /// Are subtitles switched on — the `C` state?
+    ///
+    /// The playback bar's picker button fills its icon on this, so the control reports its
+    /// own state the way play/pause does. Not the same question as "is a cue on screen":
+    /// subtitles are on through every silent gap between cues.
+    pub fn subtitles_on(&self) -> bool {
+        self.subtitles.mode != crate::subtitle::SubtitleMode::Off
+    }
+
     /// Has the track probe landed for the video on screen? `false` = "still reading", which
     /// is not the same answer as "no tracks" and must not be drawn as one.
     pub fn subtitle_tracks_known(&self) -> bool {
