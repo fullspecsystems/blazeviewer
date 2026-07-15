@@ -64,7 +64,13 @@ struct TrackPickerButton: View {
     @State private var known = false
 
     var body: some View {
-        Button(action: { open.toggle() }) {
+        // The rows are loaded HERE, before `open` flips — not in `.onChange`, which fires
+        // after the popover has begun presenting and would show a frame of "Reading tracks…"
+        // over a list we already had.
+        Button(action: {
+            if !open { reload() }
+            open.toggle()
+        }) {
             Image(systemName: "captions.bubble")
                 .font(.system(size: 14))
                 .foregroundStyle(.primary)
@@ -86,9 +92,9 @@ struct TrackPickerButton: View {
         .onChange(of: open) { _, isOpen in
             // Pin the controls up for as long as the popover is anchored to them, and
             // re-arm the fade on close. Without this the bar decays out from under an open
-            // popover on its 1.8s timer.
+            // popover on its 1.8s timer. (Also catches a dismiss-by-clicking-outside, which
+            // never runs the button's action.)
             model.pickerOpenChanged(isOpen)
-            if isOpen { reload() }
         }
     }
 
