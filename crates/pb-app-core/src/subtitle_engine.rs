@@ -106,17 +106,28 @@ impl SubtitleEngine {
         }
     }
 
-    /// Start from the user's persisted preference (`C` / View ▸ Subtitles).
+    /// Start from the user's persisted preferences (`C` / View ▸ Subtitles, plus the
+    /// #90.4 appearance).
+    ///
+    /// ⚠ **Takes the whole `Settings` on purpose, not the `subtitles` bool it needs.**
+    /// This is called from three places, one of which (`new_host`) builds the core from
+    /// *default* settings and re-derives from the real ones afterwards — and the engine
+    /// was once left off that re-derivation list, so `subtitles = true` on disk launched
+    /// with captions off and the preference looked like it never saved (post-mortem bug
+    /// #2). A signature that asks for the settings *object* cannot be called while
+    /// forgetting a field of it; a `bool` parameter had to be remembered. Adding the
+    /// style here is exactly the moment that lesson would have been re-learned.
     ///
     /// `PB_SUBTITLE_TRACE=1` additionally prints why nothing is on screen — a diagnostic
     /// only; it never turns subtitles on.
-    pub fn from_settings(on: bool) -> Self {
+    pub fn from_settings(settings: &crate::settings::Settings) -> Self {
         Self {
-            mode: if on {
+            mode: if settings.subtitles {
                 SubtitleMode::Automatic
             } else {
                 SubtitleMode::Off
             },
+            style: settings.subtitle_style.clone(),
             tracing: std::env::var_os("PB_SUBTITLE_TRACE").is_some_and(|v| v == "1"),
             ..Default::default()
         }

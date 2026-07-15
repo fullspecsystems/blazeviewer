@@ -4069,6 +4069,7 @@ dependencies = [
  "pb-hud",
  "pb-render",
  "pb-source",
+ "png 0.17.16",
  "qrcode",
  "rqrr",
  "serde",

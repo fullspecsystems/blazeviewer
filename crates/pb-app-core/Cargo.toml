@@ -73,6 +73,9 @@ ffprobe = ["pb-decode/ffprobe"]
 ffvideo = ["pb-decode/ffvideo", "ffprobe"]
 
 [dev-dependencies]
+# Dump subtitle-preview frames to look at (the `dump_preview` diagnostic; never shipped).
+# Same version pb-decode already links, so the lockfile is unchanged.
+png = "0.17"
 # Generate QR bitmaps for the image_text decode tests (never shipped). Default features
 # pull the `image` crate; we only need the raw module colors.
 qrcode = { version = "0.14", default-features = false }

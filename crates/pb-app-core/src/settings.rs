@@ -228,6 +228,14 @@ pub struct Settings {
     /// This is a *preference*, not a viewing trace (privacy #2): it records that the user
     /// likes captions, never which video or which track.
     pub subtitles: bool,
+    /// Subtitle appearance — the owner's eight axes (task #90.4). Appearance, not a
+    /// viewing trace (privacy #2): it records how captions should look, never which
+    /// video or which track.
+    ///
+    /// ⚠ Held **by value**, so it carries its own `#[serde(default)]` — see
+    /// [`crate::subtitle::SubtitleStyle`]. `Option<WindowGeometry>` gets away without one
+    /// because it is absent-or-whole; a partial `[subtitle_style]` table is normal.
+    pub subtitle_style: crate::subtitle::SubtitleStyle,
     /// Which backend generates AI image descriptions (task #44). Default `Auto`.
     pub describe_backend: DescribeBackend,
     /// The OpenAI-compatible endpoint base URL for the `LocalEndpoint` backend
@@ -301,6 +309,7 @@ impl Default for Settings {
             last_folder: None,      // no folder to reopen until the first open
             mute_live_audio: false, // Live Photo audio plays by default (#38)
             subtitles: false,       // captions off until asked for (task #90)
+            subtitle_style: crate::subtitle::SubtitleStyle::default(),
             describe_backend: DescribeBackend::Auto,
             // LM Studio's default; a bare install of Ollama uses :11434 instead.
             describe_endpoint: "http://localhost:1234/v1".to_string(),
@@ -336,6 +345,10 @@ impl Settings {
         // Keep the response cap sane (a stray 0 would ask for an empty reply; a huge value
         // could stall the panel). Covers the presets 256/512/1024 with headroom.
         self.describe_max_tokens = self.describe_max_tokens.clamp(16, 4096);
+        // Delegated, not re-implemented: the style's own bounds are the rasterizer's
+        // contract and belong with it. A hand-edited `size_pct = 40` (they meant points)
+        // must yield a large subtitle, never a full-screen wall with no way back.
+        self.subtitle_style.clamp();
         if !self.slideshow_interval_secs.is_finite() {
             self.slideshow_interval_secs = d.slideshow_interval_secs;
         }

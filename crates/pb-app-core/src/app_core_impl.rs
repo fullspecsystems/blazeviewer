@@ -122,7 +122,7 @@ impl AppCore {
             exif_cache: std::collections::HashMap::new(),
             details_probe: None,
             details_gen: 0,
-            subtitles: crate::subtitle_engine::SubtitleEngine::from_settings(settings.subtitles),
+            subtitles: crate::subtitle_engine::SubtitleEngine::from_settings(&settings),
             recognized_text: std::collections::HashMap::new(),
             text_scan: None,
             text_gen: 0,
@@ -266,9 +266,11 @@ impl AppCore {
         core.view.mode = scale_mode_of(settings.scale_mode);
         core.info_line = settings.show_image_info; // the info readout's launch default (task #54)
                                                    // The engine was built from the *default* settings above (this constructor loads the
-                                                   // real ones only now), so its mode has to be re-derived — otherwise `subtitles = true`
-                                                   // on disk launches with captions off, and the preference looks like it never saved.
-        core.subtitles = crate::subtitle_engine::SubtitleEngine::from_settings(settings.subtitles);
+                                                   // real ones only now), so its mode AND style have to be re-derived — otherwise
+                                                   // `subtitles = true` on disk launches with captions off, and the preference looks
+                                                   // like it never saved. `from_settings` takes the whole struct precisely so this
+                                                   // line cannot go stale as fields are added.
+        core.subtitles = crate::subtitle_engine::SubtitleEngine::from_settings(&settings);
         core.keymap = Keymap::load();
         core.settings = settings;
         core.hud = hud::Hud::load();
@@ -4189,6 +4191,11 @@ impl AppCore {
         if old.mute_live_audio != self.settings.mute_live_audio {
             self.launch.mute = None;
         }
+
+        // Subtitle appearance → the live engine (task #90.4). The rasterizer caches on
+        // (text, params), so a changed style rebuilds the bitmap on the very next tick —
+        // which is what makes the Settings preview and a playing film agree.
+        self.subtitles.style = self.settings.subtitle_style.clone();
 
         // Persist the whole model (atomic write; best-effort).
         self.settings.save();
@@ -8908,7 +8915,7 @@ mod tests {
             subtitles: true,
             ..Default::default()
         };
-        core.subtitles = crate::subtitle_engine::SubtitleEngine::from_settings(loaded.subtitles);
+        core.subtitles = crate::subtitle_engine::SubtitleEngine::from_settings(&loaded);
         core.settings = loaded;
 
         assert_eq!(
@@ -9080,17 +9087,26 @@ mod tests {
         );
     }
 
-    /// The saved preference is what the engine starts in — a toggle that forgets across
+    /// The saved preferences are what the engine starts in — a toggle that forgets across
     /// launches is the flag we just removed, wearing a menu item.
+    ///
+    /// The **style** half is the one worth pinning: appearance that silently reverts to
+    /// the default on every launch would look exactly like "Settings didn't save", which
+    /// is post-mortem bug #2 wearing a different hat.
     #[test]
-    fn the_engine_starts_from_the_saved_preference() {
+    fn the_engine_starts_from_the_saved_preferences() {
         use crate::subtitle::SubtitleMode;
+        let mut s = settings::Settings::default();
+
+        s.subtitles = true;
+        s.subtitle_style.size_pct = 0.077;
+        let e = crate::subtitle_engine::SubtitleEngine::from_settings(&s);
+        assert_eq!(e.mode, SubtitleMode::Automatic);
+        assert_eq!(e.style.size_pct, 0.077, "the saved style must come with it");
+
+        s.subtitles = false;
         assert_eq!(
-            crate::subtitle_engine::SubtitleEngine::from_settings(true).mode,
-            SubtitleMode::Automatic
-        );
-        assert_eq!(
-            crate::subtitle_engine::SubtitleEngine::from_settings(false).mode,
+            crate::subtitle_engine::SubtitleEngine::from_settings(&s).mode,
             SubtitleMode::Off
         );
     }

@@ -90,6 +90,9 @@ pub mod subtitle;
 // The runtime that joins them to the screen: workers, the cue clock, and the bitmap +
 // rect both shells composite.
 pub mod subtitle_engine;
+// The Settings preview (task #90.4): a sample frame drawn with the REAL rasterizer and
+// the REAL placement math, so it cannot drift from what a film actually shows.
+pub mod subtitle_preview;
 pub mod thumbs;
 pub mod timing;
 // The shared media-track formatter (task #98): one place a track turns into the line

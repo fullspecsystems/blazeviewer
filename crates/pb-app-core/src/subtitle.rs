@@ -8,6 +8,7 @@
 use std::time::Duration;
 
 use pb_decode::tracks::{language_display, MediaTrack, MediaTrackCatalog, TrackId};
+use serde::{Deserialize, Serialize};
 
 /// What the user asked for.
 ///
@@ -188,13 +189,33 @@ fn same_language(track: &MediaTrack, audio: &str) -> bool {
 // ---------------------------------------------------------------------------
 
 /// A drop shadow behind the text.
-#[derive(Debug, Clone, Copy, PartialEq)]
+///
+/// `#[serde(default)]` + [`Default`] are **required**, not decoration: this rides inside
+/// `settings.toml` as an optional table, and a human who writes `[subtitle_style.shadow]`
+/// with only `blur_pct` in it must get a shadow, not a settings file that fails to parse
+/// and silently resets everything else. Same rule as [`SubtitleStyle`].
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Shadow {
     /// Offset in **% of viewport height**, like every other size here.
     pub dx_pct: f32,
     pub dy_pct: f32,
     pub blur_pct: f32,
     pub color: [u8; 4],
+}
+
+impl Default for Shadow {
+    /// A soft drop shadow, slightly down-right — the classic. Only reached when a config
+    /// names the table without filling it in; the shipped default is no shadow at all
+    /// (see [`SubtitleStyle::default`]), because the outline already carries legibility.
+    fn default() -> Self {
+        Shadow {
+            dx_pct: 0.002,
+            dy_pct: 0.002,
+            blur_pct: 0.004,
+            color: [0, 0, 0, 200],
+        }
+    }
 }
 
 /// The owner's eight customization axes (spec: 2026-07-14).
@@ -205,7 +226,15 @@ pub struct Shadow {
 ///
 /// Persisted (this is appearance, not a viewing trace). The *track choice* is not — see
 /// [`SubtitleMode::Track`].
-#[derive(Debug, Clone, PartialEq)]
+///
+/// ⚠ **`#[serde(default)]` is load-bearing.** This lives *by value* inside `Settings`, so
+/// unlike `Option<WindowGeometry>` (which is absent-or-whole) a partial
+/// `[subtitle_style]` table has to fill the gaps from [`Default`] — otherwise a
+/// hand-edited config that sets only `size_pct` fails to parse, and `Settings::load`'s
+/// "malformed → defaults" rule would throw away **every other setting in the file** to
+/// punish one typo in this one.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct SubtitleStyle {
     /// `None` = the system sans. A name the platform doesn't have falls back to it.
     pub font_family: Option<String>,
@@ -261,11 +290,80 @@ impl Default for SubtitleStyle {
     }
 }
 
+/// The fonts the Settings picker offers, in order. `None`/empty = the system sans.
+///
+/// A **curated shortlist, deliberately not an enumeration** (owner call, 2026-07-15).
+/// cosmic-text's fontdb finds ~1114 faces on a real machine, the overwhelming majority of
+/// which are unusable as subtitles (symbol, emoji, and single-script faces), and a list
+/// that long needs a search field and an indexed-accessor pull across the FFI to be usable
+/// at all. These are the faces people actually pick, they ship on both macOS and Windows,
+/// and every one is legible at speed against moving pictures.
+///
+/// This costs nothing later: the stored value is a font *name*, so growing this into a
+/// full picker never invalidates a saved setting. A name the platform lacks falls back to
+/// the system sans (cosmic-text's own rule), so the list being wrong on some machine
+/// degrades to "the default font" rather than to no subtitles.
+pub const FONT_CHOICES: &[&str] = &[
+    "Helvetica",
+    "Arial",
+    "Verdana",
+    "Tahoma",
+    "Trebuchet MS",
+    "Georgia",
+    "Times New Roman",
+    "Courier New",
+];
+
 impl SubtitleStyle {
+    /// The font to shape with: the user's choice, or the system sans.
+    ///
+    /// Empty-string-as-none matters because the FFI cannot carry `Option<String>` — the
+    /// Swift side sends `""` for "System", and that must mean the same thing as a config
+    /// with no `font_family` key at all.
+    pub fn font(&self) -> Option<&str> {
+        self.font_family.as_deref().filter(|f| !f.trim().is_empty())
+    }
+
+    /// Clamp every field into a sane range, in place. See [`Self::clamped`].
+    pub fn clamp(&mut self) {
+        let c = std::mem::take(self).clamped();
+        *self = c;
+    }
+
     /// Clamp every field into a sane range. Settings come from a TOML file a human can
     /// edit, so "size 40" (they meant points) must produce a large subtitle, not a
     /// full-screen wall that hides the film with no way back.
+    ///
+    /// Non-finite is handled before the clamp: `f32::clamp` **panics** on a NaN bound and
+    /// a NaN input passes straight through it, so a `size_pct = nan` in a config would
+    /// otherwise reach the rasterizer. TOML can hold `nan`.
     pub fn clamped(mut self) -> Self {
+        let d = SubtitleStyle::default();
+        for (v, dv) in [
+            (&mut self.size_pct, d.size_pct),
+            (&mut self.outline_pct, d.outline_pct),
+            (&mut self.background_radius_pct, d.background_radius_pct),
+            (&mut self.background_pad_pct, d.background_pad_pct),
+            (&mut self.vertical_offset_pct, d.vertical_offset_pct),
+            (&mut self.max_line_pct, d.max_line_pct),
+            (&mut self.line_spacing, d.line_spacing),
+        ] {
+            if !v.is_finite() {
+                *v = dv;
+            }
+        }
+        if let Some(sh) = &mut self.shadow {
+            let ds = Shadow::default();
+            for (v, dv) in [
+                (&mut sh.dx_pct, ds.dx_pct),
+                (&mut sh.dy_pct, ds.dy_pct),
+                (&mut sh.blur_pct, ds.blur_pct),
+            ] {
+                if !v.is_finite() {
+                    *v = dv;
+                }
+            }
+        }
         self.size_pct = self.size_pct.clamp(0.01, 0.25);
         self.outline_pct = self.outline_pct.clamp(0.0, 0.02);
         self.background_radius_pct = self.background_radius_pct.clamp(0.0, 0.05);
@@ -393,7 +491,10 @@ impl SubtitleStyle {
     pub fn to_params(&self, viewport: (f32, f32)) -> pb_hud::subtitle::SubtitleParams {
         let (vw, vh) = viewport;
         pb_hud::subtitle::SubtitleParams {
-            font_family: self.font_family.clone(),
+            // `font()`, not the raw field: `""` (what the Settings FFI sends for "System",
+            // since it cannot carry an `Option<String>`) must mean the system font, not a
+            // hunt for a face literally named "".
+            font_family: self.font().map(str::to_string),
             size_px: self.size_px(vh),
             color: self.color,
             outline_px: (self.outline_pct * vh).max(0.0),
@@ -593,6 +694,101 @@ mod tests {
             got.id.local_id, 1,
             "rule 1 can't match, so the default wins"
         );
+    }
+
+    // -- persistence (#90.4) -----------------------------------------------
+
+    /// The round trip that keeps a saved look saved.
+    #[test]
+    fn the_style_survives_a_toml_round_trip() {
+        let mut want = SubtitleStyle::default();
+        want.font_family = Some("Verdana".into());
+        want.size_pct = 0.06;
+        want.color = [255, 240, 0, 220];
+        want.shadow = Some(Shadow {
+            dx_pct: 0.003,
+            dy_pct: 0.004,
+            blur_pct: 0.005,
+            color: [0, 0, 0, 180],
+        });
+        want.background = [0, 0, 0, 153];
+        let toml = toml::to_string_pretty(&want).expect("serialize");
+        let got: SubtitleStyle = toml::from_str(&toml).expect("deserialize");
+        assert_eq!(got, want);
+    }
+
+    /// ⚠ THE reason `#[serde(default)]` is on this struct. A hand-edited config that sets
+    /// one key must not fail to parse — `Settings::load` turns a parse failure into "use
+    /// the defaults", so without this, one typo here silently discards **every other
+    /// setting in the file**.
+    #[test]
+    fn a_partial_table_fills_the_gaps_from_default() {
+        let got: SubtitleStyle = toml::from_str("size_pct = 0.08").expect("partial parses");
+        assert_eq!(got.size_pct, 0.08);
+        assert_eq!(got.outline_pct, SubtitleStyle::default().outline_pct);
+        assert_eq!(got.line_spacing, SubtitleStyle::default().line_spacing);
+    }
+
+    /// Same rule one level down: a shadow table naming only its blur is a shadow.
+    #[test]
+    fn a_partial_shadow_table_fills_the_gaps_from_default() {
+        let got: SubtitleStyle =
+            toml::from_str("[shadow]\nblur_pct = 0.01").expect("partial shadow parses");
+        let sh = got.shadow.expect("a named shadow table means a shadow");
+        assert_eq!(sh.blur_pct, 0.01);
+        assert_eq!(sh.color, Shadow::default().color);
+    }
+
+    /// An absent shadow table is no shadow — which is the shipped default, and distinct
+    /// from a present-but-empty one.
+    #[test]
+    fn no_shadow_table_means_no_shadow() {
+        let got: SubtitleStyle = toml::from_str("size_pct = 0.05").unwrap();
+        assert!(got.shadow.is_none());
+        assert!(SubtitleStyle::default().shadow.is_none());
+    }
+
+    /// ⚠ TOML can hold `nan`, and `f32::clamp` PANICS on a NaN bound while a NaN input
+    /// sails straight through it — so a non-finite must be reset before any clamp runs,
+    /// not by it.
+    #[test]
+    fn non_finite_values_reset_instead_of_panicking() {
+        let s: SubtitleStyle =
+            toml::from_str("size_pct = nan\noutline_pct = inf\nline_spacing = -inf")
+                .expect("nan parses; it is a real TOML float");
+        let c = s.clamped();
+        let d = SubtitleStyle::default();
+        assert_eq!(c.size_pct, d.size_pct);
+        assert_eq!(c.outline_pct, d.outline_pct);
+        assert_eq!(c.line_spacing, d.line_spacing);
+    }
+
+    /// The FFI cannot carry `Option<String>`, so Swift sends `""` for "System". That must
+    /// mean exactly what a config with no `font_family` key means.
+    #[test]
+    fn an_empty_font_name_means_the_system_font() {
+        let mut s = SubtitleStyle::default();
+        assert_eq!(s.font(), None);
+        s.font_family = Some(String::new());
+        assert_eq!(s.font(), None, "empty = System, same as absent");
+        s.font_family = Some("   ".into());
+        assert_eq!(s.font(), None, "whitespace too");
+        s.font_family = Some("Verdana".into());
+        assert_eq!(s.font(), Some("Verdana"));
+    }
+
+    /// The picker's list must be usable as-is: no blanks, no duplicates.
+    #[test]
+    fn the_font_shortlist_is_sane() {
+        assert!(!FONT_CHOICES.is_empty());
+        for f in FONT_CHOICES {
+            assert!(!f.trim().is_empty());
+        }
+        let mut sorted = FONT_CHOICES.to_vec();
+        sorted.sort_unstable();
+        let n = sorted.len();
+        sorted.dedup();
+        assert_eq!(sorted.len(), n, "no duplicate font names");
     }
 
     // -- the Shift+C cycle (#99) -------------------------------------------
