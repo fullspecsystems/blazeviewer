@@ -312,8 +312,10 @@ measurable here.
 
 ## Licensing — LGPL discipline (read before touching FFmpeg, libheif, or dist)
 
-PhotoBlaze is **proprietary and sold**. That makes third-party native deps a hard
-ship gate, not a chore. The rule, in one line:
+Blaze Viewer is **source-available and sold** — **FSL-1.1-ALv2** (`LICENSE.md`), which
+converts to Apache-2.0 after two years. (It was a closed proprietary EULA until
+2026-07-14; the superseded `LICENSE` file is gone.) That still makes third-party native
+deps a hard ship gate, not a chore. The rule, in one line:
 
 > **We only ever DECODE. Ship LGPL; never ship GPL.** GPL-only encoders and
 > filters (x264, x265, GPL avfilter) are irrelevant to a viewer — we don't encode
@@ -334,9 +336,9 @@ has a licensing problem, check the artifact that actually ships:
 
 ```sh
 # Inspect the SHIPPED app, not the dev build:
-hdiutil attach dist/PhotoBlaze-*.dmg -nobrowse -readonly -mountpoint /tmp/pb
-otool -L /tmp/pb/PhotoBlaze.app/Contents/MacOS/PhotoBlaze | grep -i homebrew   # must be EMPTY
-ls  /tmp/pb/PhotoBlaze.app/Contents/Frameworks/                                # bundled LGPL dylibs live here
+hdiutil attach dist/BlazeViewer-*.dmg -nobrowse -readonly -mountpoint /tmp/pb
+otool -L "/tmp/pb/Blaze Viewer.app/Contents/MacOS/Blaze Viewer" | grep -i homebrew   # must be EMPTY
+ls  "/tmp/pb/Blaze Viewer.app/Contents/Frameworks/"                                # bundled LGPL dylibs live here
 hdiutil detach /tmp/pb
 ```
 
@@ -356,14 +358,17 @@ A release .app must reference FFmpeg **only** via `@rpath/…` out of
   exposure at all.
 - **Linux** — system/AppImage-bundled shared libheif + FFmpeg via `linuxdeploy`;
   dynamic linkage, so LGPL §4 is satisfied by construction.
-- **Windows** — ⚠️ the open one, and as of task #100 it covers **three** libraries, not two.
-  `pb-decode/build.rs` links vcpkg **static** libheif + libde265 (LGPL-3.0, §4) and
-  **FFmpeg** (LGPL-2.1, §6 — demux/metadata only, but LGPL attaches to *linkage*, not to
-  how much of the library you call). Static-linking LGPL into a proprietary binary triggers
-  the relink obligation, which is *not* satisfied by attribution alone. The fix is DLL
-  linkage for all three; the current static choice was a convenience call ("no DLLs to
-  ship"), not a constraint. **Verify status against task #77 before shipping a paid Windows
-  build.** (`dav1d` is BSD-2-Clause — static is fine, attribution only.)
+- **Windows** — covers **three** LGPL libraries as of task #100: libheif + libde265
+  (LGPL-3.0, §4) and **FFmpeg** (LGPL-2.1, §6 — demux/metadata only, but LGPL attaches to
+  *linkage*, not to how much of the library you call). **`pb-decode/build.rs` now links all
+  three as DLLs** (the `x64-windows` / `arm64-windows` vcpkg triplets, *not* `-static-md`),
+  which is what satisfies the relink obligation — attribution alone never would. Measured
+  cost of the switch: **+0.8 MB**. `PB_VCPKG_STATIC=1` forces static linkage but is an A/B
+  measurement escape hatch **only — never ship it**. (`dav1d` is BSD-2-Clause — static
+  would be fine there, attribution only.)
+  > Task #77 is still open at the time of writing; the *linkage* half is done. Check it
+  > before shipping a paid Windows build, and trust `pb-decode/build.rs` over this
+  > paragraph — it was stale once already.
 
 ### Distribution model
 
@@ -545,7 +550,7 @@ cargo bench                # criterion microbenchmarks over the corpus
 **Windows** ships **Velopack** (per-user installer + auto-update), built + signed **locally**
 (GitHub Actions credits are finite): `pwsh scripts/release-windows.ps1 -Upload` builds with
 libheif, signs the exe + `Setup.exe` + `Update.exe` via Azure Trusted Signing, `vpk pack`s a full
-release, and rsyncs the flat feed to `downloads.fullspec.ca/photoblaze/win`. The app reads that
+release, and rsyncs the flat feed to `downloads.blazeviewer.app/win`. The app reads that
 feed over HTTP (`update.rs` `FEED_URL`) and self-updates — downloads in the background, installs on
 quit. Version comes from `crates/pb-app/Cargo.toml`, so it always matches the app; there is **no
 tag / GitHub Release for Windows**.
@@ -571,9 +576,9 @@ feature set is `--features libheif,dav1d,ffprobe`. ARM64 uses the `vcredist143-a
 > between **+3.06 MB** and +16.42 MB on the exe.
 
 **macOS** is **built locally on the owner's Mac** via `scripts/release-macos.sh` (Developer ID +
-notarization), then published to `downloads.fullspec.ca/photoblaze/mac` with
+notarization), then published to `downloads.blazeviewer.app/mac` with
 `scripts/release-mac-upload.sh` — which scp's the DMG + appcast **straight from the Mac** to
-jdlien.com and repoints the `PhotoBlaze-latest.dmg` symlink (the remote `mac/` dir is
+jdlien.com and repoints the `BlazeViewer-latest.dmg` symlink (the remote `mac/` dir is
 jdlien-owned, no sudo). No Windows detour: `scripts/release-mac-upload.ps1` is the equivalent for
 running the upload from the Windows box, but the whole Mac release now stays on the Mac. Hosted
 GitHub Actions is too expensive to use, so `.github/workflows/release.yml` — which builds the DMG
@@ -594,7 +599,7 @@ auto-update without shipping a new public key via a stopgap manual update.
 
 **Linux** ships a self-contained **AppImage** — one executable the user downloads, `chmod +x`es, and
 runs; **no `apt install`, no dependency hunt.** Built locally with `scripts/release-linux.sh` (→
-`dist/PhotoBlaze-<version>-<arch>.AppImage`). It builds the full-feature release binary
+`dist/BlazeViewer-<version>-<arch>.AppImage`). It builds the full-feature release binary
 (`--features livephoto,pb-decode/libheif`) and uses **linuxdeploy** (fetched to `dist/appimage-tools`)
 to bundle the *specialized* decode libraries — libheif, FFmpeg, and the AV1/HEVC codecs — while
 leaving the ~universal system stack (glibc, GTK, Mesa/GL, X11, Wayland) to the host, per the AppImage
@@ -622,10 +627,10 @@ list (`rustfmt,clippy,…`) — a space-separated list makes it reject the secon
 
 **Publishing + auto-update (Linux) — the JSON-feed self-replace model** (the Velopack/Sparkle analog
 for AppImages). `scripts/release-linux-upload.sh` (or `release-linux-docker.sh … --upload`) scp's the
-versioned AppImage(s) + a `.sha256` sidecar each to `downloads.fullspec.ca/photoblaze/linux`, writes a
+versioned AppImage(s) + a `.sha256` sidecar each to `downloads.blazeviewer.app/linux`, writes a
 shared `latest.json` manifest (version + per-arch url/sha256/size), and repoints the
-`PhotoBlaze-latest-<arch>.AppImage` symlinks; Caddy redirects `/photoblaze/latest/linux` (x86_64) and
-`/photoblaze/latest/linux-arm64` (aarch64) at them. The app's `update.rs` `linux` module reads
+`BlazeViewer-latest-<arch>.AppImage` symlinks; Caddy redirects `/latest/linux` (x86_64) and
+`/latest/linux-arm64` (aarch64) at them. The app's `update.rs` `linux` module reads
 `latest.json` in a background thread, and if it advertises a newer build for this arch it downloads
 the AppImage, **verifies the sha256**, and swaps `$APPIMAGE` in place on quit (atomic rename — the
 next launch is the new version). Self-gates when `$APPIMAGE` is unset (a `cargo run` / extracted
@@ -662,10 +667,10 @@ To cut a release:
 3. **macOS (all on your Mac):** `./scripts/release-macos.sh --release` builds the signed +
    notarized DMG **and** EdDSA-signs it into `dist/appcast.xml` (Sparkle auto-update, task #65),
    then `./scripts/release-mac-upload.sh` scp's the DMG **and the appcast** to jdlien.com and
-   repoints `PhotoBlaze-latest.dmg` — no Windows box needed. (Optionally verify the seed's updater
-   first with `./scripts/test-sparkle-update.sh dist/PhotoBlaze-<version>.dmg`.) A GitHub Release is
+   repoints `BlazeViewer-latest.dmg` — no Windows box needed. (Optionally verify the seed's updater
+   first with `./scripts/test-sparkle-update.sh dist/BlazeViewer-<version>.dmg`.) A GitHub Release is
    **optional and manual** — nothing auto-builds from a tag:
-   `gh release create v<version> dist/PhotoBlaze-<version>.dmg* --notes-file <(bash
+   `gh release create v<version> dist/BlazeViewer-<version>.dmg* --notes-file <(bash
    scripts/changelog-section.sh <version>)`. Write **real, curated, user-facing** CHANGELOG notes
    before tagging so `changelog-section.sh` has a body. **Never** enable `generate_release_notes`.
 4. **Linux (from your Mac via OrbStack):** `./scripts/release-linux-docker.sh both --upload` builds
@@ -680,7 +685,7 @@ To cut a release:
    `spctl -a -t open --context context:primary-signature -vv <dmg>` → `source=Notarized Developer
    ID`; the macOS feed serves the new `appcast.xml` (curl it) and a launched older build detects →
    downloads → installs-on-quit the update; the Linux feed serves the new `latest.json` +
-   `latest-<arch>` symlinks (curl `…/photoblaze/latest/linux`). A `-` in a tag marks a pre-release; a
+   `latest-<arch>` symlinks (curl `…/latest/linux`). A `-` in a tag marks a pre-release; a
    clean `vX.Y.Z` is a full release.
 
 

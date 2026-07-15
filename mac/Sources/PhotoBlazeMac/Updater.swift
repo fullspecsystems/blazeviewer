@@ -3,7 +3,7 @@ import Sparkle
 
 /// The Mac auto-updater (task #65) — a thin wrapper over Sparkle's `SPUStandardUpdaterController`.
 ///
-/// Sparkle rides the existing notarized DMG on downloads.fullspec.ca via an EdDSA-signed
+/// Sparkle rides the existing notarized DMG on downloads.blazeviewer.app via an EdDSA-signed
 /// `appcast.xml` (see the `SU*` keys in Info-swift-host.plist). This is the macOS half of the
 /// same background-download / install-on-quit UX Windows already gets from Velopack
 /// (`crates/pb-app/src/update.rs`); the two are independent (different tooling, different feed).

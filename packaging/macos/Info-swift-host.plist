@@ -58,7 +58,7 @@
 	<key>NSPrincipalClass</key>
 	<string>NSApplication</string>
 	<key>NSHumanReadableCopyright</key>
-	<string>© FullSpec Systems Inc. 2026</string>
+	<string>© 2026 FullSpec Systems Inc.</string>
 
 	<!-- Sparkle auto-update (task #65). The app checks this EdDSA-signed appcast next to
 	     the DMG on downloads.blazeviewer.app and, when a newer version is published, downloads

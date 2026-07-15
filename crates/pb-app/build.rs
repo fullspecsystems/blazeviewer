@@ -126,7 +126,7 @@ fn main() {
             .set("ProductName", "Blaze Viewer")
             .set("FileDescription", "Blaze Viewer")
             .set("CompanyName", "FullSpec Systems Inc.")
-            .set("LegalCopyright", "© FullSpec Systems Inc. 2026")
+            .set("LegalCopyright", "© 2026 FullSpec Systems Inc.")
             .set_manifest(MANIFEST);
         if let Err(e) = res.compile() {
             println!(
