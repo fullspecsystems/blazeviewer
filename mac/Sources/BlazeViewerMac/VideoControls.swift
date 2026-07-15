@@ -50,6 +50,15 @@ struct SubtitleTrackRow: Identifiable {
     let active: Bool
 }
 
+/// One row of the **audio** track picker (task #99). Menu-only, by owner call
+/// (2026-07-15): audio language is a once-per-film choice, unlike subtitles which get
+/// toggled constantly — so it doesn't earn a button on the playback bar.
+struct AudioTrackRow: Identifiable {
+    let id: Int
+    let label: String
+    let active: Bool
+}
+
 /// The track picker (task #99, owner placement 2026-07-15): a button to the **right of the
 /// total runtime**, complementing the play button on the left, opening the subtitle track
 /// list.

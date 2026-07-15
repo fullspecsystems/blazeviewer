@@ -183,11 +183,37 @@ impl FfAudioDecoder {
     /// surrounds to their side, ATSC-style clip guard). The macOS sink uses 2 —
     /// AVAudioEngine's graph rejects wider-than-stereo standard formats there.
     pub fn open_capped(input: &VideoInput, max_channels: u16) -> Result<FfAudioDecoder, String> {
+        Self::open_track(input, max_channels, None)
+    }
+
+    /// [`open_capped`](Self::open_capped) with an explicit **stream index** (task #99): the
+    /// user's chosen audio track, or `None` to apply the automatic policy.
+    ///
+    /// The track choice used to be baked *inside* this function, which is why nothing could
+    /// switch audio: there was no way to ask for a different one, and no way to learn which
+    /// one you got. Both are parameters/facts now — see [`stream_index`](Self::stream_index).
+    ///
+    /// A `track` naming a stream that is missing or isn't audio **falls back to the policy**
+    /// rather than failing: a stale selection should cost you the *choice*, not the sound.
+    pub fn open_track(
+        input: &VideoInput,
+        max_channels: u16,
+        track: Option<usize>,
+    ) -> Result<FfAudioDecoder, String> {
         let mut opened = FfInput::open(input, None)?;
         let (index, rate, channels, time_base, start_time) = {
             let ctx = opened.ctx();
+            // The user's pick, but only if it really is an audio stream in *this* container.
+            let chosen = track.filter(|i| {
+                ctx.streams()
+                    .find(|s| s.index() == *i)
+                    .is_some_and(|s| s.parameters().medium() == ff::media::Type::Audio)
+            });
             // R10: an explicit, tested track-selection policy, not blind `best(Audio)`.
-            let (index, reason) = select_audio_stream(ctx).ok_or("no audio track")?;
+            let (index, reason) = match chosen {
+                Some(i) => (i, "user selection"),
+                None => select_audio_stream(ctx).ok_or("no audio track")?,
+            };
             if diag() {
                 eprintln!("[pb-video] audio track: stream #{index} ({reason})");
             }
@@ -254,6 +280,19 @@ impl FfAudioDecoder {
     /// op-deadline. No-op-safe to skip (the watchdog is the fallback).
     pub fn arm_cancel(&mut self, cancel: std::sync::Arc<std::sync::atomic::AtomicBool>) {
         self.input.set_cancel(cancel);
+    }
+
+    /// **Which stream this decoder actually opened** (task #99) — the container's real
+    /// index, matching the catalog's `local_id` and its `TrackLocator::FfStream`.
+    ///
+    /// This is the fact that makes an honest audio picker possible. The policy inside
+    /// [`open_track`](Self::open_track) is a *decision*, and until it was reported the app
+    /// genuinely did not know which track it was playing — so a picker could not tick a row
+    /// without guessing, and a guess that disagreed with the sound would be worse than no
+    /// tick. It is also how a fallback stays honest: ask for a stale track, get the policy's
+    /// pick, and this says which one that was.
+    pub fn stream_index(&self) -> usize {
+        self.index
     }
 
     /// Native sample rate — the sinks hand this to the device layer verbatim.
@@ -849,6 +888,83 @@ mod tests {
             .expect("open input");
         let picked = select_audio_stream(opened.ctx());
         assert!(matches!(picked, Some((_, _))), "found an audio stream");
+    }
+
+    /// **The fact an honest picker needs** (#99): the decoder reports which stream it
+    /// opened. Until it did, nothing in the app knew which audio track was playing — the
+    /// policy decided privately — so a picker could only have *guessed* which row to tick.
+    #[test]
+    fn the_decoder_reports_the_stream_it_opened() {
+        let d = FfAudioDecoder::open(&VideoInput::Path(fixture("color_with_tone.mp4")))
+            .expect("open audio");
+        let mut opened = FfInput::open(&VideoInput::Path(fixture("color_with_tone.mp4")), None)
+            .expect("open input");
+        let (want, _) = select_audio_stream(opened.ctx()).expect("a policy pick");
+        assert_eq!(
+            d.stream_index(),
+            want,
+            "the reported index must be the stream the policy actually chose"
+        );
+        // It is a real stream index in the container, not an ordinal among audio streams —
+        // that is what makes it comparable to the catalog's `local_id`.
+        assert!(opened
+            .ctx()
+            .streams()
+            .any(|s| s.index() == d.stream_index()
+                && s.parameters().medium() == ff::media::Type::Audio));
+    }
+
+    /// Asking for a track explicitly opens *that* stream.
+    #[test]
+    fn an_explicit_track_is_honoured() {
+        let mut opened = FfInput::open(&VideoInput::Path(fixture("color_with_tone.mp4")), None)
+            .expect("open input");
+        let want = opened
+            .ctx()
+            .streams()
+            .find(|s| s.parameters().medium() == ff::media::Type::Audio)
+            .map(|s| s.index())
+            .expect("an audio stream");
+        let d = FfAudioDecoder::open_track(
+            &VideoInput::Path(fixture("color_with_tone.mp4")),
+            u16::MAX,
+            Some(want),
+        )
+        .expect("open audio");
+        assert_eq!(d.stream_index(), want);
+    }
+
+    /// A selection naming a stream that is missing — or that is the *video* stream — must
+    /// cost you the choice, not the sound: it falls back to the policy rather than failing.
+    /// A stale pick reaching a re-open is the expected case, not an exotic one.
+    #[test]
+    fn a_bogus_track_falls_back_to_the_policy_rather_than_failing() {
+        let path = fixture("color_with_tone.mp4");
+        let expected = {
+            let mut o = FfInput::open(&VideoInput::Path(path.clone()), None).expect("open");
+            select_audio_stream(o.ctx()).expect("policy").0
+        };
+        // Way past the end of the stream table.
+        let d = FfAudioDecoder::open_track(&VideoInput::Path(path.clone()), u16::MAX, Some(99))
+            .expect("still opens");
+        assert_eq!(d.stream_index(), expected, "fell back to the policy's pick");
+
+        // ...and a real stream index that isn't audio is refused the same way.
+        let video = {
+            let mut o = FfInput::open(&VideoInput::Path(path.clone()), None).expect("open");
+            o.ctx()
+                .streams()
+                .find(|s| s.parameters().medium() == ff::media::Type::Video)
+                .map(|s| s.index())
+                .expect("a video stream")
+        };
+        let d = FfAudioDecoder::open_track(&VideoInput::Path(path), u16::MAX, Some(video))
+            .expect("still opens");
+        assert_eq!(
+            d.stream_index(),
+            expected,
+            "a video stream is not an audio pick"
+        );
     }
 
     /// Hostile bytes fail bounded, never hang (watchdog + packet budget).

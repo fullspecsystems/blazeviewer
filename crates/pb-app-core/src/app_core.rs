@@ -279,6 +279,18 @@ pub struct AppCore {
     /// "is this probe result still about the right file", this answers "is this id still
     /// about this catalog".
     pub catalog_seq: u64,
+    /// Which audio track the shell reports it is **actually playing** (task #99) — the
+    /// only source of the Playback ▸ Audio tick. `None` = not told yet, so nothing ticks.
+    ///
+    /// Reported, never derived. The track is chosen by the decoder's policy at open
+    /// (forced → default → FFmpeg's `best` → first), and `best` is a heuristic this crate
+    /// cannot compute from a catalog — so a second implementation here would be a *guess*,
+    /// and a guess that disagreed with what the user is hearing is worse than no tick at
+    /// all. `FfAudioDecoder::stream_index` exists to make this a fact.
+    ///
+    /// Session-only and per-file (privacy #2): a `TrackId` is stale by construction across
+    /// files and is never persisted.
+    pub audio_active: Option<pb_decode::TrackId>,
     /// Subtitle overlay state (task #90): the cue clock, the loaded track, and the
     /// bitmap + rect the shells composite. Shares `details_gen` as its staleness
     /// generation — both describe "what file is at index i", which is the same question.

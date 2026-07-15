@@ -158,6 +158,9 @@ final class SampleBufferPresenter {
                     guard let self, ok, !self.audioStarted else { return }
                     self.audioStarted = true
                     self.audioFeeder.startFeeding(into: self.audioRenderer)
+                    // Tell the core which track the decoder's policy actually chose, so
+                    // Playback ▸ Audio can tick it (task #99). Reported, never guessed.
+                    self.reportActiveAudioTrack()
                 }
             }
         }
@@ -378,6 +381,59 @@ final class SampleBufferPresenter {
         switch scaleMode {
         case 1: displayLayer.videoGravity = .resizeAspectFill // Fill
         default: displayLayer.videoGravity = .resizeAspect // Fit / Original
+        }
+    }
+
+    // MARK: - Audio track selection (task #99)
+
+    /// The container stream index this route is **actually playing** (`nil` until the
+    /// decoder has opened and answered).
+    ///
+    /// Cached as the **raw fact**, not resolved to a picker row, because the two are known
+    /// at different times: the decoder answers the moment audio opens, while the rows need
+    /// the track catalog, whose probe is still in flight then. Resolving early was the bug —
+    /// it produced "nothing is playing" against an empty row list and stuck there, so the
+    /// menu had no tick until you picked something. The row is derived at menu-open instead,
+    /// when both halves exist.
+    private(set) var activeAudioStream: Int?
+
+    /// Re-read which stream the decoder is on, and cache it. Async (the feeder owns the
+    /// pointer on its serial queue), which is the other reason this cannot be resolved
+    /// inside the synchronous `menuNeedsUpdate`.
+    func reportActiveAudioTrack() {
+        audioFeeder.currentTrack { [weak self] stream in
+            MainActor.assumeIsolated {
+                self?.activeAudioStream = stream
+            }
+        }
+    }
+
+    /// Switch to the audio track at picker row `row`. Reports the outcome to the core, which
+    /// toasts only on a **confirmed** switch.
+    func selectAudioTrack(row: Int) {
+        guard let model else { return }
+        let stream = model.audioRowFfStream(row)
+        guard stream >= 0 else {
+            model.audioTrackSwitched(row: row, ok: false) // not a track this route can reach
+            return
+        }
+        let at = synchronizer.currentTime().seconds
+        audioFeeder.switchTrack(
+            stream, at: at.isFinite ? max(0, at) : 0, renderer: audioRenderer
+        ) { [weak self] ok in
+            MainActor.assumeIsolated {
+                guard let self, let model = self.model else { return }
+                // Re-read what is playing FIRST — on a refusal that is the old track, and on
+                // a stale pick the decoder falls back to its policy, so neither the tick nor
+                // the toast may trust the request.
+                self.audioFeeder.currentTrack { stream in
+                    MainActor.assumeIsolated {
+                        self.activeAudioStream = stream
+                        model.reportActiveAudioStream(stream)
+                        model.audioTrackSwitched(row: row, ok: ok)
+                    }
+                }
+            }
         }
     }
 

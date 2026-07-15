@@ -14,7 +14,7 @@
 
 use pb_decode::tracks::{
     language_display, MediaTrack, MediaTrackCatalog, TrackCapability, TrackCompleteness,
-    TrackFlags, TrackKind, TrackSet,
+    TrackFlags, TrackId, TrackKind, TrackSet,
 };
 
 use crate::panels::DetailRow;
@@ -273,6 +273,37 @@ pub fn subtitle_picker_rows(
                     .unwrap_or_default(),
                 active: showing == Some(id),
             },
+        })
+        .collect()
+}
+
+/// The **audio** picker's rows: every playable audio track (task #99).
+///
+/// Deliberately unlike the subtitle picker in two ways:
+///
+/// - **No `Off` row.** You cannot turn audio off from a track list — silence is Mute, a
+///   different control answering a different question.
+/// - **No `Automatic` row.** "No choice" already *is* one of these rows: the container's
+///   default track, which the decoder's policy picks and which the tick will be sitting on.
+///   An Automatic row would name the same track twice.
+///
+/// `active` is **what the shell reports it is actually playing**, never a re-derivation of
+/// the selection policy. The distinction is the whole reason `FfAudioDecoder::stream_index`
+/// exists: the policy decides at open (forced → default → best → first), and a second
+/// implementation of it here would be a guess that could disagree with what the user is
+/// hearing. `None` = we haven't been told yet, so nothing ticks — honest, rather than a
+/// tick on a row that might be wrong.
+///
+/// Unplayable tracks are still listed, marked by [`track_summary`]'s "Unsupported" tail —
+/// they are facts about the file. Selecting one is the shell's to refuse.
+pub fn audio_picker_rows(catalog: &MediaTrackCatalog, active: Option<TrackId>) -> Vec<PickerRow> {
+    catalog
+        .audio
+        .tracks
+        .iter()
+        .map(|t| PickerRow {
+            label: track_summary(t),
+            active: active == Some(t.id),
         })
         .collect()
 }
@@ -811,6 +842,120 @@ mod tests {
                 "exactly one tick for {sel:?}"
             );
         }
+    }
+
+    // -- the audio picker's rows (#99) --------------------------------------
+
+    /// The audio list has no Off row (that is Mute, a different question) and no Automatic
+    /// row (the container's default already IS one of these rows — naming it twice would be
+    /// the same track under two names).
+    #[test]
+    fn the_audio_list_is_just_the_tracks() {
+        let mut main = audio("AAC", 2, Some("stereo"), 48000);
+        main.flags.default = true;
+        let mut comm = audio("AC-3", 2, Some("stereo"), 48000);
+        comm.id.local_id = 1;
+        comm.flags.commentary = true;
+        let c = catalog(
+            TrackSet::complete(vec![main, comm]),
+            TrackSet::complete(vec![]),
+        );
+        let rows = audio_picker_rows(&c, None);
+        assert_eq!(
+            picker_labels(&rows),
+            vec![
+                "English · AAC stereo · 48 kHz · Default",
+                "English · AC-3 stereo · 48 kHz · Commentary"
+            ]
+        );
+        assert!(!rows
+            .iter()
+            .any(|r| r.label == OFF_ROW || r.label == AUTOMATIC_ROW));
+    }
+
+    /// **The tick is reported, never derived.** Nothing ticks until the shell says what it
+    /// is playing — the decoder's policy (forced → default → FFmpeg's `best` → first) picks
+    /// the track at open, and `best` is a heuristic this crate cannot compute from a
+    /// catalog. A second guess here could disagree with what the user is hearing.
+    #[test]
+    fn nothing_ticks_until_the_shell_reports_what_it_plays() {
+        let mut main = audio("AAC", 2, Some("stereo"), 48000);
+        main.flags.default = true; // the policy would probably pick this...
+        let mut other = audio("AC-3", 6, Some("5.1"), 48000);
+        other.id.local_id = 1;
+        let c = catalog(
+            TrackSet::complete(vec![main, other]),
+            TrackSet::complete(vec![]),
+        );
+
+        let rows = audio_picker_rows(&c, None);
+        assert_eq!(
+            rows.iter().filter(|r| r.active).count(),
+            0,
+            "...but we have not been TOLD, so we must not tick the default on a hunch"
+        );
+
+        // Told: the shell is actually playing the 5.1 track.
+        let rows = audio_picker_rows(&c, Some(c.audio.tracks[1].id));
+        assert_eq!(
+            picker_labels(&rows),
+            vec![
+                "English · AAC stereo · 48 kHz · Default",
+                "✓ English · AC-3 5.1 · 48 kHz"
+            ],
+            "the tick follows the speakers, not the disposition"
+        );
+    }
+
+    /// An id from another file's catalog ticks nothing rather than whatever sits at that
+    /// local_id here — the same rule the subtitle side needed.
+    #[test]
+    fn a_foreign_active_id_ticks_nothing() {
+        let c = catalog(
+            TrackSet::complete(vec![audio("AAC", 2, Some("stereo"), 48000)]),
+            TrackSet::complete(vec![]),
+        );
+        let foreign = TrackId {
+            catalog_generation: c.generation + 1,
+            local_id: 0,
+        };
+        let rows = audio_picker_rows(&c, Some(foreign));
+        assert_eq!(rows.iter().filter(|r| r.active).count(), 0);
+    }
+
+    /// **The invariant the tick resolution rests on:** row *i* is `catalog.audio.tracks[i]`.
+    ///
+    /// The shell finds "which row am I playing?" by looping rows and asking the core for
+    /// each one's *stream index* — which the core answers by indexing the **catalog**, while
+    /// the loop counts the **snapshot**. If those two ever ordered differently, the menu
+    /// would tick a track you are not hearing, silently.
+    #[test]
+    fn audio_rows_are_the_catalogs_audio_tracks_in_order() {
+        let mut a = audio("AAC", 2, Some("eng"), 48000);
+        a.id.local_id = 7; // ids are NOT ordinals — the row index must not come from them
+        let mut b = audio("AC-3", 6, Some("fra"), 48000);
+        b.id.local_id = 3;
+        let c = catalog(TrackSet::complete(vec![a, b]), TrackSet::complete(vec![]));
+
+        let rows = audio_picker_rows(&c, None);
+        assert_eq!(rows.len(), c.audio.tracks.len());
+        for (i, row) in rows.iter().enumerate() {
+            assert_eq!(
+                row.label,
+                track_summary(&c.audio.tracks[i]),
+                "row {i} must be catalog.audio.tracks[{i}]"
+            );
+        }
+    }
+
+    /// A track we can't play is still listed — it is a fact about the file — but says so.
+    #[test]
+    fn an_unplayable_audio_track_is_listed_and_marked() {
+        let mut t = audio("TrueHD", 8, Some("7.1"), 48000);
+        t.capability = TrackCapability::Unsupported;
+        let c = catalog(TrackSet::complete(vec![t]), TrackSet::complete(vec![]));
+        let rows = audio_picker_rows(&c, None);
+        assert_eq!(rows.len(), 1);
     }
 
     // -- completeness -> rows (all five states) -----------------------------

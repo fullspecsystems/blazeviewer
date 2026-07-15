@@ -727,6 +727,9 @@ impl App {
             details_probe: None,
             details_gen: 0,
             catalog_seq: 0,
+            // Audio track selection (task #99) is macOS-only so far — this shell has no
+            // player to ask what it is playing, and the tick is reported, never derived.
+            audio_active: None,
             // Subtitles (task #90) are wired through the core, but this shell has no
             // presenter yet — `Renderer::set_subtitle_overlay` is the remaining piece.
             // Off costs nothing, so the state rides along until it exists.

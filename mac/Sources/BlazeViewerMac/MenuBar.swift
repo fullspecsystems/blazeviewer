@@ -23,11 +23,19 @@ final class MenuBar: NSObject {
     /// content check can detect it: if this item is no longer in our menu, SwiftUI
     /// rewrote the bar.
     private var sentinel: NSMenuItem?
-    /// The Playback ▸ Subtitles flyout and its holder (task #99). Held so `menuNeedsUpdate`
-    /// can recognize which menu is asking, and so the holder can be enabled/disabled with
-    /// the video. Rebuilt with the bar on a SwiftUI clobber, like everything else here.
+    /// The Playback ▸ Subtitle Track and ▸ Audio flyouts (task #99), held so
+    /// `menuNeedsUpdate` can tell which one is asking. Rebuilt with the bar on a SwiftUI
+    /// clobber, like everything else here.
+    ///
+    /// ⚠ **Their holder items are deliberately NOT retained, and must never be disabled from
+    /// inside `menuNeedsUpdate`.** That is a one-way door: a disabled submenu item cannot be
+    /// hovered, so its delegate never fires again — and the delegate is the only thing that
+    /// would re-enable it. Both flyouts did exactly that (`holder.isEnabled = false` when no
+    /// video was showing), which meant opening Playback once before a video was up greyed
+    /// them **permanently**, on every film thereafter. The submenu's own contents say "No
+    /// Video" instead; the holder stays enabled and the state is always re-derivable.
     private var subtitlesMenu: NSMenu?
-    private var subtitlesHolder: NSMenuItem?
+    private var audioMenu: NSMenu?
 
     init(model: CoreModel) {
         self.model = model
@@ -161,8 +169,27 @@ final class MenuBar: NSObject {
         subtitlesMenu = menu
         let holder = NSMenuItem(title: "Subtitle Track", action: nil, keyEquivalent: "")
         holder.submenu = menu
-        subtitlesHolder = holder
         return holder
+    }
+
+    /// The Playback ▸ Audio flyout (task #99) — same `menuNeedsUpdate` pull as the subtitle
+    /// one, for the same reason: the track list belongs to the file on screen, not to the
+    /// fixed `SetMenuState` struct.
+    private func audioFlyout() -> NSMenuItem {
+        let menu = NSMenu(title: "Audio")
+        menu.autoenablesItems = false
+        menu.delegate = self
+        audioMenu = menu
+        let holder = NSMenuItem(title: "Audio", action: nil, keyEquivalent: "")
+        holder.submenu = menu
+        return holder
+    }
+
+    /// An audio row was chosen. Carries the row index, like the subtitle rows — the core
+    /// turns it into whichever locator this file's backend speaks.
+    @objc private func pickAudioTrack(_ sender: NSMenuItem) {
+        guard let row = sender.representedObject as? Int else { return }
+        model?.selectAudioTrack(row)
     }
 
     /// A non-firing informational row ("Reading tracks…").
@@ -376,6 +403,10 @@ final class MenuBar: NSObject {
             // twin — and "Subtitle Track" is *which*. Fusing them (an Off row inside the
             // flyout, and no toggle) was the defect: turning subtitles off had to forget
             // the track you had picked, so picking Chinese and toggling twice gave English.
+            // Audio and subtitles side by side — the reason this menu exists rather than a
+            // View ▸ Subtitles flyout. There is no audio toggle to pair with the subtitle
+            // one: you cannot turn audio *off* from a track list (that is Mute, below).
+            audioFlyout(),
             item("toggle_subtitles", "Subtitles"),
             subtitlesFlyout(),
             sep(),
@@ -414,18 +445,21 @@ extension MenuBar: NSMenuDelegate {
     /// The rows come from the same core list the playback bar's popover and `Shift+C` use,
     /// so the three cannot disagree; row 0 is always Off.
     func menuNeedsUpdate(_ menu: NSMenu) {
-        guard menu === subtitlesMenu, let model else { return }
+        guard let model else { return }
+        if menu === audioMenu {
+            audioNeedsUpdate(menu, model)
+            return
+        }
+        guard menu === subtitlesMenu else { return }
         menu.removeAllItems()
 
         // Three distinct answers, and they must not be collapsed: no video at all, a video
         // whose tracks we haven't read yet, and a video we've read and which genuinely has
         // none. Saying "Reading tracks…" over a photograph would be nonsense.
         guard model.videoShowing else {
-            subtitlesHolder?.isEnabled = false
             menu.addItem(note("No Video"))
             return
         }
-        subtitlesHolder?.isEnabled = true
 
         // Row 0 is Off, which the "Subtitles" toggle above this item owns — so it is
         // dropped here while every other row KEEPS ITS CANONICAL INDEX. Hiding a row is
@@ -449,6 +483,40 @@ extension MenuBar: NSMenuDelegate {
             if row.label == "Automatic" {
                 menu.addItem(.separator())
             }
+        }
+    }
+
+    /// The Audio flyout's rows. No Off and no Automatic: you cannot turn audio off from a
+    /// track list (that is Mute), and "no choice" already *is* one of these rows — the
+    /// container's default, which the tick will be sitting on.
+    private func audioNeedsUpdate(_ menu: NSMenu, _ model: CoreModel) {
+        menu.removeAllItems()
+        guard model.videoShowing else {
+            menu.addItem(note("No Video"))
+            return
+        }
+
+        let rows = model.audioTrackRows()
+        guard !rows.isEmpty else {
+            menu.addItem(note(model.subtitleTracksKnown ? "No Audio Tracks" : "Reading Tracks…"))
+            return
+        }
+        for row in rows {
+            let item = NSMenuItem(
+                title: row.label, action: #selector(pickAudioTrack(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = row.id
+            item.state = row.active ? .on : .off
+            // A track we cannot play is still listed (it is a fact about the file) but must
+            // not read as an offer — the same rule that keeps PGS out of the subtitle rows,
+            // except here the row stays visible because Details shows it too.
+            item.isEnabled = !row.label.hasSuffix("Unsupported")
+            menu.addItem(item)
+        }
+        // One track is not a choice — say so rather than offer a menu that does nothing.
+        if rows.count == 1 {
+            menu.addItem(.separator())
+            menu.addItem(note("Only one audio track"))
         }
     }
 }

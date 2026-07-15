@@ -282,6 +282,74 @@ final class NativeVideoPlayer {
         let hasAudio = item.tracks.contains { $0.assetTrack?.mediaType == .audio }
         model?.nativeVideoOpened(sessionId, durationMs: durationMs, hasAudio: hasAudio)
         relayout() // presentationSize is known now → Original can size 1:1
+        reportActiveAudioTrack() // AVFoundation has made its automatic choice by now (#99)
+    }
+
+    // MARK: - Audio track selection (task #99)
+
+    /// The asset's audible media-selection group — AVFoundation's own model of "the audio
+    /// tracks you may choose between", and the only handle `select(_:in:)` accepts.
+    private var audibleGroup: AVMediaSelectionGroup? {
+        item.asset.mediaSelectionGroup(forMediaCharacteristic: .audible)
+    }
+
+    /// An option's identity as bytes, in the **same binary-plist encoding** the catalog
+    /// stored (`option_identity` in pb-decode). Comparing these is how a row is matched to a
+    /// live option without trusting an ordinal — the phase-0 spike proved the round-trip.
+    private func identity(of option: AVMediaSelectionOption) -> Data? {
+        try? PropertyListSerialization.data(
+            fromPropertyList: option.propertyList, format: .binary, options: 0)
+    }
+
+    /// Which picker row AVFoundation is **actually playing** (`-1` = unknown), by matching
+    /// its current selection against the rows' stored property lists.
+    ///
+    /// Synchronous, unlike the sample-buffer route's decoder: `currentMediaSelection` is
+    /// readable on the spot, so this can be asked at menu-open — which is exactly when it
+    /// must be asked. It reports what the player *selected*, including AVFoundation's own
+    /// automatic choice, rather than predicting it.
+    ///
+    /// Requires the picker rows to be built already (it compares against them), so callers
+    /// must refresh first — `CoreModel.audioTrackRows()` owns that order.
+    func currentAudioRow() -> Int {
+        guard let model, let group = audibleGroup,
+            let current = item.currentMediaSelection.selectedMediaOption(in: group),
+            let want = identity(of: current)
+        else {
+            return -1
+        }
+        return model.audioRowMatching(plist: want)
+    }
+
+    /// Push the current selection to the core (used right after a switch, where the tick
+    /// must move without waiting for the next menu open).
+    func reportActiveAudioTrack() {
+        model?.reportActiveAudioRow(currentAudioRow())
+    }
+
+    /// Switch to the audio track at picker row `row`.
+    ///
+    /// Cheap next to the sample-buffer route: `select(_:in:)` swaps the track on a playing
+    /// item with no reader rebuild, no format to re-describe, and no re-seek — AVPlayer
+    /// re-primes internally and owns the clock throughout.
+    func selectAudioTrack(row: Int) {
+        guard let model else { return }
+        guard let group = audibleGroup,
+            let plist = model.audioRowAvPlist(row),
+            let obj = try? PropertyListSerialization.propertyList(
+                from: plist, options: [], format: nil),
+            let option = group.mediaSelectionOption(withPropertyList: obj)
+        else {
+            model.audioTrackSwitched(row: row, ok: false)
+            return
+        }
+        item.select(option, in: group)
+        // Confirm from the player rather than assuming the select took: re-read the current
+        // selection and report THAT. A switch that silently didn't happen must not toast.
+        reportActiveAudioTrack()
+        let landed = item.currentMediaSelection.selectedMediaOption(in: group)
+        let ok = landed.flatMap(identity(of:)) == plist
+        model.audioTrackSwitched(row: row, ok: ok)
     }
 
     /// Mirror the core's scale mode (8/9/0) onto the layer. Re-lays-out on a real change.
