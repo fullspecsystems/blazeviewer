@@ -7,7 +7,7 @@
 .DESCRIPTION
   Finds BlazeViewer-<version>.dmg (+ its .sha256 sidecar) in -Source, scp's both to
   /var/www/downloads.blazeviewer.app/mac/, then repoints BlazeViewer-latest.dmg -> the
-  uploaded DMG so https://downloads.fullspec.ca/latest/mac always serves the newest.
+  uploaded DMG so https://downloads.blazeviewer.app/latest/mac always serves the newest.
 
   The DMG is built on the Mac (scripts/release-macos.sh) and lands in -Source on this box; this
   script publishes it. SSH host jdlien.com, same access release-windows.ps1 uses. Idempotent —
@@ -72,8 +72,8 @@ ssh -o BatchMode=yes $UploadHost "cd '$RemoteDir' && ln -sfn '$name' BlazeViewer
 if ($LASTEXITCODE -ne 0) { throw "symlink repoint failed" }
 
 # ── 5. Verify the permanent URL now serves this build.
-$r = Invoke-WebRequest "https://downloads.fullspec.ca/latest/mac" -Method Head -SkipHttpErrorCheck
+$r = Invoke-WebRequest "https://downloads.blazeviewer.app/latest/mac" -Method Head -SkipHttpErrorCheck
 if ($r.StatusCode -ne 200) { throw "latest/mac returned HTTP $($r.StatusCode)" }
 Write-Host "==> Live:" -ForegroundColor Green
-Write-Host "    https://downloads.fullspec.ca/latest/mac  (HTTP 200)"
+Write-Host "    https://downloads.blazeviewer.app/latest/mac  (HTTP 200)"
 Write-Host "    https://downloads.blazeviewer.app/mac/$name"

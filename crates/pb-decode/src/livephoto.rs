@@ -908,7 +908,7 @@ unsafe fn stream_inner(
             // Accepted degradation: play untransformed (e.g. a mirrored front-camera clip
             // shows un-mirrored) rather than refuse the clip entirely.
             eprintln!(
-                "PhotoBlaze: Live Photo preferredTransform [{} {} {} {}] isn't a rotation — playing untransformed",
+                "Blaze Viewer: Live Photo preferredTransform [{} {} {} {}] isn't a rotation — playing untransformed",
                 t.a, t.b, t.c, t.d
             );
             0

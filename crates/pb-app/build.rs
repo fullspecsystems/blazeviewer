@@ -23,7 +23,7 @@
 #[cfg(windows)]
 const MANIFEST: &str = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
-  <assemblyIdentity type="win32" name="com.photoblaze.PhotoBlaze" version="1.0.0.0"/>
+  <assemblyIdentity type="win32" name="ca.fullspec.BlazeViewer" version="1.0.0.0"/>
   <dependency>
     <dependentAssembly>
       <assemblyIdentity type="win32" name="Microsoft.Windows.Common-Controls" version="6.0.0.0" processorArchitecture="*" publicKeyToken="6595b64144ccf1df" language="*"/>
@@ -114,14 +114,19 @@ fn main() {
 
     #[cfg(windows)]
     {
-        let icon = "icons/photoblaze.ico";
+        let icon = "icons/blazeviewer.ico";
         println!("cargo:rerun-if-changed={icon}");
+        // The exe's VERSIONINFO — what Windows shows under File ▸ Properties ▸ Details.
+        // Hardcoded rather than read from `pb_app_core::APP_NAME`: a build script cannot
+        // depend on the crate it builds. Keep these in step with that constant, and with
+        // NSHumanReadableCopyright in packaging/macos/Info-swift-host.plist. (CompanyName
+        // used to say "PhotoBlaze", which was never right — it's the vendor, not the app.)
         let mut res = winresource::WindowsResource::new();
         res.set_icon(icon)
-            .set("ProductName", "PhotoBlaze")
-            .set("FileDescription", "PhotoBlaze")
-            .set("CompanyName", "PhotoBlaze")
-            .set("LegalCopyright", "© PhotoBlaze")
+            .set("ProductName", "Blaze Viewer")
+            .set("FileDescription", "Blaze Viewer")
+            .set("CompanyName", "FullSpec Systems Inc.")
+            .set("LegalCopyright", "© FullSpec Systems Inc. 2026")
             .set_manifest(MANIFEST);
         if let Err(e) = res.compile() {
             println!(

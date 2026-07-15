@@ -301,7 +301,7 @@ impl Keymap {
         let mut km = Keymap::defaults();
         if let Some(text) = read_config() {
             for w in km.merge_toml(&text) {
-                eprintln!("PhotoBlaze keymap: {w}");
+                eprintln!("{} keymap: {w}", crate::APP_NAME);
             }
             km.migrate_seek_chords();
             km.migrate_fullscreen_f();
@@ -423,7 +423,10 @@ impl Keymap {
         let mut root = toml::map::Map::new();
         root.insert("keys".to_string(), toml::Value::Table(keys));
         let body = toml::to_string_pretty(&toml::Value::Table(root)).unwrap_or_default();
-        format!("# PhotoBlaze keymap (preferences only, never photo data)\n{body}")
+        format!(
+            "# {} keymap (preferences only, never photo data)\n{body}",
+            crate::APP_NAME
+        )
     }
 
     /// Persist to `keymap.toml`, atomically (temp + rename). Best-effort; an explicit

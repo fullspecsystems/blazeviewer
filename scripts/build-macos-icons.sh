@@ -7,7 +7,7 @@
 #
 # Outputs (commit these):
 #   packaging/macos/Assets.car      — Liquid Glass AppIcon for macOS 26+ (from AppIcon.icon)
-#   packaging/macos/PhotoBlaze.icns — flat fallback for pre-26 (legacy PNG, outline only)
+#   packaging/macos/BlazeViewer.icns — flat fallback for pre-26 (legacy PNG, outline only)
 #
 # Requires: Xcode 26+ (`xcrun actool`) and ImageMagick (`magick`).
 set -euo pipefail
@@ -16,7 +16,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
 ICON_BUNDLE="icons/AppIcon.icon"
-LEGACY_PNG="icons/photoblaze-icon-macos-legacy.png"
+LEGACY_PNG="icons/blazeviewer-icon-macos-legacy.png"
 OUT="packaging/macos"
 mkdir -p "$OUT"
 TMP="$(mktemp -d)"
@@ -37,15 +37,15 @@ xcrun actool "$ICON_BUNDLE" \
 [[ -f "$TMP/Assets.car" ]] || { echo "error: actool produced no Assets.car (Xcode 26+?)" >&2; exit 1; }
 cp "$TMP/Assets.car" "$OUT/Assets.car"
 
-echo "==> Flat legacy: $LEGACY_PNG → $OUT/PhotoBlaze.icns"
-ICONSET="$TMP/PhotoBlaze.iconset"
+echo "==> Flat legacy: $LEGACY_PNG → $OUT/BlazeViewer.icns"
+ICONSET="$TMP/BlazeViewer.iconset"
 mkdir -p "$ICONSET"
 for s in 16 32 64 128 256 512; do
 	sips -z "$s" "$s"             "$LEGACY_PNG" --out "$ICONSET/icon_${s}x${s}.png"    >/dev/null
 	sips -z "$((s*2))" "$((s*2))" "$LEGACY_PNG" --out "$ICONSET/icon_${s}x${s}@2x.png" >/dev/null
 done
-iconutil -c icns "$ICONSET" -o "$OUT/PhotoBlaze.icns"
+iconutil -c icns "$ICONSET" -o "$OUT/BlazeViewer.icns"
 
 echo "==> Done. Commit:"
-echo "    $OUT/Assets.car  $OUT/PhotoBlaze.icns"
-ls -la "$OUT/Assets.car" "$OUT/PhotoBlaze.icns"
+echo "    $OUT/Assets.car  $OUT/BlazeViewer.icns"
+ls -la "$OUT/Assets.car" "$OUT/BlazeViewer.icns"

@@ -62,10 +62,10 @@ ssh -o BatchMode=yes "$UPLOAD_HOST" "cd '$REMOTE_DIR' && ln -sfn '$NAME' BlazeVi
 
 # 5) Verify the permanent URLs now serve this build. /latest/mac is a 302 → the DMG,
 #    so follow redirects (-L) and check the final status.
-LATEST_CODE="$(curl -sL -o /dev/null -w '%{http_code}' -I https://downloads.fullspec.ca/latest/mac || true)"
+LATEST_CODE="$(curl -sL -o /dev/null -w '%{http_code}' -I https://downloads.blazeviewer.app/latest/mac || true)"
 [[ "$LATEST_CODE" == "200" ]] || { echo "error: latest/mac returned HTTP $LATEST_CODE (after redirects)" >&2; exit 1; }
 echo "==> Live:"
-echo "    https://downloads.fullspec.ca/latest/mac   (HTTP 200)"
+echo "    https://downloads.blazeviewer.app/latest/mac   (HTTP 200)"
 echo "    https://downloads.blazeviewer.app/mac/$NAME"
 if [[ -f "$DMG_DIR/appcast.xml" ]]; then
 	echo "    https://downloads.blazeviewer.app/mac/appcast.xml  (Sparkle feed)"

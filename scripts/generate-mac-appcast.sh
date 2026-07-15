@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Generate the EdDSA-signed Sparkle appcast for the macOS auto-updater (task #65).
 #
-# Sparkle rides the existing notarized DMG on downloads.fullspec.ca via this appcast.xml,
+# Sparkle rides the existing notarized DMG on downloads.blazeviewer.app via this appcast.xml,
 # hosted next to the DMG (SUFeedURL in Info-swift-host.plist). release-macos.sh calls this
 # after notarizing + stapling; release-mac-upload.ps1 uploads the appcast alongside the DMG.
 #

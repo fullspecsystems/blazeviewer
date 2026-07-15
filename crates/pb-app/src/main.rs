@@ -4182,7 +4182,7 @@ pub(crate) fn apply_native_window_icon(window: &Window) {
 /// default icon. (The .exe file icon for Explorer is embedded separately by
 /// `build.rs`.)
 pub(crate) fn load_window_icon() -> Option<Icon> {
-    const PNG: &[u8] = include_bytes!("../icons/photoblaze.png");
+    const PNG: &[u8] = include_bytes!("../icons/blazeviewer.png");
     let fit = FitBox {
         max_width: 256,
         max_height: 256,
@@ -4940,7 +4940,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("pb_notrace_{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(dir.join("sub")).expect("mkdir sandbox");
-        const IMG: &[u8] = include_bytes!("../icons/photoblaze.png");
+        const IMG: &[u8] = include_bytes!("../icons/blazeviewer.png");
         for rel in ["a.png", "b.png", "sub/c.png", "d.png"] {
             fs::write(dir.join(rel), IMG).expect("seed image");
         }
@@ -5075,7 +5075,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("pb_zip_notrace_{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).expect("mkdir sandbox");
-        const IMG: &[u8] = include_bytes!("../icons/photoblaze.png");
+        const IMG: &[u8] = include_bytes!("../icons/blazeviewer.png");
         const CLIP: &[u8] =
             include_bytes!("../../pb-decode/tests/fixtures/video/black_then_color.mp4");
         let zip_path = dir.join("album.zip");
@@ -5136,7 +5136,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("pb_7z_notrace_{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).expect("mkdir sandbox");
-        const IMG: &[u8] = include_bytes!("../icons/photoblaze.png");
+        const IMG: &[u8] = include_bytes!("../icons/blazeviewer.png");
         let z_path = dir.join("album.7z");
         {
             let mut sz = ArchiveWriter::create(&z_path).expect("create 7z");
@@ -5191,7 +5191,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("pb_7z_budget_{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).expect("mkdir sandbox");
-        const IMG: &[u8] = include_bytes!("../icons/photoblaze.png");
+        const IMG: &[u8] = include_bytes!("../icons/blazeviewer.png");
         let z_path = dir.join("album.7z");
         {
             let mut sz = ArchiveWriter::create(&z_path).expect("create 7z");

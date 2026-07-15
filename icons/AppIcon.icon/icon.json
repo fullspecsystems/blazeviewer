@@ -9,8 +9,8 @@
       "layers" : [
         {
           "glass" : true,
-          "image-name" : "photoblaze-icon-flames.svg",
-          "name" : "photoblaze-icon-flames",
+          "image-name" : "blazeviewer-icon-flames.svg",
+          "name" : "blazeviewer-icon-flames",
           "opacity-specializations" : [
             {
               "appearance" : "tinted",
@@ -38,8 +38,8 @@
     {
       "layers" : [
         {
-          "image-name" : "photoblaze-icon-flames-white.svg",
-          "name" : "photoblaze-icon-flames-white",
+          "image-name" : "blazeviewer-icon-flames-white.svg",
+          "name" : "blazeviewer-icon-flames-white",
           "opacity-specializations" : [
             {
               "value" : 0
@@ -73,8 +73,8 @@
       "blur-material" : 0,
       "layers" : [
         {
-          "image-name" : "photoblaze-icon-border.svg",
-          "name" : "photoblaze-icon-border",
+          "image-name" : "blazeviewer-icon-border.svg",
+          "name" : "blazeviewer-icon-border",
           "opacity-specializations" : [
             {
               "appearance" : "tinted",
@@ -83,8 +83,8 @@
           ]
         },
         {
-          "image-name" : "photoblaze-icon-border-white.svg",
-          "name" : "photoblaze-icon-border-white",
+          "image-name" : "blazeviewer-icon-border-white.svg",
+          "name" : "blazeviewer-icon-border-white",
           "opacity-specializations" : [
             {
               "value" : 0
@@ -111,8 +111,8 @@
       "layers" : [
         {
           "hidden" : false,
-          "image-name" : "photoblaze-icon-mountains-sun.svg",
-          "name" : "photoblaze-icon-mountains-sun",
+          "image-name" : "blazeviewer-icon-mountains-sun.svg",
+          "name" : "blazeviewer-icon-mountains-sun",
           "opacity-specializations" : [
             {
               "appearance" : "dark",
@@ -134,8 +134,8 @@
         {
           "glass" : true,
           "hidden" : false,
-          "image-name" : "photoblaze-icon-mountains-sun-white.svg",
-          "name" : "photoblaze-icon-mountains-sun-white",
+          "image-name" : "blazeviewer-icon-mountains-sun-white.svg",
+          "name" : "blazeviewer-icon-mountains-sun-white",
           "opacity-specializations" : [
             {
               "value" : 0

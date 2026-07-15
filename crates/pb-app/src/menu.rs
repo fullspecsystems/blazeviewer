@@ -548,7 +548,7 @@ pub fn build_menu(keymap: &Keymap) -> BuiltMenu {
     let help = Submenu::new("&Help", true);
     let _ = help.append_items(&[
         &item(ids::HELP, "Keyboard Shortcuts\t?"),
-        &item(ids::ABOUT, "About PhotoBlaze"),
+        &item(ids::ABOUT, &format!("About {}", pb_app_core::APP_NAME)),
     ]);
 
     for sub in [&file, &edit, &view, &go, &image, &help] {
@@ -870,7 +870,11 @@ pub fn menu_bar_spec(keymap: &Keymap, s: &crate::contract::MenuState) -> Vec<Men
             title: "Help",
             items: vec![
                 item(MenuAction::Help, "Keyboard Shortcuts\t?", true),
-                item(MenuAction::About, "About PhotoBlaze", true),
+                item(
+                    MenuAction::About,
+                    &format!("About {}", pb_app_core::APP_NAME),
+                    true,
+                ),
             ],
         },
     ]

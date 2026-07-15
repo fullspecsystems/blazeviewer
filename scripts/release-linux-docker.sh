@@ -17,7 +17,7 @@
 #   DOCKER=podman ./scripts/release-linux-docker.sh
 #
 # --upload runs scripts/release-linux-upload.sh AFTER the build(s) succeed — from the host (it
-# needs your ssh keys), scp'ing whatever this run produced to downloads.fullspec.ca.
+# needs your ssh keys), scp'ing whatever this run produced to downloads.blazeviewer.app.
 #
 # Output: dist/BlazeViewer-<version>-<arch>.AppImage  (owned by you via the bind mount)
 set -euo pipefail
@@ -76,6 +76,6 @@ done
 
 # 3. Publish (host-side; needs your ssh keys / YubiKey — runs after the container work).
 if [ "$UPLOAD" -eq 1 ]; then
-  echo ">> uploading to downloads.fullspec.ca"
+  echo ">> uploading to downloads.blazeviewer.app"
   bash scripts/release-linux-upload.sh
 fi

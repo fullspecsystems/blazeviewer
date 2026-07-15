@@ -137,9 +137,9 @@ printf 'APPL????' > "$APP_DIR/Contents/PkgInfo"
 cp "$BIN" "$APP_DIR/Contents/MacOS/$APP_NAME"
 chmod +x "$APP_DIR/Contents/MacOS/$APP_NAME"
 # The app icon: the prebuilt Liquid Glass Assets.car (Tahoe+, CFBundleIconName=AppIcon)
-# + the flat icns fallback (CFBundleIconFile=PhotoBlaze). Regenerate via
+# + the flat icns fallback (CFBundleIconFile=BlazeViewer). Regenerate via
 # scripts/build-macos-icons.sh when the icon changes.
-cp packaging/macos/PhotoBlaze.icns packaging/macos/Assets.car "$APP_DIR/Contents/Resources/"
+cp packaging/macos/BlazeViewer.icns packaging/macos/Assets.car "$APP_DIR/Contents/Resources/"
 
 # Bundled-library license texts + the notices summary (task #77). Required, not courtesy:
 # LGPL-2.1 §6 ("You must supply a copy of this License") covers the FFmpeg dylibs in

@@ -1113,7 +1113,7 @@ impl Drop for DialogWindow {
 
 /// Decode the embedded app icon into an egui texture (for the About card).
 fn load_icon_texture(ctx: &egui::Context) -> Option<egui::TextureHandle> {
-    const PNG: &[u8] = include_bytes!("../icons/photoblaze.png");
+    const PNG: &[u8] = include_bytes!("../icons/blazeviewer.png");
     let fit = FitBox {
         max_width: 256,
         max_height: 256,

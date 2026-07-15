@@ -4365,7 +4365,7 @@ mod tests {
             "--version prints the host-supplied bundle string"
         );
         assert!(
-            ver.text.contains("PhotoBlaze"),
+            ver.text.contains("Blaze Viewer"),
             "--version wears the product name (display_name), not the bin name"
         );
 

@@ -111,7 +111,10 @@ pub fn ram_budget() -> u64 {
         if let Some(b) = parse_budget(&s) {
             return b;
         }
-        eprintln!("PhotoBlaze: ignoring unparseable PB_ARCHIVE_RAM_BUDGET={s:?}");
+        eprintln!(
+            "{}: ignoring unparseable PB_ARCHIVE_RAM_BUDGET={s:?}",
+            crate::APP_NAME
+        );
     }
     let available = available_physical_ram().unwrap_or(ASSUMED_RAM);
     budget_from(

@@ -712,7 +712,7 @@ pub fn resolve_playlist(source: &Source, cursor: &open::Cursor) -> Resolved {
         Source::Archive(path) => match open_archive(path, None) {
             Ok(r) => r,
             Err(e) => {
-                eprintln!("PhotoBlaze: {}", e.user_message());
+                eprintln!("{}: {}", crate::APP_NAME, e.user_message());
                 Resolved::empty()
             }
         },

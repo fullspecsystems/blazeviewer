@@ -63,8 +63,8 @@ for lic in libheif-COPYING.txt libde265-COPYING.txt ffmpeg-COPYING.LGPLv2.1.txt;
 done
 
 # Icon (AppImage wants a top-level <name>.png plus the hicolor path).
-cp icons/photoblaze-icon-v3-windows.png "$APPDIR/usr/share/icons/hicolor/256x256/apps/blazeviewer.png"
-cp icons/photoblaze-icon-v3-windows.png "$APPDIR/blazeviewer.png"
+cp icons/blazeviewer-icon-v3-windows.png "$APPDIR/usr/share/icons/hicolor/256x256/apps/blazeviewer.png"
+cp icons/blazeviewer-icon-v3-windows.png "$APPDIR/blazeviewer.png"
 
 # Desktop entry (the app's identity + the image types it opens).
 DESKTOP="$APPDIR/usr/share/applications/blazeviewer.desktop"

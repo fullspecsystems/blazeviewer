@@ -1197,7 +1197,7 @@ impl AppCore {
             src @ Source::Explicit(_) => {
                 let r = crate::scan::resolve_playlist(&src, &cursor);
                 if r.source.is_empty() {
-                    eprintln!("PhotoBlaze: no supported images in that selection");
+                    eprintln!("{}: no supported images in that selection", crate::APP_NAME);
                     return;
                 }
                 self.rebuild_playlist(r.source, r.root, r.scan_root, r.recursive, r.start);
@@ -2917,7 +2917,7 @@ impl AppCore {
             r.set_info_line(None, 0, pb_render::HAlign::Right);
         }
         self.effects
-            .push(contract::CoreEffect::SetTitle("PhotoBlaze".to_string()));
+            .push(contract::CoreEffect::SetTitle(crate::APP_NAME.to_string()));
         // Blank background + the centered "Press O to open…" hint (mirrors a bare launch).
         self.show_open_hint();
         self.overlay_shown = false;
@@ -6358,7 +6358,7 @@ impl AppCore {
                         srgb,
                         false,
                         1.0,
-                        "PhotoBlaze (decode error)".to_string(),
+                        format!("{} (decode error)", crate::APP_NAME),
                     )
                 }
             },
@@ -6373,7 +6373,7 @@ impl AppCore {
                     srgb,
                     false,
                     1.0,
-                    "PhotoBlaze".to_string(),
+                    crate::APP_NAME.to_string(),
                 )
             }
         }
@@ -12958,7 +12958,7 @@ mod tests {
         fs::create_dir_all(&dir).expect("mkdir sandbox");
         const IMG: &[u8] = include_bytes!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../pb-app/icons/photoblaze.png"
+            "/../pb-app/icons/blazeviewer.png"
         ));
         let mut paths = Vec::new();
         for name in ["a.png", "b.png", "c.png"] {

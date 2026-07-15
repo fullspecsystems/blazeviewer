@@ -391,7 +391,10 @@ impl Settings {
         let Ok(toml) = toml::to_string_pretty(self) else {
             return false;
         };
-        let body = format!("# PhotoBlaze settings (preferences only, never photo data)\n{toml}");
+        let body = format!(
+            "# {} settings (preferences only, never photo data)\n{toml}",
+            crate::APP_NAME
+        );
         let tmp = path.with_extension("toml.tmp");
         if std::fs::write(&tmp, body).is_err() {
             return false;

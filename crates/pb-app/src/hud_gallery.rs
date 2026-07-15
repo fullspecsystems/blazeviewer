@@ -79,7 +79,11 @@ fn build_sheet(hud: &Hud) -> Sheet {
     let sec_gap = s(10.0); // below a section label
     let block_gap = s(26.0); // between major blocks
 
-    let title = text(hud, "PhotoBlaze \u{2014} HUD overlay components", sp(24.0));
+    let title = text(
+        hud,
+        &format!("{} \u{2014} HUD overlay components", pb_app_core::APP_NAME),
+        sp(24.0),
+    );
     let sec_catalog = text(hud, "Components", sp(17.0));
     let sec_composite = text(
         hud,

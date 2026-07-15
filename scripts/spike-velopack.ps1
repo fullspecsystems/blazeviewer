@@ -2,7 +2,7 @@
 .SYNOPSIS
   Blaze Viewer local update-loop tester — build + pack a throwaway release into a local feed you
   can install and self-update entirely offline. This is NOT the production pipeline (that's
-  scripts/release-windows.ps1: libheif + Azure Trusted Signing + upload to downloads.fullspec.ca);
+  scripts/release-windows.ps1: libheif + Azure Trusted Signing + upload to downloads.blazeviewer.app);
   it's a fast, unsigned local harness for exercising the per-user install + file-association +
   auto-update loop without a network or the vcpkg/libheif build.
 
@@ -79,8 +79,8 @@ vpk pack `
     --mainExe blazeviewer.exe `
     --packTitle "Blaze Viewer" `
     --packAuthors "FullSpec Systems" `
-    --icon "crates\pb-app\icons\photoblaze.ico" `
-    --splashImage "crates\pb-app\icons\photoblaze-splash.jpg" `
+    --icon "crates\pb-app\icons\blazeviewer.ico" `
+    --splashImage "crates\pb-app\icons\blazeviewer-splash.jpg" `
     --splashProgressColor "#FF4915" `
     --outputDir $FeedDir
 if ($LASTEXITCODE -ne 0) { throw "vpk pack failed" }

@@ -91,10 +91,12 @@ impl DescribeError {
                 // Local Network permission; elsewhere it's the server being off / a bad URL.
                 #[cfg(target_os = "macos")]
                 {
-                    "Can't reach the model server for AI descriptions. Check that PhotoBlaze \
-                     has Local Network permission (System Settings • Privacy & Security • \
-                     Local Network)."
-                        .to_string()
+                    format!(
+                        "Can't reach the model server for AI descriptions. Check that {} \
+                         has Local Network permission (System Settings • Privacy & Security • \
+                         Local Network).",
+                        crate::APP_NAME
+                    )
                 }
                 #[cfg(not(target_os = "macos"))]
                 {

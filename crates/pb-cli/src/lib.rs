@@ -226,16 +226,16 @@ where
     let cmd = Cli::command()
         .version(version)
         // The ripgrep convention (binary `rg`, version line "ripgrep X.Y"): usage lines
-        // keep the lowercase COMMAND the user types (`photoblaze`, the bin/repo name);
+        // keep the lowercase COMMAND the user types (`blazeviewer`, the bin name);
         // the PRODUCT-name contexts wear the brand — `--version` prints
-        // "PhotoBlaze <version>" via display_name, and the help header (about) below.
-        .display_name("PhotoBlaze")
+        // "Blaze Viewer <version>" via display_name, and the help header (about) below.
+        .display_name(pb_app_core::APP_NAME)
         .about(BRANDED_ABOUT.as_str());
     let matches = cmd.try_get_matches_from(args)?;
     Cli::from_arg_matches(&matches)
 }
 
-/// The branded help header: the product name + the shared tagline ("PhotoBlaze — an
+/// The branded help header: the product name + the shared tagline ("Blaze Viewer — an
 /// ultra-fast, capable image viewer"). Composed from [`pb_app_core::TAGLINE`] at first
 /// use so the one-tagline rule holds (About box, file association, and here can never
 /// drift); the first letter is lowercased to read naturally after the em dash.
@@ -243,8 +243,13 @@ static BRANDED_ABOUT: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| 
     let t = pb_app_core::TAGLINE;
     let mut c = t.chars();
     match c.next() {
-        Some(first) => format!("PhotoBlaze — {}{}", first.to_lowercase(), c.as_str()),
-        None => "PhotoBlaze".to_string(),
+        Some(first) => format!(
+            "{} — {}{}",
+            pb_app_core::APP_NAME,
+            first.to_lowercase(),
+            c.as_str()
+        ),
+        None => pb_app_core::APP_NAME.to_string(),
     }
 });
 

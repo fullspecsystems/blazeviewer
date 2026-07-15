@@ -33,7 +33,7 @@
 	<key>CFBundleIconName</key>
 	<string>AppIcon</string>
 	<key>CFBundleIconFile</key>
-	<string>PhotoBlaze</string>
+	<string>BlazeViewer</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleInfoDictionaryVersion</key>
@@ -102,7 +102,7 @@
 			<key>LSHandlerRank</key>
 			<string>Alternate</string>
 			<key>CFBundleTypeIconFile</key>
-			<string>PhotoBlaze</string>
+			<string>BlazeViewer</string>
 			<key>LSItemContentTypes</key>
 			<array>
 				<string>public.jpeg</string>
@@ -129,7 +129,7 @@
 			<key>LSHandlerRank</key>
 			<string>Alternate</string>
 			<key>CFBundleTypeIconFile</key>
-			<string>PhotoBlaze</string>
+			<string>BlazeViewer</string>
 			<key>LSItemContentTypes</key>
 			<array>
 				<string>public.zip-archive</string>
@@ -148,7 +148,7 @@
 			<key>LSHandlerRank</key>
 			<string>Alternate</string>
 			<key>CFBundleTypeIconFile</key>
-			<string>PhotoBlaze</string>
+			<string>BlazeViewer</string>
 			<key>LSItemContentTypes</key>
 			<array>
 				<string>public.mpeg-4</string>

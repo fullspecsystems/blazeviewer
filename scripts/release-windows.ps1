@@ -7,7 +7,7 @@
   Pipeline: cargo build --release --features libheif → `vpk pack` (Azure Trusted Signing signs the
   app exe + Setup.exe + Update.exe; bundles the icon, install splash, and the VC++ redist check) →
   the flat feed lands in dist\feed (releases.win.json + .nupkg packages + BlazeViewer-win-Setup.exe).
-  Pass -Upload to rsync that feed to the downloads.fullspec.ca web root, which the app reads over
+  Pass -Upload to rsync that feed to the downloads.blazeviewer.app web root, which the app reads over
   HTTP for auto-update (see crates/pb-app/src/update.rs FEED_URL).
 
   Version comes from Cargo.toml (pb-app), so the package always matches the app. Velopack packs a
@@ -28,7 +28,7 @@
 
 .EXAMPLE
   pwsh scripts/release-windows.ps1            # host arch: build + sign + pack → dist\feed
-  pwsh scripts/release-windows.ps1 -Upload    # ...then rsync the feed to downloads.fullspec.ca
+  pwsh scripts/release-windows.ps1 -Upload    # ...then rsync the feed to downloads.blazeviewer.app
   pwsh scripts/release-windows.ps1 -Arch arm64 -Upload   # native ARM64 build (run on an ARM64 box)
 #>
 [CmdletBinding()]
@@ -45,9 +45,9 @@ param(
     [string]$Endpoint = "https://wus.codesigning.azure.net/",
     [string]$AccountName = "jdlien-signing",
     [string]$ProfileName = "jdlien-public-trust",
-    # Push the packed feed to the droplet's downloads.fullspec.ca web root over SSH. Off by default
+    # Push the packed feed to the droplet's downloads.blazeviewer.app web root over SSH. Off by default
     # so a plain run just produces the feed locally. SSH host is jdlien.com (same droplet); the path
-    # is the downloads.fullspec.ca site root. Pass a full `[user@]host:/path` to override.
+    # is the downloads.blazeviewer.app site root. Pass a full `[user@]host:/path` to override.
     [switch]$Upload,
     [string]$UploadTarget = "jdlien.com:/var/www/downloads.blazeviewer.app/win/"
 )
@@ -225,8 +225,8 @@ $packArgs = @(
     "--mainExe", "blazeviewer.exe",
     "--packTitle", "Blaze Viewer",
     "--packAuthors", "FullSpec Systems",
-    "--icon", "crates\pb-app\icons\photoblaze.ico",
-    "--splashImage", "crates\pb-app\icons\photoblaze-splash.jpg",
+    "--icon", "crates\pb-app\icons\blazeviewer.ico",
+    "--splashImage", "crates\pb-app\icons\blazeviewer-splash.jpg",
     "--splashProgressColor", "#FF4915",
     "--framework", $ArchCfg.Framework,
     "--channel", $ArchCfg.Channel,
@@ -241,7 +241,7 @@ Write-Host "==> Packed → $Feed" -ForegroundColor Green
 Write-Host "    Installer: $($Setup.Name)"
 if ($SignArgs.Count -eq 0) { Write-Host "    (UNSIGNED — set AZURE_* in .env.release or az login)" -ForegroundColor Yellow }
 
-# ── 7. Upload the feed to downloads.fullspec.ca (opt-in). Prefers rsync (incremental); falls back
+# ── 7. Upload the feed to downloads.blazeviewer.app (opt-in). Prefers rsync (incremental); falls back
 #      to scp — stock Windows has no rsync, only OpenSSH. Both add/overwrite files and leave the
 #      rest in place, so the delta chain + older versions stay reachable. Prune superseded packages
 #      on the server later. $UploadTarget may carry a `user@` prefix, or resolve it via ~/.ssh/config.
