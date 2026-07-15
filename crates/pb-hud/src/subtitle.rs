@@ -27,6 +27,14 @@ pub struct SubtitleBitmap {
     pub rgba: Vec<u8>,
     pub w: u32,
     pub h: u32,
+    /// The **symmetric inset from the bitmap's edge to the text's ink box**, in px.
+    ///
+    /// ⚠ Placement must anchor the *text*, using this — never the bitmap. The bitmap is
+    /// grown to hold whatever the outline, shadow, and background need, so its size is a
+    /// function of the *decoration*: anchoring its bottom edge means **switching on a drop
+    /// shadow visibly shoves the subtitles upward**, which is a real bug the owner caught
+    /// on 2026-07-15. The text's own box is the only stable thing to hang position off.
+    pub pad: u32,
 }
 
 /// A drop shadow, in physical pixels.
@@ -176,13 +184,28 @@ impl SubtitleRasterizer {
             return None;
         }
         let max_w = (max_x - min_x).max(1.0);
-        let grow = p.outline_px.max(0.0)
-            + p.shadow
-                .map_or(0.0, |s| s.blur + s.dx.abs().max(s.dy.abs()))
-            + p.background_pad_px.max(0.0);
         let text_w = max_w.ceil().max(1.0);
         let text_h = (runs as f32 * line_h).ceil().max(1.0);
-        let pad = grow.ceil();
+
+        // How far each layer reaches beyond the text's ink.
+        //
+        // These are **maxima, not a sum**: the outline and the background box both radiate
+        // from the same ink, so the bitmap needs the *outermost* of them, not both added.
+        // Only the shadow stacks, because it is a blurred, offset copy of what is already
+        // there. (This used to add all three, which made every bitmap bigger than it needed
+        // to be — harmless on its own, but it fed the placement bug below.)
+        let outline = p.outline_px.max(0.0);
+        let bg_pad = if p.background[3] > 0 {
+            p.background_pad_px.max(0.0)
+        } else {
+            0.0
+        };
+        // A 3-pass box blur of radius r spreads about 1.5r; 2r is the cheap safe bound.
+        let shadow_reach = p
+            .shadow
+            .map_or(0.0, |s| s.blur * 2.0 + s.dx.abs().max(s.dy.abs()));
+        let pad = (outline.max(bg_pad) + shadow_reach).ceil();
+
         let w = (text_w + pad * 2.0) as u32;
         let h = (text_h + pad * 2.0) as u32;
         if w == 0 || h == 0 || w > 16384 || h > 16384 {
@@ -223,7 +246,19 @@ impl SubtitleRasterizer {
         // --- composite ------------------------------------------------------
         let mut rgba = vec![0u8; (w * h * 4) as usize];
         if p.background[3] > 0 {
-            fill_rounded_rect(&mut rgba, w, h, p.background_radius_px, p.background);
+            // The text's ink box, grown by the background padding — NOT the whole bitmap.
+            // Filling the bitmap would make the box swell whenever an outline or shadow
+            // grew it, so "padding" would silently mean something different depending on
+            // settings that have nothing to do with the background.
+            let x0 = pad - bg_pad;
+            let y0 = pad - bg_pad;
+            let rect = (
+                x0,
+                y0,
+                x0 + text_w + bg_pad * 2.0,
+                y0 + text_h + bg_pad * 2.0,
+            );
+            fill_rounded_rect(&mut rgba, w, h, rect, p.background_radius_px, p.background);
         }
         if let Some(s) = p.shadow {
             let blurred = blur(&mask, w, h, s.blur);
@@ -240,7 +275,12 @@ impl SubtitleRasterizer {
         }
         over(&mut rgba, &mask, p.color);
 
-        Some(SubtitleBitmap { rgba, w, h })
+        Some(SubtitleBitmap {
+            rgba,
+            w,
+            h,
+            pad: pad as u32,
+        })
     }
 }
 
@@ -371,14 +411,35 @@ fn offset(mask: &[u8], w: u32, h: u32, dx: i32, dy: i32) -> Vec<u8> {
 }
 
 /// The background: a rounded rect filling the bitmap, premultiplied.
-fn fill_rounded_rect(dst: &mut [u8], w: u32, h: u32, radius: f32, color: [u8; 4]) {
-    let r = radius.min(w as f32 / 2.0).min(h as f32 / 2.0).max(0.0);
-    for y in 0..h {
-        for x in 0..w {
+/// `rect` is `(x0, y0, x1, y1)` in the bitmap's own pixels — the box to fill, which is the
+/// text's ink grown by the background padding, **not** the whole bitmap.
+fn fill_rounded_rect(
+    dst: &mut [u8],
+    w: u32,
+    h: u32,
+    rect: (f32, f32, f32, f32),
+    radius: f32,
+    color: [u8; 4],
+) {
+    let (x0, y0, x1, y1) = rect;
+    let (bw, bh) = ((x1 - x0).max(0.0), (y1 - y0).max(0.0));
+    if bw <= 0.0 || bh <= 0.0 {
+        return;
+    }
+    let r = radius.min(bw / 2.0).min(bh / 2.0).max(0.0);
+    // Only the box's own rows/columns, clipped to the bitmap — the rest is untouched.
+    let (px0, py0) = (x0.floor().max(0.0) as u32, y0.floor().max(0.0) as u32);
+    let (px1, py1) = (
+        (x1.ceil() as i64).min(w as i64),
+        (y1.ceil() as i64).min(h as i64),
+    );
+    for y in py0..py1.max(0) as u32 {
+        for x in px0..px1.max(0) as u32 {
             // Distance outside the inner (radius-shrunk) rect — the standard rounded-rect
             // SDF, antialiased over one pixel so the corners aren't stair-stepped.
-            let cx = (r - x as f32).max(x as f32 - (w as f32 - 1.0 - r)).max(0.0);
-            let cy = (r - y as f32).max(y as f32 - (h as f32 - 1.0 - r)).max(0.0);
+            let (fx, fy) = (x as f32, y as f32);
+            let cx = (x0 + r - fx).max(fx - (x1 - 1.0 - r)).max(0.0);
+            let cy = (y0 + r - fy).max(fy - (y1 - 1.0 - r)).max(0.0);
             let d = (cx * cx + cy * cy).sqrt() - r;
             let cov = (1.0 - d).clamp(0.0, 1.0);
             if cov <= 0.0 {

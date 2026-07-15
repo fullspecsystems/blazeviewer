@@ -156,6 +156,7 @@ impl SubtitleEngine {
             rgba: vec![255; 4],
             w: 1,
             h: 1,
+            pad: 0,
         });
         self.rect = Some(Rect {
             x: 0.0,
@@ -470,7 +471,7 @@ impl SubtitleEngine {
             self.hide();
             return self.gen != before;
         };
-        let (bw, bh) = (bmp.w, bmp.h);
+        let (bw, bh, bpad) = (bmp.w, bmp.h, bmp.pad);
         let changed = self.bitmap.as_ref() != Some(bmp);
         if changed {
             self.bitmap = Some(bmp.clone());
@@ -478,10 +479,13 @@ impl SubtitleEngine {
             self.trace(|| format!("drew {bw}x{bh} at {t:?}: {lines:?}"));
         }
         // Place in physical px, then hand the shell logical points.
+        // `bpad` is what keeps a drop shadow from shoving the text upward: placement
+        // anchors the TEXT's box, not the bitmap the decoration inflated.
         let px = place(
             viewport,
             video,
             (bw as f32, bh as f32),
+            bpad as f32,
             &self.style,
             controls_h,
         );

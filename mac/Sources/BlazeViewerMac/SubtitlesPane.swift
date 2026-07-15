@@ -10,30 +10,40 @@ import SwiftUI
 /// settings form would mean shipping all of it across the FFI per frame to redraw one
 /// swatch, and would couple two panes that have nothing to say to each other.
 ///
-/// **Every size is a % of viewport height, never points.** A subtitle sized in points
-/// reads differently on a 1× ultrawide and a 2× Studio; sized against the viewport it
-/// looks the same everywhere, which is the entire point of a legibility setting. The
-/// sliders show human numbers and the `*_pct` fields carry fractions — `sizePct` 4.4 on
-/// screen is 0.044 on the wire (see `pctBinding`).
+/// ## What each control is measured in, and why
+///
+/// - **Size** and **Vertical** are % of the *viewport*, never points — a subtitle sized in
+///   points reads differently on a 1× ultrawide and a 2× Studio.
+/// - **Outline**, **Blur**, and the shadow **offsets** are px on the `REFERENCE_FONT_PX`
+///   scale: stored as a fraction of the real text size (so they hold their proportions as
+///   you resize, instead of every size change demanding a re-tune of everything else) and
+///   shown as the px they'd be at the default size, because "0.06" is not a quantity
+///   anyone can picture. The Rust side owns both halves; see `pb_app_core::subtitle`.
+///
+/// ## Why opacity is a slider and not the colour picker's alpha
+///
+/// Opacity is the setting people actually reach for; the hue is a once-a-year decision.
+/// Burying it inside a `ColorPicker` popover also made **Background do nothing** — it
+/// starts at alpha 0, and picking a hue in that popover does not raise the alpha, so the
+/// box never appeared no matter what you chose. A slider on the surface makes the on/off
+/// visible and that failure impossible.
 struct SubtitlesPane: View {
     let model: CoreModel
     @State private var draft = SubtitleStyleDraft()
     @State private var loaded = false
+    @State private var showLayout = false
     @State private var applyTask: Task<Void, Never>?
 
     var body: some View {
         Form {
             Section {
-                // 16:9 — a display. The picture inside it is 2.39:1, so there is always
-                // a real letterbox to show the vertical offset against. ⚠ A swatch WIDER
-                // than 2.39:1 pillarboxes instead and has NO bars, which would hide the
-                // one setting this preview exists to explain — so this must not be
-                // stretched to the full pane width (560pt / 2.39 would do exactly that).
+                // Full width and short, per the owner. It shows the BOTTOM of a virtual
+                // 16:9 frame — see `render_preview` for why that is not just a squash.
                 SubtitlePreview(model: model, draft: draft)
-                    .aspectRatio(16.0 / 9.0, contentMode: .fit)
-                    .frame(maxWidth: 420)
+                    .frame(height: 150)
+                    .frame(maxWidth: .infinity)
                     .clipShape(RoundedRectangle(cornerRadius: 6))
-                    .frame(maxWidth: .infinity, alignment: .center)
+                    .listRowInsets(EdgeInsets(top: 4, leading: 4, bottom: 4, trailing: 4))
             }
 
             Section("Text") {
@@ -44,54 +54,63 @@ struct SubtitlesPane: View {
                     Divider()
                     ForEach(fontChoices, id: \.self) { Text($0).tag($0) }
                 }
-                labeledSlider("Size", pctBinding($draft.sizePct), in: 1...25, format: "%.1f%%")
-                ColorPicker("Color", selection: $draft.color, supportsOpacity: true)
+                slider("Size", pct($draft.sizePct), 1...maxSizePct, "%.1f%%")
+                slider("Opacity", $draft.colorOpacity, 0...100, "%.0f%%")
             }
 
             Section("Legibility") {
-                labeledSlider(
-                    "Outline", pctBinding($draft.outlinePct), in: 0...2, format: "%.2f%%")
-                ColorPicker("Outline color", selection: $draft.outlineColor, supportsOpacity: true)
-                    .disabled(draft.outlinePct <= 0)
+                // Notched, in px: the owner's ask, and 99% of people want 0–4.
+                slider("Outline", $draft.outlinePx, 0...4, "%.2f px", step: 0.25)
+                slider("Outline opacity", $draft.outlineOpacity, 0...100, "%.0f%%")
+                    .disabled(draft.outlinePx <= 0)
+
+                // Alpha 0 = no background: the slider IS the on/off, so there is no toggle
+                // that can disagree with it.
+                slider("Background", $draft.backgroundOpacity, 0...100, "%.0f%%")
 
                 Toggle("Drop shadow", isOn: $draft.shadowOn)
                 if draft.shadowOn {
-                    labeledSlider(
-                        "Blur", pctBinding($draft.shadowBlurPct), in: 0...5, format: "%.2f%%")
-                    labeledSlider(
-                        "Offset X", pctBinding($draft.shadowDxPct), in: -5...5, format: "%.2f%%")
-                    labeledSlider(
-                        "Offset Y", pctBinding($draft.shadowDyPct), in: -5...5, format: "%.2f%%")
-                    ColorPicker("Shadow color", selection: $draft.shadowColor, supportsOpacity: true)
-                }
-
-                // Alpha 0 = no background, so the opacity slider IS the on/off — one
-                // control, no toggle that can disagree with it.
-                ColorPicker("Background", selection: $draft.background, supportsOpacity: true)
-                if draft.backgroundOn {
-                    labeledSlider(
-                        "Corner radius", pctBinding($draft.backgroundRadiusPct), in: 0...5,
-                        format: "%.2f%%")
-                    labeledSlider(
-                        "Padding", pctBinding($draft.backgroundPadPct), in: 0...5, format: "%.2f%%")
+                    slider("Blur", $draft.shadowBlurPx, 0...maxBlurPx, "%.1f px", step: 0.5)
+                    slider(
+                        "Offset X", $draft.shadowDxPx, -maxOffsetPx...maxOffsetPx, "%.1f px",
+                        step: 0.5)
+                    slider(
+                        "Offset Y", $draft.shadowDyPx, -maxOffsetPx...maxOffsetPx, "%.1f px",
+                        step: 0.5)
+                    slider("Shadow opacity", $draft.shadowOpacity, 0...100, "%.0f%%")
                 }
             }
 
-            Section("Position & Layout") {
-                labeledSlider(
-                    "Vertical", pctBinding($draft.verticalOffsetPct), in: -50...90,
-                    format: "%.0f%%")
+            Section("Position") {
+                slider("Vertical", pct($draft.verticalOffsetPct), -50...90, "%.0f%%")
                 Text(verticalHint)
                     .font(.caption)
                     .foregroundStyle(.secondary)
-                // Collapsed: the Settings window is a FIXED 560x680 (resizing was punted
-                // after five attempts — don't retry), and these two are the knobs nobody
-                // tunes daily. Keeping them out of the default view is what lets the
-                // preview stay big enough to actually judge.
-                DisclosureGroup("Advanced") {
-                    labeledSlider(
-                        "Max width", pctBinding($draft.maxLinePct), in: 20...100, format: "%.0f%%")
-                    labeledSlider("Line spacing", $draft.lineSpacing, in: 0.8...3, format: "%.2f×")
+            }
+
+            Section {
+                // ⚠ The label carries its own tap target. SwiftUI's DisclosureGroup only
+                // arms the chevron, which is a ~12pt hit box — "kind of hard to open"
+                // (owner). `contentShape` makes the whole row hittable; the chevron keeps
+                // working on its own, and the two do not double-fire because the chevron
+                // is not part of the label.
+                DisclosureGroup(isExpanded: $showLayout) {
+                    // Colours live here, opacities do not (owner): the hue is a
+                    // once-a-year decision, the opacity is the one you actually reach for.
+                    ColorPicker("Text color", selection: $draft.color, supportsOpacity: false)
+                    ColorPicker(
+                        "Outline color", selection: $draft.outlineColor, supportsOpacity: false)
+                    ColorPicker(
+                        "Shadow color", selection: $draft.shadowColor, supportsOpacity: false)
+                    ColorPicker(
+                        "Background color", selection: $draft.background, supportsOpacity: false)
+                    slider("Max width", pct($draft.maxLinePct), 20...100, "%.0f%%")
+                    slider("Line spacing", $draft.lineSpacing, 0.8...maxLineSpacing, "%.2f×")
+                } label: {
+                    Text("Layout & Color")
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .contentShape(Rectangle())
+                        .onTapGesture { withAnimation { showLayout.toggle() } }
                 }
             }
 
@@ -118,6 +137,14 @@ struct SubtitlesPane: View {
         }
     }
 
+    // The bounds come from Rust — the SAME constants `SubtitleStyle::clamped` enforces —
+    // so a control can never offer a value the clamp quietly takes back. A slider that
+    // snaps when you let go is worse than one that never went there.
+    private var maxSizePct: Double { Double(subtitle_max_size_pct()) * 100 }
+    private var maxBlurPx: Double { Double(subtitle_max_shadow_blur_px()) }
+    private var maxOffsetPx: Double { Double(subtitle_max_shadow_offset_px()) }
+    private var maxLineSpacing: Double { Double(subtitle_max_line_spacing()) }
+
     /// The signed vertical offset is the setting almost no player gets right, and a bare
     /// number cannot explain it. The preview shows it; this says which way is which.
     private var verticalHint: String {
@@ -142,20 +169,25 @@ struct SubtitlesPane: View {
 
     /// A `0.044`-style fraction shown as `4.4`. The wire and the rasterizer speak
     /// fractions; a human reading "0.044%" would have no idea what it meant.
-    private func pctBinding(_ b: Binding<Double>) -> Binding<Double> {
+    private func pct(_ b: Binding<Double>) -> Binding<Double> {
         Binding(get: { b.wrappedValue * 100 }, set: { b.wrappedValue = $0 / 100 })
     }
 
-    private func labeledSlider(
-        _ label: String, _ value: Binding<Double>, in range: ClosedRange<Double>, format: String
+    private func slider(
+        _ label: String, _ value: Binding<Double>, _ range: ClosedRange<Double>,
+        _ format: String, step: Double? = nil
     ) -> some View {
         HStack {
             Text(label)
-            Slider(value: value, in: range)
+            if let step {
+                Slider(value: value, in: range, step: step)
+            } else {
+                Slider(value: value, in: range)
+            }
             Text(String(format: format, value.wrappedValue))
                 .monospacedDigit()
                 .foregroundStyle(.secondary)
-                .frame(width: 64, alignment: .trailing)
+                .frame(width: 58, alignment: .trailing)
         }
     }
 }
@@ -212,6 +244,11 @@ private struct SubtitlePreview: View {
 
 /// The Swift-native mirror of `SubtitleStyleFfi`.
 ///
+/// Colour and opacity are held **apart** — an opaque `Color` plus a 0…100 `Double` — and
+/// recombined in `toForm`. That is what lets the pane put opacity on the surface (where
+/// people actually want it) and the hue away in Layout & Color, without the two ever
+/// disagreeing about one `[u8; 4]`.
+///
 /// `Equatable` is load-bearing: `.onChange(of: draft)` is what triggers the debounced
 /// save, and the Rust side hard no-ops when the folded style is unchanged, so the echo on
 /// open never reaches the disk.
@@ -219,85 +256,91 @@ struct SubtitleStyleDraft: Equatable {
     var fontFamily = ""
     var sizePct: Double = 0.044
     var color = Color.white
-    var outlinePct: Double = 0.003
+    var colorOpacity: Double = 100
+    var outlinePx: Double = 2.85
     var outlineColor = Color.black
+    var outlineOpacity: Double = 100
     var shadowOn = false
-    var shadowDxPct: Double = 0.002
-    var shadowDyPct: Double = 0.002
-    var shadowBlurPct: Double = 0.004
-    var shadowColor = Color.black.opacity(0.78)
-    var background = Color.black.opacity(0)
-    var backgroundRadiusPct: Double = 0.006
-    var backgroundPadPct: Double = 0.008
+    var shadowDxPx: Double = 2
+    var shadowDyPx: Double = 2
+    var shadowBlurPx: Double = 4
+    var shadowColor = Color.black
+    var shadowOpacity: Double = 78
+    var background = Color.black
+    var backgroundOpacity: Double = 0
     var verticalOffsetPct: Double = 0.05
     var maxLinePct: Double = 0.9
     var lineSpacing: Double = 1.2
-
-    /// Alpha 0 = no background — one control, rather than a toggle that can disagree with
-    /// the colour it guards.
-    var backgroundOn: Bool { (NSColor(background).usingColorSpace(.sRGB)?.alphaComponent ?? 0) > 0 }
 
     init() {}
 
     init(form f: SubtitleStyleFfi) {
         fontFamily = f.font_family.toString()
         sizePct = Double(f.size_pct)
-        color = Color(rgba: f.color_r, f.color_g, f.color_b, f.color_a)
-        outlinePct = Double(f.outline_pct)
-        outlineColor = Color(rgba: f.outline_r, f.outline_g, f.outline_b, f.outline_a)
+        (color, colorOpacity) = splitRGBA(f.color_r, f.color_g, f.color_b, f.color_a)
+        outlinePx = Double(f.outline_px)
+        (outlineColor, outlineOpacity) = splitRGBA(
+            f.outline_r, f.outline_g, f.outline_b, f.outline_a)
         shadowOn = f.shadow_on
-        shadowDxPct = Double(f.shadow_dx_pct)
-        shadowDyPct = Double(f.shadow_dy_pct)
-        shadowBlurPct = Double(f.shadow_blur_pct)
-        shadowColor = Color(rgba: f.shadow_r, f.shadow_g, f.shadow_b, f.shadow_a)
-        background = Color(rgba: f.background_r, f.background_g, f.background_b, f.background_a)
-        backgroundRadiusPct = Double(f.background_radius_pct)
-        backgroundPadPct = Double(f.background_pad_pct)
+        shadowDxPx = Double(f.shadow_dx_px)
+        shadowDyPx = Double(f.shadow_dy_px)
+        shadowBlurPx = Double(f.shadow_blur_px)
+        (shadowColor, shadowOpacity) = splitRGBA(f.shadow_r, f.shadow_g, f.shadow_b, f.shadow_a)
+        (background, backgroundOpacity) = splitRGBA(
+            f.background_r, f.background_g, f.background_b, f.background_a)
         verticalOffsetPct = Double(f.vertical_offset_pct)
         maxLinePct = Double(f.max_line_pct)
         lineSpacing = Double(f.line_spacing)
     }
 
     func toForm() -> SubtitleStyleFfi {
-        let c = color.rgbaBytes()
-        let o = outlineColor.rgbaBytes()
-        let s = shadowColor.rgbaBytes()
-        let b = background.rgbaBytes()
+        let c = color.rgbBytes()
+        let o = outlineColor.rgbBytes()
+        let s = shadowColor.rgbBytes()
+        let b = background.rgbBytes()
         return SubtitleStyleFfi(
             font_family: RustString(fontFamily),
             size_pct: Float(sizePct),
-            color_r: c.0, color_g: c.1, color_b: c.2, color_a: c.3,
-            outline_pct: Float(outlinePct),
-            outline_r: o.0, outline_g: o.1, outline_b: o.2, outline_a: o.3,
+            color_r: c.0, color_g: c.1, color_b: c.2, color_a: alpha(colorOpacity),
+            outline_px: Float(outlinePx),
+            outline_r: o.0, outline_g: o.1, outline_b: o.2, outline_a: alpha(outlineOpacity),
             shadow_on: shadowOn,
-            shadow_dx_pct: Float(shadowDxPct),
-            shadow_dy_pct: Float(shadowDyPct),
-            shadow_blur_pct: Float(shadowBlurPct),
-            shadow_r: s.0, shadow_g: s.1, shadow_b: s.2, shadow_a: s.3,
-            background_r: b.0, background_g: b.1, background_b: b.2, background_a: b.3,
-            background_radius_pct: Float(backgroundRadiusPct),
-            background_pad_pct: Float(backgroundPadPct),
+            shadow_dx_px: Float(shadowDxPx),
+            shadow_dy_px: Float(shadowDyPx),
+            shadow_blur_px: Float(shadowBlurPx),
+            shadow_r: s.0, shadow_g: s.1, shadow_b: s.2, shadow_a: alpha(shadowOpacity),
+            background_r: b.0, background_g: b.1, background_b: b.2,
+            background_a: alpha(backgroundOpacity),
             vertical_offset_pct: Float(verticalOffsetPct),
             max_line_pct: Float(maxLinePct),
             line_spacing: Float(lineSpacing)
         )
     }
+
+    private func alpha(_ opacity: Double) -> UInt8 {
+        UInt8(min(255, max(0, (opacity / 100 * 255).rounded())))
+    }
+}
+
+/// An RGBA byte quad → an **opaque** colour plus its opacity, 0…100 — the pair the pane
+/// edits separately.
+private func splitRGBA(_ r: UInt8, _ g: UInt8, _ b: UInt8, _ a: UInt8) -> (Color, Double) {
+    (
+        Color(
+            .sRGB, red: Double(r) / 255, green: Double(g) / 255, blue: Double(b) / 255, opacity: 1),
+        Double(a) / 255 * 100
+    )
 }
 
 extension Color {
-    fileprivate init(rgba r: UInt8, _ g: UInt8, _ b: UInt8, _ a: UInt8) {
-        self.init(
-            .sRGB, red: Double(r) / 255, green: Double(g) / 255, blue: Double(b) / 255,
-            opacity: Double(a) / 255)
-    }
-
     /// sRGB bytes, the way the letterbox pickers already do it — through `NSColor` in an
-    /// explicit colour space, because a `Color` carries no components of its own.
-    fileprivate func rgbaBytes() -> (UInt8, UInt8, UInt8, UInt8) {
-        guard let c = NSColor(self).usingColorSpace(.sRGB) else { return (255, 255, 255, 255) }
+    /// explicit colour space, because a `Color` carries no components of its own. The
+    /// alpha is dropped: opacity is the slider's job.
+    fileprivate func rgbBytes() -> (UInt8, UInt8, UInt8) {
+        guard let c = NSColor(self).usingColorSpace(.sRGB) else { return (255, 255, 255) }
         // Clamp before the UInt8 conversion: a wide-gamut pick can land outside 0...1 in
         // sRGB, and UInt8(-3.0) traps.
         let f = { (v: CGFloat) in UInt8(min(255, max(0, (v * 255).rounded()))) }
-        return (f(c.redComponent), f(c.greenComponent), f(c.blueComponent), f(c.alphaComponent))
+        return (f(c.redComponent), f(c.greenComponent), f(c.blueComponent))
     }
 }

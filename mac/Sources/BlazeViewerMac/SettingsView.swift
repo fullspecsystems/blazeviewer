@@ -810,7 +810,10 @@ private extension View {
     /// bottom padding; Shortcuts is genuinely taller than any screen, so its Form scrolls.
     /// Clamped to the screen for small displays. USER-resizing remains punted (see git history).
     func settingsTab(cap: CGFloat) -> some View {
-        frame(width: 560, height: min(648, cap))
+        // 693, not 648: at 648 the General tab did not quite fit on open and started
+        // scrolled (owner, 2026-07-15). The window is otherwise fixed — resizing it was
+        // punted after five failed attempts, so the height is chosen here or nowhere.
+        frame(width: 560, height: min(693, cap))
     }
 }
 

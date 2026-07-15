@@ -1765,7 +1765,7 @@ impl AppCoreHandle {
     /// the pane echoes its form back on open, and that echo must never reach the disk.
     fn subtitle_style_edited(&mut self, form: ffi::SubtitleStyleFfi) {
         self.core.now = Instant::now();
-        let style = subtitle_style_from_form(&form).clamped();
+        let style = fold_subtitle_style_form(&self.core.settings.subtitle_style, &form).clamped();
         if style == self.core.settings.subtitle_style {
             return;
         }
@@ -1789,7 +1789,7 @@ impl AppCoreHandle {
         let letterbox = self.core.settings.letterbox_for(dark);
         // Clamped, not raw: a draft mid-drag is bounded by the sliders anyway, but a
         // hand-edited config could have reached the pane.
-        let style = subtitle_style_from_form(&form).clamped();
+        let style = fold_subtitle_style_form(&self.core.settings.subtitle_style, &form).clamped();
         let Some(raster) = self.core.subtitles.rasterizer_mut() else {
             return Vec::new(); // the font worker hasn't landed; the pane shows a placeholder
         };
@@ -2701,11 +2701,32 @@ fn subtitle_font_name(i: usize) -> String {
         .unwrap_or_default()
 }
 
+// The Settings sliders' bounds. One definition each — these are the very constants
+// `SubtitleStyle::clamped` enforces, so the pane and the clamp cannot disagree.
+
+fn subtitle_max_size_pct() -> f32 {
+    pb_app_core::subtitle::MAX_SIZE_PCT
+}
+
+fn subtitle_max_shadow_blur_px() -> f32 {
+    pb_app_core::subtitle::ratio_to_px(pb_app_core::subtitle::MAX_SHADOW_BLUR_RATIO)
+}
+
+fn subtitle_max_shadow_offset_px() -> f32 {
+    pb_app_core::subtitle::ratio_to_px(pb_app_core::subtitle::MAX_SHADOW_OFFSET_RATIO)
+}
+
+fn subtitle_max_line_spacing() -> f32 {
+    pb_app_core::subtitle::MAX_LINE_SPACING
+}
+
 /// [`SubtitleStyle`](pb_app_core::subtitle::SubtitleStyle) → the flat form.
 fn subtitle_style_to_form(s: &pb_app_core::subtitle::SubtitleStyle) -> ffi::SubtitleStyleFfi {
+    use pb_app_core::subtitle::ratio_to_px;
     // A shadow that is off still carries its last values across, so toggling it off and
     // back on doesn't forget how it was tuned. `Default` supplies them when there has
-    // never been one.
+    // never been one — and they are deliberately *visible* values, so a shadow you switch
+    // on appears rather than being an invisible no-op at zero.
     let sh = s.shadow.unwrap_or_default();
     ffi::SubtitleStyleFfi {
         // The FFI cannot carry Option<String>; "" is the system font.
@@ -2715,15 +2736,15 @@ fn subtitle_style_to_form(s: &pb_app_core::subtitle::SubtitleStyle) -> ffi::Subt
         color_g: s.color[1],
         color_b: s.color[2],
         color_a: s.color[3],
-        outline_pct: s.outline_pct,
+        outline_px: ratio_to_px(s.outline_ratio),
         outline_r: s.outline_color[0],
         outline_g: s.outline_color[1],
         outline_b: s.outline_color[2],
         outline_a: s.outline_color[3],
         shadow_on: s.shadow.is_some(),
-        shadow_dx_pct: sh.dx_pct,
-        shadow_dy_pct: sh.dy_pct,
-        shadow_blur_pct: sh.blur_pct,
+        shadow_dx_px: ratio_to_px(sh.dx_ratio),
+        shadow_dy_px: ratio_to_px(sh.dy_ratio),
+        shadow_blur_px: ratio_to_px(sh.blur_ratio),
         shadow_r: sh.color[0],
         shadow_g: sh.color[1],
         shadow_b: sh.color[2],
@@ -2732,19 +2753,24 @@ fn subtitle_style_to_form(s: &pb_app_core::subtitle::SubtitleStyle) -> ffi::Subt
         background_g: s.background[1],
         background_b: s.background[2],
         background_a: s.background[3],
-        background_radius_pct: s.background_radius_pct,
-        background_pad_pct: s.background_pad_pct,
         vertical_offset_pct: s.vertical_offset_pct,
         max_line_pct: s.max_line_pct,
         line_spacing: s.line_spacing,
     }
 }
 
-/// The flat form → [`SubtitleStyle`](pb_app_core::subtitle::SubtitleStyle).
+/// Fold an edited style form back onto `base`, preserving the fields the form doesn't
+/// expose — the background's corner radius and padding, which are a *look* rather than a
+/// preference (owner, 2026-07-15) and so have no controls, but stay config-editable.
 ///
-/// The caller clamps. Every field is exposed, so unlike `fold_settings_form` there is no
-/// `base` to preserve anything from.
-fn subtitle_style_from_form(f: &ffi::SubtitleStyleFfi) -> pb_app_core::subtitle::SubtitleStyle {
+/// The `base` parameter is the whole point: without it, every edit in the pane would
+/// silently reset a hand-tuned radius to the default. Same shape, and the same reason, as
+/// [`fold_settings_form`]. The caller clamps.
+fn fold_subtitle_style_form(
+    base: &pb_app_core::subtitle::SubtitleStyle,
+    f: &ffi::SubtitleStyleFfi,
+) -> pb_app_core::subtitle::SubtitleStyle {
+    use pb_app_core::subtitle::px_to_ratio;
     pb_app_core::subtitle::SubtitleStyle {
         // "" (the picker's "System" row) means the system font, exactly as an absent
         // `font_family` key does — `SubtitleStyle::font` enforces the same rule again on
@@ -2752,12 +2778,12 @@ fn subtitle_style_from_form(f: &ffi::SubtitleStyleFfi) -> pb_app_core::subtitle:
         font_family: Some(f.font_family.clone()).filter(|s| !s.trim().is_empty()),
         size_pct: f.size_pct,
         color: [f.color_r, f.color_g, f.color_b, f.color_a],
-        outline_pct: f.outline_pct,
+        outline_ratio: px_to_ratio(f.outline_px),
         outline_color: [f.outline_r, f.outline_g, f.outline_b, f.outline_a],
         shadow: f.shadow_on.then_some(pb_app_core::subtitle::Shadow {
-            dx_pct: f.shadow_dx_pct,
-            dy_pct: f.shadow_dy_pct,
-            blur_pct: f.shadow_blur_pct,
+            dx_ratio: px_to_ratio(f.shadow_dx_px),
+            dy_ratio: px_to_ratio(f.shadow_dy_px),
+            blur_ratio: px_to_ratio(f.shadow_blur_px),
             color: [f.shadow_r, f.shadow_g, f.shadow_b, f.shadow_a],
         }),
         background: [
@@ -2766,8 +2792,9 @@ fn subtitle_style_from_form(f: &ffi::SubtitleStyleFfi) -> pb_app_core::subtitle:
             f.background_b,
             f.background_a,
         ],
-        background_radius_pct: f.background_radius_pct,
-        background_pad_pct: f.background_pad_pct,
+        // Not in the form — preserved.
+        background_radius_ratio: base.background_radius_ratio,
+        background_pad_ratio: base.background_pad_ratio,
         vertical_offset_pct: f.vertical_offset_pct,
         max_line_pct: f.max_line_pct,
         line_spacing: f.line_spacing,
@@ -4067,12 +4094,17 @@ mod ffi {
         // nearly all unusable as subtitles). The stored value is a NAME, so growing this
         // into a full picker later never invalidates a saved setting.
         font_family: String,
+        // % of viewport height, as a fraction. The ONE size that is viewport-relative.
         size_pct: f32,
         color_r: u8,
         color_g: u8,
         color_b: u8,
         color_a: u8,
-        outline_pct: f32,
+        // Every field below in px is on the REFERENCE_FONT_PX scale: stored as a fraction
+        // of the real font size (so it holds its proportions as the text resizes) and
+        // shown as the px it would be at the default text size, because "0.06" is not a
+        // quantity anyone can picture. See pb_app_core::subtitle's unit rule.
+        outline_px: f32,
         outline_r: u8,
         outline_g: u8,
         outline_b: u8,
@@ -4080,20 +4112,19 @@ mod ffi {
         // Option<Shadow>, flattened. `shadow_on` false = None; the rest keep their last
         // values so toggling a shadow off and on again doesn't forget how it was tuned.
         shadow_on: bool,
-        shadow_dx_pct: f32,
-        shadow_dy_pct: f32,
-        shadow_blur_pct: f32,
+        shadow_dx_px: f32,
+        shadow_dy_px: f32,
+        shadow_blur_px: f32,
         shadow_r: u8,
         shadow_g: u8,
         shadow_b: u8,
         shadow_a: u8,
-        // background_a 0 = no background.
+        // background_a 0 = no background: the alpha IS the on/off, so there is no toggle
+        // that can disagree with the colour it guards.
         background_r: u8,
         background_g: u8,
         background_b: u8,
         background_a: u8,
-        background_radius_pct: f32,
-        background_pad_pct: f32,
         // SIGNED, from the video's bottom edge: 0 = on the edge, >0 up into the picture,
         // <0 DOWN INTO THE LETTERBOX (the owner's ask — the thing almost no player gets
         // right). See pb_app_core::subtitle::place.
@@ -4419,6 +4450,13 @@ mod ffi {
         // that does not cross back to Swift (same reason the keymap editor is indexed).
         fn subtitle_font_count() -> usize;
         fn subtitle_font_name(i: usize) -> String;
+        // The slider bounds, from the SAME constants `SubtitleStyle::clamped` uses — so a
+        // control can never offer a value the clamp quietly takes back. A slider that
+        // snaps when you let go is worse than one that never went there.
+        fn subtitle_max_size_pct() -> f32;
+        fn subtitle_max_shadow_blur_px() -> f32;
+        fn subtitle_max_shadow_offset_px() -> f32;
+        fn subtitle_max_line_spacing() -> f32;
         // The live preview swatch: RGBA8, w*h, top-left origin. Takes the DRAFT style so
         // it tracks a slider drag with no save round-trip. Drawn with the SAME rasterizer,
         // to_params, and place() the real overlay uses, so it cannot drift from what a
@@ -5353,23 +5391,60 @@ mod tests {
             font_family: Some("Verdana".into()),
             size_pct: 0.061,
             color: [255, 240, 10, 220],
-            outline_pct: 0.004,
+            outline_ratio: 0.04,
             outline_color: [10, 20, 30, 250],
             shadow: Some(pb_app_core::subtitle::Shadow {
-                dx_pct: 0.003,
-                dy_pct: 0.0042,
-                blur_pct: 0.0051,
+                dx_ratio: 0.03,
+                dy_ratio: 0.042,
+                blur_ratio: 0.051,
                 color: [1, 2, 3, 180],
             }),
             background: [4, 5, 6, 153],
-            background_radius_pct: 0.007,
-            background_pad_pct: 0.009,
+            background_radius_ratio: 0.007,
+            background_pad_ratio: 0.009,
             vertical_offset_pct: -0.11,
             max_line_pct: 0.83,
             line_spacing: 1.35,
         };
-        let got = subtitle_style_from_form(&subtitle_style_to_form(&want));
+        let got = fold_subtitle_style_form(&want, &subtitle_style_to_form(&want));
         assert_eq!(got, want);
+    }
+
+    /// ⚠ The reason the fold takes a `base`. The radius and padding have no controls (a
+    /// good rounded corner is a look, not a preference — owner, 2026-07-15), so without
+    /// the base every edit in the pane would silently reset a hand-tuned config value.
+    #[test]
+    fn fields_with_no_control_survive_an_edit() {
+        let tuned = pb_app_core::subtitle::SubtitleStyle {
+            background_radius_ratio: 0.44,
+            background_pad_ratio: 0.55,
+            ..Default::default()
+        };
+        let mut form = subtitle_style_to_form(&tuned);
+        form.size_pct = 0.09; // the user drags the size slider
+        let got = fold_subtitle_style_form(&tuned, &form);
+        assert_eq!(got.size_pct, 0.09, "the edit lands");
+        assert_eq!(
+            got.background_radius_ratio, 0.44,
+            "...and the rest is preserved"
+        );
+        assert_eq!(got.background_pad_ratio, 0.55);
+    }
+
+    /// The px readouts the sliders show are on the REFERENCE_FONT_PX scale, not raw
+    /// ratios — a slider labelled "0.06" is not a control anyone can use.
+    #[test]
+    fn the_form_carries_px_not_ratios() {
+        let s = pb_app_core::subtitle::SubtitleStyle {
+            outline_ratio: 0.06,
+            ..Default::default()
+        };
+        let f = subtitle_style_to_form(&s);
+        assert!(
+            (f.outline_px - 0.06 * pb_app_core::subtitle::REFERENCE_FONT_PX).abs() < 0.01,
+            "outline crosses as ~2.85 px, not 0.06: {}",
+            f.outline_px
+        );
     }
 
     /// The FFI cannot carry `Option<String>`, so "System" is `""` on the wire. It must
@@ -5385,7 +5460,7 @@ mod tests {
             let mut f = subtitle_style_to_form(&s);
             f.font_family = name.into();
             assert_eq!(
-                subtitle_style_from_form(&f).font(),
+                fold_subtitle_style_form(&s, &f).font(),
                 None,
                 "{name:?} = System"
             );
@@ -5399,9 +5474,9 @@ mod tests {
     #[test]
     fn a_shadow_toggled_off_keeps_its_values_for_when_it_comes_back() {
         let tuned = pb_app_core::subtitle::Shadow {
-            dx_pct: 0.01,
-            dy_pct: 0.02,
-            blur_pct: 0.03,
+            dx_ratio: 0.1,
+            dy_ratio: 0.02,
+            blur_ratio: 0.03,
             color: [9, 8, 7, 111],
         };
         let on = pb_app_core::subtitle::SubtitleStyle {
@@ -5411,10 +5486,10 @@ mod tests {
         let mut form = subtitle_style_to_form(&on);
         form.shadow_on = false;
         // Off means None...
-        assert_eq!(subtitle_style_from_form(&form).shadow, None);
+        assert_eq!(fold_subtitle_style_form(&on, &form).shadow, None);
         // ...but the tuning survived the trip, so flipping it back returns what you had.
         form.shadow_on = true;
-        assert_eq!(subtitle_style_from_form(&form).shadow, Some(tuned));
+        assert_eq!(fold_subtitle_style_form(&on, &form).shadow, Some(tuned));
     }
 
     /// A style with no shadow still hands the pane usable slider values, rather than
@@ -5425,11 +5500,11 @@ mod tests {
         assert_eq!(none.shadow, None);
         let f = subtitle_style_to_form(&none);
         assert!(!f.shadow_on);
-        assert_eq!(
-            f.shadow_blur_pct,
-            pb_app_core::subtitle::Shadow::default().blur_pct
+        assert!(
+            f.shadow_blur_px > 0.0,
+            "a shadow you switch on must be visible, not an invisible no-op at zero"
         );
-        assert!(f.shadow_a > 0, "a shadow you turn on must be visible");
+        assert!(f.shadow_a > 0);
     }
 
     /// The font list the picker renders: indexed, and out-of-range degrades to "" (the
@@ -5455,7 +5530,7 @@ mod tests {
     #[test]
     fn a_saved_style_round_trips_to_itself_so_the_open_echo_is_a_no_op() {
         let saved = pb_app_core::subtitle::SubtitleStyle::default().clamped();
-        let echoed = subtitle_style_from_form(&subtitle_style_to_form(&saved)).clamped();
+        let echoed = fold_subtitle_style_form(&saved, &subtitle_style_to_form(&saved)).clamped();
         assert_eq!(echoed, saved, "opening the pane must not look like an edit");
     }
 }

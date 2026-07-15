@@ -197,22 +197,25 @@ fn same_language(track: &MediaTrack, audio: &str) -> bool {
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Shadow {
-    /// Offset in **% of viewport height**, like every other size here.
-    pub dx_pct: f32,
-    pub dy_pct: f32,
-    pub blur_pct: f32,
+    /// Offset as a **fraction of the font size** — see [`SubtitleStyle`]'s unit rule.
+    /// `0.05` = a twentieth of the text's height, down-right at the default.
+    pub dx_ratio: f32,
+    pub dy_ratio: f32,
+    /// Blur radius as a fraction of the font size.
+    pub blur_ratio: f32,
     pub color: [u8; 4],
 }
 
 impl Default for Shadow {
     /// A soft drop shadow, slightly down-right — the classic. Only reached when a config
-    /// names the table without filling it in; the shipped default is no shadow at all
-    /// (see [`SubtitleStyle::default`]), because the outline already carries legibility.
+    /// names the table without filling it in, or when the pane needs values to offer for a
+    /// shadow you are about to switch on; the shipped default is no shadow at all (see
+    /// [`SubtitleStyle::default`]), because the outline already carries legibility.
     fn default() -> Self {
         Shadow {
-            dx_pct: 0.002,
-            dy_pct: 0.002,
-            blur_pct: 0.004,
+            dx_ratio: 0.04,
+            dy_ratio: 0.04,
+            blur_ratio: 0.08,
             color: [0, 0, 0, 200],
         }
     }
@@ -220,9 +223,23 @@ impl Default for Shadow {
 
 /// The owner's eight customization axes (spec: 2026-07-14).
 ///
-/// **Every size is a % of viewport height, never points.** A subtitle sized in points
-/// reads differently on a 1× ultrawide and a 2× Studio; sized against the viewport it
-/// looks the same everywhere, which is the whole point of a legibility setting.
+/// # The unit rule (read this before adding a field)
+///
+/// **Position and size are relative to the VIEWPORT. Decoration is relative to the TEXT.**
+///
+/// - `size_pct`, `vertical_offset_pct` → % of viewport height; `max_line_pct` → % of
+///   viewport width. **Never points**: a subtitle sized in points reads differently on a
+///   1× ultrawide and a 2× Studio, and sized against the viewport it looks the same
+///   everywhere, which is the whole point of a legibility setting.
+/// - `outline_ratio`, the shadow's offsets and blur, and the background's radius and
+///   padding → **fractions of the font size**.
+///
+/// The second half is the correction the owner made on 2026-07-15: as viewport
+/// percentages, an outline that looked right on 44 px text was a hairline on 100 px text
+/// and a blob on 20 px, so *every* decoration had to be re-tuned each time the size moved
+/// — "it looks wildly different depending on the size, so it's hard to dial in". Tied to
+/// the text, they hold their proportions and the size slider becomes a size slider instead
+/// of a re-tune-everything slider. (This is also what ASS does — `ScaledBorderAndShadow`.)
 ///
 /// Persisted (this is appearance, not a viewing trace). The *track choice* is not — see
 /// [`SubtitleMode::Track`].
@@ -238,21 +255,31 @@ impl Default for Shadow {
 pub struct SubtitleStyle {
     /// `None` = the system sans. A name the platform doesn't have falls back to it.
     pub font_family: Option<String>,
+    /// % of viewport height.
     pub size_pct: f32,
+    /// RGBA — the alpha is the opacity the pane's slider drives.
     pub color: [u8; 4],
-    /// Outline thickness in % of viewport height; 0 = off.
+    /// Outline thickness as a **fraction of the font size**; 0 = off.
     ///
     /// A true circular dilate of the glyph coverage — mathematically the outer half of a
     /// stroke — **not** the HUD's 8-way offset halo, which leaves gaps on diagonals and
     /// looks chewed at subtitle sizes.
-    pub outline_pct: f32,
+    pub outline_ratio: f32,
     pub outline_color: [u8; 4],
     pub shadow: Option<Shadow>,
-    /// Alpha 0 = no background.
+    /// Alpha 0 = no background. The alpha IS the on/off — one control, so there is no
+    /// toggle that can disagree with the colour it guards.
     pub background: [u8; 4],
-    /// Corner radius in % of viewport height. Only meaningful with a background.
-    pub background_radius_pct: f32,
-    pub background_pad_pct: f32,
+    /// Corner radius as a fraction of the font size. Only meaningful with a background.
+    ///
+    /// Not in the Settings pane: the owner's call (2026-07-15) is that a good rounded
+    /// corner is a *look*, not a preference — "make it look modern, not like 1988-era
+    /// closed captioning". Tied to the font size it stays right at every text size, so
+    /// there is nothing left to tune. Still config-editable for anyone who insists.
+    pub background_radius_ratio: f32,
+    /// Padding around the text as a fraction of the font size. Also not in the pane, for
+    /// the same reason.
+    pub background_pad_ratio: f32,
     /// **Signed**, from the *video's bottom edge*, in % of viewport height. `0` = the
     /// block's bottom sits on the edge; `> 0` = up into the picture; `< 0` = **down into
     /// the letterbox**.
@@ -274,14 +301,19 @@ impl Default for SubtitleStyle {
             // ~4.4% of a 1080p height ≈ 48 px — the broadcast-ish default.
             size_pct: 0.044,
             color: [255, 255, 255, 255],
-            outline_pct: 0.003,
+            // ~6% of the font = ~2.9 px on 48 px text: the OUTLINE_PX_AT_DEFAULT_SIZE
+            // scale's "3 px".
+            outline_ratio: 0.06,
             outline_color: [0, 0, 0, 255],
             shadow: None,
             // Off by default: the outline already carries legibility, and a box behind
             // every line is a lot of ink over the picture.
             background: [0, 0, 0, 0],
-            background_radius_pct: 0.006,
-            background_pad_pct: 0.008,
+            // Not user-facing — a good modern look, tied to the font so it stays right at
+            // every size. Radius ≈ 0.22 of a line reads as a soft pill rather than either
+            // a 1988 caption block or a lozenge.
+            background_radius_ratio: 0.22,
+            background_pad_ratio: 0.28,
             // Just inside the picture's bottom edge — the classic position.
             vertical_offset_pct: 0.05,
             max_line_pct: 0.9,
@@ -289,6 +321,54 @@ impl Default for SubtitleStyle {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// The bounds the Settings pane and the clamp share
+// ---------------------------------------------------------------------------
+//
+// One definition each, so a slider can never offer a value the clamp will quietly take
+// back — a control that snaps when you let go is worse than one that never went there.
+
+/// 17% of viewport height. Past this a line fits about two words (owner, 2026-07-15).
+pub const MAX_SIZE_PCT: f32 = 0.17;
+
+/// The font size every decoration's **px** readout is calibrated against: the default text
+/// size on a 1080p-tall viewport (`0.044 × 1080 ≈ 47.5`).
+///
+/// Storage is a fraction of the *actual* font size, so decoration holds its proportions as
+/// the text resizes — that is the whole point of the unit rule. This constant only turns
+/// that fraction into the human number a slider shows, because "outline 0.06" is not a
+/// quantity anyone can picture and "3 px" is.
+///
+/// At the default text size the label is literally true; at other sizes it is the
+/// px-*equivalent* — and that equivalent, not any particular measurement, is the stable
+/// thing the user is actually choosing. The alternative (a live px readout against the
+/// real font size) would make the slider handle jump every time the size moved, which is
+/// the exact confusion this indirection removes.
+pub const REFERENCE_FONT_PX: f32 = 47.5;
+
+/// A font-relative ratio → the px number a slider shows. See [`REFERENCE_FONT_PX`].
+pub fn ratio_to_px(ratio: f32) -> f32 {
+    ratio * REFERENCE_FONT_PX
+}
+
+/// ...and back.
+pub fn px_to_ratio(px: f32) -> f32 {
+    px / REFERENCE_FONT_PX
+}
+
+/// ~4.7 px on default-size text. Past this the outline eats the letterforms.
+pub const MAX_OUTLINE_RATIO: f32 = 0.10;
+
+/// A blur wider than the text itself is a smudge, not a shadow. The old 5%-of-viewport
+/// ceiling could fill the screen (owner, 2026-07-15).
+pub const MAX_SHADOW_BLUR_RATIO: f32 = 0.30;
+
+/// A shadow offset beyond a fifth of the text's height reads as a second, broken copy.
+pub const MAX_SHADOW_OFFSET_RATIO: f32 = 0.20;
+
+/// Above ~2, lines read as unrelated rather than as one cue.
+pub const MAX_LINE_SPACING: f32 = 2.0;
 
 /// The fonts the Settings picker offers, in order. `None`/empty = the system sans.
 ///
@@ -341,9 +421,9 @@ impl SubtitleStyle {
         let d = SubtitleStyle::default();
         for (v, dv) in [
             (&mut self.size_pct, d.size_pct),
-            (&mut self.outline_pct, d.outline_pct),
-            (&mut self.background_radius_pct, d.background_radius_pct),
-            (&mut self.background_pad_pct, d.background_pad_pct),
+            (&mut self.outline_ratio, d.outline_ratio),
+            (&mut self.background_radius_ratio, d.background_radius_ratio),
+            (&mut self.background_pad_ratio, d.background_pad_ratio),
             (&mut self.vertical_offset_pct, d.vertical_offset_pct),
             (&mut self.max_line_pct, d.max_line_pct),
             (&mut self.line_spacing, d.line_spacing),
@@ -355,28 +435,39 @@ impl SubtitleStyle {
         if let Some(sh) = &mut self.shadow {
             let ds = Shadow::default();
             for (v, dv) in [
-                (&mut sh.dx_pct, ds.dx_pct),
-                (&mut sh.dy_pct, ds.dy_pct),
-                (&mut sh.blur_pct, ds.blur_pct),
+                (&mut sh.dx_ratio, ds.dx_ratio),
+                (&mut sh.dy_ratio, ds.dy_ratio),
+                (&mut sh.blur_ratio, ds.blur_ratio),
             ] {
                 if !v.is_finite() {
                     *v = dv;
                 }
             }
         }
-        self.size_pct = self.size_pct.clamp(0.01, 0.25);
-        self.outline_pct = self.outline_pct.clamp(0.0, 0.02);
-        self.background_radius_pct = self.background_radius_pct.clamp(0.0, 0.05);
-        self.background_pad_pct = self.background_pad_pct.clamp(0.0, 0.05);
+        // 17% of the viewport is already ~2 words a line (owner, 2026-07-15: "anything
+        // bigger than that is comically massive"). The old 25% ceiling was reachable only
+        // by a hand-edited config and was never a size anyone wanted.
+        self.size_pct = self.size_pct.clamp(0.01, MAX_SIZE_PCT);
+        // ~4.7 px on default-size text: past this an outline stops reading as an outline
+        // and starts eating the letterforms.
+        self.outline_ratio = self.outline_ratio.clamp(0.0, MAX_OUTLINE_RATIO);
+        self.background_radius_ratio = self.background_radius_ratio.clamp(0.0, 1.0);
+        self.background_pad_ratio = self.background_pad_ratio.clamp(0.0, 1.0);
         // Generous but bounded: far enough up to sit mid-screen, far enough down to reach
         // the bar on any letterbox.
         self.vertical_offset_pct = self.vertical_offset_pct.clamp(-0.5, 0.9);
         self.max_line_pct = self.max_line_pct.clamp(0.2, 1.0);
-        self.line_spacing = self.line_spacing.clamp(0.8, 3.0);
+        // Above ~2 the lines read as unrelated rather than as one cue (owner: "much above
+        // 2 looks pretty silly").
+        self.line_spacing = self.line_spacing.clamp(0.8, MAX_LINE_SPACING);
         if let Some(s) = &mut self.shadow {
-            s.dx_pct = s.dx_pct.clamp(-0.05, 0.05);
-            s.dy_pct = s.dy_pct.clamp(-0.05, 0.05);
-            s.blur_pct = s.blur_pct.clamp(0.0, 0.05);
+            s.dx_ratio = s
+                .dx_ratio
+                .clamp(-MAX_SHADOW_OFFSET_RATIO, MAX_SHADOW_OFFSET_RATIO);
+            s.dy_ratio = s
+                .dy_ratio
+                .clamp(-MAX_SHADOW_OFFSET_RATIO, MAX_SHADOW_OFFSET_RATIO);
+            s.blur_ratio = s.blur_ratio.clamp(0.0, MAX_SHADOW_BLUR_RATIO);
         }
         self
     }
@@ -429,15 +520,27 @@ impl Rect {
 /// Everything is clamped into the viewport, so a negative offset with no letterbox (Fill,
 /// zoom, a clip matching the display aspect) lands at the picture's bottom rather than
 /// off-screen. The setting never becomes invalid; it just runs out of room.
+/// `block` is the **bitmap's** size and `block_pad` its symmetric inset to the text's ink
+/// ([`pb_hud::subtitle::SubtitleBitmap::pad`]).
+///
+/// ⚠ **Everything below positions the TEXT, then converts back to a bitmap origin at the
+/// very end.** The bitmap is grown to hold the outline, shadow, and background, so its
+/// size is a function of the *decoration* — anchoring it directly meant switching on a
+/// drop shadow visibly shoved the subtitles upward (owner, 2026-07-15). The text's own box
+/// is the only stable thing to hang position off.
 pub fn place(
     viewport: (f32, f32),
     video: Rect,
     block: (f32, f32),
+    block_pad: f32,
     style: &SubtitleStyle,
     controls_h: f32,
 ) -> Rect {
     let (vw, vh) = viewport;
     let (bw, bh) = block;
+    // The text's own box inside the bitmap. Everything from here on is about this.
+    let pad = block_pad.max(0.0).min(bh / 2.0).min(bw / 2.0);
+    let text_h = (bh - pad * 2.0).max(0.0);
 
     // Positive offset = up into the picture, so it subtracts.
     let off = style.vertical_offset_pct * vh;
@@ -460,12 +563,18 @@ pub fn place(
     }
     // On screen, always: never past the bottom, never pushed off the top by a tall block.
     // `max` last so a block taller than the viewport still starts at the top rather than
-    // resolving to a negative y.
-    bottom = bottom.min(vh).max(bh);
+    // resolving to a negative y. Both bounds are the TEXT's, so a big soft shadow can
+    // still bleed off-screen — which is right: clamping the bitmap would let a shadow
+    // nobody can see push the words nobody can miss.
+    bottom = bottom.min(vh).max(text_h);
 
     Rect {
+        // The text is centred in the bitmap (the pad is symmetric), so centring the
+        // bitmap centres the text — no pad term needed here.
         x: ((vw - bw) / 2.0).max(0.0),
-        y: bottom - bh,
+        // Back out to the bitmap's origin: the text's bottom sits `pad` above the
+        // bitmap's.
+        y: bottom - text_h - pad,
         w: bw,
         h: bh,
     }
@@ -490,29 +599,47 @@ impl SubtitleStyle {
     /// bitmap for free — no shell has to remember to.
     pub fn to_params(&self, viewport: (f32, f32)) -> pb_hud::subtitle::SubtitleParams {
         let (vw, vh) = viewport;
+        // The unit rule, in one line: size comes from the viewport, decoration comes from
+        // the size. Everything below that multiplies by `font` instead of `vh` is a
+        // decoration holding its proportions as the text resizes.
+        let font = self.size_px(vh);
         pb_hud::subtitle::SubtitleParams {
             // `font()`, not the raw field: `""` (what the Settings FFI sends for "System",
             // since it cannot carry an `Option<String>`) must mean the system font, not a
             // hunt for a face literally named "".
             font_family: self.font().map(str::to_string),
-            size_px: self.size_px(vh),
+            size_px: font,
             color: self.color,
-            outline_px: (self.outline_pct * vh).max(0.0),
+            outline_px: (self.outline_ratio * font).max(0.0),
             outline_color: self.outline_color,
             shadow: self.shadow.map(|s| pb_hud::subtitle::ShadowParams {
-                dx: s.dx_pct * vh,
-                dy: s.dy_pct * vh,
-                blur: (s.blur_pct * vh).max(0.0),
+                dx: s.dx_ratio * font,
+                dy: s.dy_ratio * font,
+                blur: (s.blur_ratio * font).max(0.0),
                 color: s.color,
             }),
             background: self.background,
-            background_radius_px: (self.background_radius_pct * vh).max(0.0),
-            background_pad_px: (self.background_pad_pct * vh).max(0.0),
+            background_radius_px: (self.background_radius_ratio * font).max(0.0),
+            background_pad_px: (self.background_pad_ratio * font).max(0.0),
             // Width, not height — a max line length is about how far across the screen
-            // the text runs.
+            // the text runs. The one decoration that is genuinely about the viewport:
+            // "don't run more than 90% across the screen" is a screen fact.
             max_line_px: (self.max_line_pct * vw).max(1.0),
             line_spacing: self.line_spacing,
         }
+    }
+
+    /// The outline as the **px number the Settings slider shows**, and back.
+    ///
+    /// See [`OUTLINE_PX_AT_DEFAULT_SIZE`] for why this indirection exists: storage scales
+    /// with the text (so the look is stable), but "0.06" is not a quantity anyone can
+    /// picture and "3 px" is.
+    pub fn outline_px_scale(&self) -> f32 {
+        ratio_to_px(self.outline_ratio)
+    }
+
+    pub fn set_outline_px_scale(&mut self, px: f32) {
+        self.outline_ratio = px_to_ratio(px).clamp(0.0, MAX_OUTLINE_RATIO);
     }
 }
 
@@ -696,6 +823,135 @@ mod tests {
         );
     }
 
+    // -- decoration must not move the text (owner, 2026-07-15) ---------------
+
+    /// ⚠ THE regression. Switching on a drop shadow **visibly shoved the subtitles
+    /// upward**, because the rasterizer grows the bitmap to hold the shadow and `place`
+    /// anchored the bitmap's bottom edge. Decoration is not position; it must never move
+    /// the words.
+    #[test]
+    fn a_drop_shadow_does_not_move_the_text() {
+        let (vp, video) = letterboxed();
+        let s = SubtitleStyle::default();
+        // Same TEXT (300x40), two bitmaps: one bare, one grown 12 px all round by a
+        // shadow. The text's bottom must land in the identical place.
+        let bare = place(vp, video, (300.0, 40.0), 0.0, &s, 0.0);
+        let shadowed = place(vp, video, (324.0, 64.0), 12.0, &s, 0.0);
+        assert_eq!(
+            bare.bottom(),
+            shadowed.bottom() - 12.0,
+            "the TEXT's bottom edge must not move when a shadow is added"
+        );
+    }
+
+    /// The same rule, stated as the property that matters: for a fixed text box, growing
+    /// the decoration in every direction leaves the text where it was.
+    #[test]
+    fn growing_the_decoration_leaves_the_text_where_it_was() {
+        let (vp, video) = letterboxed();
+        let s = SubtitleStyle::default();
+        // The text's bottom = the rect's bottom minus the pad below it.
+        let text_bottom = |pad: f32| {
+            place(
+                vp,
+                video,
+                (300.0 + pad * 2.0, 40.0 + pad * 2.0),
+                pad,
+                &s,
+                0.0,
+            )
+            .bottom()
+                - pad
+        };
+        let want = text_bottom(0.0);
+        for pad in [1.0, 4.0, 12.0, 40.0] {
+            assert_eq!(text_bottom(pad), want, "pad {pad} moved the text");
+        }
+    }
+
+    /// ...and horizontally too: the pad is symmetric, so the text stays centred.
+    #[test]
+    fn decoration_does_not_move_the_text_horizontally() {
+        let (vp, video) = letterboxed();
+        let s = SubtitleStyle::default();
+        let text_centre = |pad: f32| {
+            let r = place(
+                vp,
+                video,
+                (300.0 + pad * 2.0, 40.0 + pad * 2.0),
+                pad,
+                &s,
+                0.0,
+            );
+            r.x + r.w / 2.0
+        };
+        let want = text_centre(0.0);
+        for pad in [1.0, 12.0, 40.0] {
+            assert_eq!(text_centre(pad), want, "pad {pad} moved the text sideways");
+        }
+    }
+
+    // -- the unit rule (owner, 2026-07-15) ---------------------------------
+
+    /// The correction that made the size slider usable: decoration holds its proportion
+    /// as the text resizes. Double the size, and the outline/shadow/radius double with it
+    /// — so you tune the look once instead of re-tuning it at every size.
+    #[test]
+    fn decoration_scales_with_the_text_not_the_viewport() {
+        let vp = (1920.0, 1080.0);
+        let small = SubtitleStyle {
+            size_pct: 0.04,
+            outline_ratio: 0.06,
+            shadow: Some(Shadow::default()),
+            background: [0, 0, 0, 200],
+            ..Default::default()
+        };
+        let big = SubtitleStyle {
+            size_pct: 0.08,
+            ..small.clone()
+        };
+        let (a, b) = (small.to_params(vp), big.to_params(vp));
+        assert_eq!(b.size_px, a.size_px * 2.0);
+        assert!((b.outline_px - a.outline_px * 2.0).abs() < 0.01);
+        assert!((b.background_radius_px - a.background_radius_px * 2.0).abs() < 0.01);
+        assert!((b.background_pad_px - a.background_pad_px * 2.0).abs() < 0.01);
+        let (sa, sb) = (a.shadow.unwrap(), b.shadow.unwrap());
+        assert!((sb.blur - sa.blur * 2.0).abs() < 0.01);
+        assert!((sb.dy - sa.dy * 2.0).abs() < 0.01);
+
+        // ...and the outline's RATIO to the text is what stayed constant. That ratio is
+        // the thing the user actually chose.
+        assert!(((a.outline_px / a.size_px) - (b.outline_px / b.size_px)).abs() < 1e-4);
+    }
+
+    /// The px readout the slider shows is a stable number: it does not move when the text
+    /// resizes, because it names the ratio, not a measurement.
+    #[test]
+    fn the_outline_px_scale_round_trips_and_is_size_independent() {
+        let mut s = SubtitleStyle::default();
+        for px in [0.0f32, 1.0, 2.5, 4.0] {
+            s.set_outline_px_scale(px);
+            assert!(
+                (s.outline_px_scale() - px).abs() < 0.001,
+                "{px} px round-trips"
+            );
+        }
+        s.set_outline_px_scale(3.0);
+        let at_default = s.outline_px_scale();
+        s.size_pct = 0.12; // a much bigger subtitle
+        assert_eq!(s.outline_px_scale(), at_default, "the slider must not jump");
+    }
+
+    /// The slider's ceiling and the clamp's ceiling are the same number, so a control can
+    /// never offer a value the clamp quietly takes back.
+    #[test]
+    fn the_px_scale_cannot_exceed_the_clamp() {
+        let mut s = SubtitleStyle::default();
+        s.set_outline_px_scale(999.0);
+        assert_eq!(s.outline_ratio, MAX_OUTLINE_RATIO);
+        assert_eq!(s.clone().clamped().outline_ratio, s.outline_ratio);
+    }
+
     // -- persistence (#90.4) -----------------------------------------------
 
     /// The round trip that keeps a saved look saved.
@@ -706,9 +962,9 @@ mod tests {
             size_pct: 0.06,
             color: [255, 240, 0, 220],
             shadow: Some(Shadow {
-                dx_pct: 0.003,
-                dy_pct: 0.004,
-                blur_pct: 0.005,
+                dx_ratio: 0.003,
+                dy_ratio: 0.004,
+                blur_ratio: 0.005,
                 color: [0, 0, 0, 180],
             }),
             background: [0, 0, 0, 153],
@@ -727,7 +983,7 @@ mod tests {
     fn a_partial_table_fills_the_gaps_from_default() {
         let got: SubtitleStyle = toml::from_str("size_pct = 0.08").expect("partial parses");
         assert_eq!(got.size_pct, 0.08);
-        assert_eq!(got.outline_pct, SubtitleStyle::default().outline_pct);
+        assert_eq!(got.outline_ratio, SubtitleStyle::default().outline_ratio);
         assert_eq!(got.line_spacing, SubtitleStyle::default().line_spacing);
     }
 
@@ -735,9 +991,9 @@ mod tests {
     #[test]
     fn a_partial_shadow_table_fills_the_gaps_from_default() {
         let got: SubtitleStyle =
-            toml::from_str("[shadow]\nblur_pct = 0.01").expect("partial shadow parses");
+            toml::from_str("[shadow]\nblur_ratio = 0.01").expect("partial shadow parses");
         let sh = got.shadow.expect("a named shadow table means a shadow");
-        assert_eq!(sh.blur_pct, 0.01);
+        assert_eq!(sh.blur_ratio, 0.01);
         assert_eq!(sh.color, Shadow::default().color);
     }
 
@@ -761,7 +1017,7 @@ mod tests {
         let c = s.clamped();
         let d = SubtitleStyle::default();
         assert_eq!(c.size_pct, d.size_pct);
-        assert_eq!(c.outline_pct, d.outline_pct);
+        assert_eq!(c.outline_ratio, d.outline_ratio);
         assert_eq!(c.line_spacing, d.line_spacing);
     }
 
@@ -952,26 +1208,33 @@ mod tests {
     fn absurd_settings_clamp_instead_of_breaking_the_screen() {
         let s = SubtitleStyle {
             size_pct: 40.0,
-            outline_pct: 99.0,
+            outline_ratio: 99.0,
             vertical_offset_pct: -50.0,
             max_line_pct: 0.0,
             line_spacing: 0.0,
             shadow: Some(Shadow {
-                dx_pct: 9.0,
-                dy_pct: -9.0,
-                blur_pct: 9.0,
+                dx_ratio: 9.0,
+                dy_ratio: -9.0,
+                blur_ratio: 9.0,
                 color: [0, 0, 0, 255],
             }),
             ..SubtitleStyle::default()
         }
         .clamped();
-        assert_eq!(s.size_pct, 0.25);
-        assert_eq!(s.outline_pct, 0.02);
+        assert_eq!(s.size_pct, MAX_SIZE_PCT);
+        assert_eq!(s.outline_ratio, MAX_OUTLINE_RATIO);
         assert_eq!(s.vertical_offset_pct, -0.5);
         assert_eq!(s.max_line_pct, 0.2);
         assert_eq!(s.line_spacing, 0.8);
         let sh = s.shadow.unwrap();
-        assert_eq!((sh.dx_pct, sh.dy_pct, sh.blur_pct), (0.05, -0.05, 0.05));
+        assert_eq!(
+            (sh.dx_ratio, sh.dy_ratio, sh.blur_ratio),
+            (
+                MAX_SHADOW_OFFSET_RATIO,
+                -MAX_SHADOW_OFFSET_RATIO,
+                MAX_SHADOW_BLUR_RATIO
+            )
+        );
         // The default is already sane and survives clamping unchanged.
         assert_eq!(SubtitleStyle::default().clamped(), SubtitleStyle::default());
     }
@@ -999,7 +1262,7 @@ mod tests {
             vertical_offset_pct: 0.0,
             ..SubtitleStyle::default()
         };
-        let r = place(vp, video, (300.0, 40.0), &s, 0.0);
+        let r = place(vp, video, (300.0, 40.0), 0.0, &s, 0.0);
         assert_eq!(r.bottom(), 450.0, "the video's bottom edge");
         assert_eq!(r.y, 410.0);
         assert_eq!(r.x, 350.0, "centered on the viewport");
@@ -1012,7 +1275,7 @@ mod tests {
             vertical_offset_pct: 0.1, // 10% of 500 = 50px up
             ..SubtitleStyle::default()
         };
-        let r = place(vp, video, (300.0, 40.0), &s, 0.0);
+        let r = place(vp, video, (300.0, 40.0), 0.0, &s, 0.0);
         assert_eq!(r.bottom(), 400.0);
         assert!(r.bottom() < video.bottom(), "inside the picture");
     }
@@ -1031,6 +1294,7 @@ mod tests {
                 vp,
                 video,
                 block,
+                0.0,
                 &SubtitleStyle {
                     vertical_offset_pct: pct,
                     ..SubtitleStyle::default()
@@ -1074,7 +1338,7 @@ mod tests {
             vertical_offset_pct: -0.2,
             ..SubtitleStyle::default()
         };
-        let r = place(viewport, video, (300.0, 40.0), &s, 0.0);
+        let r = place(viewport, video, (300.0, 40.0), 0.0, &s, 0.0);
         assert_eq!(r.bottom(), 500.0, "clamped to the viewport");
         assert_eq!(r.y, 460.0);
     }
@@ -1100,8 +1364,8 @@ mod tests {
             w: 1000.0,
             h: 480.0,
         }; // small bars
-        let a = place(viewport, wide, (300.0, 40.0), &s, 0.0);
-        let b = place(viewport, tall, (300.0, 40.0), &s, 0.0);
+        let a = place(viewport, wide, (300.0, 40.0), 0.0, &s, 0.0);
+        let b = place(viewport, tall, (300.0, 40.0), 0.0, &s, 0.0);
         assert_ne!(a.y, b.y, "the text follows the picture, not the window");
         assert_eq!(a.bottom(), wide.bottom() - 20.0);
         assert_eq!(b.bottom(), tall.bottom() - 20.0);
@@ -1114,8 +1378,8 @@ mod tests {
             vertical_offset_pct: -0.06, // down in the bar, where the controls are
             ..SubtitleStyle::default()
         };
-        let free = place(vp, video, (300.0, 40.0), &s, 0.0);
-        let lifted = place(vp, video, (300.0, 40.0), &s, 80.0);
+        let free = place(vp, video, (300.0, 40.0), 0.0, &s, 0.0);
+        let lifted = place(vp, video, (300.0, 40.0), 0.0, &s, 80.0);
         assert_eq!(free.bottom(), 480.0);
         assert_eq!(lifted.bottom(), 420.0, "lifted above the 80px controls");
         assert!(lifted.bottom() < free.bottom());
@@ -1125,8 +1389,8 @@ mod tests {
             ..SubtitleStyle::default()
         };
         assert_eq!(
-            place(vp, video, (300.0, 40.0), &high, 80.0).bottom(),
-            place(vp, video, (300.0, 40.0), &high, 0.0).bottom()
+            place(vp, video, (300.0, 40.0), 0.0, &high, 80.0).bottom(),
+            place(vp, video, (300.0, 40.0), 0.0, &high, 0.0).bottom()
         );
     }
 
@@ -1139,25 +1403,29 @@ mod tests {
     fn to_params_resolves_percentages_to_physical_pixels() {
         let s = SubtitleStyle {
             size_pct: 0.05,
-            outline_pct: 0.004,
-            background_radius_pct: 0.01,
-            background_pad_pct: 0.02,
+            outline_ratio: 0.004,
+            background_radius_ratio: 0.01,
+            background_pad_ratio: 0.02,
             max_line_pct: 0.8,
             shadow: Some(Shadow {
-                dx_pct: 0.002,
-                dy_pct: 0.004,
-                blur_pct: 0.006,
+                dx_ratio: 0.002,
+                dy_ratio: 0.004,
+                blur_ratio: 0.006,
                 color: [0, 0, 0, 200],
             }),
             ..SubtitleStyle::default()
         };
         let p1 = s.to_params((1920.0, 1080.0));
+        // Size is % of viewport HEIGHT...
         assert_eq!(p1.size_px, 54.0);
-        assert!((p1.outline_px - 4.32).abs() < 0.01);
-        assert!((p1.background_radius_px - 10.8).abs() < 0.01);
+        // ...and every decoration is a fraction of THAT, not of the viewport. This is the
+        // unit rule: change the size and the outline keeps its proportion, so the size
+        // slider stops being a re-tune-everything slider.
+        assert!((p1.outline_px - 0.004 * 54.0).abs() < 0.01);
+        assert!((p1.background_radius_px - 0.01 * 54.0).abs() < 0.01);
         assert_eq!(p1.max_line_px, 1536.0, "max line is % of WIDTH");
         let sh = p1.shadow.unwrap();
-        assert!((sh.dy - 4.32).abs() < 0.01);
+        assert!((sh.dy - 0.004 * 54.0).abs() < 0.01);
 
         // The same style at 2x: every pixel number doubles (except width-derived ones,
         // which follow the width).
@@ -1185,7 +1453,7 @@ mod tests {
     fn oversized_blocks_never_resolve_off_screen() {
         let (vp, video) = letterboxed();
         let s = SubtitleStyle::default();
-        let r = place(vp, video, (2000.0, 900.0), &s, 0.0);
+        let r = place(vp, video, (2000.0, 900.0), 0.0, &s, 0.0);
         assert_eq!(r.x, 0.0, "wider than the viewport pins to the left");
         assert_eq!(r.y, 0.0, "taller than the viewport pins to the top");
     }
@@ -1217,6 +1485,7 @@ mod zoom_placement_tests {
             viewport,
             video,
             (600.0, 120.0),
+            0.0,
             &SubtitleStyle::default(),
             0.0,
         );

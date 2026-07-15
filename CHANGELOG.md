@@ -21,11 +21,14 @@ with any pre-release suffix carried only by the tag.
   (`café`, `señor`) is never touched.
 
 - **Subtitle appearance is now yours to set** (macOS): a new **Settings ▸ Subtitles** tab
-  with font, size, colour and opacity, outline, drop shadow, background and rounded
-  corners, and vertical position — including **below the picture, down in the black
-  letterbox bar**, which almost no player lets you do. A live preview shows exactly what
-  you'll get, drawn by the same renderer that draws the real thing, so it can't mislead
-  you. Your choices are remembered.
+  with font, size, colour and opacity, outline, drop shadow, background, and vertical
+  position — including **below the picture, down in the black letterbox bar**, which
+  almost no player lets you do. A live preview shows exactly what you'll get, drawn by the
+  same renderer that draws the real thing, so it can't mislead you. Your choices are
+  remembered.
+- **Outline, shadow, and background now scale with the text.** Change the subtitle size
+  and everything else keeps its proportions, instead of an outline that was right at one
+  size looking like a hairline at the next.
 
 ### Changed
 - **`C` now reliably shows subtitles when a file has them.** It prefers a forced/signs

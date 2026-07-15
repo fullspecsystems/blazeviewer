@@ -35,18 +35,36 @@ use crate::subtitle::{place, Rect, SubtitleStyle};
 /// size the slider allows.
 const SAMPLE: &[&str] = &["The quick brown fox", "jumps over the lazy dog"];
 
-/// The picture's aspect inside the preview frame.
+/// The picture's aspect inside the virtual frame.
 ///
 /// **2.39:1** — the widest common cinema ratio, chosen so there is always a generous
-/// letterbox to demonstrate the negative vertical offset against. A 16:9 sample in a 16:9
-/// swatch would have no bars at all, and the setting the preview exists to explain would
-/// be invisible.
+/// letterbox to demonstrate the negative vertical offset against. In a 16:9 frame it
+/// leaves a 12.5% bar top and bottom, which is exactly what a scope film looks like on a
+/// normal display.
 const PICTURE_ASPECT: f32 = 2.39;
+
+/// The frame the style is resolved against, as an aspect. **16:9 — a display.**
+const FRAME_ASPECT: f32 = 16.0 / 9.0;
 
 /// Render one preview frame: `w * h` RGBA8, top-left origin.
 ///
 /// `letterbox` is the user's *real* letterbox colour, so the bars match what they will
 /// actually see behind a film rather than an invented black.
+///
+/// ## The swatch may be shorter than the frame, and then it shows the frame's BOTTOM
+///
+/// The owner wants the swatch wide and short (2026-07-15). But **the frame's height is
+/// what sets the text size** — `size_pct` is a % of viewport height — so simply
+/// squashing the swatch would shrink the sample text to ~8 pt and make the outline and
+/// shadow, the very things you came here to judge, impossible to see.
+///
+/// So the style is resolved against a **virtual 16:9 frame** at the swatch's width, and
+/// the swatch shows that frame's bottom. The text renders at the size it would really be
+/// on a display, and the strip you see is the strip subtitles actually live in — which is
+/// what "preview the subtitles themselves, not an accurate portrayal of a film" asks for.
+///
+/// The cost is honest: with a big **positive** offset the text climbs out of the visible
+/// strip. It is on screen in reality — the preview just isn't showing that far up.
 pub fn render_preview(
     raster: &mut SubtitleRasterizer,
     style: &SubtitleStyle,
@@ -55,20 +73,38 @@ pub fn render_preview(
     letterbox: [u8; 3],
 ) -> Vec<u8> {
     let (w, h) = (w.max(1), h.max(1));
-    let viewport = (w as f32, h as f32);
+    // Never shorter than the swatch: a taller-than-16:9 swatch is simply the whole frame.
+    let frame_h = (w as f32 / FRAME_ASPECT).max(h as f32);
+    let viewport = (w as f32, frame_h);
     let video = picture_rect(viewport);
-    let mut rgba = backdrop(w, h, video, letterbox);
+    let fh = frame_h.ceil() as u32;
+    let mut rgba = backdrop(w, fh, video, letterbox);
 
     let lines: Vec<String> = SAMPLE.iter().map(|s| s.to_string()).collect();
     let params = style.to_params(viewport);
-    let Some(bmp) = raster.render(&lines, &params) else {
-        return rgba; // nothing to draw is a normal answer (an empty sample can't happen)
-    };
-    // The real placement math, so the vertical offset means here exactly what it means on
-    // a film. `controls_h` is 0: Settings has no transport bar.
-    let at = place(viewport, video, (bmp.w as f32, bmp.h as f32), style, 0.0);
-    blend(&mut rgba, w, h, &bmp.rgba, bmp.w, bmp.h, at.x, at.y);
-    rgba
+    if let Some(bmp) = raster.render(&lines, &params) {
+        // The real placement math, so the vertical offset means here exactly what it means
+        // on a film. `controls_h` is 0: Settings has no transport bar.
+        let at = place(
+            viewport,
+            video,
+            (bmp.w as f32, bmp.h as f32),
+            bmp.pad as f32,
+            style,
+            0.0,
+        );
+        blend(&mut rgba, w, fh, &bmp.rgba, bmp.w, bmp.h, at.x, at.y);
+    }
+    crop_bottom(rgba, w, fh, h)
+}
+
+/// The bottom `h` rows of a `w * fh` frame. A no-op when the frame already fits.
+fn crop_bottom(rgba: Vec<u8>, w: u32, fh: u32, h: u32) -> Vec<u8> {
+    if h >= fh {
+        return rgba;
+    }
+    let start = ((fh - h) as usize) * (w as usize) * 4;
+    rgba[start..].to_vec()
 }
 
 /// Where the "film" sits in the preview frame: [`PICTURE_ASPECT`], centred, letterboxed.
@@ -238,7 +274,7 @@ mod tests {
         let shown = render_preview(&mut r, &SubtitleStyle::default(), w, h, [0, 0, 0]);
         let invisible = SubtitleStyle {
             color: [255, 255, 255, 0],
-            outline_pct: 0.0,
+            outline_ratio: 0.0,
             ..Default::default()
         };
         let blank = render_preview(&mut r, &invisible, w, h, [0, 0, 0]);
@@ -311,14 +347,11 @@ mod tests {
             return;
         };
         let mut r = SubtitleRasterizer::new();
-        // 16:9 — a display. A 2.39:1 picture inside it letterboxes, which is the case
-        // the preview exists to show. (A swatch WIDER than 2.39 pillarboxes instead and
-        // has no bars at all — which is exactly what a first dump at 760x300 showed.)
-        let (w, h) = (640u32, 360u32);
+        // The real pane geometry: full content width, wide and short, at 2x backing.
+        let (w, h) = (1000u32, 380u32);
 
         let mut shots: Vec<(&str, SubtitleStyle)> = Vec::new();
         shots.push(("default", SubtitleStyle::default()));
-
         shots.push((
             "in-the-letterbox",
             SubtitleStyle {
@@ -326,28 +359,27 @@ mod tests {
                 ..Default::default()
             },
         ));
-
         shots.push((
             "background",
             SubtitleStyle {
                 background: [0, 0, 0, 153],
-                outline_pct: 0.0,
+                outline_ratio: 0.0,
                 ..Default::default()
             },
         ));
-
+        // The #7 regression, as a pair to eyeball: the text must not move between these.
+        shots.push(("shadow-off", SubtitleStyle::default()));
         shots.push((
-            "shadow",
+            "shadow-on",
             SubtitleStyle {
                 shadow: Some(crate::subtitle::Shadow::default()),
                 ..Default::default()
             },
         ));
-
         shots.push((
             "big-yellow",
             SubtitleStyle {
-                size_pct: 0.10,
+                size_pct: crate::subtitle::MAX_SIZE_PCT,
                 color: [255, 235, 59, 255],
                 ..Default::default()
             },
