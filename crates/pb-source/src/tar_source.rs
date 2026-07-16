@@ -287,6 +287,8 @@ fn index_tar<R: Read + Seek>(
     let metered = MeteredReader {
         inner: reader,
         quota: Arc::clone(&quota),
+        total: 0,
+        max_total: limits.max_expanded,
     };
     let mut archive = tar::Archive::new(metered);
     // Last-wins by name (tar append mode): a BTreeMap both dedups and hands
@@ -373,13 +375,14 @@ fn stream_tarball<R: Read + 'static>(
     let metered = MeteredReader {
         inner: decompressor(kind, input)?,
         quota: Arc::clone(&quota),
+        total: 0,
+        max_total: limits.max_expanded,
     };
     let mut archive = tar::Archive::new(metered);
     let cancel = || progress.is_some_and(|p| p.is_cancelled());
 
     let mut latest: BTreeMap<String, Vec<u8>> = BTreeMap::new();
     let mut resident = 0u64;
-    let mut expanded = 0u64;
     let mut walked = 0usize;
     let mut name_bytes = 0u64;
     {
@@ -399,15 +402,11 @@ fn stream_tarball<R: Read + 'static>(
                     "the archive has too many entries".into(),
                 ));
             }
-            // Our own data reads below are exempt from the metadata quota.
+            // Our own data reads below are exempt from the metadata quota (the
+            // expanded-work counter inside MeteredReader keeps running — it
+            // caps every decompressed byte, whoever pulls it).
             quota.store(u64::MAX, Ordering::Relaxed);
             let size = entry.size();
-            expanded = expanded.saturating_add(size);
-            if expanded > limits.max_expanded {
-                return Err(OpenError::Corrupt(
-                    "the archive expands past the sanity limit".into(),
-                ));
-            }
             let name = normalize_entry_name(&String::from_utf8_lossy(&entry.path_bytes()));
             let keep = entry.header().entry_type().is_file()
                 && sane_name(&name)
@@ -459,23 +458,19 @@ fn stream_tarball<R: Read + 'static>(
     // marker, but gzip/bzip2/zstd validate their trailing checksums only
     // when the stream is read through — and the progress bar's compressed
     // count only reaches the file length once everything is consumed.
-    // Bounded by the same cancel checks and expanded-work cap.
+    // Reads stay on the metered reader (quota disarmed), so the drain counts
+    // toward the same expanded-work cap as everything else.
     {
-        let mut codec = archive.into_inner().into_inner();
+        quota.store(u64::MAX, Ordering::Relaxed);
+        let mut metered = archive.into_inner();
         let mut staging = [0u8; 64 * 1024];
         loop {
             if cancel() {
                 return Err(OpenError::Cancelled);
             }
-            let n = codec.read(&mut staging).map_err(stream_read_err)?;
+            let n = metered.read(&mut staging).map_err(stream_read_err)?;
             if n == 0 {
                 break;
-            }
-            expanded = expanded.saturating_add(n as u64);
-            if expanded > limits.max_expanded {
-                return Err(OpenError::Corrupt(
-                    "the archive expands past the sanity limit".into(),
-                ));
             }
         }
     }
@@ -693,15 +688,18 @@ impl<R: Read> Read for CountingReader<R> {
 /// — and therefore allocate — *inside* one iterator step. The open arms `quota`
 /// with [`META_QUOTA`] before each `next()` and disarms (`u64::MAX`) for its own
 /// entry-data reads; seeks (the lazy model's data skip) bypass it entirely.
+///
+/// It is also the **expanded-work counter**: `total` accumulates every byte the
+/// consumer pulls — headers, long-name/PAX metadata, padding, entry data, and
+/// the trailing drain alike — against `max_total`. Counting at this one choke
+/// point (rather than summing declared entry sizes) is what stops a
+/// zero-payload metadata bomb: a million entries of pure header/metadata bytes
+/// expand real decompressor output without ever appearing in an entry size.
 struct MeteredReader<R> {
     inner: R,
     quota: Arc<AtomicU64>,
-}
-
-impl<R> MeteredReader<R> {
-    fn into_inner(self) -> R {
-        self.inner
-    }
+    total: u64,
+    max_total: u64,
 }
 
 impl<R: Read> Read for MeteredReader<R> {
@@ -717,6 +715,13 @@ impl<R: Read> Read for MeteredReader<R> {
         let n = self.inner.read(&mut buf[..want])?;
         if quota != u64::MAX {
             self.quota.fetch_sub(n as u64, Ordering::Relaxed);
+        }
+        self.total = self.total.saturating_add(n as u64);
+        if self.total > self.max_total {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "the archive expands past the sanity limit",
+            ));
         }
         Ok(n)
     }
@@ -913,7 +918,17 @@ impl<R: Read> MultiFrameZstd<R> {
                         pending: &mut self.pending,
                         source: &mut self.source,
                     };
-                    io::copy(&mut (&mut rest).take(u64::from(length)), &mut io::sink())?;
+                    let copied =
+                        io::copy(&mut (&mut rest).take(u64::from(length)), &mut io::sink())?;
+                    // A short drain means the declared payload runs past EOF —
+                    // a truncated file, not a clean end (the next probe would
+                    // otherwise mistake it for one).
+                    if copied != u64::from(length) {
+                        return Err(io::Error::new(
+                            io::ErrorKind::UnexpectedEof,
+                            "truncated zstd skippable frame",
+                        ));
+                    }
                     continue;
                 }
                 Err(e) => return Err(io::Error::new(io::ErrorKind::InvalidData, e.to_string())),
@@ -1518,6 +1533,58 @@ mod tests {
             Err(OpenError::Corrupt(msg)) => {
                 assert!(msg.contains("metadata"), "quota error expected, got: {msg}");
             }
+            other => panic!("expected Corrupt, got {:?}", other.err()),
+        }
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Header and metadata bytes count toward the work cap too (codex review of
+    /// the implementation, P1): a bomb of zero-payload entries expands real
+    /// decompressor output that per-entry size accounting never sees.
+    #[test]
+    fn eager_open_counts_header_bytes_toward_the_work_cap() {
+        // Four empty files = 4 x 512-byte headers + the 1024-byte end marker:
+        // ~3 KiB of pure header output, zero payload bytes.
+        let tar = tar_bytes(&[
+            ("a.txt", b""),
+            ("b.txt", b""),
+            ("c.txt", b""),
+            ("d.txt", b""),
+        ]);
+        let path = write_file("metawork", "tar.gz", &gz(&tar));
+        let limits = OpenLimits {
+            max_expanded: 1024,
+            ..OpenLimits::default()
+        };
+        match TarSource::open_compressed_with_limits(
+            &path,
+            ArchiveKind::TarGz,
+            is_img,
+            None,
+            u64::MAX,
+            &limits,
+        ) {
+            Err(OpenError::Corrupt(msg)) => assert!(msg.contains("expands"), "{msg}"),
+            other => panic!("expected Corrupt, got {:?}", other.err()),
+        }
+        // A sane cap admits the same archive (it just has no images).
+        let src =
+            TarSource::open_compressed(&path, ArchiveKind::TarGz, is_img, None, u64::MAX).unwrap();
+        assert!(src.is_empty());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A skippable frame whose declared payload runs past EOF is a truncated
+    /// file, not a clean end (codex review of the implementation, P2).
+    #[test]
+    fn zstd_truncated_skippable_frame_is_corrupt() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&0x184D2A50u32.to_le_bytes());
+        bytes.extend_from_slice(&100u32.to_le_bytes()); // declares 100 bytes...
+        bytes.extend_from_slice(b"SHORT"); // ...provides 5
+        let path = write_file("skiptrunc", "tar.zst", &bytes);
+        match TarSource::open_compressed(&path, ArchiveKind::TarZst, is_img, None, u64::MAX) {
+            Err(OpenError::Corrupt(msg)) => assert!(msg.contains("skippable"), "{msg}"),
             other => panic!("expected Corrupt, got {:?}", other.err()),
         }
         let _ = std::fs::remove_file(&path);
