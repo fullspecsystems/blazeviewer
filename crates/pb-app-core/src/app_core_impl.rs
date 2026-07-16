@@ -7858,6 +7858,21 @@ impl AppCore {
     /// correct tone-map on SDR, never an RGBA8 clip.
     fn present_video_frame(&mut self, frame: &pb_decode::VideoFrame) {
         let item = self.video.as_ref().map(|v| v.item());
+        // The metadata half of a present (owner report 2026-07-16): video frames
+        // stream around `present_item`, and the first frame's `mark_resolved`
+        // below makes a still-decoding poster skip its own present when it lands
+        // — so a video started before the poster (P beats a slow SMB poster
+        // decode every time) left `current` unset for the whole session, and
+        // with it the info line, the `i` toggle, the hover reveal, and the
+        // playback controls (`arm_video_line_flash` requires metadata). The
+        // poster's meta still reaches `meta_cache` when its decode completes
+        // (`drain_results` caches it unconditionally) — adopt it the moment it
+        // exists.
+        if let Some(item) = item {
+            if self.current.is_none() && self.displayed_item == Some(item) {
+                self.current = self.meta_cache.get(&item).cloned();
+            }
+        }
         {
             let Some(a) = self.renderer.as_mut() else {
                 return;
@@ -11678,6 +11693,114 @@ mod tests {
                 "{name}: no AVPlayer is commanded"
             );
         }
+    }
+
+    /// The owner's missing-chrome report (2026-07-16): pressing `P` before the
+    /// poster decode lands (an SMB movie's poster takes seconds; `P` always wins)
+    /// left `current` unset for the WHOLE playback — the Session route streams
+    /// frames around `present_item`, and the first frame's `mark_resolved` makes
+    /// the late poster skip its present. With no `current` there is no info line,
+    /// no `i`, no hover reveal, no playback controls. The fix: a presented video
+    /// frame adopts the poster's metadata from `meta_cache` the moment it lands.
+    #[cfg(all(target_os = "macos", feature = "ffvideo"))]
+    #[test]
+    fn a_video_frame_adopts_late_poster_meta_so_the_controls_can_show() {
+        let mut core = test_core();
+        core.native_info = true;
+        core.info_line = false;
+        core.viewport.width = 800;
+        core.viewport.height = 1000;
+        core.source = Arc::new(pb_source::FsSource::new(vec![std::path::PathBuf::from(
+            "/nope/movie.mkv",
+        )]));
+        core.displayed_item = Some(0);
+        core.toggle_play_pause(); // P wins the race: no poster has presented yet
+        assert!(core
+            .video
+            .as_ref()
+            .is_some_and(|v| v.as_session().is_some()));
+        assert!(core.current.is_none(), "the poster hasn't landed");
+
+        let frame = crate::video::VideoFrame {
+            session_id: crate::video::VideoSessionId(core.video_seq),
+            seek_generation: crate::video::SeekGeneration::FIRST,
+            pts: Duration::ZERO,
+            width: 2,
+            height: 2,
+            pixels: vec![0; 16],
+            format: pb_decode::PixelFormat::Rgba8,
+            color: crate::video::VideoColorInfo::srgb(),
+        };
+        // Frames present before the poster lands: nothing to adopt, no controls yet.
+        core.present_video_frame(&frame);
+        assert!(core.current.is_none());
+        core.video_hover_reveal(900.0);
+        assert!(
+            !core.info_line_visible(),
+            "no metadata yet — nothing to show"
+        );
+
+        // The poster decode completes off-thread; drain_results caches its meta.
+        core.meta_cache.insert(
+            0,
+            crate::meta::PhotoMeta {
+                rel: "movie.mkv".into(),
+                w: 1920,
+                h: 1080,
+                codec: "MKV",
+                animated: None,
+            },
+        );
+        // The very next presented frame adopts it — chrome comes alive mid-play.
+        core.present_video_frame(&frame);
+        assert!(core.current.is_some(), "the late poster's meta is adopted");
+        core.video_hover_reveal(900.0);
+        assert!(
+            core.info_line_visible(),
+            "hover now reveals the playback controls"
+        );
+    }
+
+    /// Chrome parity on the new default route (owner report 2026-07-16): an MKV
+    /// playing on the Session route must still (a) report `video_session_active`
+    /// — the SwiftUI shell's gate for the playback row/scrubber — and (b) reveal
+    /// the controls line on a bottom-zone hover, exactly like the old
+    /// sample-buffer route did.
+    #[cfg(all(target_os = "macos", feature = "ffvideo"))]
+    #[test]
+    fn session_mkv_reports_active_and_reveals_the_controls() {
+        let mut core = test_core();
+        core.native_info = true;
+        core.info_line = false;
+        core.viewport.width = 800;
+        core.viewport.height = 1000;
+        core.source = Arc::new(pb_source::FsSource::new(vec![std::path::PathBuf::from(
+            "/nope/clip.mkv",
+        )]));
+        core.displayed_item = Some(0);
+        core.current = Some(crate::meta::PhotoMeta {
+            rel: "clip.mkv".into(),
+            w: 64,
+            h: 64,
+            codec: "MKV",
+            animated: None,
+        });
+        core.toggle_play_pause(); // the real routing → Session backend
+        assert!(
+            core.video
+                .as_ref()
+                .is_some_and(|v| v.as_session().is_some()),
+            "MKV plays on the Session route"
+        );
+        assert!(
+            core.video_session_active(),
+            "the SwiftUI chrome gate must see the session"
+        );
+        core.video_hover_reveal(900.0);
+        assert!(
+            core.info_line_visible(),
+            "bottom-zone hover reveals the controls line"
+        );
     }
 
     /// The parked sample-buffer presenter stays reachable — `PB_SAMPLE_BUFFER=1`

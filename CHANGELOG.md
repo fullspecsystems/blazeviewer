@@ -12,6 +12,11 @@ with any pre-release suffix carried only by the tag.
   renderer as everything else, instead of a path that quietly dropped a few frames every
   second on high-refresh displays. Audio-track switching (`A` / **Playback ▸ Audio**), the
   tick on the playing track, subtitles, seeking, and resume all carry over to the new path.
+- **The info line and playback controls could vanish for an entire video.** Pressing play
+  before the poster frame finished loading (near-guaranteed for a movie on a network share)
+  left the app without the file's metadata, silently disabling the info line, the `i`
+  toggle, and the on-hover playback controls until the video was closed. The metadata is
+  now picked up mid-playback the moment it's ready.
 - **Occasional stutters on videos played from a network share.** Playback now buffers up to
   ~1 second of decoded video ahead (within the same memory budget as before), so a brief
   slow read from a NAS/SMB share no longer outlasts the buffer and shows as a stutter every
