@@ -65,10 +65,20 @@ final class SampleBufferPresenter {
     /// The seek currently in flight (plan §H1c). Its `epoch` gates every callback — the
     /// video anchor, the audio completion, the reader completion — so a stale seek can't
     /// re-anchor the clock after a newer one has taken over (the scrubber issues up to
-    /// ~16/s, so this is expected traffic). Its `desiredRateAfterSeek` is the rate to
-    /// restore at the post-seek anchor; its `target`/`source` label the §0 trace. Starts as
-    /// the initial feed (epoch 0, play); rebuilt per seek in `performSeek`.
+    /// ~16/s, so this is expected traffic). Its `target`/`source` label the §0 trace. Starts
+    /// as the initial feed (epoch 0, play); rebuilt per seek in `performSeek`.
     private var seek: SeekContext = .initial(desiredRate: 1.0)
+    /// The user's **actual play intent** — `1` playing, `0` paused — updated ONLY by explicit
+    /// commands (play/pause/step/EOS), never by a seek's clock-hold. The post-seek anchor
+    /// restores THIS, not `synchronizer.rate`.
+    ///
+    /// ⚠ The §0 trace (2026-07-15) named this bug: a scrubber *click* fires two seeks to the
+    /// same target (`onChanged` then `onEnded`); the first sets `synchronizer.rate = 0` to
+    /// hold the clock, and the second — reading `synchronizer.rate` to capture the pre-seek
+    /// rate — saw that **hold** and captured "paused", so the seek settled at rate 0. Reading
+    /// a preserved intent instead of the transient held rate is the fix (it also makes a
+    /// pause pressed *during* a seek stick, since the anchor reads this live).
+    private var desiredPlaybackRate: Float = 1.0
 
     init(
         sessionId: UInt64, scaleMode: UInt8, muted: Bool, startSecs: Double,
@@ -232,7 +242,10 @@ final class SampleBufferPresenter {
             canvas?.revealVideoLayer()
             pbTrace("sample-buffer video \(sessionId): revealed")
         }
-        let rate = seek.desiredRateAfterSeek
+        // Restore the user's LIVE intent, not a value captured at seek-issue time — so a
+        // pause pressed while the seek was settling sticks, and the click double-seek can't
+        // latch rate 0 (see `desiredPlaybackRate`).
+        let rate = desiredPlaybackRate
         synchronizer.setRate(rate, time: anchor)
         model?.nativeVideoStateChanged(sessionId, state: rate != 0 ? 2 : 3)
     }
@@ -240,6 +253,7 @@ final class SampleBufferPresenter {
     private func onEnded() {
         guard !ended else { return }
         ended = true
+        desiredPlaybackRate = 0 // EOS parks; a scrub-back stays paused, replay (resume) restores
         synchronizer.rate = 0 // park the last frame (AVSampleBufferDisplayLayer holds it)
         pbTrace("sample-buffer video \(sessionId): EOS — parking last frame")
         model?.nativeVideoEnded(sessionId)
@@ -258,15 +272,16 @@ final class SampleBufferPresenter {
     // MARK: - Command facade (mirrors NativeVideoPlayer)
 
     func pause() {
+        desiredPlaybackRate = 0 // the user's intent — the anchor restores THIS, not the hold
         synchronizer.rate = 0
         model?.nativeVideoStateChanged(sessionId, state: 3) // Paused
     }
 
     func resume() {
+        desiredPlaybackRate = 1.0 // intent = play; the replay/anchor restores it
         if ended {
-            // Replay: set the play rate first so the replay seek captures "was
-            // playing" and re-anchors at rate 1 on completion (avoids the async
-            // seek landing at rate 0 and overriding a resume set here).
+            // Replay: the replay seek's anchor reads `desiredPlaybackRate` (now 1), so it
+            // re-anchors at rate 1 without racing an async seek landing.
             ended = false
             synchronizer.rate = 1.0
             seek(toFraction: 0)
@@ -304,6 +319,7 @@ final class SampleBufferPresenter {
     /// display layer buffers ahead while paused, so a forward step usually lands
     /// from the buffer; backward re-seeks to the keyframe and decodes forward.
     func step(forward: Bool) {
+        desiredPlaybackRate = 0 // a step leaves playback paused — the anchor must park, not run
         synchronizer.rate = 0
         let cur = max(0, CMTimeGetSeconds(synchronizer.currentTime()))
         let frame = fps > 0 ? 1.0 / fps : 1.0 / 30.0
@@ -320,8 +336,11 @@ final class SampleBufferPresenter {
     private func performSeek(toSeconds secs: Double, source: SeekSource, report: UInt64?) {
         let target = max(0.0, min(durationSecs > 0 ? durationSecs : secs, secs))
         ended = false
-        // The rate to restore after the seek settles — the user's intent, preserved.
-        let desired: Float = synchronizer.rate != 0 ? 1.0 : 0.0
+        // The rate to restore after the seek settles is the user's PRESERVED intent — NOT
+        // `synchronizer.rate`, which a prior in-flight seek may have already forced to 0 (the
+        // click double-seek bug the §0 trace found). Carried for the trace; the anchor reads
+        // the live `desiredPlaybackRate`.
+        let desired = desiredPlaybackRate
         let epoch = seek.epoch &+ 1
         seek = SeekContext(
             epoch: epoch, target: target, desiredRateAfterSeek: desired, source: source)

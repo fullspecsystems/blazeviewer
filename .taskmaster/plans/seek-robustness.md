@@ -1,7 +1,8 @@
 # Seek robustness — fix the pre-roll clock, and make seeking regression-testable
 
-> Status: **PLAN v2 — instrumentation + testability + independent fixes LANDED (2026-07-15);
-> the clock-strategy spike is owner-gated** · Owner: JD
+> Status: **PLAN v2 — §0 trace run; H1 (pre-roll starvation) REFUTED; the real pause bug (a
+> desired-rate capture race) FIXED (2026-07-15, owner-verification pending). Residual: a ~2.3 s
+> cold-seek freeze over SMB (S3 territory, not a deadlock).** · Owner: JD
 > Scope: the **macOS sample-buffer route** (MKV/WebM), which is what `97f80bb4` changed.
 > AVPlayer (MP4/MOV) owns its own clock and is not implicated — *prove that in §0*, because
 > it splits the diagnosis in half.
@@ -24,12 +25,30 @@
 > - **T3/T4** — checked-in `longgop.mkv`/`shortgop.mkv` fixtures + demux seek-contract tests
 >   (`cargo test -p pb-decode --features ffvideo`, 12 pass). **T5** — both run on the mac CI lane.
 >
-> **NOT done — owner-gated, must not be picked on paper (plan order 3, 5, 8):**
-> - **H1b — the clock-strategy A/B spike (S1/S2/S3):** the actual seek *deadlock* fix. Blocked
->   on the §0 trace over a real long-GOP MKV (below). This is the headline symptom.
+> **§0 VERDICT (2026-07-15, trace on Ad Astra, the 10.4 s-GOP MKV) — H1 REFUTED, root cause
+> found and fixed.** The trace killed the pre-roll-starvation hypothesis outright: `provide`
+> **re-fires** after `isReadyForMoreMediaData==false` (the display layer drains the
+> DoNotDisplay pre-roll even at rate 0), and the `ANCHOR` **does** fire — no deadlock. The
+> pause was a **desired-rate capture race**: a scrubber *click* issues two seeks to the same
+> target (`onChanged` then `onEnded`, ~1 ms apart); the first sets `synchronizer.rate = 0` to
+> hold the clock, and the second captured its post-seek rate from that **held** `synchronizer.rate`
+> and read "paused", so the seek settled at rate 0 (= frozen picture **and** silence — the
+> plan's "one bug, three hats", the hat being the clock's *rate capture*, not its drain). Fix
+> (`SampleBufferPresenter`, this session): a preserved `desiredPlaybackRate` intent, updated
+> only by play/pause/step/EOS and read **live at the anchor** — so consecutive seeks can't
+> latch rate 0, and a pause pressed mid-seek sticks. **Owner-verification pending.**
+>
+> Residual (measured, NOT the pause): the first seek to a cold position costs ~2.3 s — SMB
+> demux seek + a 154-frame pre-roll decode — a one-time freeze *before* playback resumes.
+> That is the S3 "bound the pre-roll" / network-seek territory below, now clearly separable
+> from the pause and no longer the headline.
+>
+> **NOT done (plan order 3, 5, 8):**
 > - **T2 — renderer-harness proof gate** (does a compressed fixture decode headlessly?).
-> - **The 1080p/4K pre-roll budget** number (`SeekFramePolicy.effectiveTarget`'s `budgetSecs`,
->   wired to `nil` today) — needs corpus measurement; 320×240 fixtures can't choose it.
+> - **S3 pre-roll budget / the ~2.3 s cold-seek freeze** (`SeekFramePolicy.effectiveTarget`'s
+>   `budgetSecs`, `nil` today) — the residual above; needs corpus measurement. Not a deadlock.
+> - **H1b clock-strategy spike (S1/S2/S3)** — was the presumed deadlock fix; **the trace shows
+>   there is no deadlock to drain**, so this is demoted to the S3 pre-roll-budget optimization.
 >
 > **Repro corpus identified (`/Volumes/Media/Movies`, 2026-07-15):** the 184 `*.mkv` there are
 > all 1080p BluRay **H.264 with a ~10.4 s GOP** (x264 default 250-frame keyint @ 23.976 fps —

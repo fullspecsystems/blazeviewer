@@ -48,6 +48,10 @@ with any pre-release suffix carried only by the tag.
   remembered.
 
 ### Fixed
+- **Seeking no longer pauses the video** (macOS). Clicking or dragging the scrubber on an
+  MKV/WebM would stop playback dead — a click fires two internal seeks in a millisecond, and
+  the second one mistook the first's momentary clock-hold for "the user paused." Playback now
+  keeps whatever play/pause state it had across a seek, and the sound comes back with it.
 - **Seeking forward in an MKV now actually goes forward.** Pressing `→` jumped the film
   *back* to the nearest 5-second mark instead of advancing 2 seconds; seeking backward was
   unaffected, which is why it looked so strange.
