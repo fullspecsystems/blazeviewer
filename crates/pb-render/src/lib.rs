@@ -269,6 +269,22 @@ pub trait Renderer {
     /// concentrically. Its own overlay layer. `None` hides it.
     fn set_tree(&mut self, panel: Option<(&[u8], u32, u32)>, margin: u32);
 
+    /// Set or clear the **subtitle overlay** (task #90.5): the rasterized cue block from
+    /// `pb_app_core::SubtitleEngine`, drawn at an absolute `x`/`y` in **physical px**
+    /// (top-left origin).
+    ///
+    /// Unlike every other overlay here, this one is **not** an inset from an edge — a
+    /// subtitle tracks the *picture*, not the window, so the core places it (see
+    /// `pb_app_core::subtitle::place`) and hands the result over already resolved. `y` may
+    /// be slightly negative: placement clamps the text's box on screen, not the bitmap's,
+    /// so a soft shadow may bleed off the top rather than push the words down.
+    ///
+    /// ⚠ The bitmap is **premultiplied** RGBA8 (`pb_hud::subtitle`), not the straight alpha
+    /// the other CPU overlays use — it composites through its own premultiplied-blend
+    /// pipeline. Composited above the photo/video but **below** all chrome, so a toast or
+    /// the info line stays readable over a cue. `None` hides it.
+    fn set_subtitle_overlay(&mut self, panel: Option<(&[u8], u32, u32)>, x: f32, y: f32);
+
     /// The renderer's wgpu device, so the shell can build an `egui-wgpu` renderer that
     /// **shares** this device (task #54 Phase 4: the egui rich-panel overlay renders
     /// into a shell-owned offscreen texture and hands it back via

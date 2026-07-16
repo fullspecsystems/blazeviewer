@@ -553,6 +553,10 @@ struct App {
     /// never relying on redraw self-pump, which stalls on Linux (the pill would otherwise linger
     /// until the next input event). `None` when static (hover-pinned) or hidden.
     play_hint_wake: Option<Instant>,
+    /// The subtitle generation this shell has already handed to the renderer (task #90.5).
+    /// A cue lives for seconds, so this skips the re-upload on all but a few frames — the
+    /// `thumb_gen` contract, same as the macOS host's `NSImage` cache.
+    subtitle_gen: u64,
 }
 
 /// A deferred dialog open (see [`App::pending_dialog`]). Carries only what the opener
@@ -730,10 +734,12 @@ impl App {
             // Audio track selection (task #99) is macOS-only so far — this shell has no
             // player to ask what it is playing, and the tick is reported, never derived.
             audio_active: None,
-            // Subtitles (task #90) are wired through the core, but this shell has no
-            // presenter yet — `Renderer::set_subtitle_overlay` is the remaining piece.
-            // Off costs nothing, so the state rides along until it exists.
-            subtitles: Default::default(),
+            // Subtitles (task #90): start from the user's persisted preference, never from
+            // `Default`. This is post-mortem bug #2 — `subtitles = true` on disk launching
+            // with captions off, so the preference looks like it never saved. It was latent
+            // here only because this shell had no presenter to reveal it; `from_settings`
+            // takes the whole `Settings` precisely so the style can't be forgotten either.
+            subtitles: pb_app_core::subtitle_engine::SubtitleEngine::from_settings(&settings),
             recognized_text: HashMap::new(),
             text_scan: None,
             text_gen: 0,
@@ -945,6 +951,7 @@ impl App {
             play_hint_hovered: false,
             play_hint_frame: None,
             play_hint_wake: None,
+            subtitle_gen: 0,
         }
     }
 
@@ -1658,6 +1665,49 @@ impl App {
         if self.overlay_visible() {
             self.render_overlay_frame();
             self.overlay_dirty = false;
+        }
+    }
+
+    /// Hand the core's subtitle overlay to the wgpu presenter (task #90.5) — this shell's
+    /// half of the contract `tick_subtitles` fills in.
+    ///
+    /// ⚠ **Shell-local on purpose; this does NOT belong in `tick_subtitles`.** The macOS
+    /// host draws the very same bitmap as a SwiftUI overlay above its `AVPlayerLayer`
+    /// (`pb-mac-ffi`'s `subtitle_rgba`/`subtitle_rect`). Moving this into the shared tick
+    /// would draw every cue twice there — once into a canvas the player layer is covering,
+    /// once for real. One rasterizer, two presenters, and each shell owns its own.
+    ///
+    /// Re-uploads only when the core's generation moves, which is on a cue change — never
+    /// on the ~120 frames per second in between.
+    fn present_subtitles(&mut self) {
+        let gen = self.core.subtitles.gen();
+        if gen == self.subtitle_gen {
+            return;
+        }
+        self.subtitle_gen = gen;
+        // Split the borrow: the bitmap is read out of `subtitles` while `renderer` is
+        // borrowed mutably. Disjoint fields, so destructuring is what makes it legal.
+        let AppCore {
+            subtitles,
+            renderer,
+            viewport,
+            ..
+        } = &mut self.core;
+        let Some(r) = renderer.as_mut() else {
+            return;
+        };
+        // `rect()` is logical points (what a UI toolkit positions in — the macOS host's
+        // unit); wgpu draws in physical px. `update()` divided by this exact factor, so
+        // multiplying back is the inverse, not an approximation.
+        let s = viewport.scale_factor.max(0.01);
+        match (subtitles.bitmap(), subtitles.rect()) {
+            (Some(b), Some(rect)) => {
+                r.set_subtitle_overlay(Some((&b.rgba, b.w, b.h)), rect.x * s, rect.y * s)
+            }
+            // `gen` moved but there is nothing to show: the cue ended, subtitles were
+            // switched off, or the video stopped. Clearing is the whole point of routing
+            // every such case through one exit (post-mortem bug #1 — a frozen cue).
+            _ => r.set_subtitle_overlay(None, 0.0, 0.0),
         }
     }
 
@@ -3977,6 +4027,11 @@ impl ApplicationHandler for App {
         // stash this frame's pill for `render_overlay_frame` and dirty the overlay while it
         // animates.
         self.play_hint_frame = self.tick_play_hint(now);
+
+        // Hand the tick's subtitle overlay to the wgpu presenter (task #90.5). A cue change
+        // needs no redraw request of its own: the only state this does anything in is a
+        // playing video, which already draws every frame.
+        self.present_subtitles();
 
         // Drive the egui rich-panel overlay: (re)render the panels into the offscreen
         // texture when they change (or an egui animation is due) and hand it to the

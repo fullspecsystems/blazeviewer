@@ -567,6 +567,11 @@ struct Pipelines {
     tonemap: wgpu::RenderPipeline,
     /// Overlay: sRGB UI bitmap → surface, alpha-blended on top.
     overlay: wgpu::RenderPipeline,
+    /// Subtitle overlay: the same shader and quad as `overlay`, but blended
+    /// **premultiplied** — `pb_hud::subtitle` emits premultiplied RGBA (its own tests
+    /// enforce it), and running that through `overlay`'s straight `ALPHA_BLENDING` would
+    /// multiply by alpha a second time, sucking the life out of every antialiased edge.
+    subtitle: wgpu::RenderPipeline,
     /// egui rich-panel overlay: an offscreen premultiplied-sRGB texture → the fp16
     /// intermediate, premultiplied-blended (bufferless fullscreen).
     egui: wgpu::RenderPipeline,
@@ -698,6 +703,37 @@ fn build_pipelines(device: &wgpu::Device, surface_format: wgpu::TextureFormat) -
         cache: None,
     });
 
+    // Subtitles → the fp16 intermediate. Identical to `overlay` in every respect but the
+    // blend: the rasterized cue block is **premultiplied** (`pb_hud::subtitle`), so it
+    // composites premultiplied-over (src One) like the egui layer below, not with the
+    // straight `ALPHA_BLENDING` the other CPU overlays are authored for. Same shader, same
+    // quad, same bind-group layout — only the blend equation differs.
+    let subtitle = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("pb-subtitle-pipeline"),
+        layout: Some(&scene_layout),
+        vertex: wgpu::VertexState {
+            module: &overlay_mod,
+            entry_point: "vs_main",
+            compilation_options: Default::default(),
+            buffers: &quad_buffers,
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: &overlay_mod,
+            entry_point: "fs_overlay",
+            compilation_options: Default::default(),
+            targets: &[Some(wgpu::ColorTargetState {
+                format: INTERMEDIATE_FORMAT,
+                blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+        }),
+        primitive: wgpu::PrimitiveState::default(),
+        depth_stencil: None,
+        multisample: wgpu::MultisampleState::default(),
+        multiview: None,
+        cache: None,
+    });
+
     // egui rich panels → the fp16 intermediate. Bufferless fullscreen triangle; the
     // egui texture is premultiplied (linear after the sRGB-view decode), so the blend
     // is premultiplied-over (src One), not the straight `ALPHA_BLENDING` the CPU
@@ -780,6 +816,7 @@ fn build_pipelines(device: &wgpu::Device, surface_format: wgpu::TextureFormat) -
         scene_planar,
         tonemap,
         overlay,
+        subtitle,
         egui,
         scene_bgl,
         planar_bgl,
@@ -973,6 +1010,54 @@ fn toast_quad_vertices(
     let x0n = (x0 / sw) * 2.0 - 1.0;
     let x1n = (x1 / sw) * 2.0 - 1.0;
     let y_top = 1.0 - (y0 / sh) * 2.0;
+    let y_bot = 1.0 - (y1 / sh) * 2.0;
+    [
+        Vertex {
+            pos: [x0n, y_top],
+            uv: [0.0, 0.0],
+        },
+        Vertex {
+            pos: [x1n, y_top],
+            uv: [1.0, 0.0],
+        },
+        Vertex {
+            pos: [x1n, y_bot],
+            uv: [1.0, 1.0],
+        },
+        Vertex {
+            pos: [x0n, y_bot],
+            uv: [0.0, 1.0],
+        },
+    ]
+}
+
+/// The four corners of the **subtitle** quad: `panel_w`×`panel_h` px with its top-left
+/// corner at an absolute `(x, y)` in physical px.
+///
+/// Every other overlay helper takes an *inset from an edge*, because every other overlay
+/// is anchored to one. A subtitle is not: it tracks the **picture**, and its position is
+/// whatever `pb_app_core::subtitle::place` decided — vertically anchored to the video's
+/// bottom edge, horizontally centered on the viewport, and clamped by rules this crate
+/// deliberately cannot see. So the origin arrives already computed, and this only converts
+/// it to NDC.
+///
+/// `x`/`y` are `f32` and **`y` may be slightly negative** — by design. `place` clamps the
+/// *text's* box on screen, not the bitmap's, so a soft drop shadow is allowed to bleed off
+/// the top edge rather than shoving the words down to keep it.
+fn subtitle_quad_vertices(
+    panel_w: u32,
+    panel_h: u32,
+    screen_w: u32,
+    screen_h: u32,
+    x: f32,
+    y: f32,
+) -> [Vertex; 4] {
+    let (sw, sh) = (screen_w as f32, screen_h as f32);
+    let x1 = x + panel_w as f32;
+    let y1 = y + panel_h as f32;
+    let x0n = (x / sw) * 2.0 - 1.0;
+    let x1n = (x1 / sw) * 2.0 - 1.0;
+    let y_top = 1.0 - (y / sh) * 2.0;
     let y_bot = 1.0 - (y1 / sh) * 2.0;
     [
         Vertex {
@@ -1634,6 +1719,24 @@ struct OverlayDraw {
     margin_top: u32,
 }
 
+/// The subtitle overlay, when shown (task #90.5).
+///
+/// Its own struct rather than an [`OverlayDraw`], because the two differ in kind: every
+/// `OverlayDraw` is an **inset from a screen edge**, while a subtitle's origin is an
+/// **absolute point** the core already computed (`SubtitleEngine::rect`). Squeezing it
+/// into `margin`/`margin_top` would have meant two `u32`s silently meaning something else
+/// for one layer — and would not have held `y`, which can be negative.
+struct SubtitleDraw {
+    bind_group: wgpu::BindGroup,
+    vbuf: wgpu::Buffer,
+    panel_w: u32,
+    panel_h: u32,
+    /// Top-left origin in physical px. See [`subtitle_quad_vertices`] for why `y` may be
+    /// negative.
+    x: f32,
+    y: f32,
+}
+
 /// One resident ring slot: a pre-uploaded image texture reused across photos, so
 /// a keypress is a rebind (`present_slot`) — never a decode or upload. v1 slots
 /// are image-sized; the win is that the texture is uploaded during prefetch, off
@@ -1694,6 +1797,8 @@ pub struct WgpuRenderer {
     scene_pipeline: wgpu::RenderPipeline,
     tonemap_pipeline: wgpu::RenderPipeline,
     overlay_pipeline: wgpu::RenderPipeline,
+    /// The overlay pipeline's premultiplied-blend twin, for the subtitle layer only.
+    subtitle_pipeline: wgpu::RenderPipeline,
     egui_pipeline: wgpu::RenderPipeline,
     /// Layout for image (and overlay) bind groups: tex + sampler + color uniform.
     bgl: wgpu::BindGroupLayout,
@@ -1734,6 +1839,9 @@ pub struct WgpuRenderer {
     /// The top-right scan-count chip ("12 / 1234…"), shown while a folder scan streams in,
     /// sitting just below the pie. Its own layer; cleared when the scan ends.
     chip: Option<OverlayDraw>,
+    /// The subtitle cue block (task #90.5), drawn directly above the picture and below
+    /// every piece of chrome — so a toast or the info line stays readable over it.
+    subtitle: Option<SubtitleDraw>,
     /// A centered, persistent message panel — the empty-state "Press O to open…"
     /// hint shown over the blank background. Its own layer; cleared the moment a
     /// photo is shown (`set_image` / `present_slot`).
@@ -2014,6 +2122,7 @@ impl WgpuRenderer {
             scene_pipeline: pipelines.scene,
             tonemap_pipeline: pipelines.tonemap,
             overlay_pipeline: pipelines.overlay,
+            subtitle_pipeline: pipelines.subtitle,
             egui_pipeline: pipelines.egui,
             bgl: pipelines.scene_bgl,
             tonemap_bgl: pipelines.tonemap_bgl,
@@ -2035,6 +2144,7 @@ impl WgpuRenderer {
             toast: None,
             pie: None,
             chip: None,
+            subtitle: None,
             upload,
             ring: Vec::new(),
             present_idx: None,
@@ -2396,6 +2506,20 @@ impl Renderer for WgpuRenderer {
                 )),
             );
         }
+        // The subtitle's origin is the core's, and it is about to recompute it against the
+        // new viewport (a resize re-places the video, which re-runs `tick_subtitles`). Its
+        // vertices are still NDC, though, so they must be re-derived from the *new* screen
+        // size or the block jumps and stretches for the frame in between. Same px origin,
+        // new NDC: correct now, and replaced by the core's answer a tick later.
+        if let Some(s) = &self.subtitle {
+            self.queue.write_buffer(
+                &s.vbuf,
+                0,
+                bytemuck::cast_slice(&subtitle_quad_vertices(
+                    s.panel_w, s.panel_h, width, height, s.x, s.y,
+                )),
+            );
+        }
     }
 
     fn clear_image(&mut self) {
@@ -2696,6 +2820,53 @@ impl Renderer for WgpuRenderer {
         };
     }
 
+    /// Set or clear the subtitle cue block at an absolute `(x, y)` in physical px.
+    ///
+    /// Re-uploaded only when the core says the bitmap changed (its `gen` token) — a cue
+    /// holds on screen for seconds, so this runs on a cue change, never per frame.
+    fn set_subtitle_overlay(&mut self, panel: Option<(&[u8], u32, u32)>, x: f32, y: f32) {
+        self.subtitle = match panel {
+            Some((rgba, w, h)) => {
+                let scale = self.scene_scale(false);
+                let bind_group = upload_image(
+                    &self.device,
+                    &self.queue,
+                    &self.bgl,
+                    self.upload.as_mut(),
+                    rgba,
+                    w,
+                    h,
+                    &ColorTransform::srgb(),
+                    false,
+                    scale,
+                );
+                let vbuf = self
+                    .device
+                    .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: Some("subtitle-vbuf"),
+                        contents: bytemuck::cast_slice(&subtitle_quad_vertices(
+                            w,
+                            h,
+                            self.config.width,
+                            self.config.height,
+                            x,
+                            y,
+                        )),
+                        usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                    });
+                Some(SubtitleDraw {
+                    bind_group,
+                    vbuf,
+                    panel_w: w,
+                    panel_h: h,
+                    x,
+                    y,
+                })
+            }
+            None => None,
+        };
+    }
+
     fn reserve_ring(&mut self, capacity: usize, _slot_w: u32, _slot_h: u32) {
         // A geometry change rebuilds the ring empty. Move the frame that was on screen out
         // of the ring into `held` first, so `render` can keep showing it (GPU-refit to the
@@ -2857,6 +3028,32 @@ impl Renderer for WgpuRenderer {
                 &self.ibuf,
                 letterbox_linear(self.letterbox),
             );
+        }
+        // Pass 1b: the subtitle cue block — **first** of the overlays, so every piece of
+        // chrome composites above it. A subtitle belongs to the picture; a toast is the app
+        // talking over it, and the toast that says "Subtitles: English" appears in the same
+        // bottom-center strip as the cue it is talking about. Its own premultiplied blend
+        // (see `Pipelines::subtitle`).
+        if let Some(s) = &self.subtitle {
+            let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("subtitle"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &intermediate_view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            rp.set_pipeline(&self.subtitle_pipeline);
+            rp.set_bind_group(0, &s.bind_group, &[]);
+            rp.set_vertex_buffer(0, s.vbuf.slice(..));
+            rp.set_index_buffer(self.ibuf.slice(..), wgpu::IndexFormat::Uint16);
+            rp.draw_indexed(0..INDICES.len() as u32, 0, 0..1);
         }
         // Pass 2: alpha-blend the info panel into the intermediate (in linear), so
         // the single present pass below serves both the SDR and HDR output paths.
@@ -3515,6 +3712,210 @@ mod tests {
     fn at(buf: &[u8], w: u32, x: u32, y: u32) -> [u8; 4] {
         let i = ((y * w + x) * 4) as usize;
         [buf[i], buf[i + 1], buf[i + 2], buf[i + 3]]
+    }
+
+    /// The subtitle quad is the one overlay placed at an absolute point rather than an
+    /// inset, so its px→NDC conversion is the whole contract with `subtitle::place`.
+    #[test]
+    fn subtitle_quad_maps_pixels_to_ndc() {
+        // A 100×20 block at (50, 80) on a 200×100 screen: x 50..150 → NDC -0.5..0.5,
+        // y 80..100 → NDC -0.6..-1.0 (NDC +y is up, pixels count down).
+        let v = subtitle_quad_vertices(100, 20, 200, 100, 50.0, 80.0);
+        assert_eq!(v[0].pos, [-0.5, -0.6], "top-left");
+        assert_eq!(v[1].pos, [0.5, -0.6], "top-right");
+        assert_eq!(v[2].pos, [0.5, -1.0], "bottom-right");
+        assert_eq!(v[3].pos, [-0.5, -1.0], "bottom-left");
+        // UVs stay upright — a flipped subtitle is not a subtitle.
+        assert_eq!(v[0].uv, [0.0, 0.0]);
+        assert_eq!(v[2].uv, [1.0, 1.0]);
+    }
+
+    /// `place` clamps the *text*'s box on screen, not the bitmap's, so a block whose soft
+    /// shadow bleeds off the top arrives with a negative `y`. It must extend past the edge
+    /// and be clipped — not wrap, saturate to 0, or be rejected.
+    #[test]
+    fn subtitle_quad_accepts_a_negative_origin() {
+        // A 20px block at y = -10 straddles the top edge: 10px off-screen, 10px on.
+        let v = subtitle_quad_vertices(100, 20, 200, 100, 50.0, -10.0);
+        assert_eq!(
+            v[0].pos[1], 1.2,
+            "top edge sits above NDC +1 (clipped away)"
+        );
+        assert_eq!(
+            v[2].pos[1], 0.8,
+            "bottom edge is 10px down the screen, still visible"
+        );
+    }
+
+    /// Draw one premultiplied RGBA8 block over a black fp16 intermediate through the real
+    /// subtitle pipeline, and read back the linear result.
+    fn subtitle_over_black(src: [u8; 4]) -> [f32; 4] {
+        let _guard = crate::gpu_test_lock();
+        let (device, queue, _bgl) = test_device();
+        let pipelines = build_pipelines(&device, wgpu::TextureFormat::Rgba8Unorm);
+        let mut upload = StagingUpload::new();
+        let (w, h) = (2u32, 2u32);
+        let pixels: Vec<u8> = src
+            .iter()
+            .copied()
+            .cycle()
+            .take((w * h * 4) as usize)
+            .collect();
+        let bind_group = upload_image(
+            &device,
+            &queue,
+            &pipelines.scene_bgl,
+            &mut upload,
+            &pixels,
+            w,
+            h,
+            &ColorTransform::srgb(),
+            false,
+            1.0,
+        );
+        // The quad covers the whole 2×2 target, so every texel is the blend result.
+        let vbuf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("subtitle-test-vbuf"),
+            contents: bytemuck::cast_slice(&subtitle_quad_vertices(w, h, w, h, 0.0, 0.0)),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+        let ibuf = index_buffer(&device);
+        let target = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("subtitle-test-target"),
+            size: wgpu::Extent3d {
+                width: w,
+                height: h,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: INTERMEDIATE_FORMAT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let view = target.create_view(&wgpu::TextureViewDescriptor::default());
+        let padded = (w * 8).div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT)
+            * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+        let readback = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("subtitle-test-readback"),
+            size: (padded * h) as u64,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let mut encoder = device.create_command_encoder(&Default::default());
+        {
+            // Clear to opaque black, then composite the block over it — the same
+            // Load-and-blend the real pass does over the photo.
+            let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("subtitle-test"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            rp.set_pipeline(&pipelines.subtitle);
+            rp.set_bind_group(0, &bind_group, &[]);
+            rp.set_vertex_buffer(0, vbuf.slice(..));
+            rp.set_index_buffer(ibuf.slice(..), wgpu::IndexFormat::Uint16);
+            rp.draw_indexed(0..INDICES.len() as u32, 0, 0..1);
+        }
+        encoder.copy_texture_to_buffer(
+            wgpu::ImageCopyTexture {
+                texture: &target,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::ImageCopyBuffer {
+                buffer: &readback,
+                layout: wgpu::ImageDataLayout {
+                    offset: 0,
+                    bytes_per_row: Some(padded),
+                    rows_per_image: Some(h),
+                },
+            },
+            wgpu::Extent3d {
+                width: w,
+                height: h,
+                depth_or_array_layers: 1,
+            },
+        );
+        queue.submit(std::iter::once(encoder.finish()));
+        let slice = readback.slice(..);
+        let (tx, rx) = std::sync::mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |r| {
+            let _ = tx.send(r);
+        });
+        device.poll(wgpu::Maintain::Wait);
+        rx.recv().expect("map channel").expect("map readback");
+        let mapped = slice.get_mapped_range();
+        let ch = |o: usize| half::f16::from_le_bytes([mapped[o], mapped[o + 1]]).to_f32();
+        let out = [ch(0), ch(2), ch(4), ch(6)];
+        drop(mapped);
+        readback.unmap();
+        out
+    }
+
+    /// **The subtitle layer must blend premultiplied, and this is what proves it.**
+    ///
+    /// `pb_hud::subtitle` emits premultiplied RGBA; the other CPU overlays are authored
+    /// straight, so they share a pipeline whose `ALPHA_BLENDING` multiplies by alpha. Send
+    /// a premultiplied bitmap through *that* and every value is multiplied by alpha twice —
+    /// antialiased glyph edges and translucent backgrounds come out visibly dark. The two
+    /// answers are far apart (0.216 vs 0.108), so this is a cheap, decisive check.
+    ///
+    /// The expected value is also what the **macOS** host produces: its `CGImage` is
+    /// `.premultipliedLast` composited in sRGB, which is the same arithmetic as
+    /// premultiplied-over on our sRGB-decoded texels. Same rasterizer, same look, both
+    /// shells — which is the whole point of #90.5.
+    #[test]
+    fn the_subtitle_pipeline_blends_premultiplied_not_straight() {
+        // 50%-alpha white, premultiplied in sRGB space (what the rasterizer emits).
+        let got = subtitle_over_black([128, 128, 128, 128]);
+        let premultiplied = srgb_to_linear(128) as f32; // ≈ 0.2158 — src + dst*(1-a)
+        let straight = premultiplied * (128.0 / 255.0); // ≈ 0.1083 — the double-multiply bug
+        assert!(
+            (got[0] - premultiplied).abs() < 0.01,
+            "expected premultiplied-over ({premultiplied:.4}), got {:.4}",
+            got[0]
+        );
+        assert!(
+            (got[0] - straight).abs() > 0.05,
+            "this is the double-multiplied value ({straight:.4}) — the subtitle layer is on \
+             the straight-alpha overlay pipeline"
+        );
+    }
+
+    /// A fully opaque cue must land exactly on its own color: no alpha term anywhere, no
+    /// dependence on what was underneath. Guards the other end of the blend equation.
+    #[test]
+    fn an_opaque_subtitle_pixel_replaces_the_background() {
+        let got = subtitle_over_black([255, 255, 255, 255]);
+        assert!(
+            (got[0] - 1.0).abs() < 0.01,
+            "opaque white must stay white, got {:.4}",
+            got[0]
+        );
+    }
+
+    /// A resize re-derives NDC from the same px origin (the core re-places it a tick
+    /// later). Same pixels on a wider screen must mean a narrower NDC span, or the block
+    /// would stretch with the window.
+    #[test]
+    fn subtitle_quad_rederives_ndc_on_resize() {
+        let narrow = subtitle_quad_vertices(100, 20, 200, 100, 50.0, 80.0);
+        let wide = subtitle_quad_vertices(100, 20, 400, 100, 50.0, 80.0);
+        let span = |v: &[Vertex; 4]| v[1].pos[0] - v[0].pos[0];
+        assert_eq!(span(&narrow), 1.0, "100px of 200 = half the screen");
+        assert_eq!(span(&wide), 0.5, "100px of 400 = a quarter");
     }
 
     fn close(a: [u8; 4], b: [u8; 4], tol: i32) -> bool {
