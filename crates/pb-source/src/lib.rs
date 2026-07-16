@@ -275,12 +275,19 @@ pub enum OpenError {
     /// `needed` is a lower bound (the stream stopped as soon as it tripped).
     TooLarge { needed: u64, budget: u64 },
     /// The archive is recognized but deliberately not opened: a format tier we
-    /// don't decode (RAR4, multi-volume RAR, encrypted RAR). Distinct from
-    /// [`Corrupt`](OpenError::Corrupt) so the user learns *what* it is rather
-    /// than "may be damaged" — and distinct from
-    /// [`PasswordRequired`](OpenError::PasswordRequired), which the app answers
-    /// with a password prompt: an encrypted RAR can't be decrypted no matter
-    /// what is typed, so prompting would loop. Carries the ready-to-show line.
+    /// don't decode (RAR4, multi-volume RAR, a RAR encryption version that
+    /// isn't AES-256). Distinct from [`Corrupt`](OpenError::Corrupt) so the
+    /// user learns *what* it is rather than "may be damaged" — and distinct
+    /// from [`PasswordRequired`](OpenError::PasswordRequired), which the app
+    /// answers with a password prompt: nothing in this tier can be fixed by
+    /// typing a password, so prompting would loop. Carries the ready-to-show
+    /// line.
+    ///
+    /// ⚠ A password-protected **RAR5** is *not* one of these. Since the
+    /// `-p`/`-hp` decryption landed it returns
+    /// [`PasswordRequired`](OpenError::PasswordRequired) and a correct password
+    /// decrypts it (see `rar_crypt.rs`) — this doc claimed the opposite until
+    /// 2026-07-16, and the old rule is still quoted in places.
     Unsupported(String),
 }
 
