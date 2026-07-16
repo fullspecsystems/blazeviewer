@@ -39,10 +39,10 @@ built and load-bearing today:
 |---|---|---|
 | `LibraryItemKind` (`video.rs:31`) | `Image` \| `Video(VideoContainer)` | **+ `Archive(ArchiveKind)`** |
 | `item_kind` (`video.rs:145`) | types by extension | + one arm |
-| **Typed dispatch before `bytes()`** (`engine.rs:393`) | video returns before the read at `:491` | + one arm above the read |
-| `video_placeholder` (`engine.rs:507`) | 320×180 solid tile, `codec` names the container | **+ `archive_placeholder(kind)`** |
+| **Typed dispatch before `bytes()`** (`engine.rs:399`) | video returns before the read at `:504` | + one arm above the read |
+| `video_placeholder` (`engine.rs:520`) | 320×180 solid tile, `codec` names the container | **+ `archive_placeholder(kind)`** |
 | `P` = play/pause (`action.rs`) | contextual on the item's container-ness | + "enter" on a door |
-| `▶ P` HUD hint (`engine.rs:495`) | already tells you `P` does something here | reused |
+| `▶ P` HUD hint (`engine.rs:508`) | already tells you `P` does something here | reused |
 | `CoreEffect::BeginArchiveOpen` | drives pre-flight + progress + password re-open | reused verbatim |
 
 > Note (owner, 2026-07-16): the *unsupported-container* case is now rare — the OS decodes MKV
@@ -69,7 +69,7 @@ Blending archive *contents* into the deck stays rejected, and the door makes the
 **The prefetch ring is the whole argument.** A blended deck makes archive entries ordinary items,
 so the direction-biased window decodes ahead into them — decompressing archives the user never
 chose, as a side effect of scrolling nearby. A **door** has no such property, because *the door's
-decode is drawing a tile, not reading the archive* (`engine.rs:393` returns before `:491`'s
+decode is drawing a tile, not reading the archive* (`engine.rs:399` returns before `:504`'s
 `source.bytes()`). Prefetch can hold a hundred doors for the price of a hundred solid tiles —
 which `video_placeholder`'s own doc already promises: *"prefetch can hold many without denting
 the ring budget."*
@@ -127,7 +127,7 @@ Two properties fall out **for free**, which is why it is written this way:
 
 ### 2. The tile
 
-`archive_placeholder(kind)` mirrors `video_placeholder` (`engine.rs:507`): tiny, `codec` naming
+`archive_placeholder(kind)` mirrors `video_placeholder` (`engine.rs:520`): tiny, `codec` naming
 the format, so the GPU upscale is invisible and prefetch stays cheap.
 
 **Recommendation: give the door an icon, unlike the video tile.** For video the tile was a
@@ -144,7 +144,7 @@ the mechanism does not depend on it.
 `Enter` is random-photo and `O` is the Open dialog — both taken. `P` is already **contextual on
 the item's container-ness** (play a video, play an animation, play a Live Photo), so "act on this
 container" extends cleanly to "enter this archive." Owner (2026-07-16): *"P is… weird but kind of
-fits… play this archive. I'm totally cool to use that."* The `▶ P` HUD hint (`engine.rs:495`)
+fits… play this archive. I'm totally cool to use that."* The `▶ P` HUD hint (`engine.rs:508`)
 already exists and carries it.
 
 Entering pushes the existing effect:
@@ -223,18 +223,43 @@ keypress**:
 
 | Site | What happens to a door | Cost |
 |---|---|---|
-| **Thumbs strip** — `decode_item_for` (`engine.rs:356`) | the guard is **negative** (`!matches!(kind, Video(_))`), so a door falls *into* the branch and calls `source.bytes(item)` (`:360`) | a full `fs::read` of **every archive in the folder**; `native_thumbs: true` by default (`main.rs:838`) |
-| **`Shift+I` panel** (`app_core_impl.rs:6544`) | the guard is **positive-for-video**, so a door falls past the probe into the image path's sync `fs::read` (`:6568`) | the whole archive, **on the event loop** |
+| **Thumbs strip** — `decode_item_for` (`engine.rs:364`) | the guard is **negative** (`!matches!(kind, Video(_))`), so a door falls *into* the branch and calls `source.bytes(item)` (`:366`) | a full `fs::read` of **every archive in the folder**; `native_thumbs: true` by default (`main.rs:838`) |
+| **`Shift+I` panel** (`app_core_impl.rs:6550`) | the guard is **positive-for-video**, so a door falls past the probe into the image path's sync `fs::read` (`:6573`) | the whole archive, **on the event loop** |
 
 Still to audit (same pattern, unverified): `app_core_impl.rs:4046`, `:7114`, `:7315`.
 
 ### Root cause — a two-kind world
 
 The tree encodes **video vs "everything else, therefore an image, therefore safe to read
-bytes."** Nine sites match on `LibraryItemKind` (`app_core_impl.rs` ×7, `engine.rs` ×2,
-`main.rs` ×1) and every one of them is an `if let` or a `!matches!`. A third variant silently
-lands in the *image* bucket at all of them — so **reading is the default**, which is backwards
-for a door.
+bytes."** A third variant silently lands in the *image* bucket wherever that binary is written
+as an `if let` or a `!matches!` — so **reading is the default**, which is backwards for a door.
+
+> **Corrected during Phase 0 (2026-07-16).** rev4 said "nine sites, every one an `if let` or a
+> `!matches!`". That was wrong on both counts, and being mechanical about it would have meant
+> churning correct code. The real breakdown:
+>
+> - **3 were already exhaustive `match`es** (`app_core_impl.rs:7205`, `:7236`, `:8992`) — they
+>   error on a new variant for free.
+> - **2 are `matches!` that are correct for any future kind and must be left alone**:
+>   `item_is_video` (`app_core_impl.rs:6774`) asks a genuinely binary question (a door is not a
+>   video → `false`), and `scan.rs:155` keys Live-Photo companion dedup off `Some(Image)` (a
+>   door never anchors a companion → correct).
+> - **4 needed the change**, and only these: `engine.rs:364` (the thumb read — inverted to a
+>   positive `Image` guard), `engine.rs:399` (the decode dispatch — `if let` → `match`),
+>   `app_core_impl.rs:6550` (the panel read — restructured so the read lives *inside* the
+>   `Image` arm), and `app_core_impl.rs:598` (rotation — `matches!` → `match`).
+>
+> The lesson generalises: convert a guard when its *else* branch assumes image-ness. Leave a
+> guard that asks an honestly binary question. Uniformity is not the goal; safety is.
+
+### 🪤 The compiler's worklist is platform-specific
+
+Verified by temporarily adding a variant and reading the errors: **Windows `cargo check` flags 4
+of the 6 sites.** `macos_native_route` (`app_core_impl.rs:7205`) and `macos_sample_buffer_route`
+(`:7236`) are `#[cfg(target_os = "macos")]`, so they are invisible here — **Phase 1 will compile
+green on Windows and break the Mac build** unless they are handled deliberately. Both are video
+*routing* questions a door should never reach; give them an explicit arm rather than a
+catch-all, and confirm on a Mac build.
 
 ### The fix — make the compiler find them, don't grep
 
@@ -262,13 +287,15 @@ across **every** entry point — `decode_item`, `decode_item_for` with `Purpose:
 
 ## Phases
 
-**Phase 0 — exhaustive guards, no behaviour change.** Convert the nine `LibraryItemKind` guards
-from `if let` / `!matches!` to exhaustive `match`, and invert the read guards to positive
-(`Image` reads bytes). Its own commit, green before and after. This is what makes Phase 1's
-variant addition produce a compiler-generated to-do list instead of a grep. See *The audit*.
+**Phase 0 — exhaustive guards, no behaviour change. ✅ DONE (2026-07-16).** Converted the 4 guards
+whose *else* branch assumed image-ness (`engine.rs:364` inverted to a positive `Image` guard;
+`engine.rs:399`, `app_core_impl.rs:598`, `:6550` → `match`, with the panel's byte read moved
+*inside* its `Image` arm); left the 2 that ask an honestly binary question; 3 were already
+exhaustive. Fixed a stale `classify_library_file` doc found on the way. Green before and after.
+See *The audit* for the corrected breakdown and the **macOS-cfg trap**.
 
 **Phase 1 — core typing + door, TDD, pure.** `LibraryItemKind::Archive`; the `item_kind` arm; the
-`decode_item_cancellable` arm **above** the `bytes()` read (`engine.rs:491`);
+`decode_item_cancellable` arm **above** the `bytes()` read (`engine.rs:504`);
 `archive_placeholder`. Scan includes archives as items. Every site Phase 0's compiler errors
 surfaced gets an explicit decision.
 
@@ -280,7 +307,7 @@ Tests, mirroring the ones video already has:
   **panics**, driven through `decode_item`, `decode_item_for` with `Purpose::Thumb` *and*
   `Purpose::Display`, and the `Shift+I` panel path. This is the feature's central promise, and
   both confirmed leaks live in entry points a `decode_item`-only test would miss. Mutation
-  check: it must fail against today's negative guard (`engine.rs:356`).
+  check: it must fail against today's negative guard (`engine.rs:364`).
 - a door's tile is tiny (ring-budget property).
 
 **Phase 2 — enter.** `P` on a door → exactly one `BeginArchiveOpen { password: None }`, and it
@@ -314,7 +341,7 @@ is already correct; this is a two-line extension and it pins the door's central 
    a worse trade than an occasional door.
 4. **Holding space flashes past doors.** Also already true of video posters. The tile is a solid
    color, so it costs a rebind like any other frame.
-5. **`item_kind` is per decode job, not per frame** (`engine.rs:393`, `:357`) — `archive_kind`'s
+5. **`item_kind` is per decode job, not per frame** (`engine.rs:399`, `:357`) — `archive_kind`'s
    lowercase-extension `String` never lands on the hot path. **Verify no caller pulls `item_kind`
    into a per-frame path** before shipping.
 
