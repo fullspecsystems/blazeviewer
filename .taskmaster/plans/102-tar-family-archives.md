@@ -1,6 +1,10 @@
-# Task 102 — Archive support: tar, tar.gz, tar.bz2, tar.zst (+ bare .gz/.bz2/.zst images)
+# Task 102 — Archive support: tar, tar.gz, tar.bz2, tar.zst, tar.xz (+ bare .gz/.bz2/.zst images)
 
-**Status:** planned — rev1 (2026-07-16, not yet Codex-reviewed)
+**Status:** implemented through phase 4 — rev2 (2026-07-16). Phases 0–4 landed on
+`feat/enhanced-archives` (`d993fb6` pb-source, `92b4d44` wiring; 63 pb-source tests +
+no-trace/dispatch integration tests, clippy/fmt clean). Remaining: phase 5 (optional bare
+compressed images) and the fuzz run + corpus benchmarks (tasks.json #102.5/.6). The rev2
+section below records the Codex-review disposition that drove the implementation.
 **Proposed task id:** 102 (next free in `tasks.json`; add the task entry when this plan is approved)
 **Scope:** all three platforms share the code (pure Rust, no per-platform decode), but the
 *payoff* is Linux-first: tarballs are the native archive format there. Windows/macOS get it
@@ -14,6 +18,95 @@ for free through the same seam.
 > RAR5 reuses; RAR5 is gated on the compcol x86-filter fix (upstream PR #121) merging + releasing —
 > mechanics in the 103 plan. **Commit hygiene:** the user commits to `main` concurrently — stage
 > explicit paths, never `git add -A`; re-check `git status` before every commit.
+
+## Rev2 — Codex review disposition (2026-07-16, `archive-support-codex-review.md`)
+
+The review confirmed the seam + lazy/eager split and raised 8 findings. Point-by-point,
+with the decisions now binding on the implementation:
+
+1. **[P0] Seek-aware indexing + off-thread opens — ADOPTED.** `entries_with_seek()` for
+   plain tar (verified public in tar 0.4.46). **Every tar-family open runs off-thread**,
+   including plain tar (O(entries) I/O on a huge/network tar): `ArchiveKind` gains
+   `background_open()` (true for 7z + all tar; false for ZIP) *alongside* `eager()`
+   (the RAM/access model) — scheduling and access model are different concepts. Both
+   shells call one worker entry point, `scan::load_archive(path, kind, password,
+   progress)`; the 7z pre-flight moves inside it (so the shells' duplicated
+   preflight/mt_headroom code is deleted). The lazy tar open reports determinate
+   progress for free (`set_total(file_len)`, done = header offset) and honors cancel.
+2. **[P0] Budget crossing the crate boundary — ADOPTED** (and already implemented this
+   way): the eager open takes `budget: u64` as a parameter; `pb-source` grew
+   `OpenError::TooLarge { needed, budget }` mapped explicitly onto
+   `ArchiveOpenError::TooLarge` (whose message already says "at least"). Accounting
+   uses saturating adds (an overflow saturates to `u64::MAX`, which always refuses).
+   **Linux `MemAvailable`**: `archive.rs` gets a real `/proc/meminfo` reader (parse
+   helper unit-tested on every platform) — the 8 GB fallback undermined the budget on
+   the feature's primary platform.
+3. **[P0] Unbounded PAX/GNU metadata allocation inside the `tar` crate — ADOPTED, via a
+   metered reader rather than raw iteration.** Verified: non-raw `next()` reads
+   long-name/PAX payloads with `read_to_end` (unbounded growth; the 128 KiB figure is
+   only initial capacity). But **raw mode is a trap**: the non-raw iterator applies
+   PAX `size` overrides to stream advancement (archive.rs:335-354) — hand-rolled raw
+   iteration would desync on any PAX-size entry (>8 GiB files in pax-format archives)
+   and corrupt the whole listing. Instead: all entry *data* is read by our own code
+   between `next()` calls, so bytes the crate pulls *inside* `next()` are only headers
+   + metadata. A `MeteredReader` under the `Archive` is armed with a ~256 KiB quota
+   before each `next()` and disarmed for our own data reads; hostile metadata then
+   fails as `Corrupt` instead of aborting the process. Also adopted: entry-count +
+   total-name-bytes caps (index-table bombs), `offset + size <= file_len` validation
+   at lazy index time (truncated tail entries are skipped — they can never render),
+   and exact reads in `bytes(i)` (short read → `UnexpectedEof`).
+4. **[P0] zstd is not ready behind a bare `StreamingDecoder` — ADOPTED.** Verified in
+   ruzstd 0.8.3: `StreamingDecoder` is single-frame; the 100 MB window cap is enforced
+   on `reset` but **not** on the first frame (`FrameDecoderState::new` — an unbounded
+   first-frame window allocation). Implementation: a `MultiFrameZstd` wrapper (one
+   reusable `FrameDecoder`, EOF probe + replay at frame boundaries, skippable-frame
+   drain) + a **first-frame window pre-check** (parse magic/descriptor/window bytes
+   ourselves, reject > ruzstd's own 100 MB cap before `init` can allocate) + per-frame
+   **checksum verification** via `get_checksum_from_data`/`get_calculated_checksum`
+   (upstream never compares them). Dictionary-requiring frames error cleanly →
+   `Corrupt`. Not deferred: with these three fixes the reader shape is sound.
+   **xz analog:** `lzma-rust2`'s LZ decoder preallocates the declared dict
+   (`vec![0; dict_size]`, up to 4 GiB) — the first block's LZMA2 dict-size byte is
+   pre-checked (cap 256 MiB) before constructing `XzReader`; later blocks/streams
+   declaring bigger dicts remain a documented residual (bounded at 4 GiB of mostly
+   untouched zeroed pages; physical use is bounded by our work cap). Upstream ask: a
+   mem-limit parameter on `XzReader`.
+5. **[P1] Completion/truncation/work-limit precision — ADOPTED.** Short entry reads are
+   `Corrupt` (not silent success); decode-stream `UnexpectedEof`/`InvalidData` map to
+   `Corrupt` while real filesystem errors stay `Io`; after tar iteration the codec is
+   **drained to EOF** (validates gzip/bzip2 trailers + real 100% progress), bounded by
+   cancel + the work cap; a **total expanded-work cap** (64 GiB) bounds skip-and-drain
+   CPU on hostile archives (resident-byte accounting alone doesn't); `MultiGzDecoder`
+   / `MultiBzDecoder` (not the single-stream variants) — concatenated-member tests for
+   all four codecs. Cancellation-latency wording corrected: the 64 KiB chunking bounds
+   *checks between output reads*; a decoder may process a whole internal block between.
+6. **[P1] Picker made the headline formats unavailable — ADOPTED.** `gz`/`bz2`/`zst`/
+   `xz` (+ `tbz`) join the picker filter in phase 4 (rfd matches the final extension,
+   so `.tar.gz` needs `gz`); a picked bare `photo.jpg.gz` classifies as `None` and is
+   rejected cleanly. Phase 5 (bare compressed single images) stays optional. **`.svgz`
+   is removed from phase 5** — it is already a supported image (`svg.rs` inflates
+   gzipped SVG with a bounded reader); reclassifying it as an archive would regress it.
+7. **[P2] Virtual-path policy — ADOPTED (tar-side).** The tar opens reject/skip names
+   that are empty, contain NUL or `..` components, or exceed 4096 bytes (cosmetic here
+   — entries are read by offset, never by path — but cheap defense in depth). Sparse
+   entries: `EntryType::is_file()` excludes GNU sparse ('S'); PAX-sparse (format 1.0)
+   entries decode as garbage and fail at the image decoder — documented, not a safety
+   issue. Hard links: **documented limitation** (skipped; they *can* name images, but
+   safe aliasing isn't worth the complexity for v1).
+8. **[P2] Wiring inventory — ADOPTED.** The audit now names: winit picker +
+   `is_archive`, mac-ffi mirror, the Swift open-panel allowed types
+   (`CoreModel.swift`), macOS Info.plist UTIs, `default_app.rs` Windows associations,
+   and help text. **OS associations are intentionally unchanged** for every tar/gz
+   suffix (same rule as ZIP: don't steal the OS archiver's types). Phase 0 spike text
+   is superseded by its recorded findings; `.tar.xz` is IN (verified `XzReader`, xz on
+   by default in lzma-rust2, already in-tree) with the dict-size pre-check above.
+
+Review test-matrix additions adopted into the phases: metadata bomb, entry-count bomb,
+truncated last payload (plain tar), concatenated members ×4 codecs, skippable frames,
+corrupt stream/trailer, huge zstd window, expanded-work refusal, traversal-shaped
+names, concurrent lazy `bytes(i)`, progress completion. A cargo-fuzz target over the
+open paths rides with phase 4 if the repo's fuzz scaffolding accommodates it cheaply;
+corpus benchmarks (index latency, codec throughput, peak RSS) are a follow-up note.
 
 ## Problem
 
@@ -267,9 +360,12 @@ maturity probe: the fuzz targets and the x86-filter fix.
 New in `pb-source`:
 
 ```rust
-pub enum ArchiveKind { Zip, SevenZ, Tar, TarGz, TarBz2, TarZst /*, TarXz?*/ }
+pub enum ArchiveKind { Zip, SevenZ, Tar, TarGz, TarBz2, TarZst, TarXz }
 pub fn archive_kind(path: &Path) -> Option<ArchiveKind>
-impl ArchiveKind { pub fn eager(&self) -> bool }  // needs the async open + progress dialog
+impl ArchiveKind {
+    pub fn eager(&self) -> bool           // RAM/access model: decode-to-RAM + budget
+    pub fn background_open(&self) -> bool // scheduling: open off-thread (rev2 §1 —
+}                                         // all tar kinds, incl. lazy plain tar)
 ```
 
 Double extensions are the subtlety `Path::extension()` misses: `.tar.gz` reports `gz`, so
@@ -354,10 +450,11 @@ So instead of predict-and-refuse:
   their refusal happens mid-stream, surfacing through the same
   `finish_archive_open` error path). `mt_headroom` stays a 7z concept (single-stream
   codecs have no within-block MT).
-- File picker filter (`main.rs:3109-3112`): add `tar,tgz,tbz2,tzst` and the dotted pairs
-  are covered by the plain-`gz`-etc entries only in phase 5 — for now rfd filters match on
-  final extension, so add `gz`,`bz2`,`zst` **only when phase 5 lands** (otherwise the
-  picker would offer files we then refuse).
+- File picker filter (`main.rs:3109-3112`): add `tar,tgz,tbz2,tbz,tzst,txz` **and**
+  `gz,bz2,zst,xz` — rfd filters match on the final extension, so without the bare
+  suffixes the headline `.tar.gz`/`.tar.zst` files would be invisible in the picker
+  (rev2 §6). A picked bare `photo.jpg.gz` classifies to `None` and is rejected cleanly;
+  phase 5 would upgrade it to actually open.
 - `crates/pb-mac-ffi/src/lib.rs`: mirror the `begin_archive_open` (`:2696`) dispatch and
   `is_archive` (`:3165`). Check the Swift host's Info.plist document types / open-panel
   allowed types for a hardcoded zip/7z list.
@@ -369,12 +466,14 @@ So instead of predict-and-refuse:
 
 ### 5. Phase 5 (optional, cheap once codecs exist): bare compressed single images
 
-`photo.jpg.gz`, `photo.png.bz2`, `photo.jxl.zst`, and `.svgz` (gzipped SVG — a real
-standard, worth having). Classifier: compression suffix whose *inner* stem has a supported
-image extension (`.svgz` maps to `svg`). Implementation: a tiny one-entry eager source (or
-a direct decompress-then-`decode_named_bytes` in the open path — decide at impl time;
-the one-entry `ItemSource` keeps the flow uniform). Budget-checked with the same
-streaming counter. This phase also adds `gz|bz2|zst|svgz` to the picker filter.
+`photo.jpg.gz`, `photo.png.bz2`, `photo.jxl.zst`. Classifier: compression suffix whose
+*inner* stem has a supported image extension. Implementation: a tiny one-entry eager
+source (or a direct decompress-then-`decode_named_bytes` in the open path — decide at
+impl time; the one-entry `ItemSource` keeps the flow uniform). Budget-checked with the
+same streaming counter. (**Not `.svgz`** — rev2 §6: gzipped SVG is already a supported
+ordinary image via `svg.rs`; making it an archive would regress it. The bare suffixes
+are already in the picker as of phase 4; this phase makes them open instead of being
+cleanly refused.)
 
 ## Phases
 

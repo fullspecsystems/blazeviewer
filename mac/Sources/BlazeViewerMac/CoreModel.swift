@@ -2386,7 +2386,13 @@ final class CoreModel {
                 "arw", "nef", "cr2", "cr3", "dng", "raf", "rw2", "orf", "srw", "pef", "raw",
                 "mp4", "m4v", "mov", "qt", "mkv", "webm", "avi", "wmv", "asf", "mpg", "mpeg",
                 "mts", "m2ts", "3gp", "3g2",
+                // Archives (#30 zip/7z, #102 tar family). The panel matches on the
+                // FINAL extension, so `.tar.gz` needs the bare `gz` entry; a picked
+                // bare `photo.jpg.gz` is refused cleanly by the classifier. UTTypes
+                // that don't resolve on this OS just drop out of the filter.
                 "zip", "7z",
+                "tar", "tgz", "tbz2", "tbz", "tzst", "txz", "gz", "bz2", "zst", "xz",
+                "rar", "cbr", "cbz",
             ]
             panel.allowedContentTypes = exts.compactMap { UTType(filenameExtension: $0) }
         }

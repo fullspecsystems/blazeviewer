@@ -134,7 +134,10 @@ mod win {
         ".heic", ".heif", ".avif", ".jxl",
     ];
     /// Browseable archives → the `PhotoBlaze.Archive` ProgId (never the default
-    /// out of the box; the Settings page just offers the option).
+    /// out of the box; the Settings page just offers the option). The tar family
+    /// (#102) is **deliberately absent** — plan rev2 §8: no new OS association
+    /// surface for tar/gz suffixes in v1 (a bare `.gz` isn't even necessarily an
+    /// archive we open); those files open via the picker, drag-drop, and the CLI.
     const ARCHIVE_EXTS: &[&str] = &[".zip", ".7z"];
     /// Video containers the library lists (task #79) → the `PhotoBlaze.Video` ProgId.
     /// Open-With candidacy only, never the default (ADR-018) — PhotoBlaze must not

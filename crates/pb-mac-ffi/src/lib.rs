@@ -2722,34 +2722,23 @@ impl AppCoreHandle {
         self.core.scanning = false;
     }
 
-    /// Start opening an archive (`CoreEffect::BeginArchiveOpen`): a `.zip` synchronously, a
-    /// `.7z` on a worker thread after the RAM pre-flight (a real OOM aborts uncatchably, so
-    /// over-budget is refused up front).
+    /// Start opening an archive (`CoreEffect::BeginArchiveOpen`): a `.zip`
+    /// synchronously; 7z and the tar family on a worker thread
+    /// (`ArchiveKind::background_open` — even a lazy plain tar's index walk is
+    /// O(entries) of file I/O). The per-kind dispatch, including the 7z RAM
+    /// pre-flight, is `scan::load_archive`, shared with the winit shell.
     fn begin_archive_open(&mut self, path: PathBuf, password: Option<String>) {
-        let is_7z = path
-            .extension()
-            .and_then(|e| e.to_str())
-            .is_some_and(|e| e.eq_ignore_ascii_case("7z"));
+        let kind = pb_source::archive_kind(&path).unwrap_or(pb_source::ArchiveKind::Zip);
         let was_password_attempt = password.is_some();
         // Anti-stacking: a newer open supersedes (and cancels) an in-flight one.
         if let Some(prev) = self.archive_load.as_ref() {
             prev.progress.request_cancel();
         }
-        if !is_7z {
+        if !kind.background_open() {
             let result = scan::open_archive(&path, password);
             self.finish_archive_open(result, was_password_attempt, path);
             return;
         }
-        let projected = match scan::seven_z_preflight(&path, password.as_deref()) {
-            Ok(projected) => projected,
-            Err(e) => {
-                self.finish_archive_open(Err(e), was_password_attempt, path);
-                return;
-            }
-        };
-        // The budget the resident entries won't use is what the open may spend
-        // transiently on within-block MT decode (the solid-archive ~3x speedup).
-        let mt_headroom = pb_app_core::archive::ram_budget().saturating_sub(projected);
         self.archive_gen += 1;
         let generation = self.archive_gen;
         let progress = pb_source::OpenProgress::new();
@@ -2757,7 +2746,7 @@ impl AppCoreHandle {
         let worker_path = path.clone();
         let worker_progress = progress.clone();
         std::thread::spawn(move || {
-            let result = scan::load_seven_z(&worker_path, password, &worker_progress, mt_headroom);
+            let result = scan::load_archive(&worker_path, kind, password, &worker_progress);
             let _ = tx.send((generation, result));
         });
         // The determinate "Opening…" progress + Cancel dialog. If the password prompt is
@@ -3193,12 +3182,11 @@ fn probe_describe_endpoint(url: String) -> ffi::ProbeResultFfi {
     }
 }
 
-/// Is this path a viewable archive (`.zip` / `.7z`)? Mirrors the winit shell's helper.
+/// Is this path a viewable archive? The one classifier
+/// (`pb_source::archive_kind`): zip, 7z, and the tar family. Mirrors the winit
+/// shell's helper.
 fn is_archive(p: &Path) -> bool {
-    p.extension()
-        .and_then(|e| e.to_str())
-        .map(|e| e.eq_ignore_ascii_case("zip") || e.eq_ignore_ascii_case("7z"))
-        .unwrap_or(false)
+    pb_source::archive_kind(p).is_some()
 }
 
 /// Map a core [`contract::CoreEffect`] to the FFI enum the Swift host switches on.

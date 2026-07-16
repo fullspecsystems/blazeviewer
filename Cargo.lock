@@ -1067,6 +1067,11 @@ dependencies = [
 ]
 
 [[package]]
+name = "compcol"
+version = "0.6.8"
+source = "git+https://github.com/jdlien/compcol?rev=5c47b0ecf123cfb5976ab3d5c53a17fb936bb1d2#5c47b0ecf123cfb5976ab3d5c53a17fb936bb1d2"
+
+[[package]]
 name = "concurrent-queue"
 version = "2.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1764,6 +1769,16 @@ checksum = "38e2275cc4e4fc009b0669731a1e5ab7ebf11f469eaede2bab9309a5b4d6057f"
 dependencies = [
  "memoffset",
  "rustc_version",
+]
+
+[[package]]
+name = "filetime"
+version = "0.2.29"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5c287a33c7f0a620c38e641e7f60827713987b3c0f26e8ddc9462cc69cf75759"
+dependencies = [
+ "cfg-if",
+ "libc",
 ]
 
 [[package]]
@@ -3295,6 +3310,9 @@ name = "lzma-rust2"
 version = "0.16.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ce716bf1a316f47a280fc76295f6495b5bea4752bca01c3b3885e101b1c23c02"
+dependencies = [
+ "sha2 0.11.0",
+]
 
 [[package]]
 name = "malloc_buf"
@@ -4023,6 +4041,7 @@ dependencies = [
  "egui",
  "egui-wgpu",
  "egui-winit",
+ "flate2",
  "half",
  "libc",
  "muda",
@@ -4041,6 +4060,7 @@ dependencies = [
  "serde_json",
  "sevenz-rust2",
  "sha2 0.10.9",
+ "tar",
  "toml 0.8.2",
  "ureq 3.3.0",
  "velopack",
@@ -4074,6 +4094,7 @@ dependencies = [
  "rqrr",
  "serde",
  "serde_json",
+ "tar",
  "toml 0.8.2",
  "trash",
  "ureq 3.3.0",
@@ -4157,7 +4178,14 @@ dependencies = [
 name = "pb-source"
 version = "0.1.0"
 dependencies = [
+ "bzip2",
+ "compcol",
+ "crc32fast",
+ "flate2",
+ "lzma-rust2",
+ "ruzstd",
  "sevenz-rust2",
+ "tar",
  "zip 2.4.2",
 ]
 
@@ -4892,6 +4920,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "ruzstd"
+version = "0.8.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a7c1c839d570d835527c9a5e4db7cb2198683a988cb9d7293fc8674e6bd58fc8"
+dependencies = [
+ "twox-hash",
+]
+
+[[package]]
 name = "ryu"
 version = "1.0.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5452,6 +5489,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "tar"
+version = "0.4.46"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3f6221d9a6003c78398e3b239969f352578258df48c8eb051caadae0015bc840"
+dependencies = [
+ "filetime",
+ "libc",
+]
+
+[[package]]
 name = "target-lexicon"
 version = "0.12.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5818,6 +5865,12 @@ checksum = "d2df906b07856748fa3f6e0ad0cbaa047052d4a7dd609e231c4f72cee8c36f31"
 dependencies = [
  "core_maths",
 ]
+
+[[package]]
+name = "twox-hash"
+version = "2.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9ea3136b675547379c4bd395ca6b938e5ad3c3d20fad76e7fe85f9e0d011419c"
 
 [[package]]
 name = "type-map"

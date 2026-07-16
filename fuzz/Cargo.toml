@@ -15,10 +15,25 @@ cargo-fuzz = true
 [dependencies]
 libfuzzer-sys = "0.4"
 pb-decode = { path = "../crates/pb-decode", features = ["fuzz-internals"] }
+pb-source = { path = "../crates/pb-source", features = ["fuzz-internals"] }
 
 [[bin]]
 name = "probe_avis"
 path = "fuzz_targets/probe_avis.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "tar_open"
+path = "fuzz_targets/tar_open.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "rar_open"
+path = "fuzz_targets/rar_open.rs"
 test = false
 doc = false
 bench = false

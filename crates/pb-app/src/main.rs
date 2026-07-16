@@ -1023,50 +1023,37 @@ impl App {
     }
 
     /// Start opening an archive at runtime (picker / drag-drop / a deferred launch).
-    /// A `.zip` opens synchronously (just a directory read). A `.7z` is opened on a
-    /// background thread after a synchronous RAM pre-flight: the current photo stays
-    /// visible and the loop stays responsive until the eager decompress lands
-    /// (picked up in [`poll_archive_load`](App::poll_archive_load)). A second open
-    /// supersedes the first via `archive_gen`.
+    /// A `.zip` opens synchronously (just a directory read). Every other kind —
+    /// 7z and the whole tar family — opens on a background thread
+    /// ([`ArchiveKind::background_open`]; even a lazy plain tar's index walk is
+    /// O(entries) of file I/O): the current photo stays visible and the loop stays
+    /// responsive until the open lands (picked up in
+    /// [`poll_archive_load`](App::poll_archive_load)). The per-kind dispatch —
+    /// including the 7z RAM pre-flight — is `scan::load_archive`, shared with the
+    /// mac shell. A second open supersedes the first via `archive_gen`.
     ///
     /// `password` decrypts an encrypted archive: `None` on the first open (an
     /// encrypted archive then reports `PasswordRequired`, which prompts), `Some` when
     /// re-opening with a password the user entered.
     fn begin_archive_open(&mut self, path: PathBuf, password: Option<String>) {
-        let is_7z = path
-            .extension()
-            .and_then(|e| e.to_str())
-            .is_some_and(|e| e.eq_ignore_ascii_case("7z"));
+        let kind = pb_source::archive_kind(&path).unwrap_or(pb_source::ArchiveKind::Zip);
         let was_password_attempt = password.is_some();
         // Anti-stacking: cancel any open already in flight before starting another, so
-        // two eager 7z decompresses never run (and pile up RAM) at once — the original
+        // two eager decompresses never run (and pile up RAM) at once — the original
         // hang's worst case was the user re-triggering a "never-finishing" open and
         // stacking full-archive workers. The superseded worker stops at its next entry
         // boundary and frees its partial buffers. `take()` (not just cancel) drops the
         // handle + rx now: a result the old worker already sent — its generation still
-        // matches — must never be received after this newer open. The zip-sync and
-        // preflight-error paths below have no gen bump of their own to protect them.
+        // matches — must never be received after this newer open. The zip-sync path
+        // below has no gen bump of its own to protect it.
         if let Some(prev) = self.archive_load.take() {
             prev.progress.request_cancel();
         }
-        if !is_7z {
+        if !kind.background_open() {
             let result = scan::open_archive(&path, password);
             self.finish_archive_open(result, was_password_attempt, path);
             return;
         }
-        // 7z: refuse instantly if it won't fit RAM (before any background work). A
-        // pre-flight password error (a header-encrypted archive) routes to the prompt
-        // like any other, not the generic error dialog.
-        let projected = match scan::seven_z_preflight(&path, password.as_deref()) {
-            Ok(projected) => projected,
-            Err(e) => {
-                self.finish_archive_open(Err(e), was_password_attempt, path);
-                return;
-            }
-        };
-        // The budget the resident entries won't use is what the open may spend
-        // transiently on within-block MT decode (the solid-archive ~3x speedup).
-        let mt_headroom = archive::ram_budget().saturating_sub(projected);
         self.archive_gen += 1;
         let generation = self.archive_gen;
         let progress = pb_source::OpenProgress::new();
@@ -1074,7 +1061,7 @@ impl App {
         let worker_path = path.clone();
         let worker_progress = progress.clone();
         std::thread::spawn(move || {
-            let result = scan::load_seven_z(&worker_path, password, &worker_progress, mt_headroom);
+            let result = scan::load_archive(&worker_path, kind, password, &worker_progress);
             let _ = tx.send((generation, result));
         });
         // Show the determinate progress + Cancel dialog. If the password prompt is still
@@ -3204,6 +3191,14 @@ impl App {
                         exts.extend_from_slice(VIDEO_FILTER_EXTS);
                         exts.push("zip");
                         exts.push("7z");
+                        // The tar family (#102). rfd matches on the FINAL extension,
+                        // so `.tar.gz` needs the bare `gz` entry — a picked bare
+                        // `photo.jpg.gz` classifies to None and is refused cleanly.
+                        exts.extend_from_slice(&[
+                            "tar", "tgz", "tbz2", "tbz", "tzst", "txz", "gz", "bz2", "zst", "xz",
+                        ]);
+                        // RAR5 + comic books (#103): .cbr = RAR, .cbz = ZIP.
+                        exts.extend_from_slice(&["rar", "cbr", "cbz"]);
                         let input = rfd::FileDialog::new()
                             .add_filter("Images, videos & archives", &exts)
                             .add_filter("All files", &["*"])
@@ -4388,12 +4383,10 @@ fn hwnd_of(window: &Window) -> Option<isize> {
     }
 }
 
-/// Whether a path names an archive we open as a playlist (`.zip` or `.7z`).
+/// Whether a path names an archive we open as a playlist — the one classifier
+/// (`pb_source::archive_kind`): zip, 7z, and the tar family.
 fn is_archive(p: &Path) -> bool {
-    p.extension()
-        .and_then(|e| e.to_str())
-        .map(|e| e.eq_ignore_ascii_case("zip") || e.eq_ignore_ascii_case("7z"))
-        .unwrap_or(false)
+    pb_source::archive_kind(p).is_some()
 }
 
 /// Classify launch / drop / picker paths into a [`LaunchInput`] — the one step
@@ -5364,6 +5357,149 @@ mod tests {
             "viewing a 7z must create or modify no files (no extraction to disk)"
         );
 
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The privacy guarantee extends to the tar family (#102), lazy half: a plain
+    /// `.tar` is indexed by seeking over headers and every `bytes(i)` is an
+    /// open + seek + read — none of which may create or modify anything.
+    #[test]
+    fn viewing_a_tar_writes_nothing_to_disk() {
+        let dir = std::env::temp_dir().join(format!("pb_tar_notrace_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("mkdir sandbox");
+        const IMG: &[u8] = include_bytes!("../icons/blazeviewer.png");
+        let tar_path = dir.join("album.tar");
+        {
+            let f = fs::File::create(&tar_path).expect("create tar");
+            let mut tw = tar::Builder::new(f);
+            for name in ["a.png", "b.png", "sub/c.png"] {
+                let mut h = tar::Header::new_gnu();
+                h.set_size(IMG.len() as u64);
+                h.set_mode(0o644);
+                tw.append_data(&mut h, name, IMG).expect("append entry");
+            }
+            tw.finish().expect("finish tar");
+        }
+
+        let before = snapshot_tree(&dir);
+
+        let resolved =
+            scan::resolve_playlist(&Source::Archive(tar_path.clone()), &open::Cursor::First);
+        assert_eq!(resolved.source.len(), 3, "tar should yield three images");
+        let fit = FitBox {
+            max_width: 64,
+            max_height: 64,
+        };
+        for i in 0..resolved.source.len() {
+            decode_item(resolved.source.as_ref(), i, Some(fit), false).expect("decode");
+            let bytes = resolved.source.bytes(i).expect("read for exif");
+            let _ = read_exif_fields(&bytes);
+        }
+
+        let after = snapshot_tree(&dir);
+        assert_eq!(
+            before, after,
+            "viewing a tar must create or modify no files (no extraction to disk)"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The eager half (#102): a `.tar.gz` is streamed whole into RAM — like the
+    /// 7z test, the most at-risk shape. Nothing may land on disk.
+    #[test]
+    fn viewing_a_tar_gz_writes_nothing_to_disk() {
+        use std::io::Write as _;
+
+        let dir = std::env::temp_dir().join(format!("pb_tgz_notrace_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("mkdir sandbox");
+        const IMG: &[u8] = include_bytes!("../icons/blazeviewer.png");
+        let tgz_path = dir.join("album.tar.gz");
+        {
+            let mut tar_bytes = Vec::new();
+            {
+                let mut tw = tar::Builder::new(&mut tar_bytes);
+                for name in ["a.png", "b.png"] {
+                    let mut h = tar::Header::new_gnu();
+                    h.set_size(IMG.len() as u64);
+                    h.set_mode(0o644);
+                    tw.append_data(&mut h, name, IMG).expect("append entry");
+                }
+                tw.finish().expect("finish tar");
+            }
+            let f = fs::File::create(&tgz_path).expect("create tgz");
+            let mut gz = flate2::write::GzEncoder::new(f, flate2::Compression::fast());
+            gz.write_all(&tar_bytes).expect("compress");
+            gz.finish().expect("finish gz");
+        }
+
+        let before = snapshot_tree(&dir);
+
+        // Straight into the eager decode-to-RAM step this test guards, with an
+        // injected budget so a low-RAM machine's real ram_budget() (which can
+        // floor to 0) can't flake the test — same reasoning as the 7z no-trace
+        // test going through load_seven_z rather than the pre-flight.
+        let src = pb_source::TarSource::open_compressed(
+            &tgz_path,
+            pb_source::ArchiveKind::TarGz,
+            scan::is_supported_archive_entry,
+            None,
+            u64::MAX,
+        )
+        .expect("open tar.gz");
+        let resolved = scan::archive_resolved(&tgz_path, std::sync::Arc::new(src));
+        assert_eq!(resolved.source.len(), 2, "tar.gz should yield two images");
+        let fit = FitBox {
+            max_width: 64,
+            max_height: 64,
+        };
+        for i in 0..resolved.source.len() {
+            decode_item(resolved.source.as_ref(), i, Some(fit), false).expect("decode");
+            let bytes = resolved.source.bytes(i).expect("read for exif");
+            let _ = read_exif_fields(&bytes);
+        }
+
+        let after = snapshot_tree(&dir);
+        assert_eq!(
+            before, after,
+            "viewing a tar.gz must create or modify no files (no extraction to disk)"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The privacy guarantee extends to RAR (#103): the scan, the solid-group
+    /// eager decode, and every lazy per-entry decode are RAM-only. (The fixture
+    /// holds text-shaped bytes, so entries are read + CRC-checked rather than
+    /// image-decoded — the disk-trace surface is identical.)
+    #[test]
+    fn viewing_a_rar_writes_nothing_to_disk() {
+        const RAR: &[u8] = include_bytes!("../../pb-source/tests/fixtures/rar/lz_solid.rar");
+        let dir = std::env::temp_dir().join(format!("pb_rar_notrace_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("mkdir sandbox");
+        let rar_path = dir.join("album.rar");
+        fs::write(&rar_path, RAR).expect("seed rar");
+
+        let before = snapshot_tree(&dir);
+
+        // Straight into the open (solid groups eager-decode here), with an
+        // injected budget so a low-RAM machine's real ram_budget() can't flake
+        // the test — same reasoning as the 7z and tar.gz no-trace tests.
+        let src =
+            pb_source::RarSource::open(&rar_path, scan::is_supported_archive_entry, None, u64::MAX)
+                .expect("open rar");
+        let resolved = scan::archive_resolved(&rar_path, std::sync::Arc::new(src));
+        assert_eq!(resolved.source.len(), 3, "rar should yield three entries");
+        for i in 0..resolved.source.len() {
+            let _ = resolved.source.bytes(i).expect("read entry");
+        }
+
+        let after = snapshot_tree(&dir);
+        assert_eq!(
+            before, after,
+            "viewing a rar must create or modify no files (no extraction to disk)"
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 

@@ -1,10 +1,37 @@
 # Task 103 — RAR5 archive viewing (`RarSource`)
 
-**Status:** planned — rev1 (2026-07-16). Empirically de-risked by the compcol spike (see
-`102-tar-family-archives.md` §"Spike execution results").
-**Branch:** `feat/enhanced-archives` (worktree `~/code/blazeviewer-wt1`), alongside the tar
-family (#102). **Do #102 first** — it lands the `ArchiveKind` classifier this reuses, and it
-has no external dependency, whereas RAR5 is gated on an upstream compcol release (see §1).
+**Status:** implemented — rev2 (2026-07-16), after #102 as ordered. `pb-source/src/rar.rs`
+(own container parser + `ItemSource`), wired into both shells through the #102
+`load_archive` dispatch. **Corpus differential: 18 archives, 60 entries byte-identical to
+`unrar`, zero mismatches** (`rar_corpus_matches_unrar`, `--ignored`, PB_RAR_CORPUS); the
+refusals are all honest per-entry Unsupported (Delta-filtered bmp/wav content + solid-group
+degradation from the Delta member on), exactly the designed scope. 12 unit tests over
+committed WinRAR 7.23 fixtures (`tests/fixtures/rar/`, generation commands in the test
+module) + a `rar_open` cargo-fuzz target.
+
+**Implementation decisions that refine rev1** (recorded, not silently changed):
+1. **Dependency pin:** an exact **rev** (`5c47b0e`, the pushed fork branch tip carrying the
+   x86 fix), stricter than the planned branch reference — a branch dep is mutable, and the
+   plan's own rule is exact-pin. Upstream PR #121 is still open; swap to `compcol = "=x.y.z"`
+   when it merges + releases.
+2. **Encrypted RAR → `OpenError::Unsupported` (honest message), NOT `PasswordRequired`** —
+   deviation from rev1 §2, deliberate: `PasswordRequired` routes to the shells' password
+   prompt, and no typed password can help (we detect RAR encryption; we do not decrypt), so
+   prompting would loop forever. Same honest-refusal channel serves RAR4 and multi-volume.
+   An archive whose *every* item is unavailable for one shared reason refuses at open with
+   that reason instead of showing a deck of N failing items.
+3. **Delta is currently the whole solid-group tail** (as scoped): a refused member marks
+   itself + everything after it in its group unavailable; earlier members and other groups
+   serve. **Upgrade path already sighted:** the local (unpushed) compcol branch
+   `rar3-standard-filters` (da7f779) decodes Delta and adds `Decoder::add_file_boundary`
+   (correct per-file x86 semantics in solid groups). When it lands upstream, bump the pin
+   and register member boundaries in `decode_solid_group` — the Delta refusals then simply
+   stop happening. Until then, an x86-filtered member *after the first* in a solid group
+   decodes with wrong call targets; our CRC catches it (per-entry "damaged") and x86 filters
+   never apply to photos.
+4. **Fixture subtlety worth remembering:** WinRAR sorts solid input by extension, and its
+   content analysis Delta-filters *any* fixed-stride data — the delta fixture pins order
+   with `-ds`, and the text fixtures are deliberately aperiodic.
 
 ## Goal
 

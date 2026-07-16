@@ -96,8 +96,27 @@ pub fn available_physical_ram() -> Option<u64> {
     }
 }
 
+/// Available physical RAM in bytes on Linux: the kernel's own `MemAvailable`
+/// estimate (free + reclaimable without swapping) from `/proc/meminfo`. Added
+/// in plan #102 rev2 — tarballs are Linux-first, and falling back to the
+/// assumed-8-GB figure would undermine the budget gate on exactly the platform
+/// the eager tarball open targets.
+#[cfg(target_os = "linux")]
+pub fn available_physical_ram() -> Option<u64> {
+    parse_meminfo_available(&std::fs::read_to_string("/proc/meminfo").ok()?)
+}
+
+/// Parse the `MemAvailable:` line (reported in kB) out of `/proc/meminfo` text.
+/// Split out so the parse is unit-testable on every platform.
+#[cfg(any(target_os = "linux", test))]
+fn parse_meminfo_available(meminfo: &str) -> Option<u64> {
+    let line = meminfo.lines().find(|l| l.starts_with("MemAvailable:"))?;
+    let kb: u64 = line.split_whitespace().nth(1)?.parse().ok()?;
+    Some(kb.saturating_mul(1024))
+}
+
 /// Available physical RAM in bytes (stub on platforms without a query wired up).
-#[cfg(not(any(windows, target_os = "macos")))]
+#[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
 pub fn available_physical_ram() -> Option<u64> {
     None
 }
@@ -193,6 +212,12 @@ pub enum ArchiveOpenError {
     PasswordRequired,
     /// Opened fine but holds no supported images.
     Empty,
+    /// Recognized but deliberately not opened (RAR4, multi-volume RAR,
+    /// encrypted RAR). Carries the ready-to-show line — distinct from
+    /// [`PasswordRequired`](ArchiveOpenError::PasswordRequired) because the
+    /// password prompt cannot help (we detect RAR encryption, we don't decrypt
+    /// it; prompting would loop).
+    Unsupported(String),
     /// An I/O error opening or reading the file.
     Io(String),
     /// The user cancelled the open before it finished. Not really an error — the app
@@ -218,6 +243,7 @@ impl ArchiveOpenError {
                 "This archive is password protected, which is not supported yet.".into()
             }
             ArchiveOpenError::Empty => "This archive has no images to show.".into(),
+            ArchiveOpenError::Unsupported(msg) => msg.clone(),
             ArchiveOpenError::Io(e) => format!("This archive could not be opened. {e}"),
             ArchiveOpenError::Cancelled => "Archive open cancelled.".into(),
         }
@@ -233,6 +259,11 @@ impl From<pb_source::OpenError> for ArchiveOpenError {
             E::PasswordRequired => ArchiveOpenError::PasswordRequired,
             E::OutOfMemory => ArchiveOpenError::OutOfMemory,
             E::Cancelled => ArchiveOpenError::Cancelled,
+            // A compressed tar has no up-front size table, so its budget check
+            // trips mid-stream; `needed` is a lower bound, which is why the
+            // user message says "at least".
+            E::TooLarge { needed, budget } => ArchiveOpenError::TooLarge { needed, budget },
+            E::Unsupported(msg) => ArchiveOpenError::Unsupported(msg),
         }
     }
 }
@@ -272,6 +303,19 @@ mod tests {
             got >= 512 * 1024 * 1024,
             "8 GB machine should admit at least a 512 MB archive, got {got}"
         );
+    }
+
+    #[test]
+    fn meminfo_available_parses_the_kernel_line() {
+        let text = "MemTotal:       65449180 kB\nMemFree:         8321104 kB\nMemAvailable:   47234872 kB\nBuffers:          812345 kB\n";
+        assert_eq!(
+            parse_meminfo_available(text),
+            Some(47_234_872 * 1024),
+            "kB scaled to bytes"
+        );
+        assert_eq!(parse_meminfo_available("MemTotal: 1 kB\n"), None);
+        assert_eq!(parse_meminfo_available("MemAvailable: garbage kB\n"), None);
+        assert_eq!(parse_meminfo_available(""), None);
     }
 
     #[test]

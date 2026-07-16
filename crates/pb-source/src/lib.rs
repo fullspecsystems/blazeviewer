@@ -5,7 +5,7 @@
 //! index into the **raw encoded bytes** to hand `pb_decode::decode_named_bytes`,
 //! plus a display name (and, for real files, a path the info panel can stat).
 //!
-//! Three implementations ship today:
+//! Four implementations ship today:
 //! * [`FsSource`] — a plain, already-scanned filesystem listing (today's behavior
 //!   behind the seam): `bytes(i)` is a `std::fs::read`.
 //! * [`ZipSource`] — a ZIP archive read **per entry, on demand, into RAM**. ZIP's
@@ -19,20 +19,27 @@
 //!   cheap per-entry random access; instead every supported-image entry is decoded
 //!   once up front into a resident `index → bytes` map. Pre-flight an open with
 //!   [`seven_z_projected_bytes`] against a memory budget.
+//! * [`TarSource`] — the tar family (task #102): a plain `.tar` is **lazy** like
+//!   ZIP (headers indexed by seeking; `bytes(i)` = open + seek + read), while
+//!   `.tar.gz`/`.tar.bz2`/`.tar.zst`/`.tar.xz` are solid streams and go **eager**
+//!   like 7z — with the RAM budget enforced *mid-stream* (no size table exists up
+//!   front). Which is which is decided by [`archive_kind`], the one classifier
+//!   every "is this an archive?" question routes through.
 //!
 //! **Privacy.** Every read here is RAM-only; nothing is ever written to disk. This
 //! is the archive analogue of the "on-disk I/O is read-only on the view path"
 //! guarantee — opening a ZIP to view it never extracts it to a temp directory.
 //!
 //! ## Random access vs. eager sources
-//! [`FsSource`] and [`ZipSource`] are *lazy* random-access: any item is fetched
-//! cheaply and independently, which is what the direction-biased prefetch ring
-//! assumes. A *solid* archive (7z, and later tar.gz) can't seek to one entry
-//! without decompressing the block before it, so [`SevenZSource`] is instead
-//! *eager*: it pays the whole decompression once on open and then serves random
-//! access from RAM. The trait is shaped so this is an implementation choice, not a
-//! change to the seam — the only caller-visible cost is a slower open (which the
-//! app runs off-thread behind a spinner) and the resident memory.
+//! [`FsSource`], [`ZipSource`], and a plain-tar [`TarSource`] are *lazy*
+//! random-access: any item is fetched cheaply and independently, which is what
+//! the direction-biased prefetch ring assumes. A *solid* archive (7z, compressed
+//! tar) can't seek to one entry without decompressing the block before it, so
+//! those sources are instead *eager*: they pay the whole decompression once on
+//! open and then serve random access from RAM. The trait is shaped so this is an
+//! implementation choice, not a change to the seam — the only caller-visible cost
+//! is a slower open (which the app runs off-thread behind a progress dialog) and
+//! the resident memory.
 
 use std::fs::File;
 use std::io::{self, BufReader, Read};
@@ -44,6 +51,18 @@ use sevenz_rust2::{
     Archive as SevenZArchive, BlockDecoder, EncoderMethod, Password as SevenZPassword,
 };
 use zip::ZipArchive;
+
+mod kind;
+mod rar;
+mod tar_source;
+
+pub use kind::{archive_kind, ArchiveKind};
+#[cfg(feature = "fuzz-internals")]
+pub use rar::fuzz as rar_fuzz;
+pub use rar::RarSource;
+#[cfg(feature = "fuzz-internals")]
+pub use tar_source::fuzz;
+pub use tar_source::TarSource;
 
 /// A uniform, read-only source of encoded bytes addressed by item index.
 ///
@@ -248,6 +267,20 @@ pub enum OpenError {
     /// finished. Distinct from an error so the app can quietly drop it rather than
     /// show a failure dialog.
     Cancelled,
+    /// The archive's decompressed entries exceed the caller's RAM budget. Unlike
+    /// 7z (whose header lists every size, so the app pre-flights and refuses
+    /// before opening), a compressed tar's sizes are only discovered mid-stream —
+    /// so the streaming open enforces the budget itself and reports it here.
+    /// `needed` is a lower bound (the stream stopped as soon as it tripped).
+    TooLarge { needed: u64, budget: u64 },
+    /// The archive is recognized but deliberately not opened: a format tier we
+    /// don't decode (RAR4, multi-volume RAR, encrypted RAR). Distinct from
+    /// [`Corrupt`](OpenError::Corrupt) so the user learns *what* it is rather
+    /// than "may be damaged" — and distinct from
+    /// [`PasswordRequired`](OpenError::PasswordRequired), which the app answers
+    /// with a password prompt: an encrypted RAR can't be decrypted no matter
+    /// what is typed, so prompting would loop. Carries the ready-to-show line.
+    Unsupported(String),
 }
 
 impl std::fmt::Display for OpenError {
@@ -258,6 +291,11 @@ impl std::fmt::Display for OpenError {
             OpenError::PasswordRequired => write!(f, "the archive is password protected"),
             OpenError::OutOfMemory => write!(f, "ran out of memory loading the archive"),
             OpenError::Cancelled => write!(f, "the archive open was cancelled"),
+            OpenError::TooLarge { needed, budget } => write!(
+                f,
+                "the archive needs at least {needed} bytes of RAM, over the {budget}-byte budget"
+            ),
+            OpenError::Unsupported(msg) => write!(f, "{msg}"),
         }
     }
 }
@@ -328,8 +366,11 @@ impl OpenProgress {
         self.inner.cancel.load(Ordering::Relaxed)
     }
 
-    /// Opener-side: record `n` more decompressed bytes streamed.
-    fn add_done(&self, n: u64) {
+    /// Opener-side: record `n` more streamed bytes (decompressed for 7z; the tar
+    /// openers count *compressed* bytes consumed instead, since a compressed
+    /// tar's decompressed total isn't knowable up front — the fraction stays a
+    /// plain ratio either way).
+    pub(crate) fn add_done(&self, n: u64) {
         self.inner.done.fetch_add(n, Ordering::Relaxed);
     }
 }
@@ -588,8 +629,9 @@ impl ItemSource for ZipSource {
 }
 
 /// The forward-slashed directory part of an archive entry name (`""` at the root).
-/// Archive names are always `/`-separated, whatever host wrote them.
-fn zip_dir_of(name: &str) -> &str {
+/// Archive names are always `/`-separated, whatever host wrote them. (Named for
+/// its first adopter; TarSource scopes its siblings with it too.)
+pub(crate) fn zip_dir_of(name: &str) -> &str {
     match name.rsplit_once('/') {
         Some((dir, _)) => dir,
         None => "",
@@ -1082,7 +1124,7 @@ pub const MAX_ENTRY_BYTES: u64 = 1 << 30; // 1 GiB
 /// chunks so a large entry aborts within one chunk's latency rather than only at the
 /// next block boundary (which, for a solid archive, can mean after the whole thing).
 /// `Ok(true)` = read to `size` (or a short EOF); `Ok(false)` = cancelled mid-stream.
-fn read_cancellable(
+pub(crate) fn read_cancellable(
     rd: &mut dyn Read,
     size: u64,
     out: &mut dyn io::Write,
@@ -1119,7 +1161,7 @@ fn display_name(p: &Path) -> String {
 /// `/`-based grouping (the ⇧F folder tree) and read wrong in the title/EXIF
 /// panel. Purely a *name* transformation: entries are only ever read from RAM
 /// by index, never extracted to a path, so this can't affect what's opened.
-fn normalize_entry_name(raw: &str) -> String {
+pub(crate) fn normalize_entry_name(raw: &str) -> String {
     let s = raw.replace('\\', "/");
     let mut t = s.as_str();
     loop {
@@ -1137,7 +1179,7 @@ fn normalize_entry_name(raw: &str) -> String {
 /// The lowercased extension (no dot) of a name or path, or `""` if none. Uses
 /// `Path` so only the last component's extension counts (a ZIP entry name like
 /// `trip/day1/IMG.JPG` → `jpg`).
-fn ext_of(name: &str) -> String {
+pub(crate) fn ext_of(name: &str) -> String {
     Path::new(name)
         .extension()
         .and_then(|e| e.to_str())
@@ -1145,7 +1187,7 @@ fn ext_of(name: &str) -> String {
         .unwrap_or_default()
 }
 
-fn out_of_range() -> io::Error {
+pub(crate) fn out_of_range() -> io::Error {
     io::Error::new(io::ErrorKind::NotFound, "item index out of range")
 }
 
