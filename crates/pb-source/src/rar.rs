@@ -104,6 +104,7 @@ const UNAVAIL_STORED_SOLID: &str =
 const UNAVAIL_FILTER: &str =
     "this entry (or one before it in its solid group) uses a RAR feature that is not supported yet";
 const UNAVAIL_DAMAGED: &str = "this entry is damaged (checksum mismatch)";
+const UNAVAIL_TRUNCATED: &str = "this entry is cut off (the archive ends before its data)";
 
 /// Where an entry's bytes come from.
 enum EntryData {
@@ -149,6 +150,12 @@ struct Member {
     method: u64,
     window: usize,
     encrypted: bool,
+    /// Whether this member may appear in the item index (sane name). A
+    /// non-indexable member still occupies its slot in the solid stream.
+    indexable: bool,
+    /// Whether the member's data runs past EOF (necessarily the last member
+    /// scanned; its group degrades from here).
+    truncated: bool,
 }
 
 impl RarSource {
@@ -444,6 +451,15 @@ fn scan_and_load<R: Read + Seek>(
         if read_fully(reader, &mut hdr)? != hdr.len() {
             break;
         }
+        // RAR5 stores a CRC32 of (HeaderSize vint || header data). Verify it
+        // before trusting any parsed field — a bit-flipped header must read as
+        // damage, not as different names, sizes, or flags.
+        let mut hasher = crc32fast::Hasher::new();
+        hasher.update(&pre[4..4 + hs_len]);
+        hasher.update(&hdr);
+        if hasher.finalize() != u32::from_le_bytes([pre[0], pre[1], pre[2], pre[3]]) {
+            return Err(OpenError::Corrupt("RAR header checksum mismatch".into()));
+        }
         let mut c = Cur { b: &hdr, p: 0 };
         let htype = c.vint()?;
         let hflags = c.vint()?;
@@ -497,12 +513,22 @@ fn scan_and_load<R: Read + Seek>(
                 let extra = &hdr[(head_size - extra_size) as usize..];
                 let encrypted = extra_size > 0 && extra_has_encryption(extra);
 
-                if !is_dir && sane_name(&name) {
-                    name_bytes += name.len() as u64;
-                    if name_bytes > limits.max_name_bytes {
-                        return Err(OpenError::Corrupt(
-                            "the archive has too many entries".into(),
-                        ));
+                if !is_dir {
+                    // An unsafe/overlong name means the entry is never shown or
+                    // indexed — but its packed bytes are still part of its solid
+                    // group's LZ stream, so the member must stay in the group
+                    // model or every later member would desync. Drop the name
+                    // (it is never displayed) so a hostile name can't bloat the
+                    // tables either.
+                    let indexable = sane_name(&name);
+                    let name = if indexable { name } else { String::new() };
+                    if indexable {
+                        name_bytes += name.len() as u64;
+                        if name_bytes > limits.max_name_bytes {
+                            return Err(OpenError::Corrupt(
+                                "the archive has too many entries".into(),
+                            ));
+                        }
                     }
                     // Compression info: bit 6 solid, bits 7..=9 method,
                     // bits 10..=13 dict (window = 128 KiB << N). The cap keeps
@@ -517,23 +543,26 @@ fn scan_and_load<R: Read + Seek>(
                         .unwrap_or(MAX_WINDOW)
                         .min(MAX_WINDOW)
                         .min((file_len as usize).max(0x20000));
-                    // Data must actually fit the file (a truncated tail entry
-                    // can never decode — skip it, keep the archive viewable).
-                    if header_end.saturating_add(data_size) <= file_len {
-                        if !solid || groups.is_empty() {
-                            groups.push(Vec::new());
-                        }
-                        groups.last_mut().expect("just pushed").push(Member {
-                            name,
-                            data_offset: header_end,
-                            pack: data_size,
-                            unpack,
-                            crc,
-                            method,
-                            window,
-                            encrypted,
-                        });
+                    // A member whose data runs past EOF can never decode — and
+                    // since blocks are sequential, it is necessarily the last
+                    // one scanned. Kept (flagged) so its group can degrade
+                    // honestly instead of the member silently vanishing.
+                    let truncated = header_end.saturating_add(data_size) > file_len;
+                    if !solid || groups.is_empty() {
+                        groups.push(Vec::new());
                     }
+                    groups.last_mut().expect("just pushed").push(Member {
+                        name,
+                        data_offset: header_end,
+                        pack: data_size,
+                        unpack,
+                        crc,
+                        method,
+                        window,
+                        encrypted,
+                        indexable,
+                        truncated,
+                    });
                 }
             }
             _ => {} // service/unknown headers: skip via data_size
@@ -551,13 +580,15 @@ fn scan_and_load<R: Read + Seek>(
     }
 
     // ── Pass 2: resolve groups. Non-solid members go lazy; solid groups are
-    // decoded now (this is the slow, budgeted, cancellable part).
+    // decoded now (this is the slow, budgeted, cancellable part). Saturating
+    // accumulation: hostile declared sizes must trip the cap, never overflow
+    // past it.
     let solid_work: u64 = groups
         .iter()
         .filter(|g| g.len() > 1)
         .flat_map(|g| g.iter())
-        .map(|m| m.unpack)
-        .sum();
+        .filter(|m| !m.truncated)
+        .fold(0u64, |acc, m| acc.saturating_add(m.unpack));
     if solid_work > limits.max_expanded {
         return Err(OpenError::Corrupt(
             "the archive expands past the sanity limit".into(),
@@ -573,6 +604,12 @@ fn scan_and_load<R: Read + Seek>(
     for members in groups {
         if members.len() == 1 {
             let m = members.into_iter().next().expect("len checked");
+            if !m.indexable || m.truncated {
+                // Unshowable name, or data past EOF: an independent entry that
+                // can never render doesn't occupy a playlist slot (the tar
+                // family's rule for its truncated tails, kept).
+                continue;
+            }
             let data = if m.encrypted {
                 EntryData::Unavailable(UNAVAIL_ENCRYPTED)
             } else {
@@ -583,7 +620,7 @@ fn scan_and_load<R: Read + Seek>(
                     store: m.method == 0,
                 }
             };
-            latest.insert(m.name, (m.unpack, m.crc, data));
+            upsert(&mut latest, &mut resident, m.name, m.unpack, m.crc, data);
             continue;
         }
         // Multi-member solid group.
@@ -598,7 +635,16 @@ fn scan_and_load<R: Read + Seek>(
         };
         if let Some(why) = poisoned {
             for m in members {
-                latest.insert(m.name, (m.unpack, m.crc, EntryData::Unavailable(why)));
+                if m.indexable {
+                    upsert(
+                        &mut latest,
+                        &mut resident,
+                        m.name,
+                        m.unpack,
+                        m.crc,
+                        EntryData::Unavailable(why),
+                    );
+                }
             }
             continue;
         }
@@ -627,12 +673,43 @@ fn scan_and_load<R: Read + Seek>(
     Ok((entries, items))
 }
 
+/// Last-wins insert that keeps the resident-byte count honest: a replaced
+/// entry's `Resident` bytes drop with it, so they must leave the budget too
+/// (an append/update archive that fits after last-wins must not refuse as
+/// `TooLarge` on stale accounting).
+fn upsert(
+    latest: &mut BTreeMap<String, (u64, Option<u32>, EntryData)>,
+    resident: &mut u64,
+    name: String,
+    unpack: u64,
+    crc: Option<u32>,
+    data: EntryData,
+) {
+    if let EntryData::Resident(b) = &data {
+        *resident = resident.saturating_add(b.len() as u64);
+    }
+    if let Some((_, _, EntryData::Resident(old))) = latest.insert(name, (unpack, crc, data)) {
+        *resident = resident.saturating_sub(old.len() as u64);
+    }
+}
+
+/// The `Resident` bytes currently held under `name`, if any — what an insert
+/// of the same name would release (the budget check subtracts it up front).
+fn resident_under(latest: &BTreeMap<String, (u64, Option<u32>, EntryData)>, name: &str) -> u64 {
+    match latest.get(name) {
+        Some((_, _, EntryData::Resident(b))) => b.len() as u64,
+        _ => 0,
+    }
+}
+
 /// Decode one multi-member solid group: a single resumable decoder over the
 /// concatenation of the members' packed runs, keeping supported members
 /// resident and discarding the rest. A member the codec refuses (an
 /// unsupported filter) marks itself and everything after it in the group
 /// unavailable — the shared window means nothing later can be trusted — but
-/// never fails the archive.
+/// never fails the archive. A truncated member (data past EOF — necessarily
+/// the group's tail) is excluded from the stream and marked cut off, so the
+/// intact members still serve.
 #[allow(clippy::too_many_arguments)]
 fn decode_solid_group<R: Read + Seek>(
     reader: &mut R,
@@ -644,9 +721,34 @@ fn decode_solid_group<R: Read + Seek>(
     resident: &mut u64,
     latest: &mut BTreeMap<String, (u64, Option<u32>, EntryData)>,
 ) -> Result<(), OpenError> {
+    // A truncated member is necessarily the last one scanned; the stream is
+    // decodable up to it. Mark the cut-off tail honestly and decode the rest.
+    let cut = members
+        .iter()
+        .position(|m| m.truncated)
+        .unwrap_or(members.len());
+    for m in &members[cut..] {
+        if m.indexable {
+            upsert(
+                latest,
+                resident,
+                m.name.clone(),
+                m.unpack,
+                m.crc,
+                EntryData::Unavailable(UNAVAIL_TRUNCATED),
+            );
+        }
+    }
+    let members = &members[..cut];
+    if members.is_empty() {
+        return Ok(());
+    }
+
     // The shared window must fit every member's declaration.
     let window = members.iter().map(|m| m.window).max().unwrap_or(0x20000);
-    let total: u64 = members.iter().map(|m| m.unpack).sum();
+    let total = members
+        .iter()
+        .fold(0u64, |acc, m| acc.saturating_add(m.unpack));
     let mut dec = compcol::rar5::Decoder::with_unpack_size_and_window(total, window);
     // Known limitation of the pinned compcol rev: the x86 filter computes call
     // targets relative to the solid *stream*, but unrar computes them relative
@@ -693,10 +795,13 @@ fn decode_solid_group<R: Read + Seek>(
     let mut give_up_at: Option<(usize, &'static str)> = None;
     let mut out_chunk = vec![0u8; CHUNK];
     'members: for (mi, m) in members.iter().enumerate() {
-        let keep = is_supported(&ext_of(&m.name)) && m.unpack <= limits.ceiling;
+        let keep = m.indexable && is_supported(&ext_of(&m.name)) && m.unpack <= limits.ceiling;
         let mut buf = Vec::new();
         if keep {
-            let needed = (*resident).saturating_add(m.unpack);
+            // A duplicate name replaces (and releases) the bytes already held
+            // under it, so only the delta counts against the budget.
+            let replaced = resident_under(latest, &m.name);
+            let needed = resident.saturating_sub(replaced).saturating_add(m.unpack);
             if needed > budget {
                 return Err(OpenError::TooLarge { needed, budget });
             }
@@ -768,10 +873,7 @@ fn decode_solid_group<R: Read + Seek>(
         }
         let data = if keep {
             match verify_crc_raw(m.crc, &buf) {
-                Ok(()) => {
-                    *resident = (*resident).saturating_add(buf.len() as u64);
-                    EntryData::Resident(buf)
-                }
+                Ok(()) => EntryData::Resident(buf),
                 Err(why) => EntryData::Unavailable(why),
             }
         } else {
@@ -779,14 +881,24 @@ fn decode_solid_group<R: Read + Seek>(
             // for completeness; `items` won't index an unsupported name.
             EntryData::Unavailable(UNAVAIL_FILTER)
         };
-        latest.insert(m.name.clone(), (m.unpack, m.crc, data));
+        if m.indexable {
+            // `upsert` owns the resident accounting for both the new bytes and
+            // anything the duplicate name replaces.
+            upsert(latest, resident, m.name.clone(), m.unpack, m.crc, data);
+        }
     }
     if let Some((from, why)) = give_up_at {
         for m in members.iter().skip(from) {
-            latest.insert(
-                m.name.clone(),
-                (m.unpack, m.crc, EntryData::Unavailable(why)),
-            );
+            if m.indexable {
+                upsert(
+                    latest,
+                    resident,
+                    m.name.clone(),
+                    m.unpack,
+                    m.crc,
+                    EntryData::Unavailable(why),
+                );
+            }
         }
     }
     Ok(())
@@ -1066,6 +1178,124 @@ mod tests {
         // The untouched entries still read fine.
         let b = (0..src.len()).find(|&i| src.name(i) == "b.png").unwrap();
         assert_eq!(src.bytes(b).unwrap(), png_b());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A bit-flipped block header must read as damage before any parsed field
+    /// is trusted (codex review of the implementation, P2).
+    #[test]
+    fn header_crc_catches_a_corrupted_block_header() {
+        let mut bytes = LZ_NONSOLID.to_vec();
+        // Offset 8..12 is the first block header's CRC32; flipping it (or any
+        // header byte) must mismatch.
+        bytes[8] ^= 0xFF;
+        match open(&bytes, "hdrcrc") {
+            Err(OpenError::Corrupt(msg)) => assert!(msg.contains("header"), "{msg}"),
+            other => panic!("expected Corrupt, got {:?}", other.err()),
+        }
+    }
+
+    /// Test-local block walker: patch a same-length byte string inside one
+    /// header and recompute that header's CRC, so container-shape tests can
+    /// craft inputs WinRAR would never write.
+    fn patch_header(bytes: &mut [u8], old: &[u8], new: &[u8]) {
+        assert_eq!(old.len(), new.len(), "in-place patch only");
+        let mut pos = 8usize;
+        while pos + 5 <= bytes.len() {
+            let (head_size, hs_len) = read_vint(&bytes[pos + 4..], 0).expect("size vint");
+            let hstart = pos + 4 + hs_len;
+            let hend = hstart + head_size as usize;
+            if let Some(at) = bytes[hstart..hend]
+                .windows(old.len())
+                .position(|w| w == old)
+            {
+                bytes[hstart + at..hstart + at + new.len()].copy_from_slice(new);
+                let mut h = crc32fast::Hasher::new();
+                h.update(&bytes[pos + 4..hend]);
+                bytes[pos..pos + 4].copy_from_slice(&h.finalize().to_le_bytes());
+                return;
+            }
+            // Advance: parse enough of the header for data_size.
+            let mut c = Cur {
+                b: &bytes[hstart..hend],
+                p: 0,
+            };
+            let _htype = c.vint().unwrap();
+            let hflags = c.vint().unwrap();
+            let _extra = if hflags & HFLAG_EXTRA != 0 {
+                c.vint().unwrap()
+            } else {
+                0
+            };
+            let data = if hflags & HFLAG_DATA != 0 {
+                c.vint().unwrap()
+            } else {
+                0
+            };
+            pos = hend + data as usize;
+        }
+        panic!("pattern not found in any header");
+    }
+
+    /// A member with a traversal-shaped name stays in its solid group's stream
+    /// model (dropping it would desync every later member); it just never
+    /// appears in the index (codex review of the implementation, P2).
+    #[test]
+    fn insane_named_member_does_not_desync_its_solid_group() {
+        let mut bytes = LZ_SOLID.to_vec();
+        // Same length as "a.jpg" — the archive's first solid member.
+        patch_header(&mut bytes, b"a.jpg", b"../.j");
+        let path = fixture("insane", &bytes);
+        let src = RarSource::open(&path, is_img, None, u64::MAX).unwrap();
+        let names: Vec<&str> = (0..src.len()).map(|i| src.name(i)).collect();
+        assert_eq!(
+            names,
+            vec!["b.png", "sub/c.webp"],
+            "the unsafe name is not indexed"
+        );
+        // The later members decode byte-perfect: the renamed member's packed
+        // bytes are still part of the shared stream.
+        assert_eq!(src.bytes(0).unwrap(), png_b());
+        assert_eq!(src.bytes(1).unwrap(), webp_c());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A truncated solid tail degrades that member honestly; the intact
+    /// members before it still serve (the tar family's truncation posture).
+    #[test]
+    fn truncated_solid_tail_degrades_gracefully() {
+        // Chop into the last member's packed data (the end block is 7 bytes;
+        // 60 lands well inside the final data run of the 463-byte fixture).
+        let chopped = &LZ_SOLID[..LZ_SOLID.len() - 60];
+        let path = fixture("solidtrunc", chopped);
+        let src = RarSource::open(&path, is_img, None, u64::MAX).unwrap();
+        let a = (0..src.len())
+            .find(|&i| src.name(i) == "a.jpg")
+            .expect("a.jpg listed");
+        assert_eq!(src.bytes(a).unwrap(), jpg_a(), "intact members decode");
+        // Whatever the chop clipped reports an honest per-entry error (cut
+        // off / damaged), never silent wrong bytes.
+        for i in 0..src.len() {
+            match src.bytes(i) {
+                Ok(b) => {
+                    let want = match src.name(i) {
+                        "a.jpg" => jpg_a(),
+                        "b.png" => png_b(),
+                        "sub/c.webp" => webp_c(),
+                        other => panic!("unexpected entry {other}"),
+                    };
+                    assert_eq!(b, want, "{}: decoded bytes must be exact", src.name(i));
+                }
+                Err(e) => {
+                    let msg = e.to_string();
+                    assert!(
+                        msg.contains("cut off") || msg.contains("damaged"),
+                        "{}: honest reason expected, got {msg}",
+                        src.name(i)
+                    );
+                }
+            }
+        }
         let _ = std::fs::remove_file(&path);
     }
 
