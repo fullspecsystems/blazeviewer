@@ -2716,7 +2716,11 @@ impl App {
         // A live Settings edit produced by this render frame (auto-save); routed below
         // once the `d` borrow is released.
         let mut live_edit: Option<(Option<Box<settings::Settings>>, Option<Keymap>)> = None;
-        if let Some(d) = self.dialog.as_mut() {
+        // Disjoint fields, borrowed apart: the Settings preview needs the core's rasterizer
+        // while the dialog window is borrowed mutably. Destructuring is what makes that
+        // legal — `self.dialog.as_mut()` alongside `self.core.subtitles` would not be.
+        let App { dialog, core, .. } = self;
+        if let Some(d) = dialog.as_mut() {
             let repaint = d.on_event(&event);
             match &event {
                 WindowEvent::Resized(size) => {
@@ -2724,7 +2728,10 @@ impl App {
                     d.request_redraw();
                 }
                 WindowEvent::RedrawRequested => {
-                    d.render();
+                    // Lend the app's one rasterizer to the Subtitles tab's live swatch.
+                    // Asking for it here is also what *starts* the 261 ms font worker, so
+                    // opening Settings pays that cost rather than a film's first cue.
+                    d.render(core.subtitles.rasterizer_mut());
                     answer = d.take_confirm_result();
                     live_edit = d.take_settings_edit();
                 }
@@ -4463,7 +4470,7 @@ fn main() {
 
     // Hidden dev command: render a Settings tab headlessly to a PNG and exit — the Settings
     // equivalent of `--egui-shot`. `--settings-shot [out.png] [--light]
-    // [--tab=general|appearance|shortcuts]`. See `egui_shot::write_settings_shot`.
+    // [--tab=general|appearance|subtitles|shortcuts]`. See `egui_shot::write_settings_shot`.
     if let Some(i) = args
         .iter()
         .position(|a| a == "--settings-shot" || a.starts_with("--settings-shot="))

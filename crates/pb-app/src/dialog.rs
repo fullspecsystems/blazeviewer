@@ -85,6 +85,7 @@ enum SettingsTab {
     #[default]
     General,
     Display,
+    Subtitles,
     Ai,
     Shortcuts,
 }
@@ -161,6 +162,21 @@ struct SettingsDraft {
     describe_length: usize, // index into LEN_PRESETS (Brief / Standard / Detailed)
     describe_auto: bool,
     speak_descriptions: bool,
+    // --- Subtitles (task #90.4) ---
+    /// The style itself, held as the real [`SubtitleStyle`] rather than flattened into
+    /// scalar form fields. The macOS pane needs a flat `SubtitleStyleFfi` because a struct
+    /// can't cross the bridge; egui binds the struct directly, so there is nothing to
+    /// flatten and no second definition to keep in sync.
+    subtitle: pb_app_core::subtitle::SubtitleStyle,
+    /// The drop shadow, held **apart** from `subtitle.shadow` (which is an `Option`).
+    ///
+    /// Toggling the shadow off must not throw away the blur/offset/colour you just tuned —
+    /// switching it back on to find it reset to defaults reads as the toggle having eaten
+    /// your work. So the params live here for the life of the dialog and `shadow_on` is
+    /// what folds them into (or out of) the `Option`. Same reason the macOS draft splits
+    /// them.
+    shadow_on: bool,
+    shadow: pb_app_core::subtitle::Shadow,
 }
 
 impl SettingsDraft {
@@ -241,6 +257,11 @@ impl SettingsDraft {
             describe_length: len_preset_index(s.describe_max_tokens),
             describe_auto: s.describe_auto,
             speak_descriptions: s.speak_descriptions,
+            subtitle: s.subtitle_style.clone(),
+            shadow_on: s.subtitle_style.shadow.is_some(),
+            // With no shadow saved, offer the owner-tuned "on" preset — a shadow that
+            // switches on invisible reads as a broken toggle.
+            shadow: s.subtitle_style.shadow.unwrap_or_default(),
         }
     }
 
@@ -326,8 +347,21 @@ impl SettingsDraft {
         s.describe_max_tokens = LEN_PRESETS[self.describe_length.min(LEN_PRESETS.len() - 1)];
         s.describe_auto = self.describe_auto;
         s.speak_descriptions = self.speak_descriptions;
+        s.subtitle_style = self.subtitle.clone();
+        // The toggle owns the `Option`; the params ride along in the draft either way.
+        s.subtitle_style.shadow = self.shadow_on.then_some(self.shadow);
         s.clamp();
         s
+    }
+
+    /// The draft's live style, exactly as the fold will save it — what the preview draws.
+    ///
+    /// Goes through the same shadow fold as [`Self::to_settings`], so the swatch shows the
+    /// shadow toggle honestly instead of drawing whatever `subtitle.shadow` last held.
+    fn subtitle_style(&self) -> pb_app_core::subtitle::SubtitleStyle {
+        let mut st = self.subtitle.clone();
+        st.shadow = self.shadow_on.then_some(self.shadow);
+        st
     }
 }
 
@@ -417,12 +451,15 @@ pub struct DialogWindow {
     cap_logo: bool,
     /// A transient note for the keybinding editor (e.g. a "moved from …" message).
     keymap_note: Option<String>,
-    /// Which Settings tab (General / Appearance / AI / Shortcuts) is showing.
+    /// Which Settings tab (General / Appearance / Subtitles / AI / Shortcuts) is showing.
     settings_tab: SettingsTab,
     /// The AI tab's Test-connection state (probe runs off the UI thread).
     conn_test: ConnTest,
     /// Models the last probe listed (vision-capable first) — fills the Model picker.
     describe_models: Vec<String>,
+    /// The Subtitles tab's live swatch: its uploaded texture plus what it was drawn for,
+    /// so an idle frame re-uploads nothing. `None` until the tab is first shown.
+    subtitle_preview: Option<PreviewCache>,
     /// A live keymap edit produced during a render frame (a binding actually changed):
     /// rides the same auto-save channel as [`pending_settings_edit`], applied + persisted
     /// without closing the window.
@@ -679,6 +716,7 @@ impl DialogWindow {
             settings_tab: SettingsTab::default(),
             conn_test: ConnTest::default(),
             describe_models: Vec::new(),
+            subtitle_preview: None,
             pending_keymap_edit: None,
             confirm_msg: message.to_string(),
             confirm_result: None,
@@ -696,9 +734,11 @@ impl DialogWindow {
         };
         // Prime two hidden frames: the first lets egui apply its base theme, the second
         // paints with our design-system style layered on top — so the window is already
-        // correct when revealed (no default-theme flash).
-        dlg.render();
-        dlg.render();
+        // correct when revealed (no default-theme flash). No rasterizer: these frames are
+        // never seen, and the app's lives behind a `&mut self` we don't have here — the
+        // first real frame lends it.
+        dlg.render(None);
+        dlg.render(None);
         dlg.window.set_visible(true);
         // Grab keyboard focus so Esc / Enter act on the dialog (not the viewer, which
         // would otherwise treat Esc as quit).
@@ -897,7 +937,11 @@ impl DialogWindow {
     }
 
     /// Run egui for one frame and present it.
-    pub fn render(&mut self) {
+    ///
+    /// `raster` is the **app's** subtitle rasterizer, lent for the Settings preview — never
+    /// one of this window's own. See [`PreviewCtx`]. `None` while the font worker is still
+    /// building it (or for any dialog that isn't Settings).
+    pub fn render(&mut self, raster: Option<&mut pb_hud::subtitle::SubtitleRasterizer>) {
         // Reassert the design-system style each frame (cheap; off the photo hot path)
         // so it survives egui's own theme bookkeeping.
         pbui::apply_style(&self.egui_ctx, self.dark_ui);
@@ -923,6 +967,10 @@ impl DialogWindow {
         let settings_tab = &mut self.settings_tab;
         let conn_test = &mut self.conn_test;
         let describe_models = &mut self.describe_models;
+        let mut preview = PreviewCtx {
+            raster,
+            cache: &mut self.subtitle_preview,
+        };
         let mut confirm_click: Option<bool> = None;
         let full_output = ctx.run(raw_input, |ctx| match kind {
             DialogKind::About => {
@@ -936,7 +984,15 @@ impl DialogWindow {
                 egui::CentralPanel::default()
                     .frame(egui::Frame::default().fill(ctx.style().visuals.panel_fill))
                     .show(ctx, |ui| {
-                        settings_ui(ui, draft, &mut kb, settings_tab, conn_test, describe_models)
+                        settings_ui(
+                            ui,
+                            draft,
+                            &mut kb,
+                            settings_tab,
+                            conn_test,
+                            describe_models,
+                            &mut preview,
+                        )
                     });
             }
             DialogKind::Confirm => {
@@ -1734,6 +1790,7 @@ fn settings_button_bar(ctx: &egui::Context) -> Option<bool> {
 /// setting). Built on the `pbui` design system. The controls edit `d`, a draft built
 /// from the live settings on open; each change is folded back + applied live (auto-save)
 /// via [`SettingsDraft::to_settings`] — no Save button.
+#[allow(clippy::too_many_arguments)]
 fn settings_ui(
     ui: &mut egui::Ui,
     d: &mut SettingsDraft,
@@ -1741,6 +1798,7 @@ fn settings_ui(
     tab: &mut SettingsTab,
     conn_test: &mut ConnTest,
     models: &mut Vec<String>,
+    preview: &mut PreviewCtx,
 ) {
     let p = pbui::Palette::new(ui.visuals().dark_mode);
 
@@ -1768,6 +1826,7 @@ fn settings_ui(
                     match *tab {
                         SettingsTab::General => general_tab(ui, &p, d),
                         SettingsTab::Display => display_tab(ui, &p, d),
+                        SettingsTab::Subtitles => subtitles_tab(ui, &p, d, preview),
                         SettingsTab::Ai => ai_tab(ui, &p, d, conn_test, models),
                         SettingsTab::Shortcuts => keybindings_ui(ui, &p, kb),
                     }
@@ -1787,6 +1846,7 @@ pub(crate) fn settings_shot_body(ui: &mut egui::Ui, dark: bool, tab_name: &str) 
     let mut tab = match tab_name {
         "appearance" => SettingsTab::Display,
         "shortcuts" => SettingsTab::Shortcuts,
+        "subtitles" => SettingsTab::Subtitles,
         _ => SettingsTab::General,
     };
     settings_tab_bar(ui, &mut tab);
@@ -1801,6 +1861,17 @@ pub(crate) fn settings_shot_body(ui: &mut egui::Ui, dark: bool, tab_name: &str) 
             ui.spacing_mut().item_spacing.y = 0.0;
             match tab {
                 SettingsTab::Display => display_tab(ui, &p, &mut draft),
+                SettingsTab::Subtitles => {
+                    // A real rasterizer, built inline: the swatch IS the tab's reason to
+                    // exist, so a shot without it would preview the one thing that can't be
+                    // reviewed from the code. Worth 261 ms in a dev-only path.
+                    let mut raster = pb_hud::subtitle::SubtitleRasterizer::new();
+                    let mut preview = PreviewCtx {
+                        raster: Some(&mut raster),
+                        cache: &mut None,
+                    };
+                    subtitles_tab(ui, &p, &mut draft, &mut preview);
+                }
                 SettingsTab::Shortcuts => {
                     // A default keymap shows both bound chords and the empty "Set"/"Add"
                     // placeholder slots (some actions have no default binding).
@@ -1841,6 +1912,11 @@ fn settings_tab_bar(ui: &mut egui::Ui, current: &mut SettingsTab) {
                 SettingsTab::Display,
                 "Appearance",
                 Some(pbui::icon::Icon::Brush),
+            ),
+            (
+                SettingsTab::Subtitles,
+                "Subtitles",
+                Some(pbui::icon::Icon::Captions),
             ),
             (SettingsTab::Ai, "AI", Some(pbui::icon::Icon::Sparkles)),
             (
@@ -2309,6 +2385,363 @@ fn general_tab(ui: &mut egui::Ui, p: &pbui::Palette, d: &mut SettingsDraft) {
             },
         );
     });
+}
+
+/// The live swatch's cached texture and the exact inputs it was drawn for.
+///
+/// Without this the preview would re-rasterize, re-composite, and re-upload a
+/// ~840×300 RGBA image on **every** egui frame, including the idle ones — for a picture
+/// that only changes when a control moves.
+struct PreviewCache {
+    tex: egui::TextureHandle,
+    /// Everything `render_preview` reads. A change in any of it invalidates the texture;
+    /// `SubtitleStyle: PartialEq` is what makes that a one-line compare.
+    key: (pb_app_core::subtitle::SubtitleStyle, u32, u32, [u8; 3]),
+}
+
+/// What the Subtitles tab needs to draw its swatch.
+///
+/// ⚠ `raster` is **borrowed from the app's one and only `SubtitleRasterizer`** — never a
+/// second one. `FontSystem::new()` is 261 ms and ~1114 faces held for the life of the
+/// process; standing one up here would pay that twice and hold two copies of every font so
+/// that a settings window could draw a thumbnail. `None` = the worker hasn't finished
+/// building it yet, which is a placeholder, not an error.
+struct PreviewCtx<'a> {
+    raster: Option<&'a mut pb_hud::subtitle::SubtitleRasterizer>,
+    cache: &'a mut Option<PreviewCache>,
+}
+
+/// The **Subtitles** tab (task #90.4 on winit): the owner's eight axes over a live preview.
+///
+/// The macOS pane (`SubtitlesPane.swift`) is the reference; this mirrors its grouping,
+/// bounds, and copy so the two shells teach the same thing. Two deliberate differences:
+/// the style binds as a struct rather than a flattened FFI form, and there is no debounce —
+/// egui folds the draft after the frame and only writes on a real diff, so a slider drag is
+/// already coalesced by the existing auto-save path.
+///
+/// ## The units, and why they are not what is stored
+///
+/// - **Size** and **Vertical** are % of the *viewport*, never points: a subtitle sized in
+///   points reads differently on a 1× ultrawide and a 2× 4K.
+/// - **Outline**, **Blur**, and the shadow **offsets** are px on the `REFERENCE_FONT_PX`
+///   scale — stored as a fraction of the real text size (so decoration holds its
+///   proportions when you resize the text) but shown as the px they'd be at the default
+///   size, because "0.06" is not a quantity anyone can picture.
+///
+/// Every scaled control writes back **only on `.changed()`**. Round-tripping a fraction
+/// through `×100` and `÷100` is not bit-exact (`0.04` comes back `0.040000001`), and the
+/// settings fold saves on any diff — so writing back unconditionally would spew a config
+/// write every frame the tab was merely *open*.
+fn subtitles_tab(
+    ui: &mut egui::Ui,
+    p: &pbui::Palette,
+    d: &mut SettingsDraft,
+    preview: &mut PreviewCtx,
+) {
+    use pb_app_core::subtitle as sub;
+
+    subtitle_preview_swatch(ui, p, d, preview);
+
+    pbui::group_card(ui, p, Some("Text"), |ui| {
+        pbui::card_row(ui, p, None, "Font", Some("System uses the OS sans"), |ui| {
+            // The stored value is a font *name*, so growing this shortlist into a full
+            // picker later never invalidates a saved setting.
+            let current = d.subtitle.font().unwrap_or("System").to_string();
+            egui::ComboBox::from_id_salt("subtitle_font")
+                .width(150.0)
+                .selected_text(current)
+                .show_ui(ui, |ui| {
+                    pbui::apply_to_ui(ui, p.dark);
+                    let mut pick = d.subtitle.font_family.clone().unwrap_or_default();
+                    let changed = ui
+                        .selectable_value(&mut pick, String::new(), "System")
+                        .changed()
+                        | sub::FONT_CHOICES
+                            .iter()
+                            .map(|f| ui.selectable_value(&mut pick, f.to_string(), *f).changed())
+                            .fold(false, |a, b| a | b);
+                    if changed {
+                        // Empty = the system sans, exactly as an absent config key is.
+                        d.subtitle.font_family = (!pick.is_empty()).then_some(pick);
+                    }
+                });
+        });
+        pbui::card_row(
+            ui,
+            p,
+            None,
+            "Size",
+            Some("Percent of screen height"),
+            |ui| {
+                let mut v = d.subtitle.size_pct * 100.0;
+                if pbui::slider_stepped(ui, &mut v, 1.0..=sub::MAX_SIZE_PCT * 100.0, 0.1, 1, "%")
+                    .changed()
+                {
+                    d.subtitle.size_pct = v / 100.0;
+                }
+            },
+        );
+        pbui::card_row(
+            ui,
+            p,
+            None,
+            "Opacity",
+            // The master opacity — the whole subtitle faded as one object. Fading only the
+            // glyphs would make them translucent onto their own outline, which shows
+            // straight through, so the text never gets closer to the picture (owner).
+            Some("Fades the whole subtitle, including its outline and background"),
+            |ui| {
+                let mut v = d.subtitle.opacity * 100.0;
+                if pbui::slider_stepped(ui, &mut v, 0.0..=100.0, 1.0, 0, "%").changed() {
+                    d.subtitle.opacity = v / 100.0;
+                }
+            },
+        );
+    });
+
+    pbui::group_card(ui, p, Some("Legibility"), |ui| {
+        pbui::card_row(
+            ui,
+            p,
+            None,
+            "Outline",
+            Some("A dark edge around the letters, so they read over a bright picture"),
+            |ui| {
+                let mut px = sub::ratio_to_px(d.subtitle.outline_ratio);
+                // 0–4 px, notched: the owner's ask, and 99% of people want that range.
+                if pbui::slider_stepped(ui, &mut px, 0.0..=4.0, 0.25, 2, " px").changed() {
+                    d.subtitle.outline_ratio = sub::px_to_ratio(px);
+                }
+            },
+        );
+        pbui::card_row(ui, p, None, "Outline opacity", None, |ui| {
+            ui.add_enabled_ui(d.subtitle.outline_ratio > 0.0, |ui| {
+                alpha_slider(ui, &mut d.subtitle.outline_color);
+            });
+        });
+        pbui::card_row(
+            ui,
+            p,
+            None,
+            "Background",
+            // Alpha 0 IS the off switch: one control, so no toggle can disagree with the
+            // colour it guards. On the Mac this was a real bug — a hue picked inside the
+            // colour popover never raised the alpha, so Background did nothing at all.
+            Some("A box behind the text. Zero turns it off"),
+            |ui| {
+                alpha_slider(ui, &mut d.subtitle.background);
+            },
+        );
+        pbui::card_row(ui, p, None, "Drop shadow", None, |ui| {
+            pbui::toggle(ui, p, &mut d.shadow_on);
+        });
+        if d.shadow_on {
+            pbui::card_row(ui, p, None, "Blur", None, |ui| {
+                let mut px = sub::ratio_to_px(d.shadow.blur_ratio);
+                let max = sub::ratio_to_px(sub::MAX_SHADOW_BLUR_RATIO);
+                if pbui::slider_stepped(ui, &mut px, 0.0..=max, 0.5, 1, " px").changed() {
+                    d.shadow.blur_ratio = sub::px_to_ratio(px);
+                }
+            });
+            let max_off = sub::ratio_to_px(sub::MAX_SHADOW_OFFSET_RATIO);
+            pbui::card_row(ui, p, None, "Offset X", None, |ui| {
+                let mut px = sub::ratio_to_px(d.shadow.dx_ratio);
+                if pbui::slider_stepped(ui, &mut px, -max_off..=max_off, 0.5, 1, " px").changed() {
+                    d.shadow.dx_ratio = sub::px_to_ratio(px);
+                }
+            });
+            pbui::card_row(ui, p, None, "Offset Y", None, |ui| {
+                let mut px = sub::ratio_to_px(d.shadow.dy_ratio);
+                if pbui::slider_stepped(ui, &mut px, -max_off..=max_off, 0.5, 1, " px").changed() {
+                    d.shadow.dy_ratio = sub::px_to_ratio(px);
+                }
+            });
+            pbui::card_row(ui, p, None, "Shadow opacity", None, |ui| {
+                alpha_slider(ui, &mut d.shadow.color);
+            });
+        }
+    });
+
+    pbui::group_card(ui, p, Some("Position"), |ui| {
+        pbui::card_row(ui, p, None, "Vertical", Some(vertical_hint(d)), |ui| {
+            let mut v = d.subtitle.vertical_offset_pct * 100.0;
+            if pbui::slider_stepped(ui, &mut v, -50.0..=90.0, 1.0, 0, "%").changed() {
+                d.subtitle.vertical_offset_pct = v / 100.0;
+            }
+        });
+    });
+
+    // Colours live here and opacities do not (owner): the hue is a once-a-year decision,
+    // the opacity is the one you actually reach for.
+    pbui::group_card(ui, p, Some("Layout and Color"), |ui| {
+        pbui::card_row(ui, p, None, "Text color", None, |ui| {
+            rgb_of_rgba(ui, &mut d.subtitle.color);
+        });
+        pbui::card_row(ui, p, None, "Outline color", None, |ui| {
+            rgb_of_rgba(ui, &mut d.subtitle.outline_color);
+        });
+        pbui::card_row(ui, p, None, "Shadow color", None, |ui| {
+            rgb_of_rgba(ui, &mut d.shadow.color);
+        });
+        pbui::card_row(ui, p, None, "Background color", None, |ui| {
+            rgb_of_rgba(ui, &mut d.subtitle.background);
+        });
+        pbui::card_row(
+            ui,
+            p,
+            None,
+            "Max width",
+            Some("How far a line runs before it wraps, as a percent of screen width"),
+            |ui| {
+                let mut v = d.subtitle.max_line_pct * 100.0;
+                if pbui::slider_stepped(ui, &mut v, 20.0..=100.0, 1.0, 0, "%").changed() {
+                    d.subtitle.max_line_pct = v / 100.0;
+                }
+            },
+        );
+        pbui::card_row(ui, p, None, "Line spacing", None, |ui| {
+            pbui::slider_stepped(
+                ui,
+                &mut d.subtitle.line_spacing,
+                0.8..=sub::MAX_LINE_SPACING,
+                0.05,
+                2,
+                "x",
+            );
+        });
+    });
+
+    ui.add_space(pbui::GAP);
+    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+        if pbui::secondary_button(ui, "Restore Defaults").clicked() {
+            let def = sub::SubtitleStyle::default();
+            d.shadow_on = def.shadow.is_some();
+            d.shadow = def.shadow.unwrap_or_default();
+            d.subtitle = def;
+        }
+    });
+}
+
+/// The signed vertical offset is the setting almost no player gets right, and a bare number
+/// cannot explain it. The preview shows it; this says which way is which.
+fn vertical_hint(d: &SettingsDraft) -> &'static str {
+    if d.subtitle.vertical_offset_pct < -0.001 {
+        "Below the picture, in the letterbox bar"
+    } else if d.subtitle.vertical_offset_pct > 0.001 {
+        "Inside the picture, above its bottom edge"
+    } else {
+        "On the picture's bottom edge"
+    }
+}
+
+/// An 0–100% slider over an `[u8; 4]`'s **alpha**, leaving the hue alone.
+///
+/// The split is what lets opacity sit on the surface (where people reach for it) while the
+/// colour lives in its own card, without the two ever disagreeing about one `[u8; 4]`.
+fn alpha_slider(ui: &mut egui::Ui, rgba: &mut [u8; 4]) -> egui::Response {
+    let mut pct = (rgba[3] as f32 / 255.0 * 100.0).round();
+    let r = pbui::slider_stepped(ui, &mut pct, 0.0..=100.0, 1.0, 0, "%");
+    if r.changed() {
+        rgba[3] = (pct / 100.0 * 255.0).round().clamp(0.0, 255.0) as u8;
+    }
+    r
+}
+
+/// A colour button over an `[u8; 4]`'s **RGB**, leaving the alpha (the opacity slider's
+/// business) alone.
+fn rgb_of_rgba(ui: &mut egui::Ui, rgba: &mut [u8; 4]) -> egui::Response {
+    let mut rgb = [rgba[0], rgba[1], rgba[2]];
+    let r = ui.color_edit_button_srgb(&mut rgb);
+    if r.changed() {
+        rgba[0..3].copy_from_slice(&rgb);
+    }
+    r
+}
+
+/// The live swatch — the reason this tab is usable at all.
+///
+/// Drawn by `pb_app_core::subtitle_preview`, which calls **the same rasterizer, the same
+/// `to_params`, and the same `place()`** the real overlay does. There is no second
+/// implementation to drift: if the preview and a film ever disagree, that is a bug in one
+/// shared function rather than a difference of opinion between two.
+///
+/// It has a **real letterbox**, so dragging Vertical negative visibly walks the text down
+/// into the black bar — the owner's headline ask, and unjudgeable from a number.
+fn subtitle_preview_swatch(
+    ui: &mut egui::Ui,
+    p: &pbui::Palette,
+    d: &SettingsDraft,
+    preview: &mut PreviewCtx,
+) {
+    // Short and full-width, per the owner. `render_preview` resolves the style against a
+    // virtual 16:9 frame and shows that frame's bottom, so a short swatch does NOT shrink
+    // the sample text — see its docs.
+    let h_pt = 150.0;
+    let scale = ui.ctx().pixels_per_point().max(0.01);
+    // ⚠ `available_width()` is NOT a safe texture dimension. egui's first frame reports a
+    // default `screen_rect` before the real one arrives, so this can be absurd (measured:
+    // 4944 pt → a 9888 px texture) or even infinite — and egui *panics* on a side past the
+    // GPU's limit rather than clamping. Cap it at what the device can actually hold; the
+    // settled frame re-renders at the true width, so the only cost is one wasted upload on
+    // a warm-up frame.
+    let max_side = ui.ctx().input(|i| i.max_texture_side) as f32;
+    let w_pt = ui.available_width().min(max_side / scale).max(1.0);
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(w_pt, h_pt), egui::Sense::hover());
+    let round = egui::Rounding::same(pbui::RADIUS_CARD);
+
+    let Some(raster) = preview.raster.as_deref_mut() else {
+        // `FontSystem::new()` is 261 ms on a worker. Say so, rather than flashing an empty
+        // frame that reads as "the preview is broken".
+        ui.painter().rect_filled(rect, round, p.card);
+        ui.painter().text(
+            rect.center(),
+            egui::Align2::CENTER_CENTER,
+            "Loading fonts…",
+            egui::FontId::proportional(13.0),
+            p.text_secondary,
+        );
+        // Nothing else re-renders when the worker lands, so ask for another frame — on the
+        // Mac this exact gap left the spinner spinning forever until you nudged a slider.
+        ui.ctx().request_repaint_after(Duration::from_millis(50));
+        return;
+    };
+
+    // PHYSICAL px: rasterize at the size it is shown at and never let egui scale it up.
+    // This project's known sharp edge is exactly that (a 1× ultrawide beside 2× panels).
+    let (w, h) = (
+        (w_pt * scale).round().clamp(1.0, max_side) as u32,
+        (h_pt * scale).round().clamp(1.0, max_side) as u32,
+    );
+    // The user's *real* letterbox for this theme, so the bars match what they will actually
+    // see behind a film rather than an invented black.
+    let lb_f = if p.dark {
+        d.letterbox
+    } else {
+        d.letterbox_light
+    };
+    let lb = [
+        (lb_f[0] * 255.0).round().clamp(0.0, 255.0) as u8,
+        (lb_f[1] * 255.0).round().clamp(0.0, 255.0) as u8,
+        (lb_f[2] * 255.0).round().clamp(0.0, 255.0) as u8,
+    ];
+    let key = (d.subtitle_style(), w, h, lb);
+    if preview.cache.as_ref().map(|c| &c.key) != Some(&key) {
+        let rgba = pb_app_core::subtitle_preview::render_preview(raster, &key.0, w, h, lb);
+        let img = egui::ColorImage::from_rgba_unmultiplied([w as usize, h as usize], &rgba);
+        let tex = ui
+            .ctx()
+            .load_texture("subtitle-preview", img, egui::TextureOptions::LINEAR);
+        *preview.cache = Some(PreviewCache { tex, key });
+    }
+    if let Some(c) = preview.cache.as_ref() {
+        let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
+        ui.painter().add(egui::Shape::mesh({
+            let mut m = egui::Mesh::with_texture(c.tex.id());
+            m.add_rect_with_uv(rect, uv, egui::Color32::WHITE);
+            m
+        }));
+    }
+    ui.add_space(pbui::GAP);
 }
 
 /// The **Display** tab: how a photo is framed and how the overlays look.

@@ -74,6 +74,8 @@ pub enum Icon {
     Brush,
     /// Settings ▸ Shortcuts tab (matches SF `keyboard`).
     Keyboard,
+    /// Settings ▸ Subtitles tab (matches the macOS pane's SF `captions.bubble`).
+    Captions,
     /// Open-file action (the welcome screen's Open File button — matches SF `doc`).
     File,
     /// Play action (the play hint on an animated item — matches SF `play.fill`).
@@ -167,6 +169,7 @@ fn svg(icon: Icon, family: Family) -> &'static str {
         Icon::Sliders => glyph!("sliders"),
         Icon::Brush => glyph!("brush"),
         Icon::Keyboard => glyph!("keyboard"),
+        Icon::Captions => glyph!("message-captions"),
         Icon::File => glyph!("file"),
         Icon::Play => glyph!("play"),
         Icon::Pause => glyph!("pause"),
