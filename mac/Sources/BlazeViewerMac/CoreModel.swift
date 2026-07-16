@@ -105,9 +105,6 @@ final class CoreModel {
     /// not settling, so the knob tracks the live playhead. A stalled seek (H1) simply stays
     /// pinned at the target, which is the correct scrubber behaviour regardless of H1's fix.
     @ObservationIgnored private var pendingSeekTarget: Double?
-    /// The direction of the settling seek, so the pin clears when the playhead *catches up to
-    /// or passes* the target — duration-independent, unlike a fractional tolerance.
-    @ObservationIgnored private var pendingSeekForward = false
     /// Whether subtitles are switched on (the `C` state) — the picker button fills its icon
     /// on this, so it must be observable rather than read through on each draw. Refreshed in
     /// `pump()` while the controls are up.
@@ -2820,11 +2817,13 @@ final class CoreModel {
         let reported = total > 0 ? min(1.0, max(0.0, elapsed / total)) : 0.0
         // Scrubber pin (plan §H3): while a sample-buffer seek is settling, hold the target on
         // BOTH knob and time so they agree, and don't let a pre-seek report snap them back.
-        // Clear when the playhead reaches the target in the seek's direction (the landing).
-        if let target = pendingSeekTarget {
-            let landed =
-                pendingSeekForward ? (reported >= target - 1e-4) : (reported <= target + 1e-4)
-            if landed { pendingSeekTarget = nil }
+        // Clear when the real playhead reaches the target — an absolute ~0.5 s window, which
+        // is **direction-independent**. (The old `reported >=/<= target` direction test was
+        // fragile: a scrubber click fires two seeks and the 2nd recomputed direction against
+        // the already-pinned target, flipping a BACKWARD seek to "forward", clearing the pin
+        // early, and flashing the knob to the old position — owner, 2026-07-15.)
+        if let target = pendingSeekTarget, total > 0 {
+            if abs(elapsed - target * total) <= 0.5 { pendingSeekTarget = nil }
         }
         if let target = pendingSeekTarget {
             videoFraction = target
@@ -2876,7 +2875,6 @@ final class CoreModel {
         } else if let sbv = sampleBufferVideo {
             // Pin the scrubber to the target until the seek visually lands (plan §H3), so a
             // pre-seek progress report can't snap the knob back. The latest seek wins.
-            pendingSeekForward = fraction >= videoFraction
             pendingSeekTarget = fraction
             videoFraction = fraction
             sbv.seek(toFraction: fraction)
