@@ -4178,13 +4178,17 @@ dependencies = [
 name = "pb-source"
 version = "0.1.0"
 dependencies = [
+ "aes 0.9.1",
  "bzip2",
+ "cbc",
  "compcol",
  "crc32fast",
  "flate2",
+ "hmac",
  "lzma-rust2",
  "ruzstd",
  "sevenz-rust2",
+ "sha2 0.10.9",
  "tar",
  "zip 2.4.2",
 ]

@@ -5480,19 +5480,44 @@ mod tests {
         fs::create_dir_all(&dir).expect("mkdir sandbox");
         let rar_path = dir.join("album.rar");
         fs::write(&rar_path, RAR).expect("seed rar");
+        // A password-protected solid RAR seeded alongside: decryption is RAM-only
+        // too (PBKDF2 + AES-CBC), never staging plaintext to disk. Seed both
+        // before the snapshot so the only disk activity under test is the decode.
+        const ENC_RAR: &[u8] =
+            include_bytes!("../../pb-source/tests/fixtures/rar/encrypted_solid.rar");
+        let enc_path = dir.join("locked.rar");
+        fs::write(&enc_path, ENC_RAR).expect("seed encrypted rar");
 
         let before = snapshot_tree(&dir);
 
         // Straight into the open (solid groups eager-decode here), with an
         // injected budget so a low-RAM machine's real ram_budget() can't flake
         // the test — same reasoning as the 7z and tar.gz no-trace tests.
-        let src =
-            pb_source::RarSource::open(&rar_path, scan::is_supported_archive_entry, None, u64::MAX)
-                .expect("open rar");
+        let src = pb_source::RarSource::open(
+            &rar_path,
+            scan::is_supported_archive_entry,
+            None,
+            u64::MAX,
+            None,
+        )
+        .expect("open rar");
         let resolved = scan::archive_resolved(&rar_path, std::sync::Arc::new(src));
         assert_eq!(resolved.source.len(), 3, "rar should yield three entries");
         for i in 0..resolved.source.len() {
             let _ = resolved.source.bytes(i).expect("read entry");
+        }
+
+        // Decrypt the password-protected archive in the same window.
+        let enc = pb_source::RarSource::open(
+            &enc_path,
+            scan::is_supported_archive_entry,
+            None,
+            u64::MAX,
+            Some("hunter2"),
+        )
+        .expect("open encrypted rar");
+        for i in 0..enc.len() {
+            let _ = enc.bytes(i).expect("decrypt entry");
         }
 
         let after = snapshot_tree(&dir);

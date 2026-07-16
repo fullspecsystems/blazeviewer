@@ -1283,6 +1283,12 @@
             "title": "App wiring + harden",
             "description": "ArchiveKind::Rar (+cbr/cbz), dispatch via load_archive, picker, no OS association, no-trace test, archived-video-in-rar smoke, per-entry honest Unsupported for Delta/ARM/encrypted, own fuzz target, docs.",
             "status": "done"
+          },
+          {
+            "id": 5,
+            "title": "Password decryption (-p and -hp)",
+            "description": "RAR5 encryption via PBKDF2-HMAC-SHA256 + AES-256-CBC (pb-source/src/rar_crypt.rs). Per-file and full-header encryption both decrypt; missing/wrong password returns PasswordRequired (reuses ZIP/7z prompt flow, no shell changes). Encrypted-solid runs stripped to real block length before the decoder (rar5_stream_len) to skip the 16-byte inter-file padding. Validated byte-identical to unrar over the corpus (20 archives / 66 entries) + a committed encrypted_solid.rar fixture; no-trace guarantee holds.",
+            "status": "done"
           }
         ]
       }

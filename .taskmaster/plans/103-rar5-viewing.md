@@ -1,13 +1,33 @@
 # Task 103 — RAR5 archive viewing (`RarSource`)
 
-**Status:** implemented — rev2 (2026-07-16), after #102 as ordered. `pb-source/src/rar.rs`
-(own container parser + `ItemSource`), wired into both shells through the #102
-`load_archive` dispatch. **Corpus differential: 18 archives, 60 entries byte-identical to
-`unrar`, zero mismatches** (`rar_corpus_matches_unrar`, `--ignored`, PB_RAR_CORPUS); the
-refusals are all honest per-entry Unsupported (Delta-filtered bmp/wav content + solid-group
-degradation from the Delta member on), exactly the designed scope. 12 unit tests over
-committed WinRAR 7.23 fixtures (`tests/fixtures/rar/`, generation commands in the test
-module) + a `rar_open` cargo-fuzz target.
+**Status:** implemented — rev3 (2026-07-16), after #102 as ordered. `pb-source/src/rar.rs`
+(own container parser + `ItemSource`) + `pb-source/src/rar_crypt.rs` (encryption), wired
+into both shells through the #102 `load_archive` dispatch. **Corpus differential: 20
+archives, 66 entries byte-identical to `unrar`, zero mismatches** (`rar_corpus_matches_unrar`,
+`--ignored`, PB_RAR_CORPUS) — now including the corpus's encrypted (`-ptestpass`) and
+header-encrypted (`-hptestpass`) archives; the refusals are all honest per-entry Unsupported
+(Delta-filtered bmp/wav content + solid-group degradation from the Delta member on), exactly
+the designed scope. Unit tests over committed WinRAR 7.23 fixtures (`tests/fixtures/rar/`,
+generation commands in the test module) + a `rar_open` cargo-fuzz target.
+
+**rev3 (2026-07-16) — password decryption shipped, reversing the rev2 §2 deviation.** RAR5
+encryption is the *tractable* scheme (standard PBKDF2-HMAC-SHA256 + AES-256-CBC, unlike
+RAR4's bespoke KDF), so we now decrypt rather than refuse:
+- **Per-file (`-p`) and full-header (`-hp`)** both work. `RarSource::open` gained a
+  `password: Option<&str>`; a missing or wrong one (checked against the header's PBKDF2
+  password-check value) returns `OpenError::PasswordRequired`, which routes to the shells'
+  existing prompt/retry flow (the one ZIP/7z already use — `scan::load_archive` already
+  threaded `password`, so **zero shell changes**). A correct password decrypts.
+- **KDF** (`rar_crypt.rs`, unrar-exact): one PBKDF2 fold, read off at `2^lg2` (AES key),
+  `+16` (MAC key), `+32` (folded to the 8-byte password-check). `lg2` capped at 24.
+- **The encrypted-solid trap:** each file's run is CBC-encrypted with its own IV and padded
+  to 16 bytes, so padding lands *between* files in the shared LZ stream; compcol reads block
+  framing eagerly and a padding byte parses as a bogus next-block header. Fix: decrypt each
+  run, then `rar5_stream_len` truncates it to the real `last_block` end before the decoder.
+  Did **not** need `add_file_boundary`. Non-solid is immune (exact `unpack_total` → Done).
+- **CRC:** WinRAR sets the MAC-checksum flag on encrypted entries (stored value isn't a
+  plain CRC32), so we drop it (`crc=None`) for those; decode + password-check validate.
+- Still refused (`Unsupported`): RAR4, multi-volume, an unsupported encryption *version*.
 
 **Implementation decisions that refine rev1** (recorded, not silently changed):
 1. **Dependency pin:** an exact **rev** (`5c47b0e`, the pushed fork branch tip carrying the
