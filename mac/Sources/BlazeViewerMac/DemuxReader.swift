@@ -103,6 +103,46 @@ final class DemuxReader: @unchecked Sendable {
         diagSeekStart = DispatchTime.now()
     }
 
+    // Playback-smoothness diagnostics (PB_TRACE): per-window `demux_read_packet` latency, so a
+    // steady-state stutter can be pinned on SMB read spikes (the reader starving the display
+    // layer) vs decode/present. Reads are normally instant (the OS/SMB client has the bytes
+    // buffered); a cache miss that must fetch over the network blocks the reader thread, and
+    // with only the layer's queue as a buffer, a block longer than the queue depth drops a
+    // frame. Reset each window; emitted ~every 2 s of feeding. Touched only on `queue`.
+    private var pbWinStart = DispatchTime.now()
+    private var pbWinReads = 0
+    private var pbWinReadNanos: UInt64 = 0
+    private var pbWinMaxReadNanos: UInt64 = 0
+    private var pbWinSlow20 = 0 // reads > 20 ms
+    private var pbWinSlow40 = 0 // reads > 40 ms (≈ a 24 fps frame interval — a missed deadline)
+
+    /// Fold one `demux_read_packet` wall-time into the current window; emit + reset ~every 2 s.
+    /// Called only when `pbTraceEnabled`.
+    private func recordReadLatency(_ nanos: UInt64) {
+        pbWinReads += 1
+        pbWinReadNanos &+= nanos
+        if nanos > pbWinMaxReadNanos { pbWinMaxReadNanos = nanos }
+        let ms = Double(nanos) / 1e6
+        if ms > 20 { pbWinSlow20 += 1 }
+        if ms > 40 { pbWinSlow40 += 1 }
+        let elapsed =
+            Double(DispatchTime.now().uptimeNanoseconds &- pbWinStart.uptimeNanoseconds) / 1e9
+        guard elapsed >= 2.0 else { return }
+        let avgMs = Double(pbWinReadNanos) / Double(pbWinReads) / 1e6
+        pbTrace(
+            String(
+                format:
+                    "sb-read diag: %.1fs — %d reads (feed %.1f/s), avg %.1fms max %.1fms, slow>20ms=%d slow>40ms=%d",
+                elapsed, pbWinReads, Double(pbWinReads) / elapsed, avgMs,
+                Double(pbWinMaxReadNanos) / 1e6, pbWinSlow20, pbWinSlow40))
+        pbWinStart = DispatchTime.now()
+        pbWinReads = 0
+        pbWinReadNanos = 0
+        pbWinMaxReadNanos = 0
+        pbWinSlow20 = 0
+        pbWinSlow40 = 0
+    }
+
     /// Open the demuxer for `sessionId` over the container `PlaySampleBuffer`
     /// stashed Rust-side, off the main actor. Builds the `CMVideoFormatDescription`
     /// from the hvcC/avcC atom (+ the DoVi `dvvC`/`dvcC` box when present). `then`
@@ -263,7 +303,9 @@ final class DemuxReader: @unchecked Sendable {
                 requesting = false
                 return
             }
+            let t0 = pbTraceEnabled ? DispatchTime.now().uptimeNanoseconds : 0
             let rv = demux_read_packet(ptr)
+            if pbTraceEnabled { recordReadLatency(DispatchTime.now().uptimeNanoseconds &- t0) }
             let n = Int(rv.len())
             if n == 0 {
                 let state = demux_state(ptr)

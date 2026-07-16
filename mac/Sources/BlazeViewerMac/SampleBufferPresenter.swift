@@ -60,6 +60,13 @@ final class SampleBufferPresenter {
     private var audioStarted = false
     private var statusObs: NSKeyValueObservation?
     private var timeObserver: Any?
+    /// Playback-smoothness poll (PB_TRACE only): VideoToolbox's own dropped-frame count via the
+    /// sample-buffer renderer (macOS 14.4+). A rising drop count is the DIRECT stutter signal;
+    /// correlate it with `DemuxReader`'s `sb-read diag` window — drops alongside read spikes ⇒
+    /// SMB feed starvation; drops without ⇒ decode/present timing. `nil` when tracing is off.
+    private var metricsTimer: Timer?
+    private var lastDroppedFrames = 0
+    private var lastTotalFrames = 0
     private var durationSecs: Double = 0
     private var fps: Double = 0
     /// The seek currently in flight (plan §H1c). Its `epoch` gates every callback — the
@@ -124,6 +131,15 @@ final class SampleBufferPresenter {
             forInterval: CMTime(seconds: 0.05, preferredTimescale: 600), queue: .main
         ) { [weak self] _ in
             MainActor.assumeIsolated { self?.publishProgress() }
+        }
+
+        // Playback-smoothness poll (PB_TRACE only): once a second, read VideoToolbox's
+        // dropped-frame count and log the per-second delta. Off entirely in a normal run.
+        if pbTraceEnabled {
+            metricsTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) {
+                [weak self] _ in
+                MainActor.assumeIsolated { self?.pollVideoMetrics() }
+            }
         }
 
         pbTrace("sample-buffer video \(sessionId): opening")
@@ -267,6 +283,37 @@ final class SampleBufferPresenter {
             elapsed: pos.isFinite ? pos : 0,
             total: durationSecs.isFinite ? durationSecs : 0,
             playing: synchronizer.rate != 0)
+    }
+
+    /// PB_TRACE playback-smoothness poll (1 Hz): log VideoToolbox's dropped-frame delta and
+    /// accumulated delay. `numberOfDroppedFrames` counts frames dropped before decode OR for
+    /// missing their display deadline — the direct stutter signal. Read the primitives out of
+    /// the metrics object before hopping to the main actor to log against the running totals.
+    private func pollVideoMetrics() {
+        guard revealed else { return }
+        guard #available(macOS 14.4, *) else { return }
+        displayLayer.sampleBufferRenderer.loadVideoPerformanceMetrics { [weak self] metrics in
+            guard let metrics else { return }
+            let dropped = metrics.numberOfDroppedFrames
+            let total = metrics.totalNumberOfFrames
+            let delayMs = metrics.totalAccumulatedFrameDelay * 1000
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    guard let self else { return }
+                    let dDrop = dropped - self.lastDroppedFrames
+                    let dTotal = total - self.lastTotalFrames
+                    self.lastDroppedFrames = dropped
+                    self.lastTotalFrames = total
+                    guard dTotal > 0 || dDrop > 0 else { return }
+                    let pct = dTotal > 0 ? 100.0 * Double(dDrop) / Double(dTotal) : 0
+                    pbTrace(
+                        String(
+                            format:
+                                "sb-play diag: +%d frames +%d dropped (%.1f%%/s), %d dropped total, delay %.1fms",
+                            dTotal, dDrop, pct, dropped, delayMs))
+                }
+            }
+        }
     }
 
     // MARK: - Command facade (mirrors NativeVideoPlayer)
@@ -496,6 +543,8 @@ final class SampleBufferPresenter {
         synchronizer.rate = 0
         statusObs?.invalidate()
         statusObs = nil
+        metricsTimer?.invalidate()
+        metricsTimer = nil
         reader.stop(layer: displayLayer)
         audioFeeder.stop(renderer: audioRenderer)
         if let timeObserver {
@@ -510,5 +559,6 @@ final class SampleBufferPresenter {
         // Safety net if `stop()` wasn't called; the reader/feeder free their own
         // pointers in their deinits.
         statusObs?.invalidate()
+        metricsTimer?.invalidate()
     }
 }
