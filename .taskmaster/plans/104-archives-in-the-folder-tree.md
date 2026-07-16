@@ -1,6 +1,6 @@
 # Task 104 — Archives as doors: visible in the deck, entered on purpose
 
-**Status:** planned — rev4 (2026-07-16, owner-approved direction)
+**Status:** planned — rev5 (2026-07-16, owner-approved direction; ready to implement)
 **Proposed task id:** 104 (add the task entry when this plan is approved)
 **Depends on:** `pb_source::archive_kind` (`crates/pb-source/src/kind.rs:61`) — shipped on `main`
 (#102 tar family, #103 RAR5, merged `631e970`).
@@ -156,17 +156,48 @@ CoreEffect::BeginArchiveOpen { path, password: None }
 `begin_archive_open` is **shell-side** (`main.rs:1038`, `mac-ffi:2730`), so core pushes the
 effect and never calls it. Both shells already handle it.
 
-### 4. Passwords: already work — but ZIP/7z only
+### 4. Passwords: already work, for every encryptable format
 
-`OpenError::PasswordRequired` (`pb-source/src/lib.rs:262`) → prompt → re-open with `Some(pw)` is
+`OpenError::PasswordRequired` (`pb-source/src/lib.rs:263`) → prompt → re-open with `Some(pw)` is
 real on both shells (`app_core_impl.rs:1024`, `main.rs:1148`, `mac-ffi:2819`). `password: None`
 on the first attempt is correct, not a shortcut.
 
-⚠ An encrypted **RAR** returns `OpenError::Unsupported`, not `PasswordRequired`
-(`pb-source/src/lib.rs:283` — *"a format tier we don't decode … encrypted RAR"*). So an encrypted
-`.cbr` door offers itself and then refuses with an honest "unsupported". That is today's Open-File
-behaviour, not a regression — but the plan says so rather than implying every locked archive
-prompts.
+> **rev5 (2026-07-16): the RAR caveat is gone.** rev4 warned that an encrypted `.cbr` door would
+> offer itself and then refuse, because encrypted RAR returned `Unsupported`. **RAR5 `-p`/`-hp`
+> decryption shipped** (`93919af`, merged `f998a76`): encrypted RAR now returns
+> `PasswordRequired` and a correct password decrypts (`pb-source/src/rar_crypt.rs`). So **every**
+> archive format the door can show either has no encryption (the tar family) or prompts and
+> unlocks (ZIP / 7z / RAR5). `Unsupported` (`lib.rs:291`) now means RAR4, multi-volume, or a
+> non-AES-256 encryption version — none of which a password could fix, which is exactly why the
+> distinction exists.
+
+## The climb-out — RESOLVED (verified 2026-07-16), and doors improve it
+
+rev4 flagged this as *the one thing that could change the size of the feature*: a door you cannot
+back out of is a trap. **It already works, and it is already tested.**
+
+`open_parent_cmd` (`app_core_impl.rs:2705`, `Action::OpenParent` = `Alt+Up`, `keymap.rs:616`)
+anchors on `self.source.container()` (`:2721`) — and **every** archive source returns its own path
+on disk (`lib.rs:534`, `:986`, `:1053`, `rar.rs:339`, `tar_source.rs:548`). Its doc already
+describes the exact flow this plan needs:
+
+> *"An archive deck scoped to an internal folder steps the scope up one level first (`a/b` → `a` →
+> the whole archive); from the archive root, 'up' opens the folder on disk containing the archive
+> file."*
+
+Tested end-to-end by `rescope_filters_the_deck_and_parent_steps_back_up`
+(`app_core_impl.rs:10861`), which asserts at `:10885` that from the archive root the containing
+folder opens as a `BeginDirScan`.
+
+So the full loop closes with **no new code**: `P` a door → archive deck → `Alt+Up` → the folder of
+doors → `P` the next one.
+
+**And doors make this climb better than it is today.** `open_parent_cmd` opens the containing
+folder via a scan; if that folder has no photos, the keep-deck rule (`:1114`, `:1140`) means
+nothing visibly happens — you stay on the archive with a toast. That is precisely the owner's
+*"folder of encrypted 7z archives"* case, where the climb-out currently dead-ends. With doors the
+folder has items, so it opens. Same dissolution as *What this dissolves*, reached from the other
+direction.
 
 ### 5. Cut: no resident archive cache (owner, 2026-07-16)
 
@@ -229,18 +260,6 @@ across **every** entry point — `decode_item`, `decode_item_for` with `Purpose:
 `Purpose::Display`, and the panel path. rev4's Phase 1 originally specified this for
 `decode_item` only; that would have shipped both leaks above with a green suite.
 
-## Open question — verify before building: can you get back out?
-
-**A door you cannot return from is a trap.** After entering, the deck is the archive's contents;
-getting back to the folder-of-doors must work, or the feature is worse than nothing.
-
-`climb_anchor` (`app_core_impl.rs:1200`) implies a climb/up mechanism exists. **Verify first**
-that the existing up/climb command returns from an archive deck to its parent folder deck. If it
-does, this is free and the "open the next archive" flow works: enter, browse, climb out, `P` the
-next door. If it does not, **building it is part of this task** — not a follow-up.
-
-This is the one thing that could make rev4 bigger than it looks. Check it before estimating.
-
 ## Phases
 
 **Phase 0 — exhaustive guards, no behaviour change.** Convert the nine `LibraryItemKind` guards
@@ -271,8 +290,9 @@ clears `climb_anchor` like any other navigation. Verify the climb-out (above).
 
 **Phase 4 — integration.** A folder of only archives shows doors and becomes the deck root (the
 blocker that rev3 could not solve); `P` a zip → deck; `P` a 7z → progress → deck; `P` an encrypted
-zip/7z → prompt → unlock → deck; `P` an encrypted `.cbr` → honest "unsupported"; climb out and
-enter the next door.
+zip / 7z / **rar** → prompt → unlock → deck (rev5: RAR decrypts now); `Alt+Up` climbs out to the
+folder of doors and `P` enters the next one — including from a folder with **no photos**, which
+dead-ends today.
 
 **No-trace (do not skip).** `viewing_a_folder_writes_nothing_to_disk` (`main.rs:5120`) already
 seeds `clip.mp4` with garbage bytes because *"the placeholder path must not even read them"*
@@ -283,7 +303,8 @@ is already correct; this is a two-line extension and it pins the door's central 
 
 ## Risks / open questions
 
-1. **Climb-out** (above). The one thing that could change the size of this.
+1. ~~**Climb-out.**~~ **Resolved 2026-07-16** — already implemented, documented and tested; doors
+   improve it. See *The climb-out*. It was rev4's biggest unknown and it cost nothing.
 2. **Noise.** A `backup.zip` in a vacation folder becomes a door in the deck. This is exactly what
    a stray `.mp4` does today, so it is consistent rather than new — accept for v1, setting later
    if it grates.
@@ -343,7 +364,7 @@ Retained because the analysis was expensive and is correct if the rows are ever 
 - **`set_children` sorts one undifferentiated list** (`fs_tree.rs:122`) — "folders first" needs a
   typed comparator.
 - **A lock badge** would cost an archive open per row (`ZipSource::needs_password`,
-  `pb-source/src/lib.rs:484`), and 7z headers can themselves be encrypted. Opportunistic only, if
+  `pb-source/src/lib.rs:492`), and 7z headers can themselves be encrypted. Opportunistic only, if
   ever.
 - **Paging is not on this path.** Codex flagged `TreeHit::PageUp/PageDown` citing
   `app_core.rs:508` — that line does not exist and the type lives in `pb-hud`
