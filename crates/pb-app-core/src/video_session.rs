@@ -268,6 +268,12 @@ pub struct VideoSession {
     /// Late frames discarded by the catch-up drain (plan 1C) — a session-lifetime
     /// counter for the 0B diagnostics; presented frames are not counted.
     dropped_frames: u64,
+    /// Mid-play starvation **rebuffers** (the freeze-don't-drift path) — the
+    /// other stutter flavor the `PB_TRACE` session diag reports: a network read
+    /// spike that empties the queue freezes rather than drops, so a diag with
+    /// `dropped=0` alone can't prove smoothness. Initial preroll and seeks are
+    /// not counted; only a sustained underrun while playing is.
+    rebuffers: u64,
 }
 
 impl VideoSession {
@@ -314,6 +320,7 @@ impl VideoSession {
             frame_interval: None,
             starved_since: None,
             dropped_frames: 0,
+            rebuffers: 0,
         };
         (
             session,
@@ -467,6 +474,7 @@ impl VideoSession {
                             let since = *self.starved_since.get_or_insert(now);
                             if now.saturating_duration_since(since) >= STARVATION_REBUFFER {
                                 self.starved_since = None;
+                                self.rebuffers += 1; // the diag's freeze counter
                                 self.clock.freeze(now);
                                 self.transition(Buffering, &mut update);
                             }
@@ -764,6 +772,12 @@ impl VideoSession {
         self.dropped_frames
     }
 
+    /// Mid-play starvation rebuffers so far (the freeze flavor of a stutter —
+    /// see the field doc; the `PB_TRACE` session diag prints both counters).
+    pub fn rebuffers(&self) -> u64 {
+        self.rebuffers
+    }
+
     fn transition(&mut self, to: VideoSessionState, update: &mut SessionUpdate) {
         debug_assert!(
             self.state.can_transition_to(to),
@@ -970,11 +984,17 @@ mod tests {
 
     #[test]
     fn preroll_then_paced_playback_then_eos_parks_the_last_frame() {
-        let (mut s, io) = VideoSession::new(SID, FRAME_BYTES);
+        // Exact-credit mechanics: pin a 4-frame budget so the arithmetic below
+        // stays legible and independent of the (tunable) default frame cap.
+        let budget = crate::video::VideoQueueBudget {
+            max_bytes: u64::MAX,
+            max_frames: 4,
+        };
+        let (mut s, io) = VideoSession::with_budget(SID, FRAME_BYTES, budget);
         let t0 = Instant::now();
         opened(&io, 100);
 
-        // Opening → Buffering; credits flow immediately (frame cap = 3).
+        // Opening → Buffering; credits flow immediately, up to the frame cap.
         let u = s.poll(t0);
         assert!(u.state_changed);
         assert_eq!(s.state(), VideoSessionState::Buffering);
@@ -1017,7 +1037,12 @@ mod tests {
 
     #[test]
     fn credits_never_exceed_the_budget_and_replenish_as_frames_present() {
-        let (mut s, io) = VideoSession::new(SID, FRAME_BYTES);
+        // Exact-credit mechanics: pinned 4-frame budget, as above.
+        let budget = crate::video::VideoQueueBudget {
+            max_bytes: u64::MAX,
+            max_frames: 4,
+        };
+        let (mut s, io) = VideoSession::with_budget(SID, FRAME_BYTES, budget);
         let t0 = Instant::now();
         opened(&io, 10_000);
         s.poll(t0);
@@ -1282,6 +1307,7 @@ mod tests {
         let u = s.poll(rebuffer_at);
         assert_eq!(s.state(), VideoSessionState::Buffering);
         assert!(u.state_changed);
+        assert_eq!(s.rebuffers(), 1, "the diag counts the freeze");
         let frozen = s.position(rebuffer_at + Duration::from_millis(500));
         assert_eq!(
             frozen,
@@ -1347,6 +1373,7 @@ mod tests {
             u.present.expect("late frame presents").pts,
             Duration::from_millis(66)
         );
+        assert_eq!(s.rebuffers(), 0, "a transient miss is not a rebuffer");
 
         // Recovery cleared the accrual: the next empty poll starts a FRESH
         // starvation window instead of instantly rebuffering.
@@ -2205,6 +2232,9 @@ mod tests {
             s.assert_budget_invariant();
             credits += drain_credits(&io);
         }
-        assert!(sent - presented <= 4, "lookahead stays within the cap");
+        assert!(
+            sent - presented <= crate::video::VIDEO_QUEUE_MAX_FRAMES as u64,
+            "lookahead stays within the cap"
+        );
     }
 }

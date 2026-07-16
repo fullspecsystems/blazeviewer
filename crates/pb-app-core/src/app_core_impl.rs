@@ -7617,11 +7617,13 @@ impl AppCore {
         let state = v.session.state();
         let started = v.session.has_started();
         let session_id = v.session.id;
-        // PB_TRACE: the Session route's objective smoothness number
+        // PB_TRACE: the Session route's objective smoothness numbers
         // (macos-video-smoothness §4) — the analog of the sample-buffer route's
-        // `sb-play diag`. `dropped_frames` counts late frames the catch-up drain
-        // discarded (plan 1C/0B); a healthy clip holds at 0. ~Every 2 s while
-        // playing, with the delta since the last line.
+        // `sb-play diag`. `dropped` counts late frames the catch-up drain
+        // discarded (plan 1C/0B); `rebuf` counts mid-play starvation freezes
+        // (the other stutter flavor — a network read spike that empties the
+        // queue freezes rather than drops). A healthy clip holds both at 0.
+        // ~Every 2 s while playing, with the dropped delta since the last line.
         if pb_trace() && state == crate::video::VideoSessionState::Playing {
             let stale = self.video_diag_last.is_none_or(|(id, t, _)| {
                 id != session_id || now.saturating_duration_since(t) >= Duration::from_secs(2)
@@ -7633,8 +7635,9 @@ impl AppCore {
                     .filter(|(id, _, _)| *id == session_id)
                     .map_or(0, |(_, _, n)| n);
                 eprintln!(
-                    "[pb-video] session diag: dropped={dropped} (+{}) pos={:.1}s",
+                    "[pb-video] session diag: dropped={dropped} (+{}) rebuf={} pos={:.1}s",
                     dropped.saturating_sub(prev),
+                    v.session.rebuffers(),
                     v.session.position(now).as_secs_f64()
                 );
                 self.video_diag_last = Some((session_id, now, dropped));

@@ -335,11 +335,20 @@ pub struct AudioClockSample {
 // Byte-budgeted queue admission (locked decision: bytes, not frames).
 // ---------------------------------------------------------------------------
 
-/// Hard frame-count ceiling on decoded frames **queued plus in flight**: the
-/// session's accounting charges granted credits against this cap too (stricter
-/// than the plan's queue-only invariant), so 4 = the plan's 2-3 queued frames of
-/// lookahead + the one the producer is decoding against a credit.
-pub const VIDEO_QUEUE_MAX_FRAMES: usize = 4;
+/// Hard frame-count ceiling on decoded frames **queued plus in flight** (the
+/// session's accounting charges granted credits against this cap too).
+///
+/// This is the **runaway guard, not the working budget** — bytes are the locked
+/// sizing decision (below). Raised 4 → 30 (macos-video-smoothness follow-up,
+/// owner-observed SMB stutters): at 4 the cap bound *every* sub-4K clip to
+/// ~165 ms of lookahead @ 24 fps, while measured SMB read spikes reach ~273 ms —
+/// one spike outlasted the whole buffer, a stutter every couple of minutes. At
+/// 30 the byte budget binds first for everything 1080p-RGBA and larger (24
+/// frames ≈ 1 s @ 24 fps for 1080p; 4K fp16 unchanged at ~3), and the cap still
+/// stops tiny-frame clips from queueing unbounded decode-ahead. Worst-case RAM
+/// is unchanged — the byte budget was always the ceiling; small frames may now
+/// actually use it.
+pub const VIDEO_QUEUE_MAX_FRAMES: usize = 30;
 
 /// The byte budget for queued + in-flight decoded frames: 3× one fitted 4K
 /// RGBA16F frame (~190 MiB, constant — the overhaul plan 1A sizing). Sized so
@@ -347,10 +356,11 @@ pub const VIDEO_QUEUE_MAX_FRAMES: usize = 4;
 /// queued frames plus one in-flight decode: the old 3×RGBA8 budget (~95 MiB)
 /// admitted only ONE fp16 frame, which deadlocked the 2-frame preroll (R1) —
 /// and anything that serializes the credit round-trip plays below real time
-/// (the owner-reported 2/3× on a 4K60 HEVC clip). SDR 4K RGBA8 frames hit the
-/// [`VIDEO_QUEUE_MAX_FRAMES`] cap long before this byte cap. Admission still
-/// enforces the one-frame exception when a single fitted frame (8K) exceeds the
-/// whole budget, and preroll clamps to what the budget actually admits.
+/// (the owner-reported 2/3× on a 4K60 HEVC clip). This byte cap is what binds
+/// for 1080p-and-up frames now that [`VIDEO_QUEUE_MAX_FRAMES`] is the tiny-frame
+/// guard rather than the working limit. Admission still enforces the one-frame
+/// exception when a single fitted frame (8K) exceeds the whole budget, and
+/// preroll clamps to what the budget actually admits.
 pub const VIDEO_QUEUE_BYTE_BUDGET: u64 = 3 * 3840 * 2160 * 8;
 
 /// Pure admission rule for the producer→session frame queue. The session owns one;
@@ -359,7 +369,7 @@ pub const VIDEO_QUEUE_BYTE_BUDGET: u64 = 3 * 3840 * 2160 * 8;
 /// channel.
 ///
 /// Invariant (unit-tested here, structurally re-asserted by the phase-4 queue):
-/// `queued_bytes ≤ max(budget, largest_single_frame) ∧ queued_frames ≤ 3`.
+/// `queued_bytes ≤ max(budget, largest_single_frame) ∧ queued_frames ≤ max_frames`.
 #[derive(Debug, Clone, Copy)]
 pub struct VideoQueueBudget {
     pub max_bytes: u64,
@@ -666,13 +676,33 @@ mod tests {
     #[test]
     fn admits_within_budget_up_to_the_frame_cap() {
         let b = VideoQueueBudget::default();
-        // A small (1080p) frame: byte budget allows many, the frame cap binds at 4.
+        // A tiny frame (audio-cover-art-sized video): bytes never bind, the
+        // frame cap is the runaway guard.
+        let f = 64 * 64 * 4u64;
+        for n in 0..b.max_frames {
+            assert!(b.admits(n as u64 * f, n, f), "frame {n} admits");
+        }
+        assert!(
+            !b.admits(b.max_frames as u64 * f, b.max_frames, f),
+            "frame cap"
+        );
+    }
+
+    /// The SMB-stutter fix (macos-video-smoothness follow-up): a 1080p RGBA
+    /// clip buffers ~1 s of frames (24 @ 24 fps) — the byte budget binds, not
+    /// the old 4-frame cap that a single ~273 ms network read spike outlasted.
+    #[test]
+    fn a_1080p_clip_buffers_about_a_second() {
+        let b = VideoQueueBudget::default();
         let f = 1920 * 1080 * 4u64;
-        assert!(b.admits(0, 0, f));
-        assert!(b.admits(f, 1, f));
-        assert!(b.admits(2 * f, 2, f));
-        assert!(b.admits(3 * f, 3, f));
-        assert!(!b.admits(4 * f, 4, f), "frame cap");
+        let mut queued = 0u64;
+        let mut frames = 0usize;
+        while b.admits(queued, frames, f) {
+            queued += f;
+            frames += 1;
+        }
+        assert_eq!(frames, 24, "byte budget admits exactly 24 1080p frames");
+        assert!(frames < b.max_frames, "bytes bind before the frame cap");
     }
 
     #[test]
@@ -688,9 +718,12 @@ mod tests {
             !b.admits(3 * FRAME_4K_F16, 3, FRAME_4K_F16),
             "fourth 4K fp16 frame exceeds bytes before the frame cap"
         );
-        // SDR 4K RGBA8 frames hit the frame cap first, never the byte cap.
-        assert!(b.admits(3 * FRAME_4K, 3, FRAME_4K));
-        assert!(!b.admits(4 * FRAME_4K, 4, FRAME_4K), "frame cap");
+        // SDR 4K RGBA8: the byte budget admits exactly six.
+        assert!(b.admits(5 * FRAME_4K, 5, FRAME_4K), "sixth fits exactly");
+        assert!(
+            !b.admits(6 * FRAME_4K, 6, FRAME_4K),
+            "seventh exceeds bytes"
+        );
     }
 
     #[test]

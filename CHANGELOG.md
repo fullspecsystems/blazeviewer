@@ -12,6 +12,10 @@ with any pre-release suffix carried only by the tag.
   renderer as everything else, instead of a path that quietly dropped a few frames every
   second on high-refresh displays. Audio-track switching (`A` / **Playback ▸ Audio**), the
   tick on the playing track, subtitles, seeking, and resume all carry over to the new path.
+- **Occasional stutters on videos played from a network share.** Playback now buffers up to
+  ~1 second of decoded video ahead (within the same memory budget as before), so a brief
+  slow read from a NAS/SMB share no longer outlasts the buffer and shows as a stutter every
+  few minutes. Local playback gets the same headroom for free.
 - **Seeking after a resume lands where you asked (all platforms).** Reopening a video at a
   remembered position and then scrubbing could silently aim the *audio* at the wrong spot —
   offset by the resume position — leaving it churning through minutes of sound or ending
