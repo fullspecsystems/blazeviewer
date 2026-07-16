@@ -2499,6 +2499,8 @@ fn subtitles_tab(
         );
     });
 
+    ui.add_space(pbui::SECTION_GAP);
+
     pbui::group_card(ui, p, Some("Legibility"), |ui| {
         pbui::card_row(
             ui,
@@ -2562,6 +2564,8 @@ fn subtitles_tab(
         }
     });
 
+    ui.add_space(pbui::SECTION_GAP);
+
     pbui::group_card(ui, p, Some("Position"), |ui| {
         pbui::card_row(ui, p, None, "Vertical", Some(vertical_hint(d)), |ui| {
             let mut v = d.subtitle.vertical_offset_pct * 100.0;
@@ -2570,6 +2574,8 @@ fn subtitles_tab(
             }
         });
     });
+
+    ui.add_space(pbui::SECTION_GAP);
 
     // Colours live here and opacities do not (owner): the hue is a once-a-year decision,
     // the opacity is the one you actually reach for.
@@ -2741,7 +2747,10 @@ fn subtitle_preview_swatch(
             m
         }));
     }
-    ui.add_space(pbui::GAP);
+    // The swatch reads as a card, so the heading below it gets the same `SECTION_GAP` every
+    // other heading-after-a-card gets. (`settings_ui` zeroes `item_spacing.y` — every gap on
+    // a settings page is explicit, so an omitted one is flush, not merely tight.)
+    ui.add_space(pbui::SECTION_GAP);
 }
 
 /// The **Display** tab: how a photo is framed and how the overlays look.
