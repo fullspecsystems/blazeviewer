@@ -256,7 +256,11 @@ final class SampleBufferPresenter {
             // mirrors NativeVideoPlayer.revealAndPlay's `layer.isHidden = false`.
             displayLayer.isHidden = false
             canvas?.revealVideoLayer()
-            pbTrace("sample-buffer video \(sessionId): revealed")
+            // The display's refresh vs the content fps decides whether 24 fps judders/drops:
+            // 24-on-60 is a 2.5×/frame cadence (drop-prone); 120 Hz ProMotion is ~exact.
+            let hz = canvas?.window?.screen?.maximumFramesPerSecond ?? -1
+            pbTrace(
+                "sample-buffer video \(sessionId): revealed — content \(fps) fps, display \(hz) Hz")
         }
         // Restore the user's LIVE intent, not a value captured at seek-issue time — so a
         // pause pressed while the seek was settling sticks, and the click double-seek can't
