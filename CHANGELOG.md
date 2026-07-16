@@ -48,6 +48,9 @@ with any pre-release suffix carried only by the tag.
   remembered.
 
 ### Fixed
+- **A click on the playback bar seeks once, not twice** (macOS). Clicking used to seek on the
+  press and again on the release; it now seeks immediately on press, previews live while you
+  drag, and only re-seeks on release if you actually moved to a new spot.
 - **The scrubber knob no longer drifts out from under your cursor** (macOS). Clicking and
   holding on the playback bar could make the knob slide away and the video seek on its own,
   because the elapsed-time label changed width (e.g. crossing the one-hour mark) and nudged

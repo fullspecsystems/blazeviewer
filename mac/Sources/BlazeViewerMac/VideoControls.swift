@@ -217,22 +217,28 @@ private struct TrackPickerRow: View {
     }
 }
 
-/// A click/drag seek bar. While dragging, the knob follows the pointer locally (a periodic
-/// AVPlayer update must not yank it away); seeks are throttled by time and the final
-/// position is always sent on release. The bar's displayed fraction is the player's when
-/// idle, the pointer's while dragging. The track is inset by the knob radius so the knob
-/// stays within the bar's bounds at 0 % / 100 % (never overhanging the time labels).
+/// A click/drag seek bar. Mousedown seeks immediately (a click responds at once); while
+/// dragging, the knob follows the pointer locally (a periodic AVPlayer update must not yank it
+/// away) and seeks are throttled for a live preview; release lands the exact end point, but
+/// only when it differs from the last seek already sent — so a plain click doesn't seek twice.
+/// The bar's displayed fraction is the player's when idle, the pointer's while dragging. The
+/// track is inset by the knob radius so the knob stays within the bar's bounds at 0 % / 100 %.
 struct VideoScrubber: View {
     let model: CoreModel
 
     @State private var dragging = false
     @State private var dragFraction = 0.0
     @State private var lastSeek = Date.distantPast
+    /// The fraction of the most recent seek we actually sent, so the release can skip a
+    /// redundant identical seek — a plain click already seeked on mousedown, and firing the
+    /// same seek again on mouseup was a visible quirk (owner, 2026-07-15). `nil` between
+    /// gestures.
+    @State private var lastSeekedFraction: Double?
 
     private let trackHeight: CGFloat = 4
     private let knobRadius: CGFloat = 7
-    /// At most ~16 live seeks/s while scrubbing (AVPlayer also coalesces); the release
-    /// always sends a final, unthrottled seek.
+    /// At most ~16 live seeks/s while scrubbing (AVPlayer also coalesces). The release sends a
+    /// final seek only when the release point differs from the last one already sent.
     private let seekInterval: TimeInterval = 0.06
 
     var body: some View {
@@ -265,19 +271,35 @@ struct VideoScrubber: View {
             .gesture(
                 DragGesture(minimumDistance: 0)
                     .onChanged { value in
-                        if !dragging { model.scrubbingChanged(true) } // pin the controls up
-                        dragging = true
-                        dragFraction = clamp((value.location.x - knobRadius) / usable)
-                        let now = Date()
-                        if now.timeIntervalSince(lastSeek) >= seekInterval {
-                            lastSeek = now
-                            model.seekVideoFraction(dragFraction)
+                        let f = clamp((value.location.x - knobRadius) / usable)
+                        dragFraction = f
+                        if !dragging {
+                            // Mousedown: seek immediately so a click responds instantly.
+                            dragging = true
+                            model.scrubbingChanged(true) // pin the controls up
+                            lastSeek = Date()
+                            lastSeekedFraction = f
+                            model.seekVideoFraction(f)
+                        } else {
+                            // Dragging: throttled live preview of where you're scrubbing to.
+                            let now = Date()
+                            if now.timeIntervalSince(lastSeek) >= seekInterval {
+                                lastSeek = now
+                                lastSeekedFraction = f
+                                model.seekVideoFraction(f)
+                            }
                         }
                     }
                     .onEnded { value in
-                        model.seekVideoFraction(clamp((value.location.x - knobRadius) / usable))
+                        let f = clamp((value.location.x - knobRadius) / usable)
                         dragging = false
                         model.scrubbingChanged(false) // let the reveal fade on its normal timer
+                        // Land the exact release point — but skip it when we already seeked
+                        // there (a plain click, or a drag whose last preview is the release
+                        // point), so mouseup doesn't fire a second identical seek.
+                        let alreadyThere = lastSeekedFraction.map { abs(f - $0) <= 1e-4 } ?? false
+                        if !alreadyThere { model.seekVideoFraction(f) }
+                        lastSeekedFraction = nil
                     }
             )
             .onHover { $0 ? NSCursor.pointingHand.set() : NSCursor.arrow.set() }
