@@ -37,15 +37,20 @@ flate2 = "1"
 bzip2 = "0.6"
 ruzstd = "0.8"
 lzma-rust2 = { version = "0.16", default-features = false, features = ["std", "xz", "optimization"] }
-# RAR5 decode (task #103): pure-Rust, MIT, clean-room, decode-only — audited in
-# the #102 plan's compcol spike (fuzz-clean, byte-perfect vs unrar on its
-# supported subset AFTER our x86-filter fix). The fork rev IS that fix
-# (upstream PR #121, still open); once upstream merges + releases, switch to an
-# exact crates.io pin (`compcol = "=x.y.z"`). Exact-pin either way: single
-# vendor, weeks old — review the diff on every bump (zero-dep + forbid(unsafe)
-# keeps that tractable). The container parser is OURS (src/rar.rs); compcol
-# supplies only the codec.
-compcol = { git = "https://github.com/jdlien/compcol", rev = "5c47b0ecf123cfb5976ab3d5c53a17fb936bb1d2", default-features = false, features = ["std", "rar5"] }
+# RAR5 + RAR4 decode: pure-Rust, MIT, clean-room, decode-only. The container
+# parsers are OURS (src/rar.rs = RAR5, src/rar4.rs = RAR4); compcol supplies only
+# the codec.
+#
+# Pinned to the `rar3-standard-filters` branch tip. Beyond the `5c47b0e` rev we
+# shipped RAR5 on, this rev adds:
+#   * the RAR3/RAR4 codec (LZ+Huffman, PPMd-II variant H, in-band Delta/x86
+#     filters, solid multi-member) — what unblocks RAR4 viewing, and
+#   * the RAR5 Delta filter + `Decoder::add_file_boundary` (so RAR5 Delta and
+#     x86-in-solid members now decode instead of degrading; see decode_solid_group).
+# This branch is still under review upstream; swap to an exact crates.io pin
+# (`compcol = "=x.y.z"`) once it merges + releases. Exact-pin either way — single
+# vendor, review the diff on every bump (zero-dep + forbid(unsafe) keeps that tractable).
+compcol = { git = "https://github.com/jdlien/compcol", rev = "9bb967bf0d64e1e76b750bee4cee5952b96a274e", default-features = false, features = ["std", "rar5", "rar3"] }
 # CRC32 of decoded RAR entries against the header CRC (neither compcol nor the
 # fstool reference verify it — silent garbage on corruption otherwise).
 # Already in-tree via flate2.

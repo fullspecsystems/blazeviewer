@@ -1069,7 +1069,7 @@ dependencies = [
 [[package]]
 name = "compcol"
 version = "0.6.8"
-source = "git+https://github.com/jdlien/compcol?rev=5c47b0ecf123cfb5976ab3d5c53a17fb936bb1d2#5c47b0ecf123cfb5976ab3d5c53a17fb936bb1d2"
+source = "git+https://github.com/jdlien/compcol?rev=9bb967bf0d64e1e76b750bee4cee5952b96a274e#9bb967bf0d64e1e76b750bee4cee5952b96a274e"
 
 [[package]]
 name = "concurrent-queue"
