@@ -88,6 +88,12 @@ final class SampleBufferPresenter {
     /// pause pressed *during* a seek stick, since the anchor reads this live).
     private var desiredPlaybackRate: Float = 1.0
 
+    /// A/B experiment (PB_NO_SB_AUDIO): run the video with the audio renderer **detached**
+    /// from the synchronizer (and the audio decoder never opened), to test whether the audio
+    /// clock is what periodically drops video frames to hold A/V sync. Diagnostic only —
+    /// never a shipping path.
+    private let disableAudio = ProcessInfo.processInfo.environment["PB_NO_SB_AUDIO"] != nil
+
     init(
         sessionId: UInt64, scaleMode: UInt8, muted: Bool, startSecs: Double,
         canvas: MetalCanvasNSView, model: CoreModel
@@ -102,7 +108,9 @@ final class SampleBufferPresenter {
         displayLayer.videoGravity = .resizeAspect
         canvas.attachVideoSublayer(displayLayer) // hidden until the first frame
         synchronizer.addRenderer(displayLayer)
-        synchronizer.addRenderer(audioRenderer) // audio shares the video's clock (§3B)
+        if !disableAudio {
+            synchronizer.addRenderer(audioRenderer) // audio shares the video's clock (§3B)
+        }
         audioRenderer.isMuted = muted
         relayout()
 
@@ -191,7 +199,7 @@ final class SampleBufferPresenter {
         // today): the old code seeked only the video reader (below), so a resumed MKV
         // played its picture minutes in while the audio sat 0-based in the past and was
         // discarded. The audio decoder now resumes to the same spot at open.
-        if result.hasAudio {
+        if result.hasAudio, !disableAudio {
             audioFeeder.open(sessionId: sessionId, startSecs: resumeTarget ?? 0) {
                 [weak self] ok in
                 MainActor.assumeIsolated {
@@ -261,7 +269,8 @@ final class SampleBufferPresenter {
             // 24-on-60 is a 2.5×/frame cadence (drop-prone); 120 Hz ProMotion is ~exact.
             let hz = canvas?.window?.screen?.maximumFramesPerSecond ?? -1
             pbTrace(
-                "sample-buffer video \(sessionId): revealed — content \(fps) fps, display \(hz) Hz")
+                "sample-buffer video \(sessionId): revealed — content \(fps) fps, display \(hz) Hz, "
+                    + "audio \(disableAudio ? "DETACHED (PB_NO_SB_AUDIO)" : "on synchronizer")")
         }
         // Restore the user's LIVE intent, not a value captured at seek-issue time — so a
         // pause pressed while the seek was settling sticks, and the click double-seek can't
