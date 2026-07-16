@@ -79,6 +79,7 @@ pub mod ids {
     pub const FRAME_PREV: &str = "frame_prev";
     pub const MUTE_LIVE_AUDIO: &str = "mute_live_audio";
     pub const TOGGLE_SUBTITLES: &str = "toggle_subtitles";
+    pub const SUBTITLE_CYCLE: &str = "subtitle_cycle";
 
     pub const HELP: &str = "help";
     pub const ABOUT: &str = "about";
@@ -137,6 +138,7 @@ pub enum MenuAction {
     FramePrev,
     MuteLiveAudio,
     ToggleSubtitles,
+    SubtitleCycle,
     Help,
     About,
 }
@@ -195,6 +197,7 @@ impl MenuAction {
             MenuAction::FramePrev => Action::FramePrev,
             MenuAction::MuteLiveAudio => Action::MuteLiveAudio,
             MenuAction::ToggleSubtitles => Action::ToggleSubtitles,
+            MenuAction::SubtitleCycle => Action::SubtitleCycle,
             MenuAction::Help => Action::Help,
             MenuAction::About => Action::About,
         }
@@ -254,6 +257,7 @@ pub fn action_for(id: &str) -> Option<MenuAction> {
         FRAME_PREV => MenuAction::FramePrev,
         MUTE_LIVE_AUDIO => MenuAction::MuteLiveAudio,
         TOGGLE_SUBTITLES => MenuAction::ToggleSubtitles,
+        SUBTITLE_CYCLE => MenuAction::SubtitleCycle,
         HELP => MenuAction::Help,
         ABOUT => MenuAction::About,
         _ => return None,
@@ -331,6 +335,10 @@ pub struct ViewChecks {
     pub toggle_panels: CheckMenuItem,
     /// Checked when Live Photo audio is muted (#38), mirroring `settings.mute_live_audio`.
     pub mute_live_audio: CheckMenuItem,
+    /// View ▸ Subtitles (task #90): checked when captions are on, mirroring
+    /// `settings.subtitles`. Always *enabled*, like Mute Live Photo Audio — a preference
+    /// you set whenever you like, not a property of what's on screen.
+    pub subtitles: CheckMenuItem,
 }
 
 /// Everything [`build_menu`] hands back: the menu itself plus the item handles whose
@@ -447,6 +455,7 @@ pub fn build_menu(keymap: &Keymap) -> BuiltMenu {
     let full_exif = check_item(ids::FULL_EXIF, "Show Detailed Info\tShift+I");
     let toggle_panels = check_item(ids::TOGGLE_PANELS, "Hide Panels\tTab");
     let mute_live_audio = check_item(ids::MUTE_LIVE_AUDIO, "Mute Live Photo Audio\tM");
+    let subtitles = check_item(ids::TOGGLE_SUBTITLES, "Subtitles\tC");
 
     let view = Submenu::new("&View", true);
     let _ = view.append_items(&[
@@ -462,6 +471,17 @@ pub fn build_menu(keymap: &Keymap) -> BuiltMenu {
         &slideshow,
         &item(ids::SLIDESHOW_FASTER, "Slideshow Faster\t["),
         &item(ids::SLIDESHOW_SLOWER, "Slideshow Slower\t]"),
+        &sep(),
+        // Captions on a video (task #90). These lived only in the Linux egui bar until now:
+        // `C` and `Shift+C` both worked on Windows, but nothing in the UI said so — and a
+        // keyboard-only feature is one most people never find.
+        //
+        // A real track *list* here is the #99 flyout. macOS builds it in
+        // `NSMenuDelegate.menuNeedsUpdate`, pulling the per-file tracks as the menu opens;
+        // muda has no such hook (the tree is built once and only its checkmarks are
+        // mirrored onto it), so it needs machinery that doesn't exist yet.
+        &subtitles,
+        &item(ids::SUBTITLE_CYCLE, "Next Subtitle Track\tShift+C"),
         &sep(),
         &toolbar,
         &info,
@@ -576,6 +596,7 @@ pub fn build_menu(keymap: &Keymap) -> BuiltMenu {
             full_exif,
             toggle_panels,
             mute_live_audio,
+            subtitles,
         },
     }
 }
@@ -758,6 +779,18 @@ pub fn menu_bar_spec(keymap: &Keymap, s: &crate::contract::MenuState) -> Vec<Men
                     "Subtitles\tC",
                     true,
                     s.subtitles,
+                ),
+                // `Shift+C` has cycled tracks since #90.3, but nothing said so — a keyboard-
+                // only feature is a feature most people never find. Always enabled, like the
+                // toggle above it: the core answers "No subtitle tracks" / "Reading tracks…"
+                // with a toast, which is a better answer than a greyed-out item that explains
+                // nothing. A real track *list* here is the #99 flyout, and it needs machinery
+                // muda doesn't have (no `menuNeedsUpdate` equivalent — the tree is built once
+                // and only its checkmarks are mirrored).
+                item(
+                    MenuAction::SubtitleCycle,
+                    "Next Subtitle Track\tShift+C",
+                    true,
                 ),
                 sep(),
                 check(

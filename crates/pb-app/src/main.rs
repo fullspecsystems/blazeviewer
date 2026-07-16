@@ -2427,6 +2427,7 @@ impl App {
             c.slideshow.set_checked(state.slideshow);
             c.toolbar.set_checked(state.show_toolbar);
             c.mute_live_audio.set_checked(state.mute_live_audio);
+            c.subtitles.set_checked(state.subtitles);
             c.info.set_checked(state.info_basic);
             c.full_exif.set_checked(state.info_full);
             c.toggle_panels.set_checked(state.panels_hidden);
