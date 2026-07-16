@@ -496,6 +496,14 @@ pragmatic crate choices differ from the table above and are the current baseline
   warm HEVC reader blocks ~1 s — spike-measured); the producer parks after EOS so `P`
   replays via seek-to-0. 4K30 software decode is comfortable; 4K60 is borderline — NV12 +
   in-shader YUV or hardware decode is the reserved escalation (ADR-012).
+  **macOS routing (2026-07-16, macos-video-smoothness plan):** MP4/MOV → `AVPlayer`;
+  **everything else (MKV/WebM included) → the Session route** (FFmpeg → wgpu → Metal). The
+  `AVSampleBufferDisplayLayer` "sample-buffer" presenter is **parked, opt-in only**
+  (`PB_SAMPLE_BUFFER=1`) — it dropped ~3 frames/sec that both other routes play flawlessly;
+  it is kept as the on-device Dolby-Vision **reference renderer** (DoVi itself is deferred;
+  detection ships — a DoVi Profile-5 file on the Session route toasts an honest
+  colors-can't-be-shown warning and the Details panel names every DoVi profile).
+  `PB_TRACE=1` prints a per-2s Session dropped-frames diag (the `sb-play diag` analog).
 - **Archive viewing (ZIP + 7z)** (tasks.json #30) is wired in the new `pb-source` crate
   behind the `ItemSource` seam, decoded via `pb_decode::decode_named_bytes` (bytes +
   extension hint). ZIP = lazy per-entry (handle pool for parallel reads); 7z = **eager

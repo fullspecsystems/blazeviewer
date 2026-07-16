@@ -515,6 +515,9 @@ unsafe fn probe_asset(asset: Id) -> Result<VideoStreamInfo, DecodeError> {
         duration,
         has_audio,
         color: ColorTransform::default(),
+        // AVFoundation probe = the AVPlayer route, which decodes DoVi natively —
+        // no summary needed (and none is parsed here).
+        dovi: None,
     })
 }
 

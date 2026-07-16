@@ -3004,14 +3004,17 @@ final class CoreModel {
     /// Ask whichever presenter owns this file what it is playing, and tick that row.
     ///
     /// Each route answers in its own currency and on its own schedule: the sample-buffer
-    /// route caches a raw stream index (its decoder lives behind a serial queue, so it
-    /// cannot be asked synchronously), while AVPlayer's current selection is readable on the
-    /// spot. Both resolve to a row only here, against rows that definitely exist.
+    /// and Session routes cache a raw stream index (their decoders live behind a serial
+    /// queue, so they cannot be asked synchronously), while AVPlayer's current selection
+    /// is readable on the spot. All resolve to a row only here, against rows that
+    /// definitely exist.
     private func resolveActiveAudioRow() {
         if let sbv = sampleBufferVideo {
             reportActiveAudioStream(sbv.activeAudioStream)
         } else if let nv = nativeVideo {
             reportActiveAudioRow(nv.currentAudioRow())
+        } else if let sa = sessionAudio {
+            reportActiveAudioStream(sa.activeAudioStream)
         } else {
             reportActiveAudioRow(-1)
         }
@@ -3070,6 +3073,28 @@ final class CoreModel {
             sbv.selectAudioTrack(row: row)
         } else if let nv = nativeVideo {
             nv.selectAudioTrack(row: row)
+        } else if let sa = sessionAudio {
+            // The Session route's currency is the FFmpeg stream index, end-to-end
+            // (macos-video-smoothness §2). A row with no ff-stream is a refusal —
+            // the tick must not move on a switch that cannot happen.
+            let stream = audioRowFfStream(row)
+            guard stream >= 0 else {
+                audioTrackSwitched(row: row, ok: false)
+                return
+            }
+            sa.switchTrack(ffStream: stream) { [weak self, weak sa] ok in
+                MainActor.assumeIsolated {
+                    // A stale callback (the video changed mid-switch) must not
+                    // touch the tick or toast for whatever plays now.
+                    guard let self, let sa, self.sessionAudio === sa else { return }
+                    // Refresh the tick from what is ACTUALLY playing first — on a
+                    // refusal that is the old track, on a stale pick the decoder's
+                    // policy choice; never the request (same rule as the
+                    // sample-buffer route).
+                    self.reportActiveAudioStream(sa.activeAudioStream)
+                    self.audioTrackSwitched(row: row, ok: ok)
+                }
+            }
         }
     }
 

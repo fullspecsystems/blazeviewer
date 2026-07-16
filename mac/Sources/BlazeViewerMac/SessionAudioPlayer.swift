@@ -2,6 +2,7 @@ import AVFoundation
 import AppKit
 import PBCatch
 import PbMacFfi
+import PbSeek
 
 /// Exclusive owner of the Rust session-audio decoder pointer (plan §7/1E). Every
 /// decoder operation — open, read, seek, free — runs on `queue`, a dedicated
@@ -24,11 +25,14 @@ final class OwnedAudioDecoder: @unchecked Sendable {
 
     /// Open the decoder for `sessionId` over the container `StartVideoAudio`
     /// stashed Rust-side, off the main actor. `then` runs back on the main actor
-    /// with `(ok, rate, channels)`; rate/channels are `0` on failure.
-    func open(sessionId: UInt64, then: @escaping @Sendable (Bool, UInt32, UInt32) -> Void) {
+    /// with `(ok, rate, channels, stream)`; rate/channels are `0` and `stream` is
+    /// `-1` on failure. `stream` is the container stream index the decoder's
+    /// policy actually opened — it seeds the picker's tick (task #99), reported
+    /// never guessed.
+    func open(sessionId: UInt64, then: @escaping @Sendable (Bool, UInt32, UInt32, Int) -> Void) {
         queue.async { [weak self] in
             guard let self else {
-                DispatchQueue.main.async { then(false, 0, 0) }
+                DispatchQueue.main.async { then(false, 0, 0, -1) }
                 return
             }
             let p = open_stashed_session_audio(sessionId)
@@ -36,7 +40,29 @@ final class OwnedAudioDecoder: @unchecked Sendable {
             let ok = p != 0
             let rate = ok ? session_audio_rate(p) : 0
             let channels = ok ? session_audio_channels(p) : 0
-            DispatchQueue.main.async { then(ok, rate, channels) }
+            let stream = ok ? Int(session_audio_stream_index(p)) : -1
+            DispatchQueue.main.async { then(ok, rate, channels, stream) }
+        }
+    }
+
+    /// Switch the decoder to container audio stream `track` (task #99), off the
+    /// main actor and serialized behind any in-flight read/seek. The Rust side
+    /// re-opens **in place**: `ok == false` means the old decoder is untouched and
+    /// still primed. Either way `then` reports the post-call `(ok, rate, channels,
+    /// stream)` — on refusal those are the OLD track's facts (still true), on
+    /// success the NEW track's (rate/channels can differ; the caller must rebuild
+    /// its format — the switch-as-rebuffer transaction owns that).
+    func setTrack(_ track: Int, then: @escaping @Sendable (Bool, UInt32, UInt32, Int) -> Void) {
+        queue.async { [weak self] in
+            guard let self, self.ptr != 0, track >= 0 else {
+                DispatchQueue.main.async { then(false, 0, 0, -1) }
+                return
+            }
+            let ok = session_audio_set_track(self.ptr, UInt(track))
+            let rate = session_audio_rate(self.ptr)
+            let channels = session_audio_channels(self.ptr)
+            let stream = Int(session_audio_stream_index(self.ptr))
+            DispatchQueue.main.async { then(ok, rate, channels, stream) }
         }
     }
 
@@ -150,6 +176,21 @@ final class SessionAudioPlayer {
     private var seekGen: UInt64 = 0
     /// A seek requested before open completed — applied once the decoder is up.
     private var pendingSeek: Double?
+    /// The container audio stream actually playing (`nil` until open lands, or no
+    /// audio). Seeded from the open result, updated by a committed track switch —
+    /// the picker's tick reads this (`CoreModel.resolveActiveAudioRow`), so it
+    /// reports what you are *hearing*, never what was requested (task #99).
+    private(set) var activeAudioStream: Int?
+    /// A track switch is in flight (the switch-as-rebuffer transaction,
+    /// macos-video-smoothness §2): `sample()` reports **Buffering at the captured
+    /// playhead** — the core's rebuffer machinery applies no clock corrections in
+    /// that state, so the video keeps playing on its monotonic clock and re-syncs
+    /// when the switched audio returns near the playhead.
+    private var switching = false
+    /// The authoritative playhead captured when the switch began — the frozen
+    /// position `sample()` reports while `switching` (after `node.stop()` the
+    /// player time collapses, so the live reading would lie).
+    private var switchPlayhead: Double = 0
     /// Observers that reprime the engine after it stops out from under us (plan 1G):
     /// an output-device / format change (`AVAudioEngineConfigurationChange` — the
     /// engine stops and MUST be restarted) and a sleep/wake. Removed on stop/deinit.
@@ -168,10 +209,10 @@ final class SessionAudioPlayer {
     init(sessionId: UInt64, muted: Bool) {
         self.sessionId = sessionId
         self.muted = muted
-        decoder.open(sessionId: sessionId) { [weak self] ok, rate, channels in
+        decoder.open(sessionId: sessionId) { [weak self] ok, rate, channels, stream in
             // Delivered on the main thread by OwnedAudioDecoder — assert isolation.
             MainActor.assumeIsolated {
-                self?.finishOpen(ok: ok, rate: rate, channels: channels)
+                self?.finishOpen(ok: ok, rate: rate, channels: channels, stream: stream)
             }
         }
     }
@@ -179,7 +220,7 @@ final class SessionAudioPlayer {
     /// Stand the engine up once the decoder has opened (main actor). Builds the
     /// standard stereo/mono format from the source rate, assembles + starts the
     /// graph (shielded), then applies any deferred seek / play state.
-    private func finishOpen(ok: Bool, rate: UInt32, channels: UInt32) {
+    private func finishOpen(ok: Bool, rate: UInt32, channels: UInt32, stream: Int) {
         guard !failed else { return }  // stopped during open
         // Standard = deinterleaved Float32 — the ONE format family the engine graph
         // accepts everywhere. The Rust cap guarantees channels ≤ 2.
@@ -208,6 +249,7 @@ final class SessionAudioPlayer {
             return
         }
         opened = true
+        activeAudioStream = stream >= 0 ? stream : nil // seed the picker's tick (#99)
         // Reprime when the engine stops out from under us (plan 1G): AVFoundation
         // stops the engine on an output-device / format change, and audio hardware
         // re-inits across sleep/wake. Both restart + re-anchor via `repriming`.
@@ -256,7 +298,10 @@ final class SessionAudioPlayer {
     /// over-issue across the async gap). Called from finishOpen, buffer
     /// completions, seeks, and the pump.
     func topUp() {
-        guard opened, !failed, !sourceDrained else { return }
+        // `!switching`: a refill issued mid-switch would target the replacement
+        // decoder under a stale generation — droppable but wasteful; the commit's
+        // seek re-arms feeding.
+        guard opened, !failed, !sourceDrained, !switching else { return }
         while inFlight + reading < Self.targetInFlight {
             reading += 1
             let gen = seekGen
@@ -384,6 +429,160 @@ final class SessionAudioPlayer {
         }
     }
 
+    // MARK: - Audio-track switching (task #99 / macos-video-smoothness §2)
+
+    /// Switch playback to container audio stream `ffStream` — the
+    /// **switch-as-rebuffer transaction**. The decoder re-opens on the feeder
+    /// queue (serialized behind any in-flight op); while it does, `sample()`
+    /// reports Buffering at the captured playhead, which the core treats as a
+    /// transient stall: the video keeps playing, no clock correction is applied,
+    /// and audio rejoins at the playhead once the switch commits.
+    ///
+    /// `then(ok)` runs on the main actor. `ok == false` means the previous track
+    /// is (still) playing — a failed switch costs the choice, not the sound
+    /// (task #99's confirmed-switch rule). Steps and their failure handling:
+    /// refusal → re-prime the old track at the playhead; a format rebuild failure
+    /// after the decoder was replaced → roll back to the old stream + re-prime;
+    /// a rollback failure → latch `failed` (the core's permanent silent fallback —
+    /// playback never dies with the audio).
+    func switchTrack(ffStream: Int, then: @escaping @Sendable (Bool) -> Void) {
+        switch AudioSwitchPolicy.entry(
+            opened: opened, failed: failed, switching: switching,
+            activeStream: activeAudioStream, requested: ffStream)
+        {
+        case .refuse:
+            then(false)
+            return
+        case .confirmNoOp:
+            then(true) // already playing it — confirm, don't churn the graph
+            return
+        case .proceed:
+            break
+        }
+        // Capture BEFORE stopping the node: node.stop() collapses the player time.
+        let playhead = sample().positionSecs
+        let oldStream = activeAudioStream
+        switching = true
+        switchPlayhead = playhead
+        seekGen &+= 1 // superseded reads/seeks die before touching the graph
+        let gen = seekGen
+        node.stop() // flush the old track's lookahead — it must not play over the switch
+        inFlight = 0
+        reading = 0
+        sourceDrained = false
+        rebuffering = false
+        decoder.setTrack(ffStream) { [weak self] ok, rate, channels, stream in
+            MainActor.assumeIsolated {
+                guard let self, !self.failed else {
+                    then(false)
+                    return
+                }
+                self.commitSwitch(
+                    ok: ok, rate: rate, channels: channels, stream: stream,
+                    playhead: playhead, gen: gen, oldStream: oldStream, then: then)
+            }
+        }
+    }
+
+    /// The main-actor commit half of [`switchTrack`]: attempt the format
+    /// reconcile, then act on the [`AudioSwitchPolicy`] decision (the pure,
+    /// PbSeek-tested table — supersession, rollback, and reporting rules live
+    /// there, not here).
+    private func commitSwitch(
+        ok: Bool, rate: UInt32, channels: UInt32, stream: Int,
+        playhead: Double, gen: UInt64, oldStream: Int?,
+        then: @escaping @Sendable (Bool) -> Void
+    ) {
+        let reconciled = ok && reconcileFormat(rate: rate, channels: channels)
+        let d = AudioSwitchPolicy.commit(
+            setTrackOk: ok, reconciled: reconciled, genCurrent: gen == seekGen,
+            actualStream: stream >= 0 ? stream : nil)
+        if !ok {
+            pbTrace("session audio \(sessionId): track switch refused — keeping the old track")
+        } else if reconciled {
+            pbTrace("session audio \(sessionId): switched to stream \(stream) @ \(rate) Hz")
+        }
+        applySwitchDecision(d, playhead: playhead, gen: gen, oldStream: oldStream, then: then)
+    }
+
+    /// Act on one policy decision: rollback first (the transaction stays open),
+    /// else cache/latch, close the transaction, seek, and report.
+    private func applySwitchDecision(
+        _ d: AudioSwitchDecision, playhead: Double, gen: UInt64, oldStream: Int?,
+        then: @escaping @Sendable (Bool) -> Void
+    ) {
+        if d.rollBack {
+            rollBackSwitch(playhead: playhead, gen: gen, oldStream: oldStream, then: then)
+            return
+        }
+        if let stream = d.newActiveStream {
+            activeAudioStream = stream // what is actually playing — never the request
+        }
+        if d.latchFailed {
+            failed = true // permanent silent fallback (plan 1G posture); video plays on
+        }
+        switching = false
+        if d.seekToPlayhead {
+            // The (re-)opened decoder starts at ZERO — the seek to the playhead is
+            // mandatory (resume-where-the-picture-is), and it re-arms feeding.
+            applySeek(playhead)
+        }
+        if let ok = d.reportOk { then(ok) }
+    }
+
+    /// The format rebuild failed after the decoder was already replaced — put the
+    /// old stream back and re-prime it; if even that fails, the policy latches
+    /// `failed` and the session degrades to silent (video plays on).
+    private func rollBackSwitch(
+        playhead: Double, gen: UInt64, oldStream: Int?,
+        then: @escaping @Sendable (Bool) -> Void
+    ) {
+        pbTrace("session audio \(sessionId): switch format rebuild failed — rolling back")
+        guard let oldStream else {
+            let d = AudioSwitchPolicy.rollback(
+                canRollBack: false, setTrackOk: false, reconciled: false,
+                genCurrent: gen == seekGen, actualStream: nil)
+            applySwitchDecision(d, playhead: playhead, gen: gen, oldStream: nil, then: then)
+            return
+        }
+        decoder.setTrack(oldStream) { [weak self] ok, rate, channels, stream in
+            MainActor.assumeIsolated {
+                guard let self, !self.failed else {
+                    then(false)
+                    return
+                }
+                let reconciled = ok && self.reconcileFormat(rate: rate, channels: channels)
+                let d = AudioSwitchPolicy.rollback(
+                    canRollBack: true, setTrackOk: ok, reconciled: reconciled,
+                    genCurrent: gen == self.seekGen, actualStream: stream >= 0 ? stream : nil)
+                self.applySwitchDecision(
+                    d, playhead: playhead, gen: gen, oldStream: nil, then: then)
+            }
+        }
+    }
+
+    /// Re-derive the engine connection for a (possibly) new source format. A
+    /// no-op when rate/channels are unchanged (switching between same-format
+    /// tracks — common for language dubs). Returns `false` on any failure; the
+    /// caller owns rollback. Shielded: AVFAudio reports failure by NSException.
+    private func reconcileFormat(rate: UInt32, channels: UInt32) -> Bool {
+        if Double(rate) == self.rate && channels == self.channels { return true }
+        guard rate > 0, channels > 0, channels <= 2,
+            let format = AVAudioFormat(
+                standardFormatWithSampleRate: Double(rate),
+                channels: AVAudioChannelCount(channels))
+        else { return false }
+        let err = PBCatchException { [engine, node] in
+            engine.disconnectNodeOutput(node)
+            engine.connect(node, to: engine.mainMixerNode, format: format)
+        }
+        guard err == nil else { return false }
+        self.format = format
+        self.rate = Double(rate)
+        self.channels = channels
+        return true
+    }
+
     /// One clock sample: (state, played position in seconds). The position is the
     /// rendered sample time since the last anchor minus the output's presentation
     /// latency — the plan's "position actually played", not PCM bytes written.
@@ -391,6 +590,11 @@ final class SessionAudioPlayer {
     func sample() -> (state: UInt8, positionSecs: Double) {
         if failed { return (5, epochSecs) }  // Failed
         if !opened { return (0, 0) }  // Opening — the async open is still in flight
+        // A track switch in flight: Buffering at the captured playhead (the node is
+        // stopped, so the live player time would read 0). The core applies no clock
+        // corrections on a Buffering sample — video plays on, audio rejoins at the
+        // playhead when the transaction commits (macos-video-smoothness §2).
+        if switching { return (3, switchPlayhead) }
         var played = 0.0
         if let nodeTime = node.lastRenderTime,
             let playerTime = node.playerTime(forNodeTime: nodeTime),

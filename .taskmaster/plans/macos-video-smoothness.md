@@ -1,9 +1,24 @@
 # macOS video smoothness — route MKV to the Session (wgpu) path, retire the sample-buffer route
 
-> Status: **PLAN — diagnosis COMPLETE + owner-confirmed; Codex-reviewed 2026-07-15 (findings
-> incorporated below); second review 2026-07-15 (Claude — audio-switch transaction shape DECIDED,
-> DoVi door-open design added, all line refs re-verified against source); execution NOT started**
+> Status: **IMPLEMENTED 2026-07-16 — all automatable work done + tested; awaiting the §4
+> owner-verified pass** (smoothness by eye + `PB_TRACE` session diag, audio-switch/subtitle/
+> seek/resume/scale/EOS/mute parity, HDR10 on the XDR, MP4-regression). Diagnosis was
+> COMPLETE + owner-confirmed 2026-07-15; Codex-reviewed 2026-07-15; second review 2026-07-15
+> (Claude — audio-switch transaction shape DECIDED, DoVi door-open design added).
 > · Owner: JD
+>
+> **Execution notes (2026-07-16):** everything in §§1–5 that an agent can do is on main —
+> routing flip + inverted/opt-in tests, A/B-seam cleanup, the switch-as-rebuffer transaction
+> (`SessionAudioPlayer` + the pure `AudioSwitchPolicy` in PbSeek, 11 new policy tests),
+> CoreModel session branches, DoVi detect + Details row + Profile-5 toast (+ tests), the
+> `PB_TRACE` session dropped-frames diag, the `hdr_pq.mkv` fixture + container-parity test,
+> CHANGELOG + CLAUDE.md. **Bonus fix found by the new decoder tests:** a pre-read seek
+> (resume / post-switch) mis-anchored `FfAudioDecoder`'s media-zero `origin`, offsetting
+> every LATER seek by the resume position (resume at 20:00 then scrub to 5:00 aimed the
+> audio discard at 25:00 — possibly the residual "SMB cold-seek freeze"). One-line fix in
+> `audio_decoder.rs::seek` + regression test `a_pre_read_seek_does_not_offset_later_seeks`.
+> Windows cross-check (`cargo check -p pb-app --target x86_64-pc-windows-msvc --tests`) run
+> and green.
 > Scope: **macOS video playback smoothness.** The winit (Windows/Linux) shell already uses the
 > Session route and is unaffected. This is a routing + parity change, not a rendering rewrite.
 >

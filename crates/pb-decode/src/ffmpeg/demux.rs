@@ -524,10 +524,7 @@ mod tests {
     /// so the stream-unit PTS is the presentation time directly).
     fn first_seek_pts_secs(dx: &mut VideoDemuxer, target: Duration) -> (f64, bool) {
         dx.seek(target).unwrap();
-        let p = dx
-            .read_packet()
-            .unwrap()
-            .expect("a packet after seek");
+        let p = dx.read_packet().unwrap().expect("a packet after seek");
         let pts = p.pts.expect("a seeked keyframe carries a PTS");
         (dx.info().facts.pts_to_duration(pts).as_secs_f64(), p.is_key)
     }
@@ -563,7 +560,10 @@ mod tests {
         let mut dx = VideoDemuxer::open(&fixture("longgop.mkv"), cancel()).unwrap();
         let (landed, is_key) = first_seek_pts_secs(&mut dx, Duration::from_secs_f64(15.0));
         assert!(is_key);
-        assert!((landed - 15.0).abs() < 1e-2, "landed {landed}s, expected the 15 s keyframe");
+        assert!(
+            (landed - 15.0).abs() < 1e-2,
+            "landed {landed}s, expected the 15 s keyframe"
+        );
     }
 
     /// A seek near EOS lands on the last keyframe and still reads packets — the presenter's
@@ -589,7 +589,10 @@ mod tests {
         assert!(is_key);
         // 0.5 s GOP: 3.2 s lands on the 3.0 s keyframe, so the pre-roll is at most ~0.5 s.
         assert!(landed <= 3.2 + 1e-3, "landed {landed}s must be <= target");
-        assert!(3.2 - landed < 0.5 + 1e-2, "a 0.5 s GOP keeps the pre-roll under one GOP");
+        assert!(
+            3.2 - landed < 0.5 + 1e-2,
+            "a 0.5 s GOP keeps the pre-roll under one GOP"
+        );
     }
 
     /// The demuxer's fallback branch (`seek`'s `i64::MAX` retry) is documented but **not
@@ -609,7 +612,10 @@ mod tests {
         // Seek before the first keyframe; the fallback must still land readable (a keyframe),
         // even if its PTS is AFTER the requested target.
         dx.seek(Duration::ZERO).unwrap();
-        let p = dx.read_packet().unwrap().expect("fallback still yields a packet");
+        let p = dx
+            .read_packet()
+            .unwrap()
+            .expect("fallback still yields a packet");
         assert!(p.is_key, "the fallback lands on the first usable keyframe");
     }
 

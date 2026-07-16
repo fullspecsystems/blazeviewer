@@ -850,6 +850,10 @@ impl App {
             video_seq: 0,
             // The macOS FFmpeg dual-backend fallback session (inert on the winit shell).
             video_ffmpeg_fallback: None,
+            // The macOS sample-buffer opt-in (inert on the winit shell).
+            sample_buffer_opt_in: false,
+            dovi_warned: std::collections::HashSet::new(),
+            video_diag_last: None,
             // macOS-only archive-video handoff state (inert on the winit shell — see the
             // channel note above): pending bytes for the shell to pull, poster-request
             // bookkeeping, and the off-thread read channels. (`content_top_inset` is set with

@@ -225,6 +225,9 @@ pub(crate) unsafe fn stream_info(reader: &IMFSourceReader) -> Result<VideoStream
         duration,
         has_audio,
         color,
+        // MF doesn't surface the DoVi record; the Windows FFmpeg build is
+        // demuxers-only for tracks, so the summary stays unprobed there.
+        dovi: None,
     })
 }
 

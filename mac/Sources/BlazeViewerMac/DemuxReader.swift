@@ -44,27 +44,6 @@ final class DemuxReader: @unchecked Sendable {
     /// session (a seek re-anchors the synchronizer, not this origin). `Int64.min`
     /// until the first packet.
     private var origin: Int64 = Int64.min
-    /// Content frame rate (set at open from the demuxer), used by the retime A/B.
-    private var frameRate: Double = 0
-    /// A/B (PB_RETIME): snap each frame's PTS/DTS to the exact frame-rate grid at a fine
-    /// timescale, removing the container's millisecond-quantization jitter (MKV uses a 1/1000
-    /// timebase, so 23.976 fps arrives as alternating 41/42 ms deltas). AVPlayer/mpv present
-    /// on a precise grid and are smooth; this tests whether the jitter is what makes the
-    /// sample-buffer route drop ~3 frames/sec. Diagnostic seam.
-    private let retime = ProcessInfo.processInfo.environment["PB_RETIME"] != nil
-
-    /// A stream-unit timestamp → `CMTime`, snapped to the exact frame-rate grid when the
-    /// retime A/B is on (else the plain `cmTime`). Snapping both PTS and DTS keeps their
-    /// relationship (and monotonic decode order) intact, since grid points are one frame apart.
-    private func presentationTime(_ units: Int64) -> CMTime {
-        let base = cmTime(units)
-        guard retime, frameRate > 0, base.isValid else { return base }
-        let secs = CMTimeGetSeconds(base)
-        guard secs.isFinite else { return base }
-        let snapped = (secs * frameRate).rounded() / frameRate
-        return CMTime(seconds: snapped, preferredTimescale: 240_000)
-    }
-
     /// The pure seek-frame classification (plan §T1). Every "is this pre-roll? does this
     /// frame anchor, at what time?" decision goes through this, so it is unit-tested in
     /// `PbSeek` rather than buried in the feed loop untestable, which is how `97f80bb4`
@@ -183,7 +162,6 @@ final class DemuxReader: @unchecked Sendable {
                 }
                 return
             }
-            self.frameRate = demux_fps(p) // for the retime A/B
             let out = DemuxOpen(
                 ok: true,
                 width: demux_width(p),
@@ -462,8 +440,8 @@ final class DemuxReader: @unchecked Sendable {
 
         var timing = CMSampleTimingInfo(
             duration: dur > 0 ? cmDuration(dur) : .invalid,
-            presentationTimeStamp: presentationTime(pts),
-            decodeTimeStamp: presentationTime(dts))
+            presentationTimeStamp: cmTime(pts),
+            decodeTimeStamp: cmTime(dts))
         var size = n
         var sb: CMSampleBuffer?
         status = CMSampleBufferCreateReady(

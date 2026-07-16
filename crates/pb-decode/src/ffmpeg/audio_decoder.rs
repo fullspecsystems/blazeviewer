@@ -414,6 +414,15 @@ impl FfAudioDecoder {
     /// landing is within one frame of it).
     pub fn seek(&mut self, to: Duration) -> Result<Duration, AudioError> {
         let base = self.origin.or(self.start_time).unwrap_or(0);
+        // A seek BEFORE the first read (a resume, or the re-position after a track
+        // switch) must pin the media-zero base NOW: otherwise `anchor_origin` later
+        // anchors `origin` at this seek's landing, and every subsequent seek and
+        // `position()` is offset by it — resume at 20:00 then scrub to 5:00 made the
+        // discard target 25:00, silently chewing 20 minutes of audio (or EOF-ing).
+        // Found by the track-switch tests (macos-video-smoothness §2/§4).
+        if self.origin.is_none() {
+            self.origin = Some(base);
+        }
         let target = base.saturating_add(self.duration_to_units(to));
         // Seek the DEFAULT stream (index -1, AV_TIME_BASE units), NOT the audio
         // stream. Matroska Cues index the VIDEO track, so `avformat_seek_file` by
@@ -764,6 +773,133 @@ mod tests {
         }
         let secs = total as f64 / (a.rate() as f64 * a.channels() as f64);
         assert!((0.6..=1.3).contains(&secs), "remaining {secs:.2}s");
+    }
+
+    // ── Track-switch semantics (task #99 / macos-video-smoothness §2) ──
+    // The macOS FFI's switch (`session_audio_set_track`) is exactly "a fresh
+    // `open_track(Some(i))` from the same input replaces the old decoder"; these
+    // pin the decoder-level half of the switch-as-rebuffer transaction contract.
+
+    /// Switching the multitrack fixture's default AAC (stream 1, 44.1 kHz stereo)
+    /// to the AC-3 commentary (stream 2, 48 kHz 6-ch) rebuilds the format: the
+    /// replacement decoder reports the new rate, folds 5.1 to the stereo cap, and
+    /// reports the **actual** stream. And it starts at ZERO — the transaction's
+    /// seek-to-playhead (step 4) is mandatory, not belt-and-suspenders.
+    #[test]
+    fn track_switch_rebuilds_format_and_starts_at_zero() {
+        let input = VideoInput::Path(fixture("multitrack.mkv"));
+        let mut a = FfAudioDecoder::open_capped(&input, 2).expect("open default");
+        assert_eq!(a.stream_index(), 1, "policy picks the authored default");
+        assert_eq!(a.rate(), 44_100);
+        assert_eq!(a.channels(), 2);
+        let _ = a.read(4800).expect("play a bit before switching");
+
+        // The switch: a fresh decoder on the chosen stream replaces the old one.
+        let mut b = FfAudioDecoder::open_track(&input, 2, Some(2)).expect("switch");
+        assert_eq!(b.stream_index(), 2, "the actual stream, not a guess");
+        assert_eq!(b.rate(), 48_000, "the new track's own rate — never the old");
+        assert_eq!(b.channels(), 2, "6-ch folds to the stereo cap");
+        let chunk = b.read(2400).expect("post-switch chunk");
+        assert!(!chunk.is_empty(), "the new track produces frames");
+        assert_eq!(chunk.len() % 2, 0, "interleaved at the folded stride");
+        assert!(
+            b.position() < Duration::from_millis(300),
+            "a fresh decoder starts at zero (got {:?}) — the caller must seek to \
+             the playhead after a switch",
+            b.position()
+        );
+    }
+
+    /// A stale or non-audio `track` falls back to the policy and *reports* the
+    /// policy's pick — a bad selection costs the choice, not the sound (the FFI
+    /// then answers the picker via `stream_index`, so the tick stays honest).
+    #[test]
+    fn stale_track_falls_back_to_policy_and_reports_honestly() {
+        let input = VideoInput::Path(fixture("multitrack.mkv"));
+        // Stream 3 is a subtitle; stream 99 doesn't exist.
+        for stale in [3usize, 99] {
+            let a = FfAudioDecoder::open_track(&input, 2, Some(stale)).expect("fallback");
+            assert_eq!(
+                a.stream_index(),
+                1,
+                "track {stale}: fell back to the policy default and said so"
+            );
+        }
+    }
+
+    /// The refusal path: an unopenable input errors, so the FFI returns `false`
+    /// and — by its match structure — never touches the old decoder, which keeps
+    /// playing (task #99's "a failed switch costs the choice, not the sound").
+    #[test]
+    fn switch_to_an_unopenable_input_is_refused() {
+        let r = FfAudioDecoder::open_track(
+            &VideoInput::Path(PathBuf::from("/nope/never/exists.mkv")),
+            2,
+            Some(1),
+        );
+        assert!(r.is_err(), "unopenable input must refuse, not panic");
+    }
+
+    /// Post-switch seek+read (transaction steps 2→4 in miniature): the fresh
+    /// decoder on the new track seeks to the "playhead" and produces frames
+    /// positioned there — resume-where-the-picture-is works on the switched track.
+    #[test]
+    fn post_switch_seek_and_read_yield_frames_at_the_target() {
+        let input = VideoInput::Path(fixture("multitrack.mkv"));
+        let mut b = FfAudioDecoder::open_track(&input, 2, Some(2)).expect("switch");
+        b.seek(Duration::from_millis(500))
+            .expect("seek to playhead");
+        let chunk = b.read(2400).expect("landing chunk");
+        assert!(!chunk.is_empty(), "audio remains after the seek");
+        let pos = b.position();
+        assert!(
+            pos >= Duration::from_millis(300) && pos <= Duration::from_millis(900),
+            "landed near the 0.5s playhead, position reads {pos:?}"
+        );
+    }
+
+    /// Regression (found by the switch tests): a seek BEFORE the first read (a
+    /// resume, or the post-switch re-position) must not corrupt the media-zero
+    /// base. Pre-fix, `anchor_origin` pinned `origin` at the pre-read seek's
+    /// landing, so a LATER seek targeted `landing + to` — resume at 20:00 then
+    /// scrub to 5:00 aimed the discard at 25:00 and silently chewed 20 minutes of
+    /// audio (or EOF'd). Both seeks must be media-absolute.
+    #[test]
+    fn a_pre_read_seek_does_not_offset_later_seeks() {
+        let mut a = open("tone_vp9_opus.webm"); // 2 s fixture
+                                                // "Resume" at 1 s — no read has happened yet.
+        a.seek(Duration::from_secs(1)).expect("pre-read seek");
+        let first = a.read(480).expect("resume landing");
+        assert!(!first.is_empty());
+        assert!(
+            a.position() >= Duration::from_millis(850),
+            "resume landed near 1s, position reads {:?}",
+            a.position()
+        );
+        // Now "scrub back" to 0.2 s — media-absolute, NOT resume-relative (which
+        // would target 1.2 s and leave only ~0.8 s of audio).
+        a.seek(Duration::from_millis(200)).expect("scrub back");
+        let chunk = a.read(480).expect("post-scrub chunk");
+        assert!(!chunk.is_empty());
+        let pos = a.position();
+        assert!(
+            pos <= Duration::from_millis(700),
+            "scrub-back landed media-absolute near 0.2s, position reads {pos:?}"
+        );
+        // Draining from 0.2 s leaves ~1.8 s — impossible if the seek was offset.
+        let mut total = chunk.len();
+        loop {
+            let c = a.read(48_000).expect("read");
+            if c.is_empty() {
+                break;
+            }
+            total += c.len();
+        }
+        let secs = total as f64 / (a.rate() as f64 * a.channels() as f64);
+        assert!(
+            secs >= 1.4,
+            "remaining {secs:.2}s — the scrub-back was offset"
+        );
     }
 
     /// The MKV-5.1 crash regression (owner crash report, 2026-07-12): a

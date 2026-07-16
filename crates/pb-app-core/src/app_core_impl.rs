@@ -223,6 +223,10 @@ impl AppCore {
             video: None,
             video_seq: 0,
             video_ffmpeg_fallback: None,
+            // Hermetic default; the real host constructor (`new_host`) reads the env.
+            sample_buffer_opt_in: false,
+            dovi_warned: std::collections::HashSet::new(),
+            video_diag_last: None,
             video_seek_last: None,
             pending_delete_retry: None,
             video_pill_text: None,
@@ -277,6 +281,9 @@ impl AppCore {
         core.settings = settings;
         core.hud = hud::Hud::load();
         core.persist_prefs = true; // a live host persists the remembered last_folder
+                                   // Opt-in to the parked macOS sample-buffer presenter (the DoVi reference
+                                   // renderer) — read once here so routing never touches process-global env.
+        core.sample_buffer_opt_in = std::env::var("PB_SAMPLE_BUFFER").is_ok_and(|v| v == "1");
         core
     }
 
@@ -2894,6 +2901,7 @@ impl AppCore {
         self.video_resume.clear();
         self.meta_cache.clear();
         self.exif_cache.clear();
+        self.dovi_warned.clear();
         self.recognized_text.clear();
         self.text_scan = None;
         self.text_gen += 1;
@@ -3004,6 +3012,7 @@ impl AppCore {
         self.video_resume.clear();
         self.meta_cache.clear();
         self.exif_cache.clear();
+        self.dovi_warned.clear();
         self.recognized_text.clear();
         self.text_scan = None;
         self.text_gen += 1;
@@ -4142,6 +4151,8 @@ impl AppCore {
                 has_audio: Some(has_audio),
                 // The shell already probed this one; there is no worker to wait on.
                 probe_state: crate::media_details::ProbeState::Ready,
+                // AVFoundation probed it — that path doesn't parse the DoVi record.
+                dovi_incompatible: false,
             },
         );
         self.emit_panels_changed();
@@ -6605,6 +6616,9 @@ impl AppCore {
         }
         // The open Inspector may be sitting on this item's "Reading…" row.
         self.emit_panels_changed();
+        // The probe may have landed mid-playback for the very video it describes —
+        // the DoVi warning's second chance (the first is at session start).
+        self.maybe_warn_dovi(item);
         if self.slot_content() == Some(SlotContent::Details) && self.displayed_item == Some(item) {
             self.show_overlay();
         }
@@ -7001,7 +7015,8 @@ impl AppCore {
 
     /// Start video playback of `item` (task #79 phase 4 / task #84 §8a): a fresh
     /// `VideoSession` fed by a dedicated reader thread — Media Foundation on
-    /// Windows, the FFmpeg producer on Linux and for the macOS fallback — or, on
+    /// Windows, the FFmpeg producer on Linux and on macOS for everything
+    /// `AVPlayer` doesn't handle (MKV/WebM included; smoothness plan) — or, on
     /// macOS for nominally-native containers, the shell's `AVPlayer`. The
     /// producer thread is never joined — teardown is a Stop message / channel
     /// disconnect.
@@ -7011,10 +7026,12 @@ impl AppCore {
     #[allow(clippy::needless_return)]
     pub fn start_video_session(&mut self, item: usize) {
         self.stop_video();
-        // macOS routing (§8a + Phase 3): AVPlayer for what it handles well; the
-        // sample-buffer presenter (FFmpeg demux → AVSampleBufferDisplayLayer) for
-        // the DoVi/HDR end-state on containers AVPlayer can't demux; the FFmpeg
-        // session for the rest and for the level-2 fallback.
+        // macOS routing (§8a; smoothness plan): AVPlayer for what it handles well
+        // (MP4/MOV); the Session route (FFmpeg → wgpu → Metal) for everything else,
+        // including MKV/WebM — it presents smoothly where the sample-buffer
+        // presenter drops frames. The presenter is parked opt-in
+        // (`sample_buffer_opt_in`, the DoVi reference renderer) and still level-2
+        // falls back to Session on a classified failure.
         #[cfg(target_os = "macos")]
         {
             // A classified native/sample-buffer failure forces the Session route
@@ -7126,12 +7143,40 @@ impl AppCore {
                 },
             ));
             self.anim_hint_shown_for = Some(item); // engaged — retire the hint
+                                                   // Honest DoVi UX (macos-video-smoothness §2): warm the container probe
+                                                   // (async, never blocks) and warn now if it already landed; otherwise
+                                                   // `poll_details_probe` warns when it does. Also warms the track
+                                                   // pickers, which read the same catalog.
+            self.ensure_exif_cached(item);
+            self.maybe_warn_dovi(item);
             self.draw();
         }
         #[cfg(not(any(windows, target_os = "macos", all(unix, feature = "ffvideo"))))]
         {
             let _ = item;
             self.show_toast("Video playback is not available yet on this platform");
+        }
+    }
+
+    /// One-time honest-UX warning (macos-video-smoothness §2): the item playing on
+    /// the **Session route** carries a Dolby Vision stream whose base layer cannot
+    /// show correct color without RPU reshaping (Profile 5 / compat-id 0 — the
+    /// green/purple tint). AVPlayer and the opted-in sample-buffer presenter decode
+    /// DoVi natively, so only a Session backend warns. Called from
+    /// `start_video_session` (probe already cached) and `poll_details_probe` (probe
+    /// landing mid-playback); `dovi_warned` makes it once per item.
+    fn maybe_warn_dovi(&mut self, item: usize) {
+        let session_here = self
+            .video
+            .as_ref()
+            .and_then(|v| v.as_session())
+            .is_some_and(|s| s.item == item);
+        let incompatible = self
+            .exif_cache
+            .get(&item)
+            .is_some_and(|d| d.dovi_incompatible);
+        if session_here && incompatible && self.dovi_warned.insert(item) {
+            self.show_toast("Dolby Vision (Profile 5) — colors can't be shown correctly");
         }
     }
 
@@ -7160,21 +7205,21 @@ impl AppCore {
         }
     }
 
-    /// video-overhaul Phase 3 routing: `true` = use the macOS **sample-buffer
-    /// presenter** (FFmpeg demux → `AVSampleBufferDisplayLayer`) for this item —
-    /// system decode with correct Dolby Vision for the containers `AVPlayer` can't
-    /// demux. **Default on** now that the 0C gate + audio/seek are owner-verified;
-    /// `PB_NO_SAMPLE_BUFFER=1` (or `PB_SAMPLE_BUFFER=0`) forces the Session route.
-    /// Restricted to loose-file **MKV/WebM** (the verified containers) — archive
-    /// bytes and the rarer non-native containers stay on the Session route, and the
-    /// presenter still self-probes the codec, reporting a classified failure that
-    /// falls back to Session (level 2) for anything it can't sample-decode. Reached
-    /// only for non-native containers (the `macos_native_route` check runs first).
+    /// `true` = use the macOS **sample-buffer presenter** (FFmpeg demux →
+    /// `AVSampleBufferDisplayLayer`) for this item. **Default OFF** — the presenter
+    /// drops ~3 frames/sec on steady-state playback that both `AVPlayer` and the
+    /// Session route play flawlessly (measured; see
+    /// `.taskmaster/plans/macos-video-smoothness.md`), so MKV/WebM route to the
+    /// Session route (FFmpeg → wgpu → Metal). The presenter is **parked, not
+    /// deleted**: it is the on-device Dolby-Vision reference renderer, opt-in via
+    /// `PB_SAMPLE_BUFFER=1` ([`AppCore::sample_buffer_opt_in`], read once at host
+    /// construction — tests set the field directly). When opted in it keeps the old
+    /// restrictions: loose-file **MKV/WebM** only, self-probing the codec and
+    /// falling back to Session (level 2) for anything it can't sample-decode.
+    /// Reached only for non-native containers (`macos_native_route` runs first).
     #[cfg(all(target_os = "macos", feature = "ffvideo"))]
     fn macos_sample_buffer_route(&self, item: usize) -> bool {
-        let disabled = std::env::var_os("PB_NO_SAMPLE_BUFFER").is_some()
-            || std::env::var("PB_SAMPLE_BUFFER").is_ok_and(|v| v == "0");
-        if disabled || self.source.path(item).is_none() {
+        if !self.sample_buffer_opt_in || self.source.path(item).is_none() {
             return false;
         }
         match crate::video::item_kind(self.source.as_ref(), item) {
@@ -7554,8 +7599,10 @@ impl AppCore {
     /// due frame through the reusable present path, keep the shell audio player in
     /// lockstep with the session state, surface failures.
     pub fn poll_video(&mut self) {
-        // Session backends only (Windows/Linux). macOS has no session to pump —
-        // its native `AVPlayer` runs itself and reports back via callbacks.
+        // Session backends only (Windows/Linux, and macOS for the containers
+        // AVPlayer doesn't handle — MKV/WebM since the smoothness plan). The
+        // macOS `AVPlayer` route has no session to pump — it runs itself and
+        // reports back via callbacks.
         // Inline the field borrow (not the helper) so `v` borrows only `self.video`,
         // leaving `self.now`/`self.effects`/`self.source` usable below.
         let now = self.now;
@@ -7570,6 +7617,29 @@ impl AppCore {
         let state = v.session.state();
         let started = v.session.has_started();
         let session_id = v.session.id;
+        // PB_TRACE: the Session route's objective smoothness number
+        // (macos-video-smoothness §4) — the analog of the sample-buffer route's
+        // `sb-play diag`. `dropped_frames` counts late frames the catch-up drain
+        // discarded (plan 1C/0B); a healthy clip holds at 0. ~Every 2 s while
+        // playing, with the delta since the last line.
+        if pb_trace() && state == crate::video::VideoSessionState::Playing {
+            let stale = self.video_diag_last.is_none_or(|(id, t, _)| {
+                id != session_id || now.saturating_duration_since(t) >= Duration::from_secs(2)
+            });
+            if stale {
+                let dropped = v.session.dropped_frames();
+                let prev = self
+                    .video_diag_last
+                    .filter(|(id, _, _)| *id == session_id)
+                    .map_or(0, |(_, _, n)| n);
+                eprintln!(
+                    "[pb-video] session diag: dropped={dropped} (+{}) pos={:.1}s",
+                    dropped.saturating_sub(prev),
+                    v.session.position(now).as_secs_f64()
+                );
+                self.video_diag_last = Some((session_id, now, dropped));
+            }
+        }
         // One-shot resume seek (task #94.2): once the fresh session can accept a
         // seek, jump to the remembered position. The poster is held (present
         // suppressed) until then, and the seek flushes the pre-resume frames by
@@ -11569,18 +11639,53 @@ mod tests {
         assert!(core.video.is_none(), "no producer on this platform yet");
     }
 
-    /// macOS Phase 3 routing (video-overhaul): a loose-file MKV now goes to the
-    /// **sample-buffer presenter** (a `Native`-proxy backend + a `PlaySampleBuffer`
-    /// effect) — system decode with correct Dolby Vision — not the FFmpeg session
-    /// and not `AVPlayer`. `PB_NO_SAMPLE_BUFFER=1` would force the session; the
-    /// presenter self-probes the codec and falls back on the shell side.
+    /// macOS smoothness-plan routing: a loose-file MKV/WebM goes to the **Session
+    /// route** (FFmpeg → wgpu → Metal) — the sample-buffer presenter drops ~3
+    /// frames/sec that the Session route presents smoothly, so it is parked
+    /// opt-in (`sample_buffer_opt_in`; see the test below). MP4/MOV keep AVPlayer
+    /// (covered by `recoverable_native_failure_falls_back_to_the_ffmpeg_session`).
     #[cfg(all(target_os = "macos", feature = "ffvideo"))]
     #[test]
-    fn mkv_routes_to_the_sample_buffer_presenter_on_macos() {
-        // No test sets PB_NO_SAMPLE_BUFFER (env is process-global — mutating it
-        // would race parallel tests), so the default route is exercised here; the
-        // opt-out is a one-line env check verified by hand.
+    fn mkv_and_webm_route_to_the_session_on_macos() {
+        for name in ["/nope/clip.mkv", "/nope/clip.webm"] {
+            let mut core = test_core();
+            core.source = Arc::new(pb_source::FsSource::new(vec![std::path::PathBuf::from(
+                name,
+            )]));
+            core.displayed_item = Some(0);
+            core.native_toast = true;
+            core.toggle_play_pause();
+            let v = core.video.as_ref().expect("P starts playback");
+            assert!(
+                v.as_session().is_some(),
+                "{name}: routes to the Session (FFmpeg) route"
+            );
+            assert!(
+                !core
+                    .effects
+                    .iter()
+                    .any(|e| matches!(e, contract::CoreEffect::PlaySampleBuffer { .. })),
+                "{name}: the parked sample-buffer presenter is not commanded"
+            );
+            assert!(
+                !core
+                    .effects
+                    .iter()
+                    .any(|e| matches!(e, contract::CoreEffect::PlayVideo { .. })),
+                "{name}: no AVPlayer is commanded"
+            );
+        }
+    }
+
+    /// The parked sample-buffer presenter stays reachable — `PB_SAMPLE_BUFFER=1`
+    /// (the `sample_buffer_opt_in` field; env is read once at host construction,
+    /// so the test sets the field rather than racing process-global env). This is
+    /// what keeps the Dolby-Vision reference renderer from rotting.
+    #[cfg(all(target_os = "macos", feature = "ffvideo"))]
+    #[test]
+    fn sample_buffer_opt_in_routes_mkv_to_the_presenter() {
         let mut core = test_core();
+        core.sample_buffer_opt_in = true;
         core.source = Arc::new(pb_source::FsSource::new(vec![std::path::PathBuf::from(
             "/nope/clip.mkv",
         )]));
@@ -11590,7 +11695,7 @@ mod tests {
         let v = core.video.as_ref().expect("P starts playback");
         assert!(
             v.as_native().is_some(),
-            "MKV routes to the sample-buffer presenter (a Native-proxy backend)"
+            "opted in: MKV routes to the sample-buffer presenter (a Native-proxy backend)"
         );
         assert!(v.as_session().is_none(), "not the FFmpeg session");
         assert!(
@@ -11599,12 +11704,66 @@ mod tests {
                 .any(|e| matches!(e, contract::CoreEffect::PlaySampleBuffer { .. })),
             "the sample-buffer presenter is commanded"
         );
+    }
+
+    /// The honest-UX DoVi warning (macos-video-smoothness §2): a Session-route
+    /// video whose probe flagged a non-backward-compatible Dolby Vision stream
+    /// (Profile 5 / compat-id 0) toasts once — and only once per item.
+    #[cfg(all(target_os = "macos", feature = "ffvideo"))]
+    #[test]
+    fn an_incompatible_dovi_video_warns_once_on_the_session_route() {
+        let mut core = test_core();
+        core.source = Arc::new(pb_source::FsSource::new(vec![std::path::PathBuf::from(
+            "/nope/dovi5.mkv",
+        )]));
+        core.displayed_item = Some(0);
+        core.native_toast = true;
+        // The container probe already landed (say, the panel was open earlier).
+        let mut d = crate::app_core::ItemDetails::ready(0, Vec::new());
+        d.dovi_incompatible = true;
+        core.exif_cache.insert(0, d);
+        core.toggle_play_pause();
         assert!(
-            !core
-                .effects
-                .iter()
-                .any(|e| matches!(e, contract::CoreEffect::PlayVideo { .. })),
-            "no AVPlayer is commanded"
+            core.video
+                .as_ref()
+                .is_some_and(|v| v.as_session().is_some()),
+            "MKV plays on the Session route"
+        );
+        let toast = core.toast_native.as_ref().expect("the warning toast fires");
+        assert!(
+            toast.message.contains("Dolby Vision"),
+            "names the culprit: {}",
+            toast.message
+        );
+        // A replay / probe re-landing must not nag: warned once per item.
+        core.toast_native = None;
+        core.maybe_warn_dovi(0);
+        assert!(core.toast_native.is_none(), "warned once per item");
+    }
+
+    /// The same flagged file on the AVPlayer route stays quiet — AVPlayer decodes
+    /// Dolby Vision natively, so there is nothing to warn about.
+    #[cfg(all(target_os = "macos", feature = "ffvideo"))]
+    #[test]
+    fn the_dovi_warning_stays_quiet_off_the_session_route() {
+        let mut core = test_core();
+        core.source = Arc::new(pb_source::FsSource::new(vec![std::path::PathBuf::from(
+            "/nope/dovi.mp4",
+        )]));
+        core.displayed_item = Some(0);
+        core.native_toast = true;
+        let mut d = crate::app_core::ItemDetails::ready(0, Vec::new());
+        d.dovi_incompatible = true;
+        core.exif_cache.insert(0, d);
+        core.toggle_play_pause();
+        assert!(
+            core.video.as_ref().is_some_and(|v| v.as_native().is_some()),
+            "MP4 plays on the AVPlayer route"
+        );
+        core.maybe_warn_dovi(0); // even asked directly, the route gate holds
+        assert!(
+            core.toast_native.is_none(),
+            "AVPlayer does real DoVi — no warning"
         );
     }
 
@@ -12473,6 +12632,7 @@ mod tests {
                 media,
                 has_audio,
                 probe_state: crate::media_details::ProbeState::Ready,
+                dovi_incompatible: false,
             },
         );
     }
@@ -12568,6 +12728,7 @@ mod tests {
             media: None,
             has_audio: Some(true),
             probe_state: crate::media_details::ProbeState::Ready,
+            dovi_incompatible: false,
         })
         .unwrap();
         core.exif_cache

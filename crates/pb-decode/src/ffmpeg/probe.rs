@@ -192,6 +192,37 @@ pub fn rotation_degrees(stream: &ff::format::stream::Stream) -> i32 {
     }
 }
 
+/// The stream's Dolby Vision summary (`AV_PKT_DATA_DOVI_CONF` coded side data),
+/// or `None` for the common SDR/HDR10 case — the same walk as
+/// [`rotation_degrees`] above. The record's first eight fields are the stable
+/// `AVDOVIDecoderConfigurationRecord` ABI prefix (all `uint8_t`, no padding):
+/// major, minor, profile, level, rpu, el, bl, bl_signal_compatibility_id — we
+/// read only profile and compat-id here; the sample-buffer demux reads the full
+/// record separately (it feeds VideoToolbox the packed box). Demuxer-only-safe:
+/// no decoder is touched, so the `ffprobe` build can call it.
+pub fn dovi_summary(stream: &ff::format::stream::Stream) -> Option<crate::video::DoviSummary> {
+    use ffmpeg_next::ffi;
+    unsafe {
+        let par = (*stream.as_ptr()).codecpar;
+        if par.is_null() {
+            return None;
+        }
+        let sd = ffi::av_packet_side_data_get(
+            (*par).coded_side_data,
+            (*par).nb_coded_side_data,
+            ffi::AVPacketSideDataType::AV_PKT_DATA_DOVI_CONF,
+        );
+        if sd.is_null() || (*sd).data.is_null() || (*sd).size < 8 {
+            return None;
+        }
+        let d = std::slice::from_raw_parts((*sd).data, (*sd).size as usize);
+        Some(crate::video::DoviSummary {
+            profile: d[2],
+            bl_compat_id: d[7],
+        })
+    }
+}
+
 /// Codec display names for the inspector panel — the same vocabulary the
 /// Windows (MF subtype) and macOS (AVFoundation) probes use.
 pub fn codec_display_name(id: ff::codec::Id) -> &'static str {

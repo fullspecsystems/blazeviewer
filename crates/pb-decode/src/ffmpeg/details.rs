@@ -94,6 +94,14 @@ fn stream_info(
         false,
     );
     let sc = conv.source_color();
+    // The DoVi summary (macos-video-smoothness §2): a pure side-data read off the
+    // already-parsed stream table — feeds the Details row and the Session route's
+    // Profile-5 warning.
+    let dovi = opened
+        .ctx()
+        .streams()
+        .find(|s| s.index() == facts.index)
+        .and_then(|s| super::probe::dovi_summary(&s));
     Ok(VideoStreamInfo {
         codec: facts.codec,
         width: facts.width,
@@ -103,6 +111,7 @@ fn stream_info(
         duration: facts.duration,
         has_audio: facts.has_audio,
         color: super::color::sdr_transform(&sc),
+        dovi,
     })
 }
 
@@ -127,4 +136,48 @@ fn decoder_for(
     ff::codec::context::Context::from_parameters(stream.parameters())
         .and_then(|c| c.decoder().video())
         .map_err(|e| DecodeError::Corrupt(format!("FFmpeg decoder: {e}")))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// End-to-end DoVi detection on the probe the app actually uses
+    /// (macos-video-smoothness §2): point `PB_DOVI_TEST` at a Dolby Vision
+    /// container and the Details probe must carry the summary.
+    /// `PB_DOVI_TEST=/path cargo test -p pb-decode --features ffvideo \
+    ///   dovi_summary_from_real_clip -- --nocapture --ignored`
+    #[test]
+    #[ignore = "needs PB_DOVI_TEST pointing at a Dolby Vision clip"]
+    fn dovi_summary_from_real_clip() {
+        let Ok(path) = std::env::var("PB_DOVI_TEST") else {
+            eprintln!("skipping: set PB_DOVI_TEST to a Dolby Vision container");
+            return;
+        };
+        let input = VideoInput::Path(std::path::PathBuf::from(path));
+        let probe = ff_probe_video_details(&input, 1).expect("probe");
+        let dovi = probe
+            .video
+            .dovi
+            .expect("the DoVi summary must be extracted");
+        eprintln!(
+            "DoVi: profile={} bl_compat_id={} incompatible={}",
+            dovi.profile,
+            dovi.bl_compat_id,
+            dovi.base_layer_incompatible()
+        );
+    }
+
+    /// SDR/HDR10 fixtures carry no DoVi record — the summary must stay `None`
+    /// (a false positive here would toast a warning over an ordinary video).
+    #[test]
+    fn plain_fixtures_have_no_dovi_summary() {
+        for name in ["multitrack.mkv", "color_with_tone.mp4"] {
+            let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/video")
+                .join(name);
+            let probe = ff_probe_video_details(&VideoInput::Path(path), 1).expect("probe");
+            assert!(probe.video.dovi.is_none(), "{name} is not DoVi");
+        }
+    }
 }

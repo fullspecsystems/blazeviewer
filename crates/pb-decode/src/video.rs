@@ -129,6 +129,36 @@ pub struct VideoStreamInfo {
     pub has_audio: bool,
     /// Source color read from the native media type (same policy the poster uses).
     pub color: ColorTransform,
+    /// Dolby Vision summary when the stream carries a DoVi configuration record
+    /// (macos-video-smoothness §2). Filled by the FFmpeg probe; the AVFoundation
+    /// and Media Foundation probes leave it `None` — which is also the honest
+    /// value there, since their routes (AVPlayer) decode DoVi natively.
+    pub dovi: Option<DoviSummary>,
+}
+
+/// Slim Dolby Vision summary for playback UX (macos-video-smoothness §2): enough
+/// to warn about the one flavor that renders visibly wrong without RPU reshaping,
+/// and to name the rest honestly in the Details panel. The full configuration
+/// record (level/flags/the packed `dvcC` box) stays on the sample-buffer demux's
+/// [`ffmpeg::demux::DoviConfig`] — that route feeds VideoToolbox and needs it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DoviSummary {
+    /// `dv_profile` (5, 7, 8, …).
+    pub profile: u8,
+    /// `dv_bl_signal_compatibility_id` — what the base layer is *without* the
+    /// RPU: `0` = nothing standard (Profile 5's IPTPQc2), `1` = HDR10, `2` = SDR,
+    /// `4` = HLG.
+    pub bl_compat_id: u8,
+}
+
+impl DoviSummary {
+    /// The base layer is NOT watchable on its own: rendering it without RPU
+    /// reshaping produces visibly wrong color (the Profile-5 green/purple tint).
+    /// Compat-id 1/2/4 content degrades cleanly to its HDR10/SDR/HLG base layer —
+    /// that *is* correct degradation, no warning needed.
+    pub fn base_layer_incompatible(&self) -> bool {
+        self.bl_compat_id == 0
+    }
 }
 
 impl VideoStreamInfo {

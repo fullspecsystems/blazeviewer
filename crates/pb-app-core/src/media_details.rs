@@ -124,6 +124,11 @@ pub fn probe_job(source: &dyn ItemSource, item: usize, generation: u64) -> ItemD
         allow(unused_mut)
     )]
     let mut has_audio: Option<bool> = None;
+    #[cfg_attr(
+        not(any(windows, target_os = "macos", all(unix, feature = "ffvideo"))),
+        allow(unused_mut)
+    )]
+    let mut dovi_incompatible = false;
 
     // One shared row builder so the three platform probes can't drift on copy. The bare
     // `Audio: Yes/No` row it used to add is gone: the real per-track listing (task #98)
@@ -139,6 +144,13 @@ pub fn probe_job(source: &dyn ItemSource, item: usize, generation: u64) -> ItemD
             fields.push(("Frame rate".into(), format!("{:.2} fps", info.fps)));
         }
         has_audio = Some(info.has_audio);
+        // Dolby Vision, stated honestly (macos-video-smoothness §2): compat-id 0
+        // (Profile 5) cannot show correct color without RPU reshaping — say so
+        // here and let playback warn once; other profiles play their base layer.
+        if let Some(dovi) = info.dovi {
+            fields.push(("Dolby Vision".into(), dovi_row_value(&dovi)));
+            dovi_incompatible = dovi.base_layer_incompatible();
+        }
     };
 
     #[cfg(any(windows, target_os = "macos"))]
@@ -281,6 +293,62 @@ pub fn probe_job(source: &dyn ItemSource, item: usize, generation: u64) -> ItemD
         media,
         has_audio,
         probe_state: ProbeState::Ready,
+        dovi_incompatible,
+    }
+}
+
+/// The Details row's value for a Dolby Vision stream — names the profile and what
+/// the base layer amounts to on a renderer without RPU reshaping.
+#[cfg(any(windows, target_os = "macos", all(unix, feature = "ffvideo")))]
+fn dovi_row_value(dovi: &pb_decode::DoviSummary) -> String {
+    let base = match dovi.bl_compat_id {
+        0 => "colors unsupported",
+        1 => "HDR10-compatible base layer",
+        2 => "SDR-compatible base layer",
+        4 => "HLG-compatible base layer",
+        _ => "base-layer compatible",
+    };
+    format!("Profile {} — {}", dovi.profile, base)
+}
+
+#[cfg(all(
+    test,
+    any(windows, target_os = "macos", all(unix, feature = "ffvideo"))
+))]
+mod dovi_row_tests {
+    use super::*;
+
+    /// The DoVi Details row names the profile and states the base layer honestly
+    /// (macos-video-smoothness §2) — and only compat-id 0 flags the warning.
+    #[test]
+    fn dovi_rows_name_the_profile_and_base_layer() {
+        let p5 = pb_decode::DoviSummary {
+            profile: 5,
+            bl_compat_id: 0,
+        };
+        assert!(p5.base_layer_incompatible());
+        assert_eq!(dovi_row_value(&p5), "Profile 5 — colors unsupported");
+
+        let p8 = pb_decode::DoviSummary {
+            profile: 8,
+            bl_compat_id: 1,
+        };
+        assert!(!p8.base_layer_incompatible());
+        assert_eq!(
+            dovi_row_value(&p8),
+            "Profile 8 — HDR10-compatible base layer"
+        );
+
+        for compat in [2u8, 4] {
+            let d = pb_decode::DoviSummary {
+                profile: 8,
+                bl_compat_id: compat,
+            };
+            assert!(
+                !d.base_layer_incompatible(),
+                "compat {compat} degrades cleanly"
+            );
+        }
     }
 }
 

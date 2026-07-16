@@ -7,7 +7,23 @@ with any pre-release suffix carried only by the tag.
 
 ## [Unreleased]
 
+### Fixed
+- **Video playback is smooth again (macOS).** MKV and WebM files now play through the same
+  renderer as everything else, instead of a path that quietly dropped a few frames every
+  second on high-refresh displays. Audio-track switching (`A` / **Playback ▸ Audio**), the
+  tick on the playing track, subtitles, seeking, and resume all carry over to the new path.
+- **Seeking after a resume lands where you asked (all platforms).** Reopening a video at a
+  remembered position and then scrubbing could silently aim the *audio* at the wrong spot —
+  offset by the resume position — leaving it churning through minutes of sound or ending
+  early. Both seeks are now measured from the start of the file, as they always should have
+  been.
+
 ### Added
+- **Dolby Vision, stated honestly.** The Details panel now names a Dolby Vision stream's
+  profile and what its base layer amounts to ("Profile 8 — HDR10-compatible base layer"),
+  and playing a **Profile 5** file — the one flavor whose colors cannot be shown correctly
+  without Dolby's own processing — says so in a toast instead of leaving you wondering why
+  the picture looks green and purple.
 - **Subtitles on videos.** Press `C` to turn captions on and off; your choice is remembered.
   Blaze Viewer reads both the subtitle tracks stored **inside** an MKV or MP4 and a subtitle file sitting **beside** the video (the usual `Movie.eng.srt` or
   `Movie.vtt`) — SubRip (`.srt`), WebVTT (`.vtt`), ASS/SSA, and MP4's own timed text, all

@@ -183,3 +183,15 @@ ffmpeg -y -f lavfi -i "color=orange:size=64x64:rate=30:duration=1" \
        -x265-params "colorprim=bt2020:transfer=smpte2084:colormatrix=bt2020nc" \
        -tag:v hvc1 hdr_pq.mp4
 ```
+
+## hdr_pq.mkv (macos-video-smoothness §4)
+
+The same HEVC PQ stream remuxed into **Matroska** — proves HDR metadata carriage
+is container-independent on the Session route, which is what plays MKVs on macOS
+now (the sample-buffer route is parked). Same fp16 contract as `hdr_pq.mp4`.
+
+Regen:
+
+```sh
+ffmpeg -i hdr_pq.mp4 -c copy hdr_pq.mkv
+```

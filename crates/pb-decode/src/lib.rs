@@ -208,11 +208,11 @@ pub use tracks::{
     AudioFormat, AvGroup, MediaBackend, MediaTrack, MediaTrackCatalog, SidecarOrigin,
     TrackCapability, TrackCompleteness, TrackFlags, TrackId, TrackKind, TrackLocator, TrackSet,
 };
+pub use video::{DoviSummary, VideoDetailsProbe, VideoStreamInfo};
 pub use video::{
     SeekGeneration, VideoColorInfo, VideoFrame, VideoInput, VideoProducerEvent, VideoProducerMsg,
     VideoProducerOptions, VideoSessionId, VideoTransfer, YuvMatrix,
 };
-pub use video::{VideoDetailsProbe, VideoStreamInfo};
 #[cfg(windows)]
 pub use wic::WicDecoder;
 pub use zune::ZuneJpegDecoder;

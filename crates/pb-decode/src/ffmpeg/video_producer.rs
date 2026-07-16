@@ -1027,12 +1027,11 @@ mod tests {
         assert!(frames >= 25, "rotated clip decoded {frames} frames");
     }
 
-    /// The fp16 HDR contract (plan §9, owner decision #1): a PQ/BT.2020 clip
-    /// emits scene-linear Rgba16F frames — never tone-mapped RGBA8 — with a
+    /// The shared fp16 HDR contract (plan §9, owner decision #1): a PQ/BT.2020
+    /// clip emits scene-linear Rgba16F frames — never tone-mapped RGBA8 — with a
     /// format-aware credit size and a real peak for the SDR tone-map.
-    #[test]
-    fn hdr_pq_clip_emits_fp16_scene_linear_frames() {
-        let (msgs, events) = spawn(fixture("hdr_pq.mp4"));
+    fn assert_hdr_pq_contract(name: &str) {
+        let (msgs, events) = spawn(fixture(name));
         match events
             .recv_timeout(Duration::from_secs(10))
             .expect("opened")
@@ -1043,28 +1042,45 @@ mod tests {
                 frame_bytes,
                 ..
             } => {
-                assert_eq!((width, height), (64, 64));
-                assert_eq!(frame_bytes, 64 * 64 * 8, "fp16 charges 8 bytes/px");
+                assert_eq!((width, height), (64, 64), "{name}");
+                assert_eq!(frame_bytes, 64 * 64 * 8, "{name}: fp16 charges 8 bytes/px");
             }
-            other => panic!("expected Opened, got {other:?}"),
+            other => panic!("{name}: expected Opened, got {other:?}"),
         }
         msgs.send(VideoProducerMsg::Credit).unwrap();
         match events.recv_timeout(Duration::from_secs(10)).expect("frame") {
             VideoProducerEvent::Frame(f) => {
-                assert_eq!(f.format, PixelFormat::Rgba16F);
-                assert!(f.is_well_formed(), "fp16 geometry/buffer contract");
+                assert_eq!(f.format, PixelFormat::Rgba16F, "{name}");
+                assert!(f.is_well_formed(), "{name}: fp16 geometry/buffer contract");
                 assert!(
                     !f.color.transform.enabled,
-                    "scene-linear scRGB is a shader passthrough"
+                    "{name}: scene-linear scRGB is a shader passthrough"
                 );
-                assert!(f.color.peak >= 1.0, "peak {}", f.color.peak);
-                assert_eq!(f.color.cicp, Some((9, 16, 9)), "BT.2020 PQ kept verbatim");
+                assert!(f.color.peak >= 1.0, "{name}: peak {}", f.color.peak);
+                assert_eq!(
+                    f.color.cicp,
+                    Some((9, 16, 9)),
+                    "{name}: BT.2020 PQ kept verbatim"
+                );
                 // Spot-check a pixel decodes to finite positive linear light.
                 let ch = half::f16::from_le_bytes([f.pixels[0], f.pixels[1]]).to_f32();
-                assert!(ch.is_finite() && ch >= 0.0, "linear R = {ch}");
+                assert!(ch.is_finite() && ch >= 0.0, "{name}: linear R = {ch}");
             }
-            other => panic!("expected a frame, got {other:?}"),
+            other => panic!("{name}: expected a frame, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn hdr_pq_clip_emits_fp16_scene_linear_frames() {
+        assert_hdr_pq_contract("hdr_pq.mp4");
+    }
+
+    /// Container parity (macos-video-smoothness §4): the SAME HEVC PQ stream in
+    /// **Matroska** carries its HDR metadata identically — MKV is what the Session
+    /// route plays on macOS now, so the contract needs an MKV witness, not only MP4.
+    #[test]
+    fn hdr_pq_mkv_carries_the_same_fp16_contract() {
+        assert_hdr_pq_contract("hdr_pq.mkv");
     }
 
     fn opts(planar: bool, p010: bool) -> crate::VideoProducerOptions {

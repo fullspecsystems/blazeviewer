@@ -132,6 +132,12 @@ pub struct ItemDetails {
     pub has_audio: Option<bool>,
     /// How far the (async, video-only) container probe got. Stills are born `Ready`.
     pub probe_state: crate::media_details::ProbeState,
+    /// The video carries a Dolby Vision stream whose base layer is NOT watchable
+    /// on its own (`bl_signal_compatibility_id == 0` — Profile 5's IPTPQc2): the
+    /// Session route renders it with visibly wrong color, so playback warns once
+    /// (macos-video-smoothness §2). Compat-id 1/2/4 content degrades cleanly and
+    /// stays `false`.
+    pub dovi_incompatible: bool,
 }
 
 impl ItemDetails {
@@ -143,6 +149,7 @@ impl ItemDetails {
             media: None,
             has_audio: None,
             probe_state: crate::media_details::ProbeState::Ready,
+            dovi_incompatible: false,
         }
     }
 
@@ -638,6 +645,22 @@ pub struct AppCore {
     /// the flag is consumed (a fresh open later retries native first). Never a
     /// loop: a session failure surfaces the error, it never re-arms this.
     pub video_ffmpeg_fallback: Option<usize>,
+    /// macOS: opt IN to the parked sample-buffer presenter for MKV/WebM
+    /// (`PB_SAMPLE_BUFFER=1`). Default `false` — the Session route is the smooth
+    /// default (macos-video-smoothness plan); the presenter is kept as the future
+    /// Dolby-Vision reference renderer. Read from the env once at construction;
+    /// a plain field so tests can set it without touching process-global env.
+    pub sample_buffer_opt_in: bool,
+    /// Items already given the one-time "Dolby Vision Profile 5 — colors can't be
+    /// shown correctly" toast (macos-video-smoothness §2), so replay/seek/probe
+    /// races can't re-toast. Index-keyed — cleared with the other per-deck caches.
+    pub dovi_warned: std::collections::HashSet<usize>,
+    /// `PB_TRACE` session-smoothness diag bookkeeping: the last emitted
+    /// `(session, at, dropped-count)`, so `poll_video` prints the dropped-frame
+    /// line ~every 2 s with a delta (macos-video-smoothness §4 — the Session
+    /// route's analog of the sample-buffer `sb-play diag`). Dev-only telemetry;
+    /// never read when `PB_TRACE` is off.
+    pub video_diag_last: Option<(crate::video::VideoSessionId, Instant, u64)>,
     /// macOS archive-video handoff: the in-RAM container bytes for the session the core
     /// just emitted `PlayVideoBytes` for, stashed for the shell to pull once
     /// (`take_pending_video_bytes`) and serve to `AVPlayer` via a resource loader. RAM-only,

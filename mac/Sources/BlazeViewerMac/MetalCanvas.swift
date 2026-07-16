@@ -356,14 +356,9 @@ final class MetalCanvasNSView: NSView {
         // Clip the player layer to the canvas: a zoomed / Fill / rotated video overflows its
         // footprint, and the overflow must be cropped to the window like a still (not spill
         // over the chrome). The container fills the canvas, so this bounds the video to it.
-        //
-        // ⚠ A/B (PB_NO_MASK): a clipping ancestor disqualifies the AVSampleBufferDisplayLayer
-        // from a hardware **overlay plane** (direct scanout), forcing GPU compositing — the
-        // suspected cause of the ~3 dropped frames/sec on a high-refresh display. Forcing this
-        // off tests that (visually correct ONLY for a Fit, unrotated, unzoomed clip — nothing
-        // overflows to clip). If it lands the fix, the shipping version makes `masksToBounds`
-        // conditional on whether the video actually overflows.
-        container.masksToBounds = ProcessInfo.processInfo.environment["PB_NO_MASK"] == nil
+        // (The smoothness diagnosis A/B'd dropping this clip — PB_NO_MASK — and it made no
+        // difference to the sample-buffer frame drops; the mask is unconditional again.)
+        container.masksToBounds = true
         // Hide the *whole container* (not just the inner player) until the first frame is
         // displayable, so the opaque fill doesn't cover the wgpu poster before there's a real
         // video frame to show — that gap is the "blackout" flash. `revealVideoLayer()` unhides
