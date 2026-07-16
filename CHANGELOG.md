@@ -48,6 +48,11 @@ with any pre-release suffix carried only by the tag.
   remembered.
 
 ### Fixed
+- **The scrubber knob no longer drifts out from under your cursor** (macOS). Clicking and
+  holding on the playback bar could make the knob slide away and the video seek on its own,
+  because the elapsed-time label changed width (e.g. crossing the one-hour mark) and nudged
+  the whole bar sideways under the held pointer. The time now keeps a fixed width, so the bar
+  stays put.
 - **Seeking no longer pauses the video** (macOS). Clicking or dragging the scrubber on an
   MKV/WebM would stop playback dead — a click fires two internal seeks in a millisecond, and
   the second one mistook the first's momentary clock-hold for "the user paused." Playback now

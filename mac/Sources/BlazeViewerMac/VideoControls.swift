@@ -22,10 +22,24 @@ struct VideoPlaybackRow: View {
             .help(model.videoPlaying ? "Pause" : "Play")
             .accessibilityLabel(model.videoPlaying ? "Pause" : "Play")
 
-            Text(model.videoElapsed)
-                .font(.callout)
-                .monospacedDigit()
-                .foregroundStyle(.secondary)
+            // Elapsed time — its width is RESERVED to the total's width (the widest it can
+            // ever be) so the string changing (e.g. "28:00" → "1:12:34" when you seek past the
+            // hour, or "9:59" → "10:00") can't reflow the HStack and slide the scrubber
+            // sideways. That reflow was a feedback loop: a click seeks → the label grows → the
+            // scrubber shifts under the still-held cursor → SwiftUI reports a new local x →
+            // `onChanged` re-fires → it re-seeks (owner, 2026-07-15: "the knob drifts off my
+            // pointer and the film seeks while I'm just holding"). monospacedDigit keeps digits
+            // uniform; the hidden total pins the slot, and `.hidden()` keeps it in the layout.
+            ZStack(alignment: .trailing) {
+                Text(model.videoTotal.isEmpty ? model.videoElapsed : model.videoTotal)
+                    .font(.callout)
+                    .monospacedDigit()
+                    .hidden()
+                Text(model.videoElapsed)
+                    .font(.callout)
+                    .monospacedDigit()
+                    .foregroundStyle(.secondary)
+            }
 
             VideoScrubber(model: model)
 
