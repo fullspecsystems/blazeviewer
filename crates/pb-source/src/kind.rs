@@ -24,6 +24,11 @@ pub enum ArchiveKind {
     TarZst,
     /// `.tar.xz` / `.txz` — solid xz stream: eager.
     TarXz,
+    /// RAR5 (`.rar`, and `.cbr` comic books = RAR renamed) — mixed: non-solid
+    /// entries decode lazily per entry, solid groups are eagerly decoded at
+    /// open ([`crate::RarSource`]). Solidness is a property of the archive,
+    /// not the suffix, so the open handles both.
+    Rar,
 }
 
 impl ArchiveKind {
@@ -31,6 +36,8 @@ impl ArchiveKind {
     /// front (the RAM-budget model), rather than serving entries lazily (ZIP's
     /// central directory, plain tar's header index).
     pub fn eager(&self) -> bool {
+        // Rar counts as eager: whether a given .rar is solid is only knowable
+        // after the container scan, so budget/progress plumbing must be there.
         !matches!(self, ArchiveKind::Zip | ArchiveKind::Tar)
     }
 
@@ -55,7 +62,10 @@ pub fn archive_kind(path: &Path) -> Option<ArchiveKind> {
     let ext = path.extension()?.to_str()?.to_ascii_lowercase();
     Some(match ext.as_str() {
         "zip" => ArchiveKind::Zip,
+        // Comic-book archives are plain archives renamed: .cbz = ZIP, .cbr = RAR.
+        "cbz" => ArchiveKind::Zip,
         "7z" => ArchiveKind::SevenZ,
+        "rar" | "cbr" => ArchiveKind::Rar,
         "tar" => ArchiveKind::Tar,
         "tgz" => ArchiveKind::TarGz,
         "tbz2" | "tbz" => ArchiveKind::TarBz2,
@@ -92,7 +102,10 @@ mod tests {
         use ArchiveKind::*;
         for (path, want) in [
             ("a.zip", Zip),
+            ("a.cbz", Zip),
             ("a.7z", SevenZ),
+            ("a.rar", Rar),
+            ("a.cbr", Rar),
             ("a.tar", Tar),
             ("a.tar.gz", TarGz),
             ("a.tgz", TarGz),
@@ -159,7 +172,7 @@ mod tests {
         for k in [Zip, Tar] {
             assert!(!k.eager(), "{k:?} is lazy");
         }
-        for k in [SevenZ, TarGz, TarBz2, TarZst, TarXz] {
+        for k in [SevenZ, TarGz, TarBz2, TarZst, TarXz, Rar] {
             assert!(k.eager(), "{k:?} is eager");
         }
     }
@@ -168,7 +181,7 @@ mod tests {
     fn every_kind_but_zip_opens_in_the_background() {
         use ArchiveKind::*;
         assert!(!Zip.background_open(), "zip stays the cheap sync open");
-        for k in [SevenZ, Tar, TarGz, TarBz2, TarZst, TarXz] {
+        for k in [SevenZ, Tar, TarGz, TarBz2, TarZst, TarXz, Rar] {
             assert!(k.background_open(), "{k:?} opens off-thread");
         }
     }

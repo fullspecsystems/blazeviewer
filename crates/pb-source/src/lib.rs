@@ -53,9 +53,13 @@ use sevenz_rust2::{
 use zip::ZipArchive;
 
 mod kind;
+mod rar;
 mod tar_source;
 
 pub use kind::{archive_kind, ArchiveKind};
+#[cfg(feature = "fuzz-internals")]
+pub use rar::fuzz as rar_fuzz;
+pub use rar::RarSource;
 #[cfg(feature = "fuzz-internals")]
 pub use tar_source::fuzz;
 pub use tar_source::TarSource;
@@ -269,6 +273,14 @@ pub enum OpenError {
     /// so the streaming open enforces the budget itself and reports it here.
     /// `needed` is a lower bound (the stream stopped as soon as it tripped).
     TooLarge { needed: u64, budget: u64 },
+    /// The archive is recognized but deliberately not opened: a format tier we
+    /// don't decode (RAR4, multi-volume RAR, encrypted RAR). Distinct from
+    /// [`Corrupt`](OpenError::Corrupt) so the user learns *what* it is rather
+    /// than "may be damaged" — and distinct from
+    /// [`PasswordRequired`](OpenError::PasswordRequired), which the app answers
+    /// with a password prompt: an encrypted RAR can't be decrypted no matter
+    /// what is typed, so prompting would loop. Carries the ready-to-show line.
+    Unsupported(String),
 }
 
 impl std::fmt::Display for OpenError {
@@ -283,6 +295,7 @@ impl std::fmt::Display for OpenError {
                 f,
                 "the archive needs at least {needed} bytes of RAM, over the {budget}-byte budget"
             ),
+            OpenError::Unsupported(msg) => write!(f, "{msg}"),
         }
     }
 }

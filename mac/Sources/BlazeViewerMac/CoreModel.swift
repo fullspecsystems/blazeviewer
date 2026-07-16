@@ -2392,6 +2392,7 @@ final class CoreModel {
                 // that don't resolve on this OS just drop out of the filter.
                 "zip", "7z",
                 "tar", "tgz", "tbz2", "tbz", "tzst", "txz", "gz", "bz2", "zst", "xz",
+                "rar", "cbr", "cbz",
             ]
             panel.allowedContentTypes = exts.compactMap { UTType(filenameExtension: $0) }
         }

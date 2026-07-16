@@ -616,7 +616,7 @@ impl ItemSource for TarSource {
 /// A normalized entry name we are willing to record. Entries are read by
 /// offset/index — never by path — so this is defense in depth for display and
 /// sibling lookup, not a traversal gate.
-fn sane_name(name: &str) -> bool {
+pub(crate) fn sane_name(name: &str) -> bool {
     !name.is_empty()
         && !name.ends_with('/')
         && name.len() <= 4096
@@ -663,7 +663,7 @@ fn decompressor<R: Read + 'static>(
                 true,
             ))
         }
-        ArchiveKind::Zip | ArchiveKind::SevenZ | ArchiveKind::Tar => {
+        ArchiveKind::Zip | ArchiveKind::SevenZ | ArchiveKind::Tar | ArchiveKind::Rar => {
             return Err(OpenError::Corrupt(
                 "not a compressed tar (wrong dispatch)".into(),
             ))

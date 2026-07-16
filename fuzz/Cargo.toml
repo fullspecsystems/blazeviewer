@@ -31,4 +31,11 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "rar_open"
+path = "fuzz_targets/rar_open.rs"
+test = false
+doc = false
+bench = false
+
 [workspace]

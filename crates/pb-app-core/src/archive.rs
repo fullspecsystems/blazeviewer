@@ -212,6 +212,12 @@ pub enum ArchiveOpenError {
     PasswordRequired,
     /// Opened fine but holds no supported images.
     Empty,
+    /// Recognized but deliberately not opened (RAR4, multi-volume RAR,
+    /// encrypted RAR). Carries the ready-to-show line — distinct from
+    /// [`PasswordRequired`](ArchiveOpenError::PasswordRequired) because the
+    /// password prompt cannot help (we detect RAR encryption, we don't decrypt
+    /// it; prompting would loop).
+    Unsupported(String),
     /// An I/O error opening or reading the file.
     Io(String),
     /// The user cancelled the open before it finished. Not really an error — the app
@@ -237,6 +243,7 @@ impl ArchiveOpenError {
                 "This archive is password protected, which is not supported yet.".into()
             }
             ArchiveOpenError::Empty => "This archive has no images to show.".into(),
+            ArchiveOpenError::Unsupported(msg) => msg.clone(),
             ArchiveOpenError::Io(e) => format!("This archive could not be opened. {e}"),
             ArchiveOpenError::Cancelled => "Archive open cancelled.".into(),
         }
@@ -256,6 +263,7 @@ impl From<pb_source::OpenError> for ArchiveOpenError {
             // trips mid-stream; `needed` is a lower bound, which is why the
             // user message says "at least".
             E::TooLarge { needed, budget } => ArchiveOpenError::TooLarge { needed, budget },
+            E::Unsupported(msg) => ArchiveOpenError::Unsupported(msg),
         }
     }
 }

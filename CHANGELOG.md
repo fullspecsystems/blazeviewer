@@ -28,6 +28,11 @@ with any pre-release suffix carried only by the tag.
   been.
 
 ### Added
+- **RAR archives open too.** `.rar` files (the modern RAR5 format) and `.cbr`/`.cbz` comic
+  books now open as browsable decks, with the contents verified byte-for-byte against the
+  reference unrar tool during development. Older RAR4 archives, password-protected RARs,
+  and a few rare compression filters are declined with a plain message saying exactly what
+  is not supported, instead of a generic error or garbled images.
 - **Tarballs open like folders.** Blaze Viewer now views images and plays videos inside
   `.tar`, `.tar.gz` (`.tgz`), `.tar.bz2` (`.tbz2`), `.tar.zst` (`.tzst`), and `.tar.xz`
   (`.txz`) archives, alongside the existing ZIP and 7z support. A plain `.tar` opens

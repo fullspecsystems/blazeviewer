@@ -3197,6 +3197,8 @@ impl App {
                         exts.extend_from_slice(&[
                             "tar", "tgz", "tbz2", "tbz", "tzst", "txz", "gz", "bz2", "zst", "xz",
                         ]);
+                        // RAR5 + comic books (#103): .cbr = RAR, .cbz = ZIP.
+                        exts.extend_from_slice(&["rar", "cbr", "cbz"]);
                         let input = rfd::FileDialog::new()
                             .add_filter("Images, videos & archives", &exts)
                             .add_filter("All files", &["*"])
@@ -5462,6 +5464,41 @@ mod tests {
         assert_eq!(
             before, after,
             "viewing a tar.gz must create or modify no files (no extraction to disk)"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The privacy guarantee extends to RAR (#103): the scan, the solid-group
+    /// eager decode, and every lazy per-entry decode are RAM-only. (The fixture
+    /// holds text-shaped bytes, so entries are read + CRC-checked rather than
+    /// image-decoded — the disk-trace surface is identical.)
+    #[test]
+    fn viewing_a_rar_writes_nothing_to_disk() {
+        const RAR: &[u8] = include_bytes!("../../pb-source/tests/fixtures/rar/lz_solid.rar");
+        let dir = std::env::temp_dir().join(format!("pb_rar_notrace_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("mkdir sandbox");
+        let rar_path = dir.join("album.rar");
+        fs::write(&rar_path, RAR).expect("seed rar");
+
+        let before = snapshot_tree(&dir);
+
+        // Straight into the open (solid groups eager-decode here), with an
+        // injected budget so a low-RAM machine's real ram_budget() can't flake
+        // the test — same reasoning as the 7z and tar.gz no-trace tests.
+        let src =
+            pb_source::RarSource::open(&rar_path, scan::is_supported_archive_entry, None, u64::MAX)
+                .expect("open rar");
+        let resolved = scan::archive_resolved(&rar_path, std::sync::Arc::new(src));
+        assert_eq!(resolved.source.len(), 3, "rar should yield three entries");
+        for i in 0..resolved.source.len() {
+            let _ = resolved.source.bytes(i).expect("read entry");
+        }
+
+        let after = snapshot_tree(&dir);
+        assert_eq!(
+            before, after,
+            "viewing a rar must create or modify no files (no extraction to disk)"
         );
         let _ = fs::remove_dir_all(&dir);
     }

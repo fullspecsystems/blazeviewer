@@ -1253,8 +1253,8 @@
       {
         "id": 103,
         "title": "RAR5 archive viewing (RarSource)",
-        "description": "View RAR5 archives (.rar/.cbr; .cbz=ZIP rides along) through the ItemSource seam. Plan: .taskmaster/plans/103-rar5-viewing.md. Own ~350-line container parser in pb-source over compcol::rar5 (fstool as reference only); lazy non-solid + eager solid; we add CRC32 verify, 64 MiB window cap, container-level encryption detection -> password prompt, solid-group Delta degradation. RAR4 = detect + honest 'not supported yet'. Empirically de-risked: byte-perfect vs unrar after our x86-filter fix, fuzz-clean (see compcol-rar-evaluation memory).",
-        "status": "pending",
+        "description": "View RAR5 archives (.rar/.cbr; .cbz=ZIP rides along) through the ItemSource seam. Plan: .taskmaster/plans/103-rar5-viewing.md (rev2 records the implementation decisions). IMPLEMENTED 2026-07-16: corpus differential 18 archives / 60 entries byte-identical to unrar, zero mismatches; encrypted RAR refuses honestly (Unsupported, not PasswordRequired - prompting would loop since we cannot decrypt). Own ~350-line container parser in pb-source over compcol::rar5 (fstool as reference only); lazy non-solid + eager solid; we add CRC32 verify, 64 MiB window cap, container-level encryption detection -> password prompt, solid-group Delta degradation. RAR4 = detect + honest 'not supported yet'. Empirically de-risked: byte-perfect vs unrar after our x86-filter fix, fuzz-clean (see compcol-rar-evaluation memory).",
+        "status": "review",
         "priority": "medium",
         "dependencies": [
           102
@@ -1263,26 +1263,26 @@
           {
             "id": 1,
             "title": "Unblock: compcol dep with the x86 fix",
-            "description": "Gate: upstream PR #121 (jdlien/compcol rar5-x86-filter-fix) merged + released -> exact crates.io pin. Until then the fork git-dep is acceptable on this branch. Confirm the corpus decodes from a throwaway harness.",
-            "status": "pending"
+            "description": "Fork git-dep wired: exact rev 5c47b0e (pushed branch tip with the x86 fix). REMAINING: swap to an exact crates.io pin once upstream PR #121 merges + releases. The local rar3-standard-filters branch (Delta + add_file_boundary) is the next pin bump when it lands.",
+            "status": "in-progress"
           },
           {
             "id": 2,
             "title": "RarSource non-solid (lazy)",
             "description": "Block-chain scan for the file table, per-entry decode, CRC32, window cap, encryption detection. TDD against compcol-rar-corpus rar5_m*_nonsolid.",
-            "status": "pending"
+            "status": "done"
           },
           {
             "id": 3,
             "title": "RarSource solid (eager)",
             "description": "Whole-group decode-to-RAM with OpenProgress/budget; byte-identical to unrar; Delta-member-in-solid degrades that group's later members, never the archive.",
-            "status": "pending"
+            "status": "done"
           },
           {
             "id": 4,
             "title": "App wiring + harden",
             "description": "ArchiveKind::Rar (+cbr/cbz), dispatch via load_archive, picker, no OS association, no-trace test, archived-video-in-rar smoke, per-entry honest Unsupported for Delta/ARM/encrypted, own fuzz target, docs.",
-            "status": "pending"
+            "status": "done"
           }
         ]
       }

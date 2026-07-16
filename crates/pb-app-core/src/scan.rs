@@ -13,8 +13,8 @@ use std::sync::Arc;
 use pb_core::open::{self, Source};
 use pb_decode::is_supported_extension;
 use pb_source::{
-    archive_kind, seven_z_projected_bytes, ArchiveKind, FsSource, ItemSource, SevenZSource,
-    TarSource, ZipSource,
+    archive_kind, seven_z_projected_bytes, ArchiveKind, FsSource, ItemSource, RarSource,
+    SevenZSource, TarSource, ZipSource,
 };
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
@@ -674,6 +674,19 @@ pub fn load_archive(
             )?;
             nonempty_resolved(path, src)
         }
+        // RAR5 (.rar/.cbr, task #103): non-solid entries lazy, solid groups
+        // eagerly decoded by the open against the RAM budget. The password is
+        // ignored — RAR encryption is detected and refused honestly (no
+        // decrypt support), never routed to the password prompt.
+        ArchiveKind::Rar => {
+            let src = RarSource::open(
+                path,
+                is_supported_archive_entry,
+                Some(progress),
+                crate::archive::ram_budget(),
+            )?;
+            nonempty_resolved(path, src)
+        }
     }
 }
 
@@ -923,6 +936,21 @@ mod archive_video_tests {
         assert_eq!(t.source.name(0), "b.png");
         let _ = std::fs::remove_file(&zip);
         let _ = std::fs::remove_file(&tar);
+    }
+
+    /// A `.cbr` (RAR renamed) routes through the same dispatch and opens as a
+    /// playlist (#103); the fixture is pb-source's committed WinRAR archive.
+    #[test]
+    fn a_cbr_opens_through_the_dispatch() {
+        const RAR: &[u8] = include_bytes!("../../pb-source/tests/fixtures/rar/lz_nonsolid.rar");
+        let path = std::env::temp_dir().join(format!("pb_scan_av_cbr_{}.cbr", std::process::id()));
+        std::fs::write(&path, RAR).unwrap();
+        assert_eq!(archive_kind(&path), Some(ArchiveKind::Rar));
+        let r = open_archive(&path, None).expect("a cbr must open");
+        let names: Vec<&str> = (0..r.source.len()).map(|i| r.source.name(i)).collect();
+        assert_eq!(names, vec!["a.jpg", "b.png", "sub/c.webp"]);
+        assert!(r.source.bytes(0).is_ok(), "entries decode");
+        let _ = std::fs::remove_file(&path);
     }
 }
 
