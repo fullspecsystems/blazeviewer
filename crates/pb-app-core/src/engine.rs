@@ -495,6 +495,12 @@ pub fn decode_item_cancellable(
             }
             return Ok(video_placeholder(container));
         }
+        // An archive door (task #104): return the tile **here**, above the bytes
+        // request below. That placement is the feature's whole guarantee — a door
+        // in the prefetch window costs a solid-colour tile, never a decompression,
+        // so scrubbing past a folder of 2 GB archives touches none of them. The
+        // archive is read only when the viewer presses `P` to enter it.
+        crate::video::LibraryItemKind::Archive(kind) => return Ok(archive_placeholder(kind)),
         // Exhaustive on purpose: everything below this match reads the item's whole
         // encoded bytes, so only a kind we know is an image may fall through to it.
         // A new kind gets a compile error here rather than a silent full read.
@@ -528,6 +534,37 @@ pub fn video_placeholder(container: crate::video::VideoContainer) -> DecodedImag
         orig_width: W,
         orig_height: H,
         codec: container.name(),
+        format: PixelFormat::Rgba8,
+        pixels,
+        is_preview: false,
+        color: pb_decode::ColorTransform::srgb(),
+        peak: 1.0,
+        animated: None,
+    }
+}
+
+/// The tile an archive **door** displays (task #104): a small flat frame whose
+/// `codec` row names the format. Returned by [`decode_item_cancellable`]
+/// *before* it requests the item's bytes, which is the door's whole contract —
+/// the archive is read only when the viewer presses `P` to enter it.
+///
+/// Deliberately tiny for the same reason as [`video_placeholder`]: it is a solid
+/// colour, so the GPU upscale is invisible and the prefetch ring can hold a
+/// folder's worth of doors without denting its budget. Squarer than the video
+/// tile (4:3) because an archive is not footage — the difference is legible at a
+/// glance while scrubbing. Phase 3 composites the per-kind icon in here.
+pub fn archive_placeholder(kind: pb_source::ArchiveKind) -> DecodedImage {
+    const W: u32 = 240;
+    const H: u32 = 180;
+    // A touch lighter than the video tile: a door is a place you can go, not a
+    // frame that failed to decode.
+    let pixels: Vec<u8> = [38u8, 38, 42, 255].repeat((W * H) as usize);
+    DecodedImage {
+        width: W,
+        height: H,
+        orig_width: W,
+        orig_height: H,
+        codec: kind.name(),
         format: PixelFormat::Rgba8,
         pixels,
         is_preview: false,
@@ -1117,5 +1154,110 @@ mod tests {
         use pb_source::FsSource;
         let src = FsSource::new(vec![PathBuf::from(r"C:\definitely\not\here\photo.jpg")]);
         assert!(decode_item(&src, 0, None, true).is_err());
+    }
+
+    // --- archive doors (task #104) ----------------------------------------
+
+    /// A source that **panics** if anyone reads an item's bytes.
+    ///
+    /// Deliberately harsher than the nonexistent-path trick above: a missing file
+    /// proves a read would have *failed*, which a future caller could swallow. A
+    /// panic proves the call never happened at all — and "the archive is never read
+    /// until you press `P`" is the door's entire contract, so it is worth proving
+    /// exactly rather than nearly.
+    struct ExplodingSource(PathBuf);
+    impl pb_source::ItemSource for ExplodingSource {
+        fn len(&self) -> usize {
+            1
+        }
+        fn name(&self, _i: usize) -> &str {
+            self.0.file_name().and_then(|n| n.to_str()).unwrap_or("")
+        }
+        fn path(&self, _i: usize) -> Option<&Path> {
+            Some(&self.0)
+        }
+        fn bytes(&self, _i: usize) -> std::io::Result<Vec<u8>> {
+            panic!("a door read the archive: {}", self.0.display());
+        }
+    }
+
+    #[test]
+    fn a_door_dispatches_before_bytes_and_gets_the_tile() {
+        let src = ExplodingSource(PathBuf::from(r"C:\photos\holiday.7z"));
+        let img = decode_item(&src, 0, None, true).expect("a door needs no read");
+        assert_eq!(img.codec, "7z");
+        assert!(img.is_well_formed(), "tile pixels match its geometry");
+        assert_eq!((img.width, img.height), (240, 180));
+    }
+
+    /// **The feature's central promise.** Both leaks Phase 0 fixed lived in entry
+    /// points a `decode_item`-only test never touches: the thumbs strip goes through
+    /// `decode_item_for(Thumb)`, which used to read bytes for anything that was not a
+    /// video. Cover every door, through every entry.
+    #[test]
+    fn a_door_is_never_read_through_any_entry_point() {
+        use crate::decode_pool::Purpose;
+        let cancel = AtomicBool::new(false);
+        for file in [
+            "holiday.zip",
+            "holiday.7z",
+            "book.cbz",
+            "book.cbr",
+            "backup.tar.gz",
+            "backup.tar.zst",
+        ] {
+            let src = ExplodingSource(PathBuf::from(r"C:\photos").join(file));
+            for (entry, got) in [
+                ("decode_item", decode_item(&src, 0, None, true)),
+                (
+                    "decode_item_cancellable",
+                    decode_item_cancellable(&src, 0, None, true, &cancel),
+                ),
+                (
+                    "decode_item_for/Display",
+                    decode_item_for(&src, 0, None, true, Purpose::Display, &cancel),
+                ),
+                (
+                    "decode_item_for/Thumb",
+                    decode_item_for(&src, 0, None, true, Purpose::Thumb, &cancel),
+                ),
+            ] {
+                let img = got.unwrap_or_else(|e| panic!("{file} via {entry}: {e:?}"));
+                assert_eq!(
+                    (img.width, img.height),
+                    (240, 180),
+                    "{file} via {entry} should be the door tile"
+                );
+            }
+        }
+    }
+
+    /// The tile stays cheap enough that the prefetch ring can hold a folder's worth
+    /// of doors — the property that makes doors safe where blending was not.
+    #[test]
+    fn the_door_tile_is_tiny_enough_to_prefetch_freely() {
+        let img = archive_placeholder(pb_source::ArchiveKind::Zip);
+        assert!(
+            img.pixels.len() < 256 * 1024,
+            "a door tile is {} bytes; 100 of them must not dent the ring budget",
+            img.pixels.len()
+        );
+    }
+
+    /// Every kind names itself, so the tile never shows a blank format row.
+    #[test]
+    fn every_archive_kind_names_its_tile() {
+        for kind in [
+            pb_source::ArchiveKind::Zip,
+            pb_source::ArchiveKind::SevenZ,
+            pb_source::ArchiveKind::Tar,
+            pb_source::ArchiveKind::TarGz,
+            pb_source::ArchiveKind::TarBz2,
+            pb_source::ArchiveKind::TarZst,
+            pb_source::ArchiveKind::TarXz,
+            pb_source::ArchiveKind::Rar,
+        ] {
+            assert!(!archive_placeholder(kind).codec.is_empty(), "{kind:?}");
+        }
     }
 }

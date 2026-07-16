@@ -600,6 +600,11 @@ impl AppCore {
                 self.show_toast("Can't save rotation for video");
                 return;
             }
+            // A door is a place, not a picture — there is no orientation to write.
+            crate::video::LibraryItemKind::Archive(_) => {
+                self.show_toast("Can't save rotation for an archive");
+                return;
+            }
             // Exhaustive so a new kind states its own answer: what follows assumes a
             // rotatable image file on disk.
             crate::video::LibraryItemKind::Image => {}
@@ -6569,6 +6574,28 @@ impl AppCore {
                     self.source.name(item).to_string(),
                 ));
             }
+            // A door's facts are its size and its format — both free. The size comes
+            // from a **stat**, never a read (`media_details::probe_job` uses the same
+            // rule); reading a 2 GB archive here, on the event loop, just to fill a
+            // panel is exactly what the door exists to avoid. No EXIF, no probe: what
+            // is inside is unknown until the viewer enters it, and saying so honestly
+            // beats opening it to find out.
+            crate::video::LibraryItemKind::Archive(kind) => {
+                let size = self
+                    .source
+                    .path(item)
+                    .and_then(|p| std::fs::metadata(p).ok())
+                    .map(|m| m.len())
+                    .or_else(|| self.source.size_hint(item))
+                    .unwrap_or(0);
+                self.exif_cache.insert(
+                    item,
+                    crate::app_core::ItemDetails::ready(
+                        size,
+                        vec![("Format".to_string(), format!("{} archive", kind.name()))],
+                    ),
+                );
+            }
             crate::video::LibraryItemKind::Image => {
                 if let Ok(bytes) = self.source.bytes(item) {
                     let fields = read_exif_fields(&bytes);
@@ -7215,7 +7242,10 @@ impl AppCore {
             match crate::video::item_kind(self.source.as_ref(), item) {
                 crate::video::LibraryItemKind::Video(c) => c.macos_native(),
                 // Not a video (unreachable from the play paths) — native no-op.
-                crate::video::LibraryItemKind::Image => true,
+                // A door reaches `P` but enters an archive rather than playing,
+                // so it never gets here either.
+                crate::video::LibraryItemKind::Image
+                | crate::video::LibraryItemKind::Archive(_) => true,
             }
         }
     }
@@ -7242,7 +7272,10 @@ impl AppCore {
                 c,
                 crate::video::VideoContainer::Mkv | crate::video::VideoContainer::Webm
             ),
-            crate::video::LibraryItemKind::Image => false,
+            // Neither is a video, so neither uses the presenter.
+            crate::video::LibraryItemKind::Image | crate::video::LibraryItemKind::Archive(_) => {
+                false
+            }
         }
     }
 
@@ -8993,7 +9026,10 @@ impl AppCore {
                 crate::video::LibraryItemKind::Image => {
                     self.source.path(item).and_then(companion_motion)
                 }
-                crate::video::LibraryItemKind::Video(_) => None,
+                // Neither a video nor a door Live-pairs: a door is not half of
+                // anything, and a same-stem .mov beside `holiday.zip` is unrelated.
+                crate::video::LibraryItemKind::Video(_)
+                | crate::video::LibraryItemKind::Archive(_) => None,
             };
             self.live_motion_cache.insert(item, paired.clone());
             paired

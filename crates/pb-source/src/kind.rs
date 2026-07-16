@@ -49,6 +49,23 @@ impl ArchiveKind {
     pub fn background_open(&self) -> bool {
         !matches!(self, ArchiveKind::Zip)
     }
+
+    /// The format's display name — what the viewer shows on an archive "door"
+    /// tile and in the details panel (task #104). Names the **container**, not
+    /// the suffix it arrived under, so a `.cbz` reads "ZIP" (it is one) exactly
+    /// as a video's `.m4v` reads "MP4".
+    pub fn name(self) -> &'static str {
+        match self {
+            ArchiveKind::Zip => "ZIP",
+            ArchiveKind::SevenZ => "7z",
+            ArchiveKind::Tar => "TAR",
+            ArchiveKind::TarGz => "TAR.GZ",
+            ArchiveKind::TarBz2 => "TAR.BZ2",
+            ArchiveKind::TarZst => "TAR.ZST",
+            ArchiveKind::TarXz => "TAR.XZ",
+            ArchiveKind::Rar => "RAR",
+        }
+    }
 }
 
 /// Classify `path` as an archive we open as a playlist, or `None`.

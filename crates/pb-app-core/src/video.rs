@@ -35,6 +35,17 @@ pub enum LibraryItemKind {
     /// platform readers stream it from disk); an archive entry plays from its
     /// in-RAM bytes through the `VideoInput::Bytes` seam.
     Video(VideoContainer),
+    /// An archive **on disk** — a "door" (task #104). Displays as a placeholder
+    /// tile; `P` enters it, which is the only thing that ever reads it. The
+    /// decode path returns the tile *before* requesting bytes, so prefetching a
+    /// door costs a solid-colour tile and never a decompression.
+    ///
+    /// Unlike [`Video`](LibraryItemKind::Video) this is decided by the item's
+    /// **path**, not its name, and the asymmetry is deliberate: an archived clip
+    /// is playable from RAM, but an archive inside an archive is not enterable
+    /// (nesting is a non-goal). An entry has no path, so a nested archive cannot
+    /// be represented as a door at all.
+    Archive(pb_source::ArchiveKind),
 }
 
 /// The **one cross-platform recognition list** of video containers (locked decision:
@@ -138,7 +149,14 @@ pub fn classify_library_file(path: &Path) -> Option<LibraryItemKind> {
     if pb_decode::is_supported_extension(ext) {
         return Some(LibraryItemKind::Image);
     }
-    VideoContainer::from_extension(ext).map(LibraryItemKind::Video)
+    if let Some(c) = VideoContainer::from_extension(ext) {
+        return Some(LibraryItemKind::Video(c));
+    }
+    // Archives are doors (task #104). Classified off the **whole path**, not the
+    // extension above, because `archive_kind` is the one classifier that knows
+    // `.tar.gz` is not a `.gz`. Must agree with `item_kind`'s archive arm — a
+    // file admitted here as a door has to decode as one.
+    pb_source::archive_kind(path).map(LibraryItemKind::Archive)
 }
 
 /// What item `item` of `source` *is* — the dispatch the decode scheduler runs **before**
@@ -147,13 +165,22 @@ pub fn classify_library_file(path: &Path) -> Option<LibraryItemKind> {
 /// covers both worlds — a filesystem item's file name and an archive entry's
 /// archive-relative name both end in the real extension (a `ItemSource` contract).
 pub fn item_kind(source: &dyn ItemSource, item: usize) -> LibraryItemKind {
-    source
+    if let Some(c) = source
         .name(item)
         .rsplit_once('.')
         .map(|(_, ext)| ext)
         .and_then(VideoContainer::from_extension)
-        .map(LibraryItemKind::Video)
-        .unwrap_or(LibraryItemKind::Image)
+    {
+        return LibraryItemKind::Video(c);
+    }
+    // Doors are **path**-gated (task #104): only an archive sitting on disk is
+    // enterable, so an archive entry (`path` = `None`) can never be one. This is
+    // what makes nested archives unrepresentable rather than merely disallowed.
+    // Still O(1) and off the event loop — `item_kind` runs on decode workers.
+    if let Some(kind) = source.path(item).and_then(pb_source::archive_kind) {
+        return LibraryItemKind::Archive(kind);
+    }
+    LibraryItemKind::Image
 }
 
 /// Whether `path` is a Live-Photo *companion candidate* — a `.mov`/`.qt` video, the only
@@ -412,6 +439,7 @@ impl VideoQueueBudget {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
     use VideoSessionState::*;
 
     // --- item model -------------------------------------------------------
@@ -776,5 +804,123 @@ mod tests {
                 queue.remove(0);
             }
         }
+    }
+
+    // --- archive doors (task #104) ----------------------------------------
+
+    /// A filesystem-backed item: it has a `path`, like `FsSource`.
+    struct DiskSource(PathBuf);
+    impl pb_source::ItemSource for DiskSource {
+        fn len(&self) -> usize {
+            1
+        }
+        fn name(&self, _i: usize) -> &str {
+            self.0.file_name().and_then(|n| n.to_str()).unwrap_or("")
+        }
+        fn path(&self, _i: usize) -> Option<&Path> {
+            Some(&self.0)
+        }
+        fn bytes(&self, _i: usize) -> std::io::Result<Vec<u8>> {
+            panic!("a door must never have its bytes read")
+        }
+    }
+
+    /// An archive **entry**: a name but no path — what a Zip/7z source looks like.
+    struct EntrySource(String);
+    impl pb_source::ItemSource for EntrySource {
+        fn len(&self) -> usize {
+            1
+        }
+        fn name(&self, _i: usize) -> &str {
+            &self.0
+        }
+        fn bytes(&self, _i: usize) -> std::io::Result<Vec<u8>> {
+            Ok(Vec::new())
+        }
+    }
+
+    #[test]
+    fn an_archive_on_disk_is_a_door() {
+        for (file, want) in [
+            ("holiday.zip", pb_source::ArchiveKind::Zip),
+            ("holiday.7z", pb_source::ArchiveKind::SevenZ),
+            ("book.cbz", pb_source::ArchiveKind::Zip),
+            ("book.cbr", pb_source::ArchiveKind::Rar),
+            ("stuff.rar", pb_source::ArchiveKind::Rar),
+        ] {
+            let src = DiskSource(PathBuf::from("/photos").join(file));
+            assert_eq!(
+                item_kind(&src, 0),
+                LibraryItemKind::Archive(want),
+                "{file} should be a door"
+            );
+        }
+    }
+
+    /// The reason the archive arm is **path**-based rather than name-based: a
+    /// name-based classifier splits on the last dot and sees `gz`, which is not
+    /// a `.tar.gz`. `archive_kind` takes the whole path and gets it right.
+    #[test]
+    fn a_tar_gz_door_is_not_mistaken_for_a_gz() {
+        let src = DiskSource(PathBuf::from("/photos/backup.tar.gz"));
+        assert_eq!(
+            item_kind(&src, 0),
+            LibraryItemKind::Archive(pb_source::ArchiveKind::TarGz)
+        );
+    }
+
+    /// Nested archives are a non-goal, and the typing makes them unrepresentable
+    /// rather than forbidden: an archive entry has no `path`, so it can never be
+    /// a door — no rule, no guard to forget.
+    #[test]
+    fn an_archive_inside_an_archive_is_never_a_door() {
+        let src = EntrySource("inner.zip".to_string());
+        assert_eq!(
+            item_kind(&src, 0),
+            LibraryItemKind::Image,
+            "a .zip entry has no path, so it cannot be a door"
+        );
+    }
+
+    /// Videos keep their **name**-based rule: an archived clip plays from RAM
+    /// through `VideoInput::Bytes`, so it must still type as a video with no path.
+    #[test]
+    fn an_archived_video_still_types_as_video_without_a_path() {
+        let src = EntrySource("clip.mp4".to_string());
+        assert_eq!(
+            item_kind(&src, 0),
+            LibraryItemKind::Video(VideoContainer::Mp4)
+        );
+    }
+
+    #[test]
+    fn the_scanner_admits_archives_as_library_items() {
+        assert_eq!(
+            classify_library_file(Path::new("/p/a.zip")),
+            Some(LibraryItemKind::Archive(pb_source::ArchiveKind::Zip))
+        );
+        assert_eq!(
+            classify_library_file(Path::new("/p/a.tar.zst")),
+            Some(LibraryItemKind::Archive(pb_source::ArchiveKind::TarZst))
+        );
+        // Images and videos keep their existing answers; junk stays skipped.
+        assert_eq!(
+            classify_library_file(Path::new("/p/a.jpg")),
+            Some(LibraryItemKind::Image)
+        );
+        assert_eq!(
+            classify_library_file(Path::new("/p/a.mp4")),
+            Some(LibraryItemKind::Video(VideoContainer::Mp4))
+        );
+        assert_eq!(classify_library_file(Path::new("/p/a.txt")), None);
+    }
+
+    /// The scanner's gate and the decode dispatch must agree, or an item is
+    /// admitted as one kind and decoded as another.
+    #[test]
+    fn the_scanner_and_the_decode_dispatch_agree_on_a_disk_archive() {
+        let p = PathBuf::from("/photos/holiday.7z");
+        let src = DiskSource(p.clone());
+        assert_eq!(classify_library_file(&p), Some(item_kind(&src, 0)));
     }
 }

@@ -5131,18 +5131,22 @@ mod tests {
         // companion pair (the .mov is hidden by dedup, exactly like the app).
         fs::write(dir.join("clip.mp4"), b"not a real movie").expect("seed video");
         fs::write(dir.join("d.mov"), b"companion motion").expect("seed companion");
+        // Task #104: an archive door rides the same guarantee. Garbage bytes for
+        // the same reason as the clip — the door path must not even read them, and
+        // never extracts to disk (which is what this test can actually prove).
+        fs::write(dir.join("album.zip"), b"not a real zip").expect("seed archive");
 
         let before = snapshot_tree(&dir);
 
         // The actual disk-touching code the app runs while viewing, through the
         // real source seam: recursive scan → companion dedup → FsSource →
         // decode_item (the pool's step) + the Shift+I panel read (bytes for an
-        // image, a stat only for a video).
+        // image, a stat only for a video or an archive door).
         let paths = scan::dedup_companions(scan_images(&dir, true), None);
         assert_eq!(
             paths.len(),
-            5,
-            "four images + the loose clip; the companion .mov is hidden"
+            6,
+            "four images + the loose clip + the archive door; the companion .mov is hidden"
         );
         let source = FsSource::new(paths);
         let fit = FitBox {
@@ -5158,6 +5162,13 @@ mod tests {
                 }
                 // The panel never RAM-reads a video: file size comes from a stat.
                 pb_app_core::video::LibraryItemKind::Video(_) => {}
+                // Nor an archive door (task #104) — same rule, and the seeded
+                // `.zip` below is garbage, so a read would not merely be wasteful,
+                // it would fail. Note what this arm can and cannot prove: this test
+                // asserts nothing is *written*, and reading an archive writes
+                // nothing, so a door that read its bytes would still pass here. The
+                // read guarantee is pinned by `engine`'s panicking-source tests.
+                pb_app_core::video::LibraryItemKind::Archive(_) => {}
             }
             if let Some(p) = source.path(i) {
                 let _ = fs::metadata(p).expect("stat");
