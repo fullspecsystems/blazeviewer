@@ -12,7 +12,10 @@ use std::sync::Arc;
 
 use pb_core::open::{self, Source};
 use pb_decode::is_supported_extension;
-use pb_source::{seven_z_projected_bytes, FsSource, ItemSource, SevenZSource, ZipSource};
+use pb_source::{
+    archive_kind, seven_z_projected_bytes, ArchiveKind, FsSource, ItemSource, SevenZSource,
+    TarSource, ZipSource,
+};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
@@ -594,48 +597,97 @@ pub fn stream_scan(
 
 // ── Archive open + top-level playlist resolution (NS0 5.6 Step 2c) ──
 
-/// Open `path` as an archive playlist, dispatching by extension: `.7z` ->
-/// [`SevenZSource`] (eager, RAM-budget pre-flight), anything else -> [`ZipSource`]
-/// (lazy per-entry). Returns a structured [`ArchiveOpenError`](crate::archive::ArchiveOpenError)
-/// so the caller can show the right message; entries are read into RAM, never
+/// Open `path` as an archive playlist, dispatching on the
+/// [`archive_kind`] classifier. This is the synchronous safety-net entry
+/// ([`resolve_playlist`]'s archive arm, tests): the interactive paths spawn a
+/// worker thread that calls [`load_archive`] with a live progress handle,
+/// because every kind but ZIP can be slow to open
+/// ([`ArchiveKind::background_open`]). Entries are read into RAM, never
 /// extracted to disk.
 ///
 /// `password` decrypts an encrypted archive (`None` on the first open; an encrypted
 /// archive then returns [`PasswordRequired`](crate::archive::ArchiveOpenError::PasswordRequired)
 /// so the app can prompt, and a re-open carries the entered password). A ZIP's
 /// directory reads without one, and a *wrong* password still opens — so an actual
-/// entry decrypt ([`ZipSource::password_ok`]) is what catches it.
+/// entry decrypt ([`ZipSource::password_ok`]) is what catches it. The tar family
+/// has no standard encryption; the password is ignored there.
 pub fn open_archive(
     path: &Path,
     password: Option<String>,
 ) -> Result<Resolved, crate::archive::ArchiveOpenError> {
-    let is_7z = path
-        .extension()
-        .and_then(|e| e.to_str())
-        .is_some_and(|e| e.eq_ignore_ascii_case("7z"));
-    if is_7z {
-        let projected = seven_z_preflight(path, password.as_deref())?;
-        let mt_headroom = crate::archive::ram_budget().saturating_sub(projected);
-        // Synchronous safety-net path (the interactive paths use the async, cancellable
-        // `begin_archive_open`): a throwaway progress handle no UI reads.
-        load_seven_z(path, password, &pb_source::OpenProgress::new(), mt_headroom)
-    } else {
-        let has_password = password.is_some();
-        let zs = ZipSource::open(path, password, is_supported_archive_entry)?;
-        // Encrypted but no password supplied -> prompt for one.
-        if zs.needs_password() {
-            return Err(crate::archive::ArchiveOpenError::PasswordRequired);
+    // Callers pre-filter through `archive_kind`; an unclassifiable path (only
+    // reachable through a stale caller) gets ZIP's error reporting.
+    let kind = archive_kind(path).unwrap_or(ArchiveKind::Zip);
+    load_archive(path, kind, password, &pb_source::OpenProgress::new())
+}
+
+/// The one background-open worker entry point (plan #102 rev2 §1): both shells'
+/// `begin_archive_open` workers call this for every
+/// [`background_open`](ArchiveKind::background_open) kind, so the per-kind
+/// dispatch — including the 7z RAM pre-flight, which used to be duplicated in
+/// each shell — lives in exactly one place. `progress` drives the determinate
+/// bar and the Cancel button for every kind.
+pub fn load_archive(
+    path: &Path,
+    kind: ArchiveKind,
+    password: Option<String>,
+    progress: &pb_source::OpenProgress,
+) -> Result<Resolved, crate::archive::ArchiveOpenError> {
+    match kind {
+        ArchiveKind::Zip => {
+            let has_password = password.is_some();
+            let zs = ZipSource::open(path, password, is_supported_archive_entry)?;
+            // Encrypted but no password supplied -> prompt for one.
+            if zs.needs_password() {
+                return Err(crate::archive::ArchiveOpenError::PasswordRequired);
+            }
+            // A password was supplied but it doesn't decrypt -> prompt again (open
+            // succeeds regardless of the password; the entry read is the real check).
+            if has_password && zs.is_encrypted() && !zs.password_ok() {
+                return Err(crate::archive::ArchiveOpenError::PasswordRequired);
+            }
+            nonempty_resolved(path, zs)
         }
-        // A password was supplied but it doesn't decrypt -> prompt again (open
-        // succeeds regardless of the password; the entry read is the real check).
-        if has_password && zs.is_encrypted() && !zs.password_ok() {
-            return Err(crate::archive::ArchiveOpenError::PasswordRequired);
+        ArchiveKind::SevenZ => {
+            // Predict-and-refuse before the eager decompress (a true allocation
+            // failure aborts uncatchably); the unused budget becomes the
+            // within-block MT headroom (the solid-archive ~3x speedup).
+            let projected = seven_z_preflight(path, password.as_deref())?;
+            let mt_headroom = crate::archive::ram_budget().saturating_sub(projected);
+            load_seven_z(path, password, progress, mt_headroom)
         }
-        if zs.is_empty() {
-            return Err(crate::archive::ArchiveOpenError::Empty);
+        // Plain tar: lazy (ZIP's access model), but still opened off-thread —
+        // the header walk is O(entries) of file I/O.
+        ArchiveKind::Tar => {
+            let src = TarSource::open_tar(path, is_supported_archive_entry, Some(progress))?;
+            nonempty_resolved(path, src)
         }
-        Ok(archive_resolved(path, Arc::new(zs)))
+        // Compressed tar: eager decode-to-RAM. No size table exists up front,
+        // so the budget is enforced mid-stream by the source itself.
+        ArchiveKind::TarGz | ArchiveKind::TarBz2 | ArchiveKind::TarZst | ArchiveKind::TarXz => {
+            let src = TarSource::open_compressed(
+                path,
+                kind,
+                is_supported_archive_entry,
+                Some(progress),
+                crate::archive::ram_budget(),
+            )?;
+            nonempty_resolved(path, src)
+        }
     }
+}
+
+/// An opened archive source becomes a [`Resolved`] playlist — unless nothing in
+/// it is viewable, which reports [`Empty`](crate::archive::ArchiveOpenError::Empty)
+/// so the current photo is never blanked for a dud archive.
+fn nonempty_resolved(
+    path: &Path,
+    src: impl ItemSource + 'static,
+) -> Result<Resolved, crate::archive::ArchiveOpenError> {
+    if src.is_empty() {
+        return Err(crate::archive::ArchiveOpenError::Empty);
+    }
+    Ok(archive_resolved(path, Arc::new(src)))
 }
 
 /// The RAM pre-flight for a 7z: predict-and-refuse before the (uncatchable) eager
@@ -813,6 +865,64 @@ mod archive_video_tests {
             other => panic!("expected Empty, got {other:?}"),
         }
         let _ = std::fs::remove_file(&zip);
+    }
+
+    fn write_tar(tag: &str, files: &[(&str, &[u8])]) -> PathBuf {
+        let path =
+            std::env::temp_dir().join(format!("pb_scan_av_{tag}_{}.tar", std::process::id()));
+        let f = std::fs::File::create(&path).unwrap();
+        let mut tw = tar::Builder::new(f);
+        for &(name, bytes) in files {
+            let mut h = tar::Header::new_gnu();
+            h.set_size(bytes.len() as u64);
+            h.set_mode(0o644);
+            tw.append_data(&mut h, name, bytes).unwrap();
+        }
+        tw.finish().unwrap();
+        path
+    }
+
+    /// The tar family routes through the same `open_archive` dispatch (#102):
+    /// mixed image + video tars open as one sorted deck with typed video items
+    /// (archived videos play from RAM via `VideoInput::Bytes`, like ZIP).
+    #[test]
+    fn a_tar_opens_with_typed_video_items_through_the_dispatch() {
+        let tar = write_tar(
+            "tarvid",
+            &[
+                ("photo.jpg", b"J".as_slice()),
+                ("clip.mp4", b"fake mp4"),
+                ("notes.txt", b"never indexed"),
+            ],
+        );
+        let r = open_archive(&tar, None).expect("a tar must open through the dispatch");
+        let names: Vec<&str> = (0..r.source.len()).map(|i| r.source.name(i)).collect();
+        assert_eq!(names, vec!["clip.mp4", "photo.jpg"]);
+        assert!(matches!(
+            crate::video::item_kind(r.source.as_ref(), 0),
+            crate::video::LibraryItemKind::Video(crate::video::VideoContainer::Mp4)
+        ));
+        assert!(matches!(
+            crate::video::item_kind(r.source.as_ref(), 1),
+            crate::video::LibraryItemKind::Image
+        ));
+        assert_eq!(r.root, tar, "the archive path is the display root");
+        let _ = std::fs::remove_file(&tar);
+    }
+
+    /// `load_archive` is the one worker entry point for every kind — the same
+    /// dispatch the shells' background opens use (plan #102 rev2 §1).
+    #[test]
+    fn load_archive_dispatches_zip_and_tar_alike() {
+        let zip = write_zip("la_zip", &[("a.jpg", b"A".as_slice())]);
+        let tar = write_tar("la_tar", &[("b.png", b"B".as_slice())]);
+        let progress = pb_source::OpenProgress::new();
+        let z = load_archive(&zip, ArchiveKind::Zip, None, &progress).expect("zip");
+        assert_eq!(z.source.name(0), "a.jpg");
+        let t = load_archive(&tar, ArchiveKind::Tar, None, &progress).expect("tar");
+        assert_eq!(t.source.name(0), "b.png");
+        let _ = std::fs::remove_file(&zip);
+        let _ = std::fs::remove_file(&tar);
     }
 }
 

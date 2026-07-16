@@ -49,6 +49,8 @@ mod kind;
 mod tar_source;
 
 pub use kind::{archive_kind, ArchiveKind};
+#[cfg(feature = "fuzz-internals")]
+pub use tar_source::fuzz;
 pub use tar_source::TarSource;
 
 /// A uniform, read-only source of encoded bytes addressed by item index.

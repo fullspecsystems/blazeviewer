@@ -167,77 +167,13 @@ impl TarSource {
         if let Some(p) = progress {
             p.set_total(file_len);
         }
-        let quota = Arc::new(AtomicU64::new(META_QUOTA));
-        let metered = MeteredReader {
-            inner: BufReader::new(file),
-            quota: Arc::clone(&quota),
-        };
-        let mut archive = tar::Archive::new(metered);
-        // Last-wins by name (tar append mode): a BTreeMap both dedups and hands
-        // back the same ascending name order ZIP's post-scan sort produces.
-        let mut latest: BTreeMap<String, (u64, u64)> = BTreeMap::new();
-        let mut walked = 0usize;
-        let mut name_bytes = 0u64;
-        let mut prev_pos = 0u64;
-        let mut entries = archive
-            .entries_with_seek()
-            .map_err(|e| OpenError::Corrupt(e.to_string()))?;
-        loop {
-            if progress.is_some_and(|p| p.is_cancelled()) {
-                return Err(OpenError::Cancelled);
-            }
-            // Metadata quota for this step (headers + long-name/PAX payloads);
-            // the seek-based data skip doesn't read, so no disarm is needed.
-            quota.store(META_QUOTA, Ordering::Relaxed);
-            let Some(entry) = entries.next() else { break };
-            let entry = entry.map_err(|e| OpenError::Corrupt(e.to_string()))?;
-            walked += 1;
-            if walked > limits.max_entries {
-                return Err(OpenError::Corrupt(
-                    "the archive has too many entries".into(),
-                ));
-            }
-            if let Some(p) = progress {
-                let pos = entry.raw_file_position();
-                p.add_done(pos.saturating_sub(prev_pos));
-                prev_pos = pos;
-            }
-            if !entry.header().entry_type().is_file() {
-                continue; // symlinks/hardlinks/devices/sparse — see module docs
-            }
-            // `path_bytes` resolves PAX/GNU long names; lossy is safe — entries
-            // are only ever read back by offset, never looked up by name.
-            let name = normalize_entry_name(&String::from_utf8_lossy(&entry.path_bytes()));
-            if !sane_name(&name) {
-                continue;
-            }
-            let (offset, size) = (entry.raw_file_position(), entry.size());
-            // A truncated tail entry (its data runs past EOF) can never render;
-            // skip it and keep the rest of the archive viewable.
-            if offset.saturating_add(size) > file_len {
-                continue;
-            }
-            name_bytes += name.len() as u64;
-            if name_bytes > limits.max_name_bytes {
-                return Err(OpenError::Corrupt(
-                    "the archive has too many entries".into(),
-                ));
-            }
-            latest.insert(name, (offset, size));
-        }
-        if let Some(p) = progress {
-            p.add_done(file_len.saturating_sub(prev_pos));
-        }
-        let files: Vec<TarFile> = latest
-            .into_iter()
-            .map(|(name, (offset, size))| TarFile { name, size, offset })
-            .collect();
-        let items = files
-            .iter()
-            .enumerate()
-            .filter(|(_, f)| is_supported(&ext_of(&f.name)) && f.size <= limits.ceiling)
-            .map(|(i, _)| i)
-            .collect();
+        let (files, items) = index_tar(
+            BufReader::new(file),
+            file_len,
+            &is_supported,
+            progress,
+            limits,
+        )?;
         Ok(Self {
             path,
             files,
@@ -245,7 +181,6 @@ impl TarSource {
             store: Store::Lazy,
         })
     }
-
     /// Open a compressed tarball (`kind` must be one of the eager tar kinds) by
     /// streaming every supported entry into RAM. Honors `progress` for the
     /// determinate bar (compressed bytes consumed vs. file length) and
@@ -289,118 +224,8 @@ impl TarSource {
             inner: BufReader::with_capacity(1 << 20, file),
             progress: progress.cloned(),
         };
-        let quota = Arc::new(AtomicU64::new(META_QUOTA));
-        let metered = MeteredReader {
-            inner: decompressor(kind, counted)?,
-            quota: Arc::clone(&quota),
-        };
-        let mut archive = tar::Archive::new(metered);
-        let cancel = || progress.is_some_and(|p| p.is_cancelled());
-
-        let mut latest: BTreeMap<String, Vec<u8>> = BTreeMap::new();
-        let mut resident = 0u64;
-        let mut expanded = 0u64;
-        let mut walked = 0usize;
-        let mut name_bytes = 0u64;
-        {
-            let mut entries = archive
-                .entries()
-                .map_err(|e| OpenError::Corrupt(e.to_string()))?;
-            loop {
-                if cancel() {
-                    return Err(OpenError::Cancelled);
-                }
-                quota.store(META_QUOTA, Ordering::Relaxed);
-                let Some(entry) = entries.next() else { break };
-                let mut entry = entry.map_err(|e| OpenError::Corrupt(e.to_string()))?;
-                walked += 1;
-                if walked > limits.max_entries {
-                    return Err(OpenError::Corrupt(
-                        "the archive has too many entries".into(),
-                    ));
-                }
-                // Our own data reads below are exempt from the metadata quota.
-                quota.store(u64::MAX, Ordering::Relaxed);
-                let size = entry.size();
-                expanded = expanded.saturating_add(size);
-                if expanded > limits.max_expanded {
-                    return Err(OpenError::Corrupt(
-                        "the archive expands past the sanity limit".into(),
-                    ));
-                }
-                let name = normalize_entry_name(&String::from_utf8_lossy(&entry.path_bytes()));
-                let keep = entry.header().entry_type().is_file()
-                    && sane_name(&name)
-                    && is_supported(&ext_of(&name))
-                    && size <= limits.ceiling;
-                if !keep {
-                    // Skip (never index) an unsupported or oversized entry — but
-                    // drain it ourselves in cancellable chunks: the tar iterator
-                    // would otherwise read through it in one opaque pass, and for
-                    // a bomb that's the whole point of the chunked cancel check.
-                    if !read_cancellable(&mut entry, size, &mut io::sink(), &cancel)
-                        .map_err(stream_read_err)?
-                    {
-                        return Err(OpenError::Cancelled);
-                    }
-                    continue;
-                }
-                name_bytes += name.len() as u64;
-                if name_bytes > limits.max_name_bytes {
-                    return Err(OpenError::Corrupt(
-                        "the archive has too many entries".into(),
-                    ));
-                }
-                // The streaming budget gate: refuse before reserving (prediction
-                // is the real defense; `try_reserve` is the backstop). A replaced
-                // duplicate's bytes are released, so they don't double-count.
-                let replaced = latest.get(&name).map_or(0, |b| b.len() as u64);
-                let needed = (resident - replaced).saturating_add(size);
-                if needed > budget {
-                    return Err(OpenError::TooLarge { needed, budget });
-                }
-                let mut buf = Vec::new();
-                buf.try_reserve_exact(size as usize)
-                    .map_err(|_| OpenError::OutOfMemory)?;
-                if !read_cancellable(&mut entry, size, &mut buf, &cancel)
-                    .map_err(stream_read_err)?
-                {
-                    return Err(OpenError::Cancelled);
-                }
-                // `read_cancellable` treats a short clean EOF as success (its 7z
-                // callers bound-check elsewhere); here a short entry means the
-                // stream ended mid-file — a truncated archive, not a viewable item.
-                if buf.len() as u64 != size {
-                    return Err(OpenError::Corrupt("archive entry truncated".into()));
-                }
-                resident = (resident - replaced).saturating_add(buf.len() as u64);
-                latest.insert(name, buf);
-            }
-        }
-        // Drain the codec to EOF: the tar iterator stops at the end-of-archive
-        // marker, but gzip/bzip2/zstd validate their trailing checksums only
-        // when the stream is read through — and the progress bar's compressed
-        // count only reaches the file length once everything is consumed.
-        // Bounded by the same cancel checks and expanded-work cap.
-        {
-            let mut codec = archive.into_inner().into_inner();
-            let mut staging = [0u8; 64 * 1024];
-            loop {
-                if cancel() {
-                    return Err(OpenError::Cancelled);
-                }
-                let n = codec.read(&mut staging).map_err(stream_read_err)?;
-                if n == 0 {
-                    break;
-                }
-                expanded = expanded.saturating_add(n as u64);
-                if expanded > limits.max_expanded {
-                    return Err(OpenError::Corrupt(
-                        "the archive expands past the sanity limit".into(),
-                    ));
-                }
-            }
-        }
+        let (files, items, store) =
+            stream_tarball(kind, counted, &is_supported, progress, budget, limits)?;
         // Snap the bar to complete (belt: padding rounding could leave a byte).
         if let Some(p) = progress {
             let done = p.done();
@@ -408,23 +233,11 @@ impl TarSource {
                 p.add_done(total - done);
             }
         }
-
-        let mut files = Vec::with_capacity(latest.len());
-        let mut store = Vec::with_capacity(latest.len());
-        for (name, bytes) in latest {
-            files.push(TarFile {
-                name,
-                size: bytes.len() as u64,
-                offset: 0,
-            });
-            store.push(bytes);
-        }
-        let items = (0..files.len()).collect();
         Ok(Self {
             path,
             files,
             items,
-            store: Store::Eager(store),
+            store,
         })
     }
 
@@ -455,6 +268,274 @@ impl TarSource {
             ));
         }
         Ok(buf)
+    }
+}
+
+/// The lazy index pass over a plain tar byte stream (split from
+/// [`TarSource::open_tar`] so the fuzz harness can drive it over raw bytes):
+/// header-only, seeking over file data, with the metadata quota and the
+/// index-table caps applied. Returns the recorded files + the supported-item
+/// index map.
+fn index_tar<R: Read + Seek>(
+    reader: R,
+    file_len: u64,
+    is_supported: &dyn Fn(&str) -> bool,
+    progress: Option<&OpenProgress>,
+    limits: &OpenLimits,
+) -> Result<(Vec<TarFile>, Vec<usize>), OpenError> {
+    let quota = Arc::new(AtomicU64::new(META_QUOTA));
+    let metered = MeteredReader {
+        inner: reader,
+        quota: Arc::clone(&quota),
+    };
+    let mut archive = tar::Archive::new(metered);
+    // Last-wins by name (tar append mode): a BTreeMap both dedups and hands
+    // back the same ascending name order ZIP's post-scan sort produces.
+    let mut latest: BTreeMap<String, (u64, u64)> = BTreeMap::new();
+    let mut walked = 0usize;
+    let mut name_bytes = 0u64;
+    let mut prev_pos = 0u64;
+    let mut entries = archive
+        .entries_with_seek()
+        .map_err(|e| OpenError::Corrupt(e.to_string()))?;
+    loop {
+        if progress.is_some_and(|p| p.is_cancelled()) {
+            return Err(OpenError::Cancelled);
+        }
+        // Metadata quota for this step (headers + long-name/PAX payloads);
+        // the seek-based data skip doesn't read, so no disarm is needed.
+        quota.store(META_QUOTA, Ordering::Relaxed);
+        let Some(entry) = entries.next() else { break };
+        let entry = entry.map_err(|e| OpenError::Corrupt(e.to_string()))?;
+        walked += 1;
+        if walked > limits.max_entries {
+            return Err(OpenError::Corrupt(
+                "the archive has too many entries".into(),
+            ));
+        }
+        if let Some(p) = progress {
+            let pos = entry.raw_file_position();
+            p.add_done(pos.saturating_sub(prev_pos));
+            prev_pos = pos;
+        }
+        if !entry.header().entry_type().is_file() {
+            continue; // symlinks/hardlinks/devices/sparse — see module docs
+        }
+        // `path_bytes` resolves PAX/GNU long names; lossy is safe — entries
+        // are only ever read back by offset, never looked up by name.
+        let name = normalize_entry_name(&String::from_utf8_lossy(&entry.path_bytes()));
+        if !sane_name(&name) {
+            continue;
+        }
+        let (offset, size) = (entry.raw_file_position(), entry.size());
+        // A truncated tail entry (its data runs past EOF) can never render;
+        // skip it and keep the rest of the archive viewable.
+        if offset.saturating_add(size) > file_len {
+            continue;
+        }
+        name_bytes += name.len() as u64;
+        if name_bytes > limits.max_name_bytes {
+            return Err(OpenError::Corrupt(
+                "the archive has too many entries".into(),
+            ));
+        }
+        latest.insert(name, (offset, size));
+    }
+    if let Some(p) = progress {
+        p.add_done(file_len.saturating_sub(prev_pos));
+    }
+    let files: Vec<TarFile> = latest
+        .into_iter()
+        .map(|(name, (offset, size))| TarFile { name, size, offset })
+        .collect();
+    let items = files
+        .iter()
+        .enumerate()
+        .filter(|(_, f)| is_supported(&ext_of(&f.name)) && f.size <= limits.ceiling)
+        .map(|(i, _)| i)
+        .collect();
+    Ok((files, items))
+}
+
+/// The eager streaming pass over a compressed tar byte stream (split from
+/// [`TarSource::open_compressed`] so the fuzz harness can drive it over raw
+/// bytes): decode via the codec seam, keep supported entries under the budget,
+/// drain the rest, then drain the codec to EOF for trailer validation.
+fn stream_tarball<R: Read + 'static>(
+    kind: ArchiveKind,
+    input: R,
+    is_supported: &dyn Fn(&str) -> bool,
+    progress: Option<&OpenProgress>,
+    budget: u64,
+    limits: &OpenLimits,
+) -> Result<(Vec<TarFile>, Vec<usize>, Store), OpenError> {
+    let quota = Arc::new(AtomicU64::new(META_QUOTA));
+    let metered = MeteredReader {
+        inner: decompressor(kind, input)?,
+        quota: Arc::clone(&quota),
+    };
+    let mut archive = tar::Archive::new(metered);
+    let cancel = || progress.is_some_and(|p| p.is_cancelled());
+
+    let mut latest: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+    let mut resident = 0u64;
+    let mut expanded = 0u64;
+    let mut walked = 0usize;
+    let mut name_bytes = 0u64;
+    {
+        let mut entries = archive
+            .entries()
+            .map_err(|e| OpenError::Corrupt(e.to_string()))?;
+        loop {
+            if cancel() {
+                return Err(OpenError::Cancelled);
+            }
+            quota.store(META_QUOTA, Ordering::Relaxed);
+            let Some(entry) = entries.next() else { break };
+            let mut entry = entry.map_err(|e| OpenError::Corrupt(e.to_string()))?;
+            walked += 1;
+            if walked > limits.max_entries {
+                return Err(OpenError::Corrupt(
+                    "the archive has too many entries".into(),
+                ));
+            }
+            // Our own data reads below are exempt from the metadata quota.
+            quota.store(u64::MAX, Ordering::Relaxed);
+            let size = entry.size();
+            expanded = expanded.saturating_add(size);
+            if expanded > limits.max_expanded {
+                return Err(OpenError::Corrupt(
+                    "the archive expands past the sanity limit".into(),
+                ));
+            }
+            let name = normalize_entry_name(&String::from_utf8_lossy(&entry.path_bytes()));
+            let keep = entry.header().entry_type().is_file()
+                && sane_name(&name)
+                && is_supported(&ext_of(&name))
+                && size <= limits.ceiling;
+            if !keep {
+                // Skip (never index) an unsupported or oversized entry — but
+                // drain it ourselves in cancellable chunks: the tar iterator
+                // would otherwise read through it in one opaque pass, and for
+                // a bomb that's the whole point of the chunked cancel check.
+                if !read_cancellable(&mut entry, size, &mut io::sink(), &cancel)
+                    .map_err(stream_read_err)?
+                {
+                    return Err(OpenError::Cancelled);
+                }
+                continue;
+            }
+            name_bytes += name.len() as u64;
+            if name_bytes > limits.max_name_bytes {
+                return Err(OpenError::Corrupt(
+                    "the archive has too many entries".into(),
+                ));
+            }
+            // The streaming budget gate: refuse before reserving (prediction
+            // is the real defense; `try_reserve` is the backstop). A replaced
+            // duplicate's bytes are released, so they don't double-count.
+            let replaced = latest.get(&name).map_or(0, |b| b.len() as u64);
+            let needed = (resident - replaced).saturating_add(size);
+            if needed > budget {
+                return Err(OpenError::TooLarge { needed, budget });
+            }
+            let mut buf = Vec::new();
+            buf.try_reserve_exact(size as usize)
+                .map_err(|_| OpenError::OutOfMemory)?;
+            if !read_cancellable(&mut entry, size, &mut buf, &cancel).map_err(stream_read_err)? {
+                return Err(OpenError::Cancelled);
+            }
+            // `read_cancellable` treats a short clean EOF as success (its 7z
+            // callers bound-check elsewhere); here a short entry means the
+            // stream ended mid-file — a truncated archive, not a viewable item.
+            if buf.len() as u64 != size {
+                return Err(OpenError::Corrupt("archive entry truncated".into()));
+            }
+            resident = (resident - replaced).saturating_add(buf.len() as u64);
+            latest.insert(name, buf);
+        }
+    }
+    // Drain the codec to EOF: the tar iterator stops at the end-of-archive
+    // marker, but gzip/bzip2/zstd validate their trailing checksums only
+    // when the stream is read through — and the progress bar's compressed
+    // count only reaches the file length once everything is consumed.
+    // Bounded by the same cancel checks and expanded-work cap.
+    {
+        let mut codec = archive.into_inner().into_inner();
+        let mut staging = [0u8; 64 * 1024];
+        loop {
+            if cancel() {
+                return Err(OpenError::Cancelled);
+            }
+            let n = codec.read(&mut staging).map_err(stream_read_err)?;
+            if n == 0 {
+                break;
+            }
+            expanded = expanded.saturating_add(n as u64);
+            if expanded > limits.max_expanded {
+                return Err(OpenError::Corrupt(
+                    "the archive expands past the sanity limit".into(),
+                ));
+            }
+        }
+    }
+    let mut files = Vec::with_capacity(latest.len());
+    let mut store = Vec::with_capacity(latest.len());
+    for (name, bytes) in latest {
+        files.push(TarFile {
+            name,
+            size: bytes.len() as u64,
+            offset: 0,
+        });
+        store.push(bytes);
+    }
+    let items = (0..files.len()).collect();
+    Ok((files, items, Store::Eager(store)))
+}
+
+/// Raw-byte entry points for the cargo-fuzz harness (`fuzz/`): arbitrary bytes
+/// must only ever produce `Ok`/`Err` — never a panic, an unbounded allocation,
+/// or non-termination. Never compiled into a ship build.
+#[cfg(feature = "fuzz-internals")]
+pub mod fuzz {
+    use super::*;
+
+    fn limits() -> OpenLimits {
+        OpenLimits {
+            ceiling: 1 << 20,
+            max_entries: 4096,
+            max_name_bytes: 1 << 20,
+            max_expanded: 1 << 24,
+        }
+    }
+
+    /// The lazy plain-tar index pass over raw bytes.
+    pub fn tar_index(data: &[u8]) {
+        let _ = index_tar(
+            io::Cursor::new(data),
+            data.len() as u64,
+            &|_| true,
+            None,
+            &limits(),
+        );
+    }
+
+    /// The eager streaming pass over raw bytes, codec selected by `sel`.
+    pub fn tar_stream(sel: u8, data: &[u8]) {
+        let kind = match sel & 3 {
+            0 => ArchiveKind::TarGz,
+            1 => ArchiveKind::TarBz2,
+            2 => ArchiveKind::TarZst,
+            _ => ArchiveKind::TarXz,
+        };
+        let _ = stream_tarball(
+            kind,
+            io::Cursor::new(data.to_vec()),
+            &|_| true,
+            None,
+            1 << 24,
+            &limits(),
+        );
     }
 }
 

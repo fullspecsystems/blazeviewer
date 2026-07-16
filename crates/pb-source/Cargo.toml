@@ -42,3 +42,9 @@ lzma-rust2 = { version = "0.16", default-features = false, features = ["std", "x
 # Fixture generation only: XzWriter needs the encoder feature (test builds unify
 # it in; ship builds stay decode-only).
 lzma-rust2 = { version = "0.16", default-features = false, features = ["std", "xz", "optimization", "encoder"] }
+
+[features]
+# Expose raw-byte open entry points for the cargo-fuzz harness (fuzz/) — the
+# project rule is "fuzz the decoders", and archive parsers eat hostile bytes.
+# Never enabled in a ship build.
+fuzz-internals = []
