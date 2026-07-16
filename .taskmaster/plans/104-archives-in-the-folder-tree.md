@@ -1,10 +1,17 @@
 # Task 104 — Archives in the folder tree: visible, navigable, never auto-entered
 
-**Status:** planned — rev1 (2026-07-16, not yet Codex-reviewed)
-**Proposed task id:** 104 (next free — `tasks.json` tops out at **101**; plans 102/103 exist
-without task entries yet; add the task entry when this plan is approved)
-**Depends on:** **#102's `archive_kind` classifier** — hard dependency, see *Coordination*.
+**Status:** planned — rev2 (2026-07-16, not yet Codex-reviewed)
+**Proposed task id:** 104 (add the task entry when this plan is approved)
+**Depends on:** `pb_source::archive_kind` — **already shipped** on `feat/enhanced-archives`
+(`crates/pb-source/src/kind.rs:61`). See *Coordination*: **base this on that branch, not on
+`main`.**
 **Scope:** all three platforms. Core + `pb-hud` are shared; each shell adds one glyph case.
+
+> **rev2 (2026-07-16):** rev1 was written against `main`, where #102/#103 did not exist yet,
+> and it treated the classifier as a hypothetical dependency to coordinate around. It has since
+> **landed** — along with the whole tar family, RAR5, and comic formats. Every "when #102 lands"
+> hedge below is now a statement of fact, and the eager/lazy reasoning that rev1 argued from
+> prose is now encoded as [`ArchiveKind::eager()`](../../crates/pb-source/src/kind.rs).
 
 ## Problem
 
@@ -23,16 +30,21 @@ their images join the deck). Discussed and rejected 2026-07-16 (owner: *"just li
 as part of normal browsing is fraught with problems we shouldn't have to deal with"*). Recorded
 here because it is the obvious idea and will be re-proposed otherwise:
 
-1. **Half the formats cannot be enumerated without decompressing them.** `pb-source` splits
-   into *lazy* random-access (zip, cbz, tar, cbt — a cheap index pass) and *eager* (7z,
-   tar.gz, tar.bz2, tar.zst — "pays the whole decompression once on open",
-   `crates/pb-source/src/lib.rs:17-32`). Listing a folder holding three 2 GB `.7z` files
+1. **Half the formats cannot be enumerated without decompressing them.** This is not a
+   judgement call — it is **encoded**: `ArchiveKind::eager()`
+   (`crates/pb-source/src/kind.rs:38`) is the canonical answer. Lazy: `Zip` (and so `.cbz`),
+   `Tar`. Eager: `SevenZ`, `TarGz`, `TarBz2`, `TarZst`, `TarXz`. `Rar` (and so `.cbr`) is
+   **mixed** — non-solid entries decode per entry, solid groups eagerly at open, and
+   *solidness is a property of the archive rather than the suffix*, so you cannot even
+   predict the cost from the filename. Listing a folder holding three 2 GB `.7z` files
    would mean decompressing 6 GB into RAM **to draw a directory listing**, and
    `seven_z_projected_bytes`' pre-flight would refuse them mid-scan during an operation the
    user never asked for. Scan cost becomes proportional to archive *contents* rather than
    directory size — on the SMB corpus, brutal. That is a straight prime-directive violation.
 2. **It would therefore be format-dependent**, which is an unexplainable user model: *"why
-   did it descend into `vacation.zip` but not `vacation.7z`?"*
+   did it descend into `vacation.zip` but not `vacation.7z`?"* — and with RAR, not even
+   *format*-dependent but per-file, which is worse: two `.cbr`s side by side, one cheap and
+   one not, with nothing on screen to distinguish them.
 3. **No file manager blends.** Explorer makes a `.zip` *navigable* — you double-click into
    it — but never merges its contents into the parent listing. Navigation is the idiom;
    merging is not.
@@ -125,7 +137,8 @@ obvious at a glance.
 The owner floated per-format glyphs ("maybe we even can have separate icons for each format,
 but the key thing is making them distinct from folders"). **Recommendation: one archive glyph
 for v1.** The format is already legible in the row — it is the file extension, right there in
-the name. Per-format glyphs are cheap to add later behind #102's `ArchiveKind` if wanted.
+the name. `ArchiveKind` is `Copy` and already carried, so per-format glyphs are a `match` away
+whenever they're wanted; nothing here forecloses it.
 
 The distinction that is genuinely *invisible* is **which archives are locked** — which is the
 owner's own example ("a folder of encrypted 7z archives"). But see *Risks* #2: it costs an
@@ -133,20 +146,26 @@ open per row, which is precisely the cost this design removes. **Not in v1.**
 
 ## Coordination — ⚠ read before starting
 
-A **parallel agent is working in `../blazeviewer-wt1`** on #102/#103 (tar family, RAR5), in
-these exact files.
+**The dependency is done.** #102 (tar family) and #103 (RAR5) shipped on
+**`feat/enhanced-archives`** — four commits, both wired into both shells, with `tasks.json`
+entries. `pb_source::archive_kind` (`crates/pb-source/src/kind.rs:61`) is the single
+classifier this plan needs, and it already covers every format including the comic ones
+(`"cbz" => Zip`, `"rar" | "cbr" => Rar`).
 
-- **Use #102's `pb_source::archive_kind`. Do not add a fourth `is_archive`.** There are
-  already three copies (`crates/pb-app/src/main.rs:4392`, `crates/pb-mac-ffi/src/lib.rs:3197`,
-  plus `scan.rs`'s ad-hoc `is_7z`) which #102 notes "only agree by luck". A fourth that drifts
-  would show `.cbz` as an archive row in the tree and then refuse to open it — the worst
-  possible failure, because it is *offered* and then declined.
-- Therefore **land this after #102's phase 1** (the classifier), or coordinate the classifier
-  landing first. Everything else here is independent of which formats exist.
-- 🪤 **#102's plan cites stale line anchors** (as of 2026-07-16 it says `is_archive` at
-  main.rs:4284 → really **4392**; `begin_archive_open` at 1008 → really **1035**; mac-ffi
-  3165 → **3197**, 2696 → **2728**). The anchors in *this* plan were verified at rev1 and will
-  drift the same way — re-grep, don't trust either document's line numbers.
+- **Base this work on that branch (or on `main` once it merges), never on `main` before.**
+  rev1 was authored on `main`, where none of it existed — a review from there would correctly
+  report a dangling dependency.
+- **Use `archive_kind`. Do not add a fourth `is_archive`.** It exists precisely because the
+  shells' predicates and `scan::open_archive`'s dispatch each hand-rolled a `zip|7z` check and
+  "only agreed by luck" (its own module doc says so). A fourth copy that drifts would show a
+  `.cbz` as an archive row and then refuse to open it — the worst failure available, because
+  the row is *offered* and then declined.
+- 🪤 **Line anchors drift fast in this tree.** #102's plan shipped citing anchors my subtitle
+  commits had already moved (`is_archive` main.rs:4284 → really **4392**; `begin_archive_open`
+  1008 → **1035**; mac-ffi 3165 → **3197**, 2696 → **2728**). The anchors in *this* plan were
+  verified at rev1/rev2 against `main` and will drift the same way — and once
+  `feat/enhanced-archives` merges, its own four commits move them again. **Re-grep; trust no
+  line number in any of these documents.**
 
 ## Phases
 
