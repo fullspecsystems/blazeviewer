@@ -93,6 +93,11 @@ final class SampleBufferPresenter {
     /// clock is what periodically drops video frames to hold A/V sync. Diagnostic only —
     /// never a shipping path.
     private let disableAudio = ProcessInfo.processInfo.environment["PB_NO_SB_AUDIO"] != nil
+    /// A/B experiment (PB_NO_PROGRESS): stop the ~20 Hz scrubber/progress publish during
+    /// playback, to test whether that SwiftUI churn (a CATransaction over the video ~20×/s)
+    /// is knocking the video off the direct-scanout overlay plane and dropping frames. The
+    /// scrubber freezes; the video keeps playing. Diagnostic only.
+    private let disableProgress = ProcessInfo.processInfo.environment["PB_NO_PROGRESS"] != nil
 
     init(
         sessionId: UInt64, scaleMode: UInt8, muted: Bool, startSecs: Double,
@@ -290,7 +295,7 @@ final class SampleBufferPresenter {
     }
 
     private func publishProgress() {
-        guard revealed else { return }
+        guard revealed, !disableProgress else { return }
         let pos = max(0, CMTimeGetSeconds(synchronizer.currentTime()))
         model?.updateVideoProgress(
             sessionId,
