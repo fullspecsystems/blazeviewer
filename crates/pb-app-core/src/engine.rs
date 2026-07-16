@@ -353,9 +353,15 @@ pub fn decode_item_for(
     if purpose == crate::decode_pool::Purpose::Thumb {
         // Videos poster through the normal routing below (already thumb-friendly);
         // for images, a cheap embedded EXIF thumbnail beats any full decode.
-        if !matches!(
+        //
+        // The guard is **positive on purpose**: this branch reads the item's whole
+        // encoded bytes, so only a kind we know is an image may reach it. Phrased
+        // negatively (`!= Video`) any future kind would opt *into* the read by
+        // default — which is how a non-image item ends up fully read just to draw a
+        // thumbnail.
+        if matches!(
             crate::video::item_kind(source, item),
-            crate::video::LibraryItemKind::Video(_)
+            crate::video::LibraryItemKind::Image
         ) {
             if let Ok(bytes) = source.bytes(item) {
                 if let Some(img) = pb_decode::exif_thumbnail(&bytes) {
@@ -390,102 +396,109 @@ pub fn decode_item_cancellable(
                     // playback path; any failure (missing codec, no container handler,
                     // corrupt file) degrades to the flat placeholder tile — the item stays
                     // visible, and the *play* attempt is where a precise error surfaces.
-    if let crate::video::LibraryItemKind::Video(container) = crate::video::item_kind(source, item) {
-        #[cfg(any(windows, target_os = "macos"))]
-        if let Some(path) = source.path(item) {
-            match pb_decode::decode_video_poster(path, fit, cancel) {
-                Ok(img) => return Ok(img),
-                Err(e) => {
-                    // macOS + ffvideo (task #84 §8, owner keep-both decision):
-                    // AVFoundation stays primary; FFmpeg posters only what it
-                    // refuses (MKV/WebM/… — the same split as playback).
-                    #[cfg(all(target_os = "macos", feature = "ffvideo"))]
-                    {
-                        let input = pb_decode::VideoInput::Path(path.to_path_buf());
-                        if let Ok(img) = pb_decode::ff_decode_video_poster(&input, fit, cancel) {
-                            return Ok(img);
+    match crate::video::item_kind(source, item) {
+        crate::video::LibraryItemKind::Video(container) => {
+            #[cfg(any(windows, target_os = "macos"))]
+            if let Some(path) = source.path(item) {
+                match pb_decode::decode_video_poster(path, fit, cancel) {
+                    Ok(img) => return Ok(img),
+                    Err(e) => {
+                        // macOS + ffvideo (task #84 §8, owner keep-both decision):
+                        // AVFoundation stays primary; FFmpeg posters only what it
+                        // refuses (MKV/WebM/… — the same split as playback).
+                        #[cfg(all(target_os = "macos", feature = "ffvideo"))]
+                        {
+                            let input = pb_decode::VideoInput::Path(path.to_path_buf());
+                            if let Ok(img) = pb_decode::ff_decode_video_poster(&input, fit, cancel)
+                            {
+                                return Ok(img);
+                            }
                         }
+                        eprintln!("video poster failed: {}: {e}", path.display());
                     }
-                    eprintln!("video poster failed: {}: {e}", path.display());
                 }
             }
-        }
-        // macOS archive entry with a container AVFoundation can't open: the Swift
-        // AVAssetImageGenerator round-trip below would never produce a poster —
-        // FFmpeg posters it in-process from the entry's bytes (task #84 §8).
-        #[cfg(all(target_os = "macos", feature = "ffvideo"))]
-        if source.path(item).is_none() && !container.macos_native() {
-            match source.bytes(item) {
-                Ok(data) => {
-                    let input = pb_decode::VideoInput::Bytes {
-                        data: std::sync::Arc::new(data),
-                        name: source.name(item).to_string(),
-                    };
+            // macOS archive entry with a container AVFoundation can't open: the Swift
+            // AVAssetImageGenerator round-trip below would never produce a poster —
+            // FFmpeg posters it in-process from the entry's bytes (task #84 §8).
+            #[cfg(all(target_os = "macos", feature = "ffvideo"))]
+            if source.path(item).is_none() && !container.macos_native() {
+                match source.bytes(item) {
+                    Ok(data) => {
+                        let input = pb_decode::VideoInput::Bytes {
+                            data: std::sync::Arc::new(data),
+                            name: source.name(item).to_string(),
+                        };
+                        match pb_decode::ff_decode_video_poster(&input, fit, cancel) {
+                            Ok(img) => return Ok(img),
+                            Err(e) => eprintln!("video poster failed: {}: {e}", source.name(item)),
+                        }
+                    }
+                    Err(e) => eprintln!("video poster read failed: {}: {e}", source.name(item)),
+                }
+            }
+            // Linux (task #84): the FFmpeg poster covers path and archive-byte items
+            // alike (one in-process reader; the thumbs strip gets these for free).
+            #[cfg(all(unix, not(target_os = "macos"), feature = "ffvideo"))]
+            {
+                let input = match source.path(item) {
+                    Some(p) => Some(pb_decode::VideoInput::Path(p.to_path_buf())),
+                    None => match source.bytes(item) {
+                        Ok(data) => Some(pb_decode::VideoInput::Bytes {
+                            data: std::sync::Arc::new(data),
+                            name: source.name(item).to_string(),
+                        }),
+                        Err(e) => {
+                            eprintln!("video poster read failed: {}: {e}", source.name(item));
+                            None
+                        }
+                    },
+                };
+                if let Some(input) = input {
                     match pb_decode::ff_decode_video_poster(&input, fit, cancel) {
                         Ok(img) => return Ok(img),
                         Err(e) => eprintln!("video poster failed: {}: {e}", source.name(item)),
                     }
                 }
-                Err(e) => eprintln!("video poster read failed: {}: {e}", source.name(item)),
             }
-        }
-        // Linux (task #84): the FFmpeg poster covers path and archive-byte items
-        // alike (one in-process reader; the thumbs strip gets these for free).
-        #[cfg(all(unix, not(target_os = "macos"), feature = "ffvideo"))]
-        {
-            let input = match source.path(item) {
-                Some(p) => Some(pb_decode::VideoInput::Path(p.to_path_buf())),
-                None => match source.bytes(item) {
-                    Ok(data) => Some(pb_decode::VideoInput::Bytes {
-                        data: std::sync::Arc::new(data),
-                        name: source.name(item).to_string(),
-                    }),
-                    Err(e) => {
-                        eprintln!("video poster read failed: {}: {e}", source.name(item));
-                        None
-                    }
-                },
-            };
-            if let Some(input) = input {
-                match pb_decode::ff_decode_video_poster(&input, fit, cancel) {
-                    Ok(img) => return Ok(img),
-                    Err(e) => eprintln!("video poster failed: {}: {e}", source.name(item)),
-                }
-            }
-        }
-        // An archive entry (no path): Windows posters it from the entry's in-RAM
-        // bytes through the same MF reader configuration — a transient fetch this
-        // decode worker drops after the poster (playback re-fetches and holds one
-        // Arc for its session).
-        #[cfg(windows)]
-        if source.path(item).is_none() {
-            match source.bytes(item) {
-                Ok(data) => {
-                    let input = pb_decode::VideoInput::Bytes {
-                        data: std::sync::Arc::new(data),
-                        name: source.name(item).to_string(),
-                    };
-                    match pb_decode::decode_video_poster_input(&input, fit, cancel) {
-                        Ok(img) => return Ok(img),
-                        Err(e) => {
-                            eprintln!("video poster failed: {}: {e}", source.name(item));
+            // An archive entry (no path): Windows posters it from the entry's in-RAM
+            // bytes through the same MF reader configuration — a transient fetch this
+            // decode worker drops after the poster (playback re-fetches and holds one
+            // Arc for its session).
+            #[cfg(windows)]
+            if source.path(item).is_none() {
+                match source.bytes(item) {
+                    Ok(data) => {
+                        let input = pb_decode::VideoInput::Bytes {
+                            data: std::sync::Arc::new(data),
+                            name: source.name(item).to_string(),
+                        };
+                        match pb_decode::decode_video_poster_input(&input, fit, cancel) {
+                            Ok(img) => return Ok(img),
+                            Err(e) => {
+                                eprintln!("video poster failed: {}: {e}", source.name(item));
+                            }
                         }
                     }
+                    Err(e) => eprintln!("video poster read failed: {}: {e}", source.name(item)),
                 }
-                Err(e) => eprintln!("video poster read failed: {}: {e}", source.name(item)),
             }
+            // macOS archive entry: the poster is generated by the Swift shell (AVFoundation
+            // can't build an AVAsset from bytes in Rust) and fed back into the ring as a
+            // preview→full upgrade — so mark this placeholder a *preview* to make that upgrade
+            // land in place (`drain_results`). See .taskmaster/plans/macos-archive-video-posters.md.
+            #[cfg(target_os = "macos")]
+            if source.path(item).is_none() {
+                let mut ph = video_placeholder(container);
+                ph.is_preview = true;
+                return Ok(ph);
+            }
+            return Ok(video_placeholder(container));
         }
-        // macOS archive entry: the poster is generated by the Swift shell (AVFoundation
-        // can't build an AVAsset from bytes in Rust) and fed back into the ring as a
-        // preview→full upgrade — so mark this placeholder a *preview* to make that upgrade
-        // land in place (`drain_results`). See .taskmaster/plans/macos-archive-video-posters.md.
-        #[cfg(target_os = "macos")]
-        if source.path(item).is_none() {
-            let mut ph = video_placeholder(container);
-            ph.is_preview = true;
-            return Ok(ph);
-        }
-        return Ok(video_placeholder(container));
+        // Exhaustive on purpose: everything below this match reads the item's whole
+        // encoded bytes, so only a kind we know is an image may fall through to it.
+        // A new kind gets a compile error here rather than a silent full read.
+        crate::video::LibraryItemKind::Image => {}
     }
     let bytes = source
         .bytes(item)

@@ -126,9 +126,13 @@ impl VideoContainer {
 
 /// Classify a filesystem path as a library item — the **scanner's** predicate (phase 1
 /// predicate split): images + loose videos. `None` = not a library file (skip it).
-/// Archive scanners never use this; they keep the images-only
-/// `pb_decode::is_supported_extension`, so a video inside a ZIP/7z is never indexed
-/// (video items are path-only by construction).
+/// Archive entries go through the separate `scan::is_supported_archive_entry` instead.
+///
+/// ⚠ This doc used to say archive scanners were images-only, "so a video inside a ZIP/7z
+/// is never indexed (video items are path-only by construction)". That stopped being true
+/// when archived videos gained the `VideoInput::Bytes` seam — `scan::is_supported_archive_entry`
+/// is a **union** predicate (image ∪ video), and `zip_indexes_videos_under_a_union_predicate…`
+/// pins it. Do not rely on "archive entries are images" or on video being path-only.
 pub fn classify_library_file(path: &Path) -> Option<LibraryItemKind> {
     let ext = path.extension()?.to_str()?;
     if pb_decode::is_supported_extension(ext) {

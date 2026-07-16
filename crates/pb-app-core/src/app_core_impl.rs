@@ -595,12 +595,14 @@ impl AppCore {
         // Videos never persist a rotation (task #79 action matrix): footage can rotate
         // mid-clip, so there is no single correct value to write. The in-memory display
         // rotation stays available (and stays live during playback).
-        if matches!(
-            crate::video::item_kind(self.source.as_ref(), item),
-            crate::video::LibraryItemKind::Video(_)
-        ) {
-            self.show_toast("Can't save rotation for video");
-            return;
+        match crate::video::item_kind(self.source.as_ref(), item) {
+            crate::video::LibraryItemKind::Video(_) => {
+                self.show_toast("Can't save rotation for video");
+                return;
+            }
+            // Exhaustive so a new kind states its own answer: what follows assumes a
+            // rotatable image file on disk.
+            crate::video::LibraryItemKind::Image => {}
         }
         if !crate::save_rotation::is_orientation_writable(&path) {
             self.show_toast("Save rotation: JPEG only");
@@ -6541,36 +6543,41 @@ impl AppCore {
         // the item's lifetime (comparable to the sync fs::read the image path below
         // already does here). An archive entry skips the probe: it would inflate the
         // whole entry on the event loop; playback's `Opened` carries duration anyway.
-        if let crate::video::LibraryItemKind::Video(_) =
-            crate::video::item_kind(self.source.as_ref(), item)
-        {
-            // Off to a worker: opening a container is an unbounded wait (damaged file,
-            // network share, a codec the OS reader labours over), and the event loop must
-            // never take it. Record `Loading` — which the panel shows honestly, and which
-            // also stops a second worker being spawned for this item — and let `tick`
-            // pick the result up.
-            self.exif_cache
-                .insert(item, crate::app_core::ItemDetails::loading());
-            // Two generations, deliberately: the deck's (has index `item` been reassigned
-            // under us?) and a fresh one for this catalog alone (which file's tracks are
-            // these?). See `AppCore::catalog_seq` — handing the deck's to both is what let a
-            // picked track resolve against the next film's catalog.
-            self.catalog_seq += 1;
-            self.details_probe = Some(crate::media_details::spawn(
-                &self.source,
-                item,
-                self.details_gen,
-                self.catalog_seq,
-                self.source.name(item).to_string(),
-            ));
-            return;
-        }
-        if let Ok(bytes) = self.source.bytes(item) {
-            let fields = read_exif_fields(&bytes);
-            self.exif_cache.insert(
-                item,
-                crate::app_core::ItemDetails::ready(bytes.len() as u64, fields),
-            );
+        // Exhaustive on purpose: the `Image` arm reads the item's **entire** encoded
+        // bytes synchronously, on the event loop. That is only a bounded cost for a
+        // photo, so every kind must state its own answer here rather than inherit the
+        // read by falling past a video-shaped `if let`.
+        match crate::video::item_kind(self.source.as_ref(), item) {
+            crate::video::LibraryItemKind::Video(_) => {
+                // Off to a worker: opening a container is an unbounded wait (damaged file,
+                // network share, a codec the OS reader labours over), and the event loop must
+                // never take it. Record `Loading` — which the panel shows honestly, and which
+                // also stops a second worker being spawned for this item — and let `tick`
+                // pick the result up.
+                self.exif_cache
+                    .insert(item, crate::app_core::ItemDetails::loading());
+                // Two generations, deliberately: the deck's (has index `item` been reassigned
+                // under us?) and a fresh one for this catalog alone (which file's tracks are
+                // these?). See `AppCore::catalog_seq` — handing the deck's to both is what let a
+                // picked track resolve against the next film's catalog.
+                self.catalog_seq += 1;
+                self.details_probe = Some(crate::media_details::spawn(
+                    &self.source,
+                    item,
+                    self.details_gen,
+                    self.catalog_seq,
+                    self.source.name(item).to_string(),
+                ));
+            }
+            crate::video::LibraryItemKind::Image => {
+                if let Ok(bytes) = self.source.bytes(item) {
+                    let fields = read_exif_fields(&bytes);
+                    self.exif_cache.insert(
+                        item,
+                        crate::app_core::ItemDetails::ready(bytes.len() as u64, fields),
+                    );
+                }
+            }
         }
     }
 
