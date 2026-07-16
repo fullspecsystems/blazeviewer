@@ -18,22 +18,45 @@ use serde::{Deserialize, Serialize};
 /// question: you picked Chinese on Ad Astra, pressed `C` twice, and got English back. The
 /// two answers can only survive each other if they are stored separately.
 ///
-/// Owner decisions (2026-07-14, reaffirmed 2026-07-15), both chosen for predictability:
+/// Owner decisions, chosen for predictability:
 ///
-/// - **Off means off.** Forced subtitles do *not* leak through. The alternative
-///   (VLC-style: "off" still shows forced signs) means text appears on screen while the UI
-///   says subtitles are off, with no way to get true silence.
-/// - **Automatic prefers forced-and-matching-the-audio**, then falls back to the
-///   container's default, then to anything renderable. It deliberately does **not** follow
-///   the system language or OS accessibility settings: turning subtitles on by itself is
-///   the kind of surprise that makes people hunt through Settings. Nothing here can turn
-///   subtitles on — [`enabled`](Self::enabled) is the user's, and only `C` and the picker
-///   set it.
+/// - **`C` governs *dialogue* subtitles.** Forced signs are a separate layer — see
+///   [`always_forced`](Self::always_forced).
+/// - **`Automatic` means "the full dialogue track"**: the container's default, else any
+///   non-forced track, else (only if nothing else exists) a forced one. It deliberately
+///   does **not** follow the system language or OS accessibility settings: turning
+///   subtitles on by itself is the kind of surprise that makes people hunt through
+///   Settings. Nothing here can turn *dialogue* subtitles on — [`enabled`](Self::enabled)
+///   is the user's, and only `C` and the picker set it.
+///
+/// > **Reversed 2026-07-16 (owner):** the 2026-07-14 rule was *"Off means off — forced
+/// > subtitles do not leak through"*, on the reasoning that text appearing while the UI
+/// > says off, with no way to get true silence, is worse. The owner reversed it — *"it
+/// > should work the way every other movie-playing application works"* — and the original
+/// > objection is answered by [`always_forced`](Self::always_forced) **being a setting**:
+/// > the escape hatch exists, it is just not the default. See that field for the why.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct SubtitleSelection {
-    /// `C`. Whether subtitles show at all. Persisted as `settings.subtitles` — an on/off
-    /// preference is not a record of what you watched.
+    /// `C`. Whether **dialogue** subtitles show. Persisted as `settings.subtitles` — an
+    /// on/off preference is not a record of what you watched.
+    ///
+    /// Not the same question as "is anything on screen": with
+    /// [`always_forced`](Self::always_forced) a film's forced signs show while this is
+    /// `false`. That is the point — they answer different questions.
     pub enabled: bool,
+    /// Show forced subtitles even when [`enabled`](Self::enabled) is `false` (task #99).
+    /// Mirrors `settings.forced_subtitles`; default **on**.
+    ///
+    /// The forced flag means *"show this even if subtitles are off"* — it is how you read
+    /// the Elvish in *Lord of the Rings*, which the director intends everyone to read. It
+    /// is part of the film, not an aid you switch on, which is why Apple, mpv, VLC and
+    /// every Blu-ray player show these without being asked.
+    ///
+    /// ⚠ **This is why [`automatic`] must NOT prefer forced tracks.** If the forced signs
+    /// are already on screen passively, an `Automatic` that resolved to the forced track
+    /// would make pressing `C` do **nothing visible** on exactly the films where forced
+    /// tracks exist. The two rules only work as a pair.
+    pub always_forced: bool,
     /// WHICH subtitles show, when [`enabled`](Self::enabled). Never expresses "off": that
     /// is the field above, and keeping them apart is the whole point.
     pub want: SubtitleWant,
@@ -75,6 +98,15 @@ pub struct SubtitlePreference {
     /// Whether the picked track was SDH. Choosing "Arabic (SDH)" over plain Arabic is a
     /// deliberate accessibility choice, so it should survive to the next episode.
     pub hearing_impaired: bool,
+    /// Whether the picked track was **forced**. Carried for the same reason as
+    /// `hearing_impaired`, and it became load-bearing the moment forced tracks got a life
+    /// of their own (task #99).
+    ///
+    /// Without it, a forced-English and a full-English track score **identically** here —
+    /// same language, same SDH — so the tie broke on *track order*. Picking "English ·
+    /// SubRip" on one film could silently land on "English · Forced" in the next, which
+    /// reads as the subtitles having mysteriously stopped working.
+    pub forced: bool,
 }
 
 /// One row of the track picker — a **command**, not the state.
@@ -97,22 +129,30 @@ impl SubtitleSelection {
     }
 
     /// Subtitles on, app-chosen: the state `C` produces when you have picked nothing.
+    ///
+    /// ⚠ Leaves [`always_forced`](Self::always_forced) at its `Default` (`false`) — it is a
+    /// *setting*, not part of "what did the user pick", and only
+    /// [`SubtitleEngine::from_settings`](crate::subtitle_engine::SubtitleEngine::from_settings)
+    /// and `apply_settings` know its real value. So **never assign this over a live
+    /// selection** in app code, or you silently switch the setting off; the live mutators
+    /// ([`toggle`](Self::toggle) / [`apply`](Self::apply)) preserve it by construction,
+    /// which is why they exist.
     pub fn automatic() -> Self {
         Self {
             enabled: true,
             want: SubtitleWant::Automatic,
-            preference: None,
+            ..Self::default()
         }
     }
 
     /// Subtitles on, showing exactly `id`. (Carries no preference: only
     /// [`apply`](Self::apply) can build one, because only it has the catalog to read the
-    /// track's language from.)
+    /// track's language from.) Same `always_forced` caveat as [`automatic`](Self::automatic).
     pub fn track(id: TrackId) -> Self {
         Self {
             enabled: true,
             want: SubtitleWant::Track(id),
-            preference: None,
+            ..Self::default()
         }
     }
 
@@ -153,15 +193,21 @@ impl SubtitleSelection {
         }
     }
 
-    /// Which track is on screen, given this selection and this file. `None` = show nothing,
-    /// which is a normal answer rather than a failure.
+    /// The **dialogue** track this selection chooses for this file — the question the
+    /// picker is asking. `None` = the user has dialogue subtitles off, or this file carries
+    /// none; both are normal answers rather than failures.
+    ///
+    /// ⚠ **Not what is drawn** — that is [`resolve_display`](Self::resolve_display), which
+    /// adds the passive forced layer. The split is deliberate: the picker's `Off` row must
+    /// tick when the user has chosen off, and it would not if this function reported the
+    /// forced signs showing underneath. One function per question.
     pub fn resolve<'a>(
         &self,
         catalog: &'a MediaTrackCatalog,
         audio_language: Option<&str>,
     ) -> Option<&'a MediaTrack> {
         if !self.enabled {
-            return None; // Off means off. No forced exception.
+            return None; // no *dialogue*; forced signs are resolve_display's business
         }
         if let SubtitleWant::Track(id) = self.want {
             if let Some(t) = catalog
@@ -180,35 +226,80 @@ impl SubtitleSelection {
         }
         automatic(catalog, audio_language, self.preference.as_ref())
     }
+
+    /// What is **actually drawn** for this file: the chosen dialogue track if there is one,
+    /// otherwise the passive forced layer. `None` = a genuinely clean picture.
+    ///
+    /// This is the whole of the 2026-07-16 model, and it is three lines because the two
+    /// questions were kept apart:
+    ///
+    /// | `enabled` | `always_forced` | drawn |
+    /// |---|---|---|
+    /// | `false` | `true` | the film's forced signs, if any match the audio |
+    /// | `false` | `false` | nothing — true silence, the escape hatch |
+    /// | `true` | either | the dialogue track ([`resolve`](Self::resolve)) |
+    ///
+    /// Forced signs deliberately do **not** stack on top of a dialogue track: if you are
+    /// already reading every line, the signs are in there too, and drawing both would
+    /// double up.
+    pub fn resolve_display<'a>(
+        &self,
+        catalog: &'a MediaTrackCatalog,
+        audio_language: Option<&str>,
+    ) -> Option<&'a MediaTrack> {
+        self.resolve(catalog, audio_language).or_else(|| {
+            self.always_forced
+                .then(|| forced_for_audio(catalog, audio_language))?
+        })
+    }
 }
 
-/// The app's own choice, in preference order.
-fn automatic<'a>(
+/// The film's forced track for the language you are hearing, if it has one.
+///
+/// **An unknown audio language matches nothing**, deliberately: guessing would put French
+/// signs over an English film. Forced subtitles only make sense *against* the audio they
+/// were authored to annotate.
+fn forced_for_audio<'a>(
     catalog: &'a MediaTrackCatalog,
     audio_language: Option<&str>,
+) -> Option<&'a MediaTrack> {
+    let audio = audio_language?;
+    catalog
+        .subtitles
+        .tracks
+        .iter()
+        .filter(|t| renderable(t))
+        .find(|t| t.flags.forced && same_language(t, audio))
+}
+
+/// The app's own choice of **dialogue** track, in preference order.
+///
+/// ⚠ **Nothing here prefers a forced track, and that is load-bearing** (task #99). Forced
+/// signs show passively via [`SubtitleSelection::always_forced`], so an `Automatic` that
+/// picked the forced track would make pressing `C` do nothing visible on precisely the
+/// films that have one. `Automatic` answers "which track do I read", and a forced track is
+/// not an answer to that — it is a handful of signs.
+fn automatic<'a>(
+    catalog: &'a MediaTrackCatalog,
+    _audio_language: Option<&str>,
     preference: Option<&SubtitlePreference>,
 ) -> Option<&'a MediaTrack> {
     let renderable = || catalog.subtitles.tracks.iter().filter(|t| renderable(t));
 
-    // 0. The language you last picked by hand. An explicit choice outranks every heuristic
-    //    below it — including the forced rule, which is only a guess at what you'd want.
+    // 0. The language you last picked by hand. An explicit choice outranks every heuristic.
     if let Some(pref) = preference {
         if let Some(t) = best_for_preference(catalog, pref) {
             return Some(t);
         }
     }
-    // 1. The owner's frozen rule: forced *and* the same language as what you're hearing —
-    //    the signs and alien dialogue in the film you chose. An unknown audio language
-    //    matches nothing: guessing would show French signs over an English film.
-    if let Some(audio) = audio_language {
-        if let Some(t) = renderable().find(|t| t.flags.forced && same_language(t, audio)) {
-            return Some(t);
-        }
-    }
-    // 2. The track the container's author marked default.
-    // 3. Anything we can render.
+    // 1. The container author's pick — unless it is the forced track, which answers a
+    //    different question than "which dialogue track".
+    // 2. Any full track.
+    // 3. Only forced tracks exist. Something you can read beats nothing, and it is what you
+    //    asked for by pressing `C`.
     renderable()
-        .find(|t| t.flags.default)
+        .find(|t| t.flags.default && !t.flags.forced)
+        .or_else(|| renderable().find(|t| !t.flags.forced))
         .or_else(|| renderable().next())
 }
 
@@ -218,6 +309,10 @@ fn automatic<'a>(
 /// **Ranked, not exact-matched.** A "Portuguese (BR)" pick must still land on a plain
 /// "Portuguese" track next episode rather than falling through to English, and an SDH pick
 /// should *prefer* an SDH track without *requiring* one.
+///
+/// The **forced** match outranks the SDH one: a forced/full mix-up changes *how much text
+/// you see* (a few signs vs every line), which reads as the subtitles being broken, whereas
+/// an SDH mix-up only adds or drops sound cues.
 fn best_for_preference<'a>(
     catalog: &'a MediaTrackCatalog,
     pref: &SubtitlePreference,
@@ -227,8 +322,13 @@ fn best_for_preference<'a>(
         let Some(rank) = language_rank(t, &pref.language) else {
             continue;
         };
-        // Language dominates; the SDH match only breaks ties within one language.
-        let score = rank * 2 + u8::from(t.flags.hearing_impaired == pref.hearing_impaired);
+        // Language dominates; forced then SDH break ties within one language. Without the
+        // forced term, a forced-English and a full-English track score the same and the tie
+        // breaks on *track order* — so "I picked full English" could land on forced English
+        // in the next film.
+        let score = rank * 4
+            + u8::from(t.flags.forced == pref.forced) * 2
+            + u8::from(t.flags.hearing_impaired == pref.hearing_impaired);
         if best.is_none_or(|(_, b)| score > b) {
             best = Some((t, score));
         }
@@ -266,6 +366,7 @@ fn preference_of(t: &MediaTrack) -> Option<SubtitlePreference> {
     Some(SubtitlePreference {
         language: t.language.clone()?,
         hearing_impaired: t.flags.hearing_impaired,
+        forced: t.flags.forced,
     })
 }
 
@@ -895,23 +996,144 @@ mod tests {
         assert!(SubtitleSelection::off().resolve(&c, Some("en")).is_none());
     }
 
-    /// Owner decision: Automatic = forced, matching the audio language.
+    /// Owner decision (2026-07-16, reversing 2026-07-14): **Automatic = the full dialogue
+    /// track**, never the forced one.
+    ///
+    /// This is only safe because forced signs show *passively* now (`always_forced`). If
+    /// Automatic still preferred forced, pressing `C` on a film with a forced track would
+    /// change **nothing on screen** — you were already seeing those signs. The two rules
+    /// only work as a pair.
     #[test]
-    fn automatic_shows_a_forced_track_matching_the_audio() {
+    fn automatic_picks_the_dialogue_track_never_the_forced_one() {
         let c = catalog(vec![
-            sub(0, Some("en"), false, TrackCapability::SupportedText), // full English
+            sub(0, Some("en"), false, TrackCapability::SupportedText), // full English ✓
             sub(1, Some("fr"), true, TrackCapability::SupportedText),  // French forced
-            sub(2, Some("en"), true, TrackCapability::SupportedText),  // English forced ✓
+            sub(2, Some("en"), true, TrackCapability::SupportedText),  // English forced
         ]);
         let got = SubtitleSelection::automatic()
             .resolve(&c, Some("en"))
             .expect("match");
-        assert_eq!(got.id.local_id, 2, "forced AND the audio's language");
+        assert_eq!(
+            got.id.local_id, 0,
+            "you pressed C to READ — the English forced track is a handful of signs"
+        );
     }
 
-    /// The forced rule is a *preference*, not a filter. When it doesn't match, Automatic
-    /// falls back rather than showing nothing — because the mode is only ever Automatic
-    /// because the user pressed `C` and was told "Subtitles on". See `SubtitleMode`.
+    /// …but a forced track beats nothing. If it is all the film has, `C` shows it: the user
+    /// asked, and a toast saying "Subtitles on" over a blank screen is the worse answer.
+    #[test]
+    fn automatic_falls_back_to_a_forced_track_when_it_is_the_only_one() {
+        let c = catalog(vec![sub(
+            0,
+            Some("en"),
+            true,
+            TrackCapability::SupportedText,
+        )]);
+        let got = SubtitleSelection::automatic()
+            .resolve(&c, Some("en"))
+            .expect("something to read beats nothing");
+        assert_eq!(got.id.local_id, 0);
+    }
+
+    // ── The passive forced layer (task #99, owner 2026-07-16) ───────────
+    //
+    // "It should work the way every other movie-playing application works": forced signs
+    // are part of the film, so they show without being asked for. `resolve` answers "which
+    // dialogue track" (what the picker asks); `resolve_display` answers "what is drawn".
+
+    /// The whole model, as one table — the four states the owner signed off.
+    #[test]
+    fn the_forced_layer_shows_only_when_dialogue_subtitles_are_off() {
+        let c = catalog(vec![
+            sub(0, Some("en"), false, TrackCapability::SupportedText), // full English
+            sub(1, Some("en"), true, TrackCapability::SupportedText),  // English forced
+        ]);
+        let forced_on = |enabled| SubtitleSelection {
+            enabled,
+            always_forced: true,
+            ..Default::default()
+        };
+
+        // Off + setting on → the film's forced signs. THIS is the reversal of "Off means
+        // off": you never asked, and you see them anyway, because that is what the flag
+        // means and what every other player does.
+        let got = forced_on(false)
+            .resolve_display(&c, Some("en"))
+            .expect("forced signs are part of the film");
+        assert_eq!(got.id.local_id, 1);
+
+        // …but the PICKER still reports off, which is why `resolve` and `resolve_display`
+        // are two functions. Collapsing them would leave the Off row unticked while the
+        // user is sitting on Off.
+        assert!(
+            forced_on(false).resolve(&c, Some("en")).is_none(),
+            "the picker asks which DIALOGUE track — and the answer is none"
+        );
+
+        // On → the dialogue track. The signs are not drawn on top: if you are reading every
+        // line, they are already in there, and both at once would double up.
+        let got = forced_on(true)
+            .resolve_display(&c, Some("en"))
+            .expect("dialogue");
+        assert_eq!(got.id.local_id, 0);
+
+        // Setting off + off → a genuinely clean picture. The escape hatch that answers the
+        // owner's original objection to reversing the rule.
+        let silent = SubtitleSelection {
+            enabled: false,
+            always_forced: false,
+            ..Default::default()
+        };
+        assert!(silent.resolve_display(&c, Some("en")).is_none());
+    }
+
+    /// The forced layer is matched **against the audio you are hearing**, because that is
+    /// the only thing it annotates. Guessing would put French signs over an English film.
+    #[test]
+    fn the_forced_layer_needs_a_track_matching_the_audio() {
+        let c = catalog(vec![sub(
+            0,
+            Some("fr"),
+            true,
+            TrackCapability::SupportedText,
+        )]);
+        let sel = SubtitleSelection {
+            enabled: false,
+            always_forced: true,
+            ..Default::default()
+        };
+        // French forced signs over English audio: not this film's signs.
+        assert!(sel.resolve_display(&c, Some("en")).is_none());
+        // Unknown audio language matches nothing rather than guessing.
+        assert!(sel.resolve_display(&c, None).is_none());
+        // The film you are actually watching.
+        assert!(sel.resolve_display(&c, Some("fr")).is_some());
+
+        // A film with no forced track at all shows nothing — correct, not a failure.
+        let plain = catalog(vec![sub(
+            0,
+            Some("en"),
+            false,
+            TrackCapability::SupportedText,
+        )]);
+        assert!(sel.resolve_display(&plain, Some("en")).is_none());
+    }
+
+    /// A forced track we cannot draw (PGS) is not an offer here either — the same rule that
+    /// keeps it out of the picker. Otherwise "forced signs on" would silently mean nothing.
+    #[test]
+    fn the_forced_layer_skips_a_track_it_cannot_render() {
+        let c = catalog(vec![sub(0, Some("en"), true, TrackCapability::Bitmap)]);
+        let sel = SubtitleSelection {
+            enabled: false,
+            always_forced: true,
+            ..Default::default()
+        };
+        assert!(sel.resolve_display(&c, Some("en")).is_none());
+    }
+
+    /// Automatic falls back rather than showing nothing — because the mode is only ever
+    /// Automatic because the user pressed `C` and was told "Subtitles on".
     #[test]
     fn automatic_falls_back_when_no_forced_track_matches() {
         // A full English track is not forced — but it is what the user asked for.
@@ -940,20 +1162,24 @@ mod tests {
             .is_some());
     }
 
-    /// Rule 1 beats the fallbacks: a forced track matching the audio wins even when
-    /// another track is flagged default.
+    /// A **forced** track flagged `default` is still not a dialogue track. Some rips mark
+    /// the forced track default, and honouring that literally would hand `C` a few signs
+    /// while a full track sat right there.
     #[test]
-    fn the_forced_rule_outranks_the_default_flag() {
+    fn a_forced_track_marked_default_does_not_win_automatic() {
         let mut tracks = vec![
-            sub(0, Some("en"), false, TrackCapability::SupportedText),
-            sub(1, Some("en"), true, TrackCapability::SupportedText), // forced ✓
+            sub(0, Some("en"), true, TrackCapability::SupportedText), // forced AND default
+            sub(1, Some("en"), false, TrackCapability::SupportedText), // the full track ✓
         ];
         tracks[0].flags.default = true;
         let c = catalog(tracks);
         let got = SubtitleSelection::automatic()
             .resolve(&c, Some("en"))
             .expect("match");
-        assert_eq!(got.id.local_id, 1, "forced+matching outranks default");
+        assert_eq!(
+            got.id.local_id, 1,
+            "the author's default flag answers 'which track', not 'signs or dialogue'"
+        );
     }
 
     /// Rule 2: absent a forced match, the container author's default track is the best
@@ -1489,6 +1715,50 @@ mod tests {
         );
     }
 
+    /// The memory carries **forced-or-not**, not just the language.
+    ///
+    /// Without it a forced-English and a full-English track score identically — same
+    /// language, same SDH — so the tie broke on *track order*. Picking the full English
+    /// track on one film could land on English-forced in the next, which reads as the
+    /// subtitles having mysteriously stopped working halfway through a box set. Latent
+    /// until task #99 gave forced tracks a life of their own; the ordering below is the
+    /// exact trap (forced sits first).
+    #[test]
+    fn the_memory_carries_forced_not_just_the_language() {
+        let film = |generation| {
+            let mut c = catalog(vec![
+                sub(0, Some("en"), true, TrackCapability::SupportedText), // forced, FIRST
+                sub(1, Some("en"), false, TrackCapability::SupportedText), // the full track
+            ]);
+            // ⚠ A DIFFERENT catalog generation is what makes this test mean anything: with
+            // the same one, film B's TrackIds still match the pick and `resolve` returns
+            // through the `want` branch, never reaching the memory at all. (Written without
+            // this first — it passed against deliberately-broken scoring.)
+            c.generation = generation;
+            for t in c.subtitles.tracks.iter_mut() {
+                t.id.catalog_generation = generation;
+            }
+            c
+        };
+        // Pick the FULL English track on film A…
+        let (a, b) = (film(1), film(999));
+        let mut sel = SubtitleSelection::off();
+        sel.apply(SubtitleChoice::Track(a.subtitles.tracks[1].id), &a);
+        assert!(matches!(&sel.preference, Some(p) if !p.forced));
+        // …and film B must give you the full track again, not the forced one sitting first.
+        let got = sel.resolve(&b, Some("en")).expect("English, found again");
+        assert_eq!(
+            got.id.local_id, 1,
+            "a full-track pick must not decay into a forced track on the next film"
+        );
+
+        // And the reverse holds: pick forced, keep forced.
+        let mut sel = SubtitleSelection::off();
+        sel.apply(SubtitleChoice::Track(a.subtitles.tracks[0].id), &a);
+        assert!(matches!(&sel.preference, Some(p) if p.forced));
+        assert_eq!(sel.resolve(&b, Some("en")).unwrap().id.local_id, 0);
+    }
+
     /// ...and when the next film simply hasn't got it, the ordinary chain takes over rather
     /// than showing nothing.
     #[test]
@@ -1505,10 +1775,16 @@ mod tests {
             &film_a,
         );
 
-        let mut film_b = catalog(vec![
-            sub(0, Some("en"), true, TrackCapability::SupportedText),
+        // The English track is the container's DEFAULT. (It used to be `forced` here, and
+        // the test passed on the old forced-first rule while its own assertion said
+        // "default" — so it never exercised what it claimed. Task #99 removed that rule and
+        // exposed it.)
+        let mut tracks = vec![
+            sub(0, Some("en"), false, TrackCapability::SupportedText),
             sub(1, Some("fr"), false, TrackCapability::SupportedText),
-        ]);
+        ];
+        tracks[0].flags.default = true;
+        let mut film_b = catalog(tracks);
         film_b.generation = 999;
         for t in film_b.subtitles.tracks.iter_mut() {
             t.id.catalog_generation = 999;
@@ -1609,10 +1885,15 @@ mod tests {
     /// be no way to un-pin it, and "Automatic" would go on obeying a cancelled choice.
     #[test]
     fn choosing_automatic_clears_the_remembered_language() {
-        let c = catalog(vec![
-            sub(0, Some("en"), true, TrackCapability::SupportedText),
+        // English is the container's DEFAULT (was `forced` here, which is what the old
+        // forced-first rule matched — while the assertion below said "default". See
+        // `a_remembered_language_absent_from_the_film_falls_through`.)
+        let mut tracks = vec![
+            sub(0, Some("en"), false, TrackCapability::SupportedText),
             sub(1, Some("zh"), false, TrackCapability::SupportedText),
-        ]);
+        ];
+        tracks[0].flags.default = true;
+        let c = catalog(tracks);
         let mut sel = SubtitleSelection::off();
         sel.apply(SubtitleChoice::Track(c.subtitles.tracks[1].id), &c);
         assert!(sel.preference.is_some());
@@ -1669,10 +1950,14 @@ mod tests {
     /// (when one was remembered) to the picked language first.
     #[test]
     fn a_track_id_from_another_catalog_falls_back_rather_than_matching_or_vanishing() {
-        let c = catalog(vec![
-            sub(0, Some("en"), true, TrackCapability::SupportedText),
+        // English is the container's DEFAULT (was `forced`; see
+        // `a_remembered_language_absent_from_the_film_falls_through` for why that mattered).
+        let mut tracks = vec![
+            sub(0, Some("en"), false, TrackCapability::SupportedText),
             sub(1, Some("fr"), false, TrackCapability::SupportedText),
-        ]);
+        ];
+        tracks[0].flags.default = true;
+        let c = catalog(tracks);
         // Same local_id as the French track, minted against a catalog that is not this one.
         let stale = TrackId {
             catalog_generation: 99,

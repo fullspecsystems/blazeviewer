@@ -168,6 +168,9 @@ struct SettingsDraft {
     /// can't cross the bridge; egui binds the struct directly, so there is nothing to
     /// flatten and no second definition to keep in sync.
     subtitle: pb_app_core::subtitle::SubtitleStyle,
+    /// Settings ▸ Subtitles ▸ "Always show forced subtitles" (task #99). Behaviour, not
+    /// style, so it sits beside `subtitle` rather than inside it.
+    forced_subtitles: bool,
     /// The drop shadow, held **apart** from `subtitle.shadow` (which is an `Option`).
     ///
     /// Toggling the shadow off must not throw away the blur/offset/colour you just tuned —
@@ -258,6 +261,7 @@ impl SettingsDraft {
             describe_auto: s.describe_auto,
             speak_descriptions: s.speak_descriptions,
             subtitle: s.subtitle_style.clone(),
+            forced_subtitles: s.forced_subtitles,
             shadow_on: s.subtitle_style.shadow.is_some(),
             // With no shadow saved, offer the owner-tuned "on" preset — a shadow that
             // switches on invisible reads as a broken toggle.
@@ -348,6 +352,7 @@ impl SettingsDraft {
         s.describe_auto = self.describe_auto;
         s.speak_descriptions = self.speak_descriptions;
         s.subtitle_style = self.subtitle.clone();
+        s.forced_subtitles = self.forced_subtitles;
         // The toggle owns the `Option`; the params ride along in the draft either way.
         s.subtitle_style.shadow = self.shadow_on.then_some(self.shadow);
         s.clamp();
@@ -2441,6 +2446,22 @@ fn subtitles_tab(
     use pb_app_core::subtitle as sub;
 
     subtitle_preview_swatch(ui, p, d, preview);
+
+    // Behaviour before appearance: everything below is how captions *look*; this is when
+    // they show up at all — which is the more consequential answer.
+    pbui::group_card(ui, p, Some("Behavior"), |ui| {
+        pbui::card_row(
+            ui,
+            p,
+            None,
+            "Always show forced subtitles",
+            // Plain and simple, no em-dashes (the house copy style). Says what it does, not
+            // what a "forced track" is.
+            Some("Show signs and foreign dialogue even when subtitles are off"),
+            |ui| pbui::toggle(ui, p, &mut d.forced_subtitles),
+        );
+    });
+    ui.add_space(pbui::SECTION_GAP);
 
     pbui::group_card(ui, p, Some("Text"), |ui| {
         pbui::card_row(ui, p, None, "Font", Some("System uses the OS sans"), |ui| {

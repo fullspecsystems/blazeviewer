@@ -41,6 +41,11 @@ with any pre-release suffix carried only by the tag.
   `C` prefers a forced/signs track matching the audio, then the file's own default track,
   then whatever it can read. (Image-based subtitles — PGS, VobSub — are not text and are
   still not shown.)
+- **Forced subtitles now show on their own**, the way every other video player does it. The
+  signs and foreign dialogue a film means everyone to read (the Elvish in *Lord of the
+  Rings*) appear even with subtitles switched off. Pressing `C` still gives you the full
+  dialogue track, and **Settings ▸ Subtitles ▸ Always show forced subtitles** turns the
+  behavior off if you want a guaranteed-clean picture.
 - **Pick a subtitle track from a list.** The new **Playback ▸ Subtitle Track** menu lists
   every track the file carries — named by language and format ("English · SubRip · Forced"),
   with a tick on the one you're watching. On macOS a button on the playback bar, just right of

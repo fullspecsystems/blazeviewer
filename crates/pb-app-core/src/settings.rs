@@ -228,6 +228,25 @@ pub struct Settings {
     /// This is a *preference*, not a viewing trace (privacy #2): it records that the user
     /// likes captions, never which video or which track.
     pub subtitles: bool,
+    /// Show a film's **forced** subtitles even when [`subtitles`](Self::subtitles) is off
+    /// (task #99). Default **on** — this is what every other player does, and it is what the
+    /// forced flag *means*.
+    ///
+    /// Forced subtitles are the signs and the foreign dialogue the director intends
+    /// everyone to read (the Elvish in *Lord of the Rings*); they are part of the film, not
+    /// an accessibility aid you switch on. Apple's automatic selection shows them with
+    /// captions otherwise off — `AVMediaCharacteristicContainsOnlyForcedSubtitles` exists
+    /// for exactly this — as do mpv, VLC, and every Blu-ray player.
+    ///
+    /// **This reverses the 2026-07-14 "Off means off, no forced exception" rule** (owner,
+    /// 2026-07-16: "it should work the way every other movie-playing application works").
+    /// The original objection to reversing it was sound — text on screen while the UI says
+    /// off, with no way to get true silence — and *this setting is the answer to it*: it is
+    /// the escape hatch, and it's the same one Plex and Infuse ship. Turning it off is how
+    /// you get a guaranteed-clean picture.
+    ///
+    /// A preference, not a viewing trace (privacy #2).
+    pub forced_subtitles: bool,
     /// Subtitle appearance — the owner's eight axes (task #90.4). Appearance, not a
     /// viewing trace (privacy #2): it records how captions should look, never which
     /// video or which track.
@@ -309,6 +328,8 @@ impl Default for Settings {
             last_folder: None,      // no folder to reopen until the first open
             mute_live_audio: false, // Live Photo audio plays by default (#38)
             subtitles: false,       // captions off until asked for (task #90)
+            // On: forced signs are part of the film, not an aid you switch on (task #99).
+            forced_subtitles: true,
             subtitle_style: crate::subtitle::SubtitleStyle::default(),
             describe_backend: DescribeBackend::Auto,
             // LM Studio's default; a bare install of Ollama uses :11434 instead.

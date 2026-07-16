@@ -751,13 +751,18 @@ mod tests {
             TrackSet::complete(vec![sub_track(0, "fra"), forced]),
         );
         let rows = subtitle_picker_rows(&c, &SubtitleSelection::automatic(), Some("eng"));
+        // French, though the audio is English: `Automatic` answers "which **dialogue**
+        // track", and this film's English track is forced — a handful of signs, not
+        // something to read. (Before task #99 the tick sat on the forced track, because
+        // Automatic preferred forced-matching-audio. Those signs now show passively via
+        // `always_forced`, so Automatic no longer competes for them.)
         assert_eq!(
             picker_labels(&rows),
             vec![
                 "Off",
                 "Automatic",
-                "French · SubRip",
-                "✓ English · SubRip · Forced"
+                "✓ French · SubRip",
+                "English · SubRip · Forced"
             ]
         );
         // Exactly one tick, and it is on the TRACK — the Automatic row is never itself

@@ -126,10 +126,14 @@ impl SubtitleEngine {
         Self {
             // Only the on/off half is persisted; WHICH track is a per-file, session-only
             // choice (privacy #2 -- it would be a record of what you watched).
-            selection: if settings.subtitles {
-                SubtitleSelection::automatic()
-            } else {
-                SubtitleSelection::off()
+            selection: SubtitleSelection {
+                // Only the two on/off preferences are persisted; WHICH track is per-file.
+                always_forced: settings.forced_subtitles,
+                ..if settings.subtitles {
+                    SubtitleSelection::automatic()
+                } else {
+                    SubtitleSelection::off()
+                }
             },
             style: settings.subtitle_style.clone(),
             tracing: std::env::var_os("PB_SUBTITLE_TRACE").is_some_and(|v| v == "1"),
@@ -285,9 +289,10 @@ impl SubtitleEngine {
             self.trace(|| "waiting: the track catalog hasn't been probed yet".into());
             return;
         };
-        // The selection. `resolve_track` was written against the catalog long before
-        // anything called it; this is that bridge finally carrying traffic.
-        let Some(track) = self.selection.resolve(catalog, audio_language) else {
+        // The selection. `resolve_display`, not `resolve`: this is the one place that asks
+        // "what goes on screen", so it is the one place the passive forced layer belongs.
+        // The picker asks a different question and calls `resolve`.
+        let Some(track) = self.selection.resolve_display(catalog, audio_language) else {
             let n = catalog.subtitles.tracks.len();
             self.trace(|| format!("no track resolved from {n} subtitle track(s)"));
             // Not an error — "show nothing" is a normal answer. But it must actually

@@ -4214,6 +4214,12 @@ impl AppCore {
         // (text, params), so a changed style rebuilds the bitmap on the very next tick —
         // which is what makes the Settings preview and a playing film agree.
         self.subtitles.style = self.settings.subtitle_style.clone();
+        // …and the forced-subtitles preference (task #99). Same lesson as post-mortem bug
+        // #2: a preference that only reaches the engine at construction saves to disk and
+        // does nothing until relaunch, which reads as the setting being broken. The next
+        // tick re-resolves through `resolve_display`, so turning it off drops the signs
+        // immediately (`tick_subtitles`'s single clearing exit) rather than at next launch.
+        self.subtitles.selection.always_forced = self.settings.forced_subtitles;
 
         // Persist the whole model (atomic write; best-effort).
         self.settings.save();
@@ -8339,15 +8345,25 @@ impl AppCore {
         // an overlay can never outlive the state that produced it.
         let (displayed, active) = (self.displayed_item, self.video_showing());
         let on = self.subtitles.selection.enabled;
-        let Some(item) = displayed.filter(|_| active && on) else {
+        // `|| always_forced` (task #99): with dialogue subtitles off we must still get far
+        // enough to look for a *forced* track, because forced signs are part of the film —
+        // `resolve_display` is what decides, and it can't decide from behind this gate.
+        let forced = self.subtitles.selection.always_forced;
+        let Some(item) = displayed.filter(|_| active && (on || forced)) else {
             self.subtitles.trace(|| {
-                format!("idle: displayed_item={displayed:?} session_active={active} on={on}")
+                format!(
+                    "idle: displayed_item={displayed:?} session_active={active} on={on} \
+                     always_forced={forced}"
+                )
             });
             self.subtitles.clear_item();
             return;
         };
-        // Off still costs nothing beyond the branch above: no discovery thread, no font
-        // system, no cue data held.
+        // Cost of `always_forced` being on by default, stated honestly: a video now pays the
+        // ~20 ms header probe below and the one-per-session 261 ms rasterizer build even with
+        // subtitles off. Both are off-thread and behind `video_showing()`, so **the photo path
+        // is untouched** — which is the property that actually matters here. Turning the
+        // setting off restores "off costs nothing" exactly.
         //
         // The track catalog is the Details probe's, and it is what holds the container's
         // own subtitle streams *and* the sidecars beside it in one id namespace — so
@@ -9779,7 +9795,20 @@ mod tests {
         s.subtitles = false;
         assert_eq!(
             crate::subtitle_engine::SubtitleEngine::from_settings(&s).selection,
-            SubtitleSelection::off()
+            SubtitleSelection {
+                always_forced: true, // the shipped default — forced signs are part of the film
+                ..SubtitleSelection::off()
+            }
+        );
+
+        // The forced preference must ride along too (task #99) — this is the field the
+        // post-mortem-bug-#2 lesson is about: one that reaches the engine only at
+        // construction saves to disk and does nothing, and the preference looks broken.
+        s.forced_subtitles = false;
+        let e = crate::subtitle_engine::SubtitleEngine::from_settings(&s);
+        assert!(
+            !e.selection.always_forced,
+            "turning the setting off must reach the engine, not just the file"
         );
     }
 
