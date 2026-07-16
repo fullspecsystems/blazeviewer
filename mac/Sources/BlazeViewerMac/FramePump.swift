@@ -24,7 +24,14 @@ final class FramePump: NSObject {
 
     @objc private func fire(_ link: CADisplayLink) {
         MainActor.assumeIsolated {
-            model?.pump()
+            guard let model else { return }
+            guard pbTraceEnabled else {
+                model.pump()
+                return
+            }
+            let t0 = DispatchTime.now().uptimeNanoseconds
+            model.pump()
+            model.recordPumpTick(DispatchTime.now().uptimeNanoseconds &- t0)
         }
     }
 

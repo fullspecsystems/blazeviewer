@@ -267,6 +267,21 @@ impl ActiveVideoBackend {
         }
     }
 
+    /// Whether this backend needs the host loop to keep ticking **every frame** while it
+    /// plays. Only the **Session** route does: `poll_video` pulls its decoded frames off the
+    /// loop into the wgpu renderer. The **Native** route (macOS sample-buffer / AVPlayer) is
+    /// presented by the OS compositor — the loop pulls nothing per frame, so keeping
+    /// `work_pending` true for it just spins `pump()` at the display refresh (120 Hz) on the
+    /// main thread, contending with the very presentation it isn't driving (owner-measured
+    /// stutter, 2026-07-15). State changes, progress, relayout, and teardown are all
+    /// kick-driven, so idling the loop between them is safe.
+    pub fn needs_frame_pacing(&self) -> bool {
+        match self {
+            Self::Session(v) => v.session.is_active(),
+            Self::Native(_) => false,
+        }
+    }
+
     pub fn is_playing(&self) -> bool {
         self.state() == VideoSessionState::Playing
     }

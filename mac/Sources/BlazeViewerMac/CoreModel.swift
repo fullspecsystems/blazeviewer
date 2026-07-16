@@ -1817,6 +1817,36 @@ final class CoreModel {
         framePump?.paused = false
     }
 
+    // PB_TRACE pump-load diagnostics: the main-thread pump's tick rate + cost. Before the
+    // native-video `work_pending` fix (2026-07-15) this spun at the display refresh (120 Hz)
+    // during OS-presented playback; this confirms it now idles, and flags any pump-duration
+    // spike that could hitch presentation. Windowed ~2 s.
+    @ObservationIgnored private var pumpWinStart = DispatchTime.now()
+    @ObservationIgnored private var pumpWinTicks = 0
+    @ObservationIgnored private var pumpWinNanos: UInt64 = 0
+    @ObservationIgnored private var pumpWinMaxNanos: UInt64 = 0
+
+    /// Fold one `pump()` wall-time into the current window; emit + reset ~every 2 s. Called
+    /// from `FramePump.fire` only when `pbTraceEnabled`.
+    func recordPumpTick(_ nanos: UInt64) {
+        pumpWinTicks += 1
+        pumpWinNanos &+= nanos
+        if nanos > pumpWinMaxNanos { pumpWinMaxNanos = nanos }
+        let elapsed =
+            Double(DispatchTime.now().uptimeNanoseconds &- pumpWinStart.uptimeNanoseconds) / 1e9
+        guard elapsed >= 2.0 else { return }
+        let busyPct = Double(pumpWinNanos) / 1e9 / elapsed * 100
+        pbTrace(
+            String(
+                format: "pump diag: %.1fs — %d ticks (%.0f/s), %.1f%% main busy, avg %.2fms max %.2fms",
+                elapsed, pumpWinTicks, Double(pumpWinTicks) / elapsed, busyPct,
+                Double(pumpWinNanos) / Double(pumpWinTicks) / 1e6, Double(pumpWinMaxNanos) / 1e6))
+        pumpWinStart = DispatchTime.now()
+        pumpWinTicks = 0
+        pumpWinNanos = 0
+        pumpWinMaxNanos = 0
+    }
+
     // MARK: - The wgpu canvas (NS1 item 2)
 
     /// Stand the Rust renderer up on the view's `CAMetalLayer`. The layer is retained by

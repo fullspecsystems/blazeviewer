@@ -301,8 +301,12 @@ impl AppCore {
             // A streaming Live Photo decode (task #69) likewise keeps the loop polling so
             // `poll_anim_stream` drains newly decoded frames as they arrive.
             || self.anim_stream.is_some()
-            // Active video playback (task #79): `poll_video` paces frames off this loop.
-            || self.video.as_ref().is_some_and(|v| v.is_active())
+            // Active video playback (task #79): the **Session** route's `poll_video` paces
+            // frames off this loop. The **Native** route (macOS sample-buffer / AVPlayer) is
+            // OS-presented and pulls nothing per frame, so it must NOT keep the loop hot — that
+            // spun `pump()` at 120 Hz on the main thread and dropped presentation frames
+            // (owner-measured, 2026-07-15). `needs_frame_pacing` draws that line.
+            || self.video.as_ref().is_some_and(|v| v.needs_frame_pacing())
             // A delete waiting out a retiring video reader (bounded retry).
             || self.pending_delete_retry.is_some()
             // A tree-io job (the folder tree's read_dir derivation / a Go sibling
