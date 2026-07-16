@@ -1368,8 +1368,10 @@ impl AppCore {
         // refresh the `T` panel's busy state, run a deferred copy.
         self.poll_text_scan();
         self.poll_details_probe();
-        // 1c'. Rebuild the subtitle overlay for the playhead (task #90). Cheap when
-        // nothing changed and free when subtitles are off.
+        // 1c'. Rebuild the subtitle overlay for the playhead (task #90). Cheap when nothing
+        // changed, and free unless a *video* is showing — with `always_forced` on (the
+        // default) "subtitles off" no longer means free, because the tick has to get far
+        // enough to look for a forced track (task #99). Still nothing on the photo path.
         self.tick_subtitles();
 
         // 1d. Pick up a finished off-thread AI describe (task #44): cache it and refresh

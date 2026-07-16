@@ -1514,6 +1514,17 @@ final class CoreModel {
         core.subtitle_style_edited(form)
     }
 
+    /// "Always show forced subtitles" (task #99) — behaviour, so it rides its own pair
+    /// rather than `SubtitleStyleFfi` (which drives the preview swatch). No debounce: one
+    /// click, one write, and Rust hard no-ops when the value is unchanged.
+    func forcedSubtitles() -> Bool {
+        core.forced_subtitles()
+    }
+
+    func setForcedSubtitles(_ on: Bool) {
+        core.set_forced_subtitles(on)
+    }
+
     /// The preview swatch as an `NSImage`, drawn by Rust with the **same** rasterizer and
     /// placement math the real overlay uses — so it cannot drift from what a film shows.
     ///

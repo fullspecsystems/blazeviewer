@@ -32,6 +32,12 @@ struct SubtitlesPane: View {
     @State private var draft = SubtitleStyleDraft()
     @State private var loaded = false
     @State private var applyTask: Task<Void, Never>?
+    /// "Always show forced subtitles" (task #99). Deliberately **not** in `draft`: that is
+    /// the style, and it feeds the preview swatch on every keystroke. This is behaviour, it
+    /// changes nothing about how the text looks, and it needs no debounce — one click, one
+    /// write. Kept in sync by the binding below rather than `.onChange`, which would also
+    /// fire on the load in `onAppear`.
+    @State private var forcedSubtitles = true
 
     var body: some View {
         Form {
@@ -43,6 +49,21 @@ struct SubtitlesPane: View {
                     .frame(maxWidth: .infinity)
                     .clipShape(RoundedRectangle(cornerRadius: 6))
                     .listRowInsets(EdgeInsets(top: 4, leading: 4, bottom: 4, trailing: 4))
+            }
+
+            // Behaviour before appearance: everything below is how captions *look*; this is
+            // when they show up at all, which is the more consequential answer. Forced
+            // subtitles are the signs and foreign dialogue a film means everyone to read, so
+            // they show without being asked for — the way every other player does it (owner,
+            // 2026-07-16). This is the escape hatch for a guaranteed-clean picture.
+            Section("Behavior") {
+                Toggle(isOn: Binding(
+                    get: { forcedSubtitles },
+                    set: { forcedSubtitles = $0; model.setForcedSubtitles($0) }
+                )) {
+                    Text("Always show forced subtitles")
+                    Text("Show signs and foreign dialogue even when subtitles are off")
+                }
             }
 
             Section("Text") {
@@ -121,6 +142,7 @@ struct SubtitlesPane: View {
         .onAppear {
             if !loaded {
                 draft = SubtitleStyleDraft(form: model.subtitleStyleForm())
+                forcedSubtitles = model.forcedSubtitles()
                 loaded = true
             }
         }

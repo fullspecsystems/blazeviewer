@@ -1914,6 +1914,38 @@ impl AppCoreHandle {
         subtitle_style_to_form(&self.core.settings.subtitle_style)
     }
 
+    /// Settings ▸ Subtitles ▸ "Always show forced subtitles" (task #99), for the pane to
+    /// open on.
+    ///
+    /// Its own pair rather than a field on `SubtitleStyleFfi`: it is **behaviour, not
+    /// style**, so it must not ride the style form — that form feeds the live preview
+    /// swatch, and a bool that changes nothing about how text *looks* has no business
+    /// invalidating it.
+    fn forced_subtitles(&self) -> bool {
+        self.core.settings.forced_subtitles
+    }
+
+    /// Toggled → settings + the live engine.
+    ///
+    /// Diffs first and **hard no-ops when unchanged**, exactly like `subtitle_style_edited`:
+    /// the pane echoes its state back on open, and that echo must never reach the disk.
+    /// Routed through `DialogResolved` so `apply_settings` stays the one place a preference
+    /// reaches both the engine and the file.
+    fn set_forced_subtitles(&mut self, on: bool) {
+        if on == self.core.settings.forced_subtitles {
+            return;
+        }
+        self.core.now = Instant::now();
+        let mut s = self.core.settings.clone();
+        s.forced_subtitles = on;
+        self.core.handle(CoreEvent::DialogResolved(
+            contract::DialogResult::SettingsEdited {
+                settings: Some(Box::new(s)),
+                keymap: None,
+            },
+        ));
+    }
+
     /// An edited style → settings + the live engine.
     ///
     /// Diffs first and **hard no-ops when unchanged**, exactly like `settings_edited`:
@@ -4752,6 +4784,10 @@ mod ffi {
         // the 37-field settings form — see SubtitleStyleFfi.
         fn subtitle_style_form(&self) -> SubtitleStyleFfi;
         fn subtitle_style_edited(&mut self, form: SubtitleStyleFfi);
+        // Behaviour, not style — deliberately NOT on SubtitleStyleFfi, which drives the
+        // preview swatch (task #99).
+        fn forced_subtitles(&self) -> bool;
+        fn set_forced_subtitles(&mut self, on: bool);
         // The curated font list the picker shows. Indexed accessors, not a Vec<String>:
         // that does not cross back to Swift (same reason the keymap editor is indexed).
         fn subtitle_font_count() -> usize;
