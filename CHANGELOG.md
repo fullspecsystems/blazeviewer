@@ -44,9 +44,10 @@ with any pre-release suffix carried only by the tag.
 - **Pick a subtitle track from a list** (macOS): a button on the playback bar, just right of
   the running time, opens every track the file carries — named by language and format
   ("English · SubRip · Forced"), with a tick on the one you're watching. The same list is in
-  the new **Playback ▸ Subtitle Track** menu, and `Shift+C` steps through the very same
-  tracks if you'd rather not reach for the mouse. Turning subtitles off and on again brings
-  back the track *you* chose, rather than reverting to the app's guess.
+  the new **Playback ▸ Subtitle Track** menu. On every platform, `Shift+C` steps through the
+  very same tracks, and **View ▸ Next Subtitle Track** does it from the menu. Turning
+  subtitles off and on again brings back the track *you* chose, rather than reverting to the
+  app's guess.
 - **Your subtitle language follows you to the next film.** Choose "Arabic (SDH)" on one
   episode and the next one starts on its Arabic track — even though the two files number
   their tracks differently, and even if one says `ara` where the other says `ar`. If a film
@@ -64,7 +65,7 @@ with any pre-release suffix carried only by the tag.
   breaking subtitles everywhere for decades. Blaze Viewer now detects and undoes it, and
   only ever when it can prove the text really was mangled, so correctly-written text
   (`café`, `señor`) is never touched.
-- **Subtitle appearance is yours to set** (macOS): a new **Settings ▸ Subtitles** tab with
+- **Subtitle appearance is yours to set**: a new **Settings ▸ Subtitles** tab with
   font, size, colour and opacity, outline, drop shadow, background, and vertical position —
   including **below the picture, down in the black letterbox bar**, which almost no player
   lets you do. Outline, shadow, and background scale with the text, so changing the size
