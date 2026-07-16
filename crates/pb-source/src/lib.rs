@@ -45,6 +45,12 @@ use sevenz_rust2::{
 };
 use zip::ZipArchive;
 
+mod kind;
+mod tar_source;
+
+pub use kind::{archive_kind, ArchiveKind};
+pub use tar_source::TarSource;
+
 /// A uniform, read-only source of encoded bytes addressed by item index.
 ///
 /// **Items, not photos** (the trait was `PhotoSource` until task #101). An item is an
@@ -248,6 +254,12 @@ pub enum OpenError {
     /// finished. Distinct from an error so the app can quietly drop it rather than
     /// show a failure dialog.
     Cancelled,
+    /// The archive's decompressed entries exceed the caller's RAM budget. Unlike
+    /// 7z (whose header lists every size, so the app pre-flights and refuses
+    /// before opening), a compressed tar's sizes are only discovered mid-stream —
+    /// so the streaming open enforces the budget itself and reports it here.
+    /// `needed` is a lower bound (the stream stopped as soon as it tripped).
+    TooLarge { needed: u64, budget: u64 },
 }
 
 impl std::fmt::Display for OpenError {
@@ -258,6 +270,10 @@ impl std::fmt::Display for OpenError {
             OpenError::PasswordRequired => write!(f, "the archive is password protected"),
             OpenError::OutOfMemory => write!(f, "ran out of memory loading the archive"),
             OpenError::Cancelled => write!(f, "the archive open was cancelled"),
+            OpenError::TooLarge { needed, budget } => write!(
+                f,
+                "the archive needs at least {needed} bytes of RAM, over the {budget}-byte budget"
+            ),
         }
     }
 }
@@ -328,8 +344,11 @@ impl OpenProgress {
         self.inner.cancel.load(Ordering::Relaxed)
     }
 
-    /// Opener-side: record `n` more decompressed bytes streamed.
-    fn add_done(&self, n: u64) {
+    /// Opener-side: record `n` more streamed bytes (decompressed for 7z; the tar
+    /// openers count *compressed* bytes consumed instead, since a compressed
+    /// tar's decompressed total isn't knowable up front — the fraction stays a
+    /// plain ratio either way).
+    pub(crate) fn add_done(&self, n: u64) {
         self.inner.done.fetch_add(n, Ordering::Relaxed);
     }
 }
@@ -588,8 +607,9 @@ impl ItemSource for ZipSource {
 }
 
 /// The forward-slashed directory part of an archive entry name (`""` at the root).
-/// Archive names are always `/`-separated, whatever host wrote them.
-fn zip_dir_of(name: &str) -> &str {
+/// Archive names are always `/`-separated, whatever host wrote them. (Named for
+/// its first adopter; TarSource scopes its siblings with it too.)
+pub(crate) fn zip_dir_of(name: &str) -> &str {
     match name.rsplit_once('/') {
         Some((dir, _)) => dir,
         None => "",
@@ -1082,7 +1102,7 @@ pub const MAX_ENTRY_BYTES: u64 = 1 << 30; // 1 GiB
 /// chunks so a large entry aborts within one chunk's latency rather than only at the
 /// next block boundary (which, for a solid archive, can mean after the whole thing).
 /// `Ok(true)` = read to `size` (or a short EOF); `Ok(false)` = cancelled mid-stream.
-fn read_cancellable(
+pub(crate) fn read_cancellable(
     rd: &mut dyn Read,
     size: u64,
     out: &mut dyn io::Write,
@@ -1119,7 +1139,7 @@ fn display_name(p: &Path) -> String {
 /// `/`-based grouping (the ⇧F folder tree) and read wrong in the title/EXIF
 /// panel. Purely a *name* transformation: entries are only ever read from RAM
 /// by index, never extracted to a path, so this can't affect what's opened.
-fn normalize_entry_name(raw: &str) -> String {
+pub(crate) fn normalize_entry_name(raw: &str) -> String {
     let s = raw.replace('\\', "/");
     let mut t = s.as_str();
     loop {
@@ -1137,7 +1157,7 @@ fn normalize_entry_name(raw: &str) -> String {
 /// The lowercased extension (no dot) of a name or path, or `""` if none. Uses
 /// `Path` so only the last component's extension counts (a ZIP entry name like
 /// `trip/day1/IMG.JPG` → `jpg`).
-fn ext_of(name: &str) -> String {
+pub(crate) fn ext_of(name: &str) -> String {
     Path::new(name)
         .extension()
         .and_then(|e| e.to_str())
@@ -1145,7 +1165,7 @@ fn ext_of(name: &str) -> String {
         .unwrap_or_default()
 }
 
-fn out_of_range() -> io::Error {
+pub(crate) fn out_of_range() -> io::Error {
     io::Error::new(io::ErrorKind::NotFound, "item index out of range")
 }
 

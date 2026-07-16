@@ -17,3 +17,28 @@ zip = { version = "2", default-features = false, features = ["deflate", "aes-cry
 # build risk. Default features kept (compress + aes256 + bzip2 + ppmd + util) for
 # codec coverage; all pure Rust.
 sevenz-rust2 = "0.21.3"
+# Tar-family reading (task #102): TarSource's lazy index over plain .tar (headers
+# only, seeking over file data) and the eager streaming pass over compressed
+# tarballs. Read-side handles PAX/GNU long names. `default-features = false` drops
+# the unix-only xattr support we never read.
+tar = { version = "0.4.46", default-features = false }
+# The tarball codecs — all pure Rust, matching the zip/7z picks above (no C build
+# risk, no LGPL exposure; see the #102 plan's crate table):
+#  * gzip: flate2's default rust backend is miniz_oxide (already in-tree via zip).
+#    `MultiGzDecoder` so concatenated members (pigz output) decode whole.
+#  * bzip2: the default backend is libbz2-rs-sys (already in-tree via sevenz-rust2).
+#    `MultiBzDecoder` for concatenated streams (pbzip2 output).
+#  * zstd: ruzstd (decode used at runtime; its encoder generates test fixtures).
+#    The C `zstd` crate is faster but is exactly the build risk this crate avoids;
+#    the reader-factory seam in tar.rs makes an A/B swap a one-line change.
+#  * xz: lzma-rust2 (already in-tree via sevenz-rust2) exposes a pure-Rust
+#    XzReader, which is what puts .tar.xz in scope at zero new dependencies.
+flate2 = "1"
+bzip2 = "0.6"
+ruzstd = "0.8"
+lzma-rust2 = { version = "0.16", default-features = false, features = ["std", "xz", "optimization"] }
+
+[dev-dependencies]
+# Fixture generation only: XzWriter needs the encoder feature (test builds unify
+# it in; ship builds stay decode-only).
+lzma-rust2 = { version = "0.16", default-features = false, features = ["std", "xz", "optimization", "encoder"] }
