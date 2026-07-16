@@ -504,16 +504,26 @@ pragmatic crate choices differ from the table above and are the current baseline
   detection ships — a DoVi Profile-5 file on the Session route toasts an honest
   colors-can't-be-shown warning and the Details panel names every DoVi profile).
   `PB_TRACE=1` prints a per-2s Session dropped-frames diag (the `sb-play diag` analog).
-- **Archive viewing (ZIP + 7z)** (tasks.json #30) is wired in the new `pb-source` crate
-  behind the `ItemSource` seam, decoded via `pb_decode::decode_named_bytes` (bytes +
-  extension hint). ZIP = lazy per-entry (handle pool for parallel reads); 7z = **eager
-  decode-to-RAM** (solid archives have no cheap random access), opened **off-thread** with
-  a RAM **pre-flight that predict-and-refuses** archives that won't fit (a real OOM aborts
-  uncatchably in Rust). RAM-only — never extracted to disk, so the no-trace guarantee holds
-  (`viewing_a_{zip,7z}_writes_nothing_to_disk`). Errors surface in the egui `Message` dialog.
-  Password-protected archives are *detected* (`OpenError::PasswordRequired` /
-  `ZipSource::needs_password`) but in-app password **entry is a TODO**. Crates: `zip` +
-  `sevenz-rust2` (both pure Rust, no C build risk).
+- **Archive viewing (ZIP + 7z + the tar family)** (tasks.json #30, #102) is wired in the
+  `pb-source` crate behind the `ItemSource` seam, decoded via
+  `pb_decode::decode_named_bytes` (bytes + extension hint). One classifier —
+  `pb_source::archive_kind` — answers every "is this an archive, and which kind?"
+  question (shell `is_archive` predicates, `scan::open_archive` dispatch, double
+  extensions like `.tar.gz`). Two access models: **lazy** (ZIP via handle pool; plain
+  `.tar` via a seek-over-data header index) and **eager decode-to-RAM** (7z; `.tar.gz` /
+  `.tar.bz2` / `.tar.zst` / `.tar.xz` — solid streams have no cheap random access). 7z
+  pre-flights its RAM budget from the header; a compressed tar has no size table, so its
+  budget is enforced **mid-stream** (`OpenError::TooLarge`, still refuse-before-reserve).
+  Every kind but ZIP opens **off-thread** (`ArchiveKind::background_open`) through the
+  one worker entry `scan::load_archive`, with determinate progress + Cancel. Tar opens
+  are hardened against hostile bytes (metered PAX/GNU metadata quota, entry/name-table
+  caps, expanded-work cap, zstd window pre-check + frame-checksum verify, xz dict-size
+  pre-check; `fuzz/` has a `tar_open` target) — see the #102 plan rev2. RAM-only — never
+  extracted to disk, so the no-trace guarantee holds
+  (`viewing_a_{zip,7z,tar,tar_gz}_writes_nothing_to_disk`). Errors surface in the egui
+  `Message` dialog. Passwords: ZIP/7z prompt in-app; the tar family has no standard
+  encryption. Crates: `zip` + `sevenz-rust2` + `tar`/`flate2`/`bzip2`/`ruzstd`/
+  `lzma-rust2` (all pure Rust, no C build risk).
 - **Known v1 limitations** (deliberate): Radiance-HDR / OpenEXR (image-crate, not WIC) still
   clamped to SDR; CMYK JPEG mis-colored; first frame only (GIF/animated-WebP/Live-Photo/
   multipage-TIFF). LUT/CLUT & gray/CMYK ICC profiles → sRGB passthrough (the `lcms2`-behind-a-

@@ -1203,6 +1203,88 @@
             "status": "done"
           }
         ]
+      },
+      {
+        "id": 102,
+        "title": "Archive support: the tar family (tar, tar.gz, tar.bz2, tar.zst, tar.xz)",
+        "description": "View images/videos inside tar-family archives through the pb-source ItemSource seam. Plan: .taskmaster/plans/102-tar-family-archives.md (rev2 incorporates the Codex review: metered PAX/GNU metadata quota, entry/name/expanded-work caps, zstd window pre-check + checksum verify, xz dict pre-check, background opens for every kind but ZIP via the one scan::load_archive worker entry, Linux MemAvailable for the RAM budget). One classifier (pb_source::archive_kind) replaced the three copy-pasted zip|7z predicates. All codecs pure Rust; RAM-only (no-trace holds); fuzz/ has a tar_open target.",
+        "status": "in-progress",
+        "priority": "high",
+        "dependencies": [],
+        "subtasks": [
+          {
+            "id": 1,
+            "title": "Phase 0 - crate verification spikes",
+            "description": "DONE. entries_with_seek exists; bzip2 default backend = libbz2-rs-sys; flate2 default = miniz_oxide; lzma-rust2 exposes XzReader (multi-stream) so .tar.xz is in scope at zero new deps; ruzstd 0.8.3 can encode (fixtures generated in-test, no committed binaries) but its StreamingDecoder is single-frame and skips the first-frame window cap (both fixed by our MultiFrameZstd wrapper). Spike 102.0 (compcol) findings recorded in the plan; verdict: incumbents for the big three, compcol not adopted for tar.",
+            "status": "done"
+          },
+          {
+            "id": 2,
+            "title": "Phase 1 - ArchiveKind classifier + lazy TarSource",
+            "description": "DONE d993fb6. Classifier with eager()/background_open(), double-extension matrix tests; lazy plain-tar index (seek over data, offset reads, full sibling listing, dup-name last-wins, truncated-tail skip, traversal-name skip, entry-count/name caps).",
+            "status": "done"
+          },
+          {
+            "id": 3,
+            "title": "Phases 2-3 - eager compressed tar, all four codecs",
+            "description": "DONE d993fb6. Codec-reader seam, counting-reader progress, mid-stream RAM budget (OpenError::TooLarge), cancellation, metadata quota, expanded-work cap, post-iteration codec drain (trailer CRCs), multi-frame + skippable zstd with window pre-check + checksum verify, xz first-block dict pre-check. 63 pb-source tests.",
+            "status": "done"
+          },
+          {
+            "id": 4,
+            "title": "Phase 4 - app wiring (winit + mac-ffi + Swift panel)",
+            "description": "DONE 92b4d44. scan::load_archive single worker entry (7z preflight moved inside), every kind but ZIP opens off-thread, is_archive -> archive_kind in both shells, picker filters (+bare gz/bz2/zst/xz; macOS panel too - no All-files hatch there), OS associations deliberately unchanged, no-trace tests (tar + tar.gz), archived-video-in-tar dispatch test, Linux MemAvailable, tar_open fuzz target.",
+            "status": "done"
+          },
+          {
+            "id": 5,
+            "title": "Phase 5 (optional) - bare compressed single images",
+            "description": "photo.jpg.gz / photo.png.bz2 / photo.jxl.zst open as one-entry sources (NOT .svgz - already a supported image via svg.rs). The picker already offers the bare suffixes; today they refuse cleanly, this makes them open.",
+            "status": "pending"
+          },
+          {
+            "id": 6,
+            "title": "Fuzz run + corpus benchmarks",
+            "description": "Run cargo fuzz run tar_open on the Linux side (nightly; target compiles on MSVC too). Corpus benchmarks: plain-tar index latency, codec throughput, cancel latency, peak RSS on representative multi-GB tarballs.",
+            "status": "pending"
+          }
+        ]
+      },
+      {
+        "id": 103,
+        "title": "RAR5 archive viewing (RarSource)",
+        "description": "View RAR5 archives (.rar/.cbr; .cbz=ZIP rides along) through the ItemSource seam. Plan: .taskmaster/plans/103-rar5-viewing.md. Own ~350-line container parser in pb-source over compcol::rar5 (fstool as reference only); lazy non-solid + eager solid; we add CRC32 verify, 64 MiB window cap, container-level encryption detection -> password prompt, solid-group Delta degradation. RAR4 = detect + honest 'not supported yet'. Empirically de-risked: byte-perfect vs unrar after our x86-filter fix, fuzz-clean (see compcol-rar-evaluation memory).",
+        "status": "pending",
+        "priority": "medium",
+        "dependencies": [
+          102
+        ],
+        "subtasks": [
+          {
+            "id": 1,
+            "title": "Unblock: compcol dep with the x86 fix",
+            "description": "Gate: upstream PR #121 (jdlien/compcol rar5-x86-filter-fix) merged + released -> exact crates.io pin. Until then the fork git-dep is acceptable on this branch. Confirm the corpus decodes from a throwaway harness.",
+            "status": "pending"
+          },
+          {
+            "id": 2,
+            "title": "RarSource non-solid (lazy)",
+            "description": "Block-chain scan for the file table, per-entry decode, CRC32, window cap, encryption detection. TDD against compcol-rar-corpus rar5_m*_nonsolid.",
+            "status": "pending"
+          },
+          {
+            "id": 3,
+            "title": "RarSource solid (eager)",
+            "description": "Whole-group decode-to-RAM with OpenProgress/budget; byte-identical to unrar; Delta-member-in-solid degrades that group's later members, never the archive.",
+            "status": "pending"
+          },
+          {
+            "id": 4,
+            "title": "App wiring + harden",
+            "description": "ArchiveKind::Rar (+cbr/cbz), dispatch via load_archive, picker, no OS association, no-trace test, archived-video-in-rar smoke, per-entry honest Unsupported for Delta/ARM/encrypted, own fuzz target, docs.",
+            "status": "pending"
+          }
+        ]
       }
     ]
   }

@@ -28,7 +28,14 @@ with any pre-release suffix carried only by the tag.
   been.
 
 ### Added
-- **Dolby Vision, stated honestly.** The Details panel now names a Dolby Vision stream's
+- **Tarballs open like folders.** Blaze Viewer now views images and plays videos inside
+  `.tar`, `.tar.gz` (`.tgz`), `.tar.bz2` (`.tbz2`), `.tar.zst` (`.tzst`), and `.tar.xz`
+  (`.txz`) archives, alongside the existing ZIP and 7z support. A plain `.tar` opens
+  near-instantly even when huge; compressed tarballs show a progress bar with a working
+  Cancel while they load into memory, and one that would not fit in memory is refused
+  up front with a clear message. Everything stays in RAM — nothing is ever extracted to
+  disk, damaged or malicious archives fail with an honest error instead of a crash, and
+  archive opens no longer freeze the app while a large file is read. The Details panel now names a Dolby Vision stream's
   profile and what its base layer amounts to ("Profile 8 — HDR10-compatible base layer"),
   and playing a **Profile 5** file — the one flavor whose colors cannot be shown correctly
   without Dolby's own processing — says so in a toast instead of leaving you wondering why

@@ -5,7 +5,7 @@
 //! index into the **raw encoded bytes** to hand `pb_decode::decode_named_bytes`,
 //! plus a display name (and, for real files, a path the info panel can stat).
 //!
-//! Three implementations ship today:
+//! Four implementations ship today:
 //! * [`FsSource`] — a plain, already-scanned filesystem listing (today's behavior
 //!   behind the seam): `bytes(i)` is a `std::fs::read`.
 //! * [`ZipSource`] — a ZIP archive read **per entry, on demand, into RAM**. ZIP's
@@ -19,20 +19,27 @@
 //!   cheap per-entry random access; instead every supported-image entry is decoded
 //!   once up front into a resident `index → bytes` map. Pre-flight an open with
 //!   [`seven_z_projected_bytes`] against a memory budget.
+//! * [`TarSource`] — the tar family (task #102): a plain `.tar` is **lazy** like
+//!   ZIP (headers indexed by seeking; `bytes(i)` = open + seek + read), while
+//!   `.tar.gz`/`.tar.bz2`/`.tar.zst`/`.tar.xz` are solid streams and go **eager**
+//!   like 7z — with the RAM budget enforced *mid-stream* (no size table exists up
+//!   front). Which is which is decided by [`archive_kind`], the one classifier
+//!   every "is this an archive?" question routes through.
 //!
 //! **Privacy.** Every read here is RAM-only; nothing is ever written to disk. This
 //! is the archive analogue of the "on-disk I/O is read-only on the view path"
 //! guarantee — opening a ZIP to view it never extracts it to a temp directory.
 //!
 //! ## Random access vs. eager sources
-//! [`FsSource`] and [`ZipSource`] are *lazy* random-access: any item is fetched
-//! cheaply and independently, which is what the direction-biased prefetch ring
-//! assumes. A *solid* archive (7z, and later tar.gz) can't seek to one entry
-//! without decompressing the block before it, so [`SevenZSource`] is instead
-//! *eager*: it pays the whole decompression once on open and then serves random
-//! access from RAM. The trait is shaped so this is an implementation choice, not a
-//! change to the seam — the only caller-visible cost is a slower open (which the
-//! app runs off-thread behind a spinner) and the resident memory.
+//! [`FsSource`], [`ZipSource`], and a plain-tar [`TarSource`] are *lazy*
+//! random-access: any item is fetched cheaply and independently, which is what
+//! the direction-biased prefetch ring assumes. A *solid* archive (7z, compressed
+//! tar) can't seek to one entry without decompressing the block before it, so
+//! those sources are instead *eager*: they pay the whole decompression once on
+//! open and then serve random access from RAM. The trait is shaped so this is an
+//! implementation choice, not a change to the seam — the only caller-visible cost
+//! is a slower open (which the app runs off-thread behind a progress dialog) and
+//! the resident memory.
 
 use std::fs::File;
 use std::io::{self, BufReader, Read};

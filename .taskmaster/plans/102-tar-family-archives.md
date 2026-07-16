@@ -1,7 +1,10 @@
 # Task 102 — Archive support: tar, tar.gz, tar.bz2, tar.zst, tar.xz (+ bare .gz/.bz2/.zst images)
 
-**Status:** in progress — rev2 (2026-07-16, incorporates the Codex review; see
-§"Rev2 — Codex review disposition" for what changed and why)
+**Status:** implemented through phase 4 — rev2 (2026-07-16). Phases 0–4 landed on
+`feat/enhanced-archives` (`d993fb6` pb-source, `92b4d44` wiring; 63 pb-source tests +
+no-trace/dispatch integration tests, clippy/fmt clean). Remaining: phase 5 (optional bare
+compressed images) and the fuzz run + corpus benchmarks (tasks.json #102.5/.6). The rev2
+section below records the Codex-review disposition that drove the implementation.
 **Proposed task id:** 102 (next free in `tasks.json`; add the task entry when this plan is approved)
 **Scope:** all three platforms share the code (pure Rust, no per-platform decode), but the
 *payoff* is Linux-first: tarballs are the native archive format there. Windows/macOS get it
