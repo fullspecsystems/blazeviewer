@@ -1,6 +1,7 @@
 # macOS video smoothness — route MKV to the Session (wgpu) path, retire the sample-buffer route
 
-> Status: **PLAN — diagnosis COMPLETE + owner-confirmed; execution NOT started** · Owner: JD
+> Status: **PLAN — diagnosis COMPLETE + owner-confirmed; Codex-reviewed 2026-07-15 (findings
+> incorporated below); execution NOT started** · Owner: JD
 > Scope: **macOS video playback smoothness.** The winit (Windows/Linux) shell already uses the
 > Session route and is unaffected. This is a routing + parity change, not a rendering rewrite.
 >
@@ -119,22 +120,41 @@ would be the one to consider — equally niche, equally unverifiable-by-agent, s
     presenter intact — just not selected by default.
   - `macos_native_route` (AVPlayer for MP4/MOV) is checked **first** and is unaffected — MP4/MOV keep
     using AVPlayer (smooth).
-- **Verify** the archive-video and Live-Photo-companion paths (which forced the Session route already via
-  `video_ffmpeg_fallback`) still behave.
+- **Not affected (Codex correction):** archive **MKVs** already fall through to Session (no file path);
+  archive **MP4/MOV** use `PlayVideoBytes` (AVPlayer via a resource loader) and are untouched by this flip;
+  **Live-Photo companions** use the animation/Live-Photo pipeline, not `start_video_session`, so they are
+  unrelated. No extra verification needed for these beyond a smoke test.
 
 ### 2. Close the parity gaps on the macOS Session route (the real work)
 
 The Session route is smooth but was a *fallback* — confirm it has feature parity with what the
 sample-buffer route grew. Known gap + things to verify:
 
-- **⚠ Audio-track switching (#99) — the one confirmed gap.** `CoreModel.selectAudioTrack` (~3068) routes
-  to `sampleBufferVideo` and `nativeVideo` only; the macOS Session route's audio player
-  (`SessionAudioPlayer.swift`) has **no `switchTrack`**. The FFI exists: `session_audio_set_track`
-  (`pb-mac-ffi` ~3450). **Add** a `SessionAudioPlayer.switchTrack(stream:at:)` that calls it, rebuilds the
-  format (rate/channels can differ per track), re-primes, and reports the confirmed switch back through the
-  same `audio_track_switched(row:ok:)` path (#99's confirmed-switch rule). Wire `selectAudioTrack` to it.
-  Also confirm the **active-track report** (`reportActiveAudioStream` / the picker tick) works for the
-  Session route, and that `cycle_audio_track` (`A`/`Shift+A`, `app_core_impl.rs` ~8126) drives it.
+- **⚠ Audio-track switching (#99) — the real work, and NOT a verbatim copy (Codex P1).**
+  `CoreModel.selectAudioTrack` (~3068) routes to `sampleBufferVideo`/`nativeVideo` only; the Session route's
+  audio (`SessionAudioPlayer.swift`) has no `switchTrack`. The FFI `session_audio_set_track` (`pb-mac-ffi`
+  ~3438/3450) exists, **but it synchronously opens a NEW FFmpeg decoder on the same serial queue that
+  services refills** — on SMB/slow storage the ~750 ms audio lookahead can drain while that queue is blocked
+  (a *new* stutter), and its `true` return confirms **only decoder replacement**, not AVAudioEngine reconfig,
+  seek, buffer scheduling, or resumed playback. **Do NOT copy `AudioSampleFeeder.switchTrack`
+  (`AudioSampleFeeder.swift` ~196) verbatim — after its decoder replacement, a format-build failure has no
+  rollback.** Design a proper **transaction**:
+  - **Two-phase prepare/commit** (open the replacement decoder *without* blocking the playing one), or an
+    **intentional pause → re-anchor → resume** coordinated with the core — pick one and state it.
+  - **Generation-gated** (a superseded switch/seek can't land), **targets the authoritative playhead at
+    commit time** (not switch-issue time), **suppresses refills while switching**, and **rolls back to the
+    old stream + re-primes** if anything *after* decoder replacement fails.
+  - Reports through the existing `audio_track_switched(row:ok:)` path (#99's confirmed-switch rule); wire
+    `selectAudioTrack` to it. `cycle_audio_track` (`A`/`Shift+A`, `app_core_impl.rs` ~8126) drives it via the
+    same `SelectAudioTrack` effect.
+- **⚠ Active-track reporting is a REQUIRED change, not "confirm" (Codex P1).** `resolveActiveAudioRow()`
+  (`CoreModel.swift` ~3010) handles sample-buffer + AVPlayer and then **explicitly clears the tick for every
+  Session video** — so even a *successful* switch loses its checkmark the next time the picker opens. Add a
+  cached `SessionAudioPlayer.activeAudioStream`: **populate it from the initial open result**, update it from
+  the completed switch transaction, and add **`sessionAudio` branches to both `resolveActiveAudioRow()` and
+  `selectAudioTrack()`**. The two routes reach a track by *different locators* — the picker exposes
+  `audio_track_ff_stream` (FFmpeg stream index, ~3021) and `audio_track_av_plist` (~3025); the Session route
+  must use the **FFmpeg-stream** currency end-to-end.
 - **Subtitles (#90)** — the core renders them as an overlay clocked off `video_position()`, route-agnostic
   in principle. **Verify** they render + are selectable on the Session route (they should be, but confirm
   `C`/`Shift+C`, the picker, the settings preview).
@@ -142,10 +162,11 @@ sample-buffer route grew. Known gap + things to verify:
   poster/first-frame reveal, scale/Fit/Fill/Original + zoom/pan/rotation placement, play/pause, EOS/replay,
   scrubber progress + pinned-target (the seek-robustness §H3 pin is in `CoreModel`, likely route-agnostic —
   confirm), mute, HDR10 output on the XDR.
-- **⚠ Session-route audio health.** The video-playback-overhaul flagged post-seek audio issues (R2/R4/R5)
-  on the Session route (see `.taskmaster/docs/video-playback-overhaul.md` + memory `video-playback-overhaul`).
-  Make MKV playback the daily driver → these become front-and-center. Budget for A/V sync + post-seek audio
-  polish on the Session route; this is the biggest execution risk.
+- **⚠ Session-route audio health (Codex P2 — corrected).** R2/R4/R5 (post-seek audio) are **already closed
+  + owner-confirmed** (`.taskmaster/docs/video-playback-overhaul.md` ~434) — **test them for regression, do
+  NOT reopen their scope.** The remaining measured network item is **R9: duplicate demuxers + shared packet
+  read-ahead** — keep it a **follow-up** unless this repro (making MKV the daily driver over SMB) actually
+  demonstrates it. Track-switch correctness (above) is the in-scope audio risk, not the demuxer redesign.
 
 ### 3. Clean up the diagnostic scaffolding
 
@@ -157,18 +178,37 @@ sample-buffer route grew. Known gap + things to verify:
   `DemuxReader.presentationTime`/`frameRate`). None helped; they're cruft.
 - Delete the test artifact `~/Downloads/adastra_avplayer_test.mp4` (a remux, not committed).
 
-### 4. Testing (owner-verified — the smoothness + A/V bits can't be unit-tested)
+### 4. Testing — automatable core + owner-verified perceptual (Codex P2: TDD is required)
 
-- **Smoothness:** `Ad.Astra.…mkv` (local + SMB) plays smooth, `PB_TRACE` `sb-play`… — wait, the Session
-  route has no `sb-play diag`; verify by eye + (if wanted) add a minimal drop counter to the Session
-  present path. Compare against the AVPlayer MP4 (known-smooth reference) and mpv.
-- **Parity checklist (owner):** audio-track switch (`A`/menu/picker) with a confirmed toast; subtitles
-  (`C`/`Shift+C`/picker/settings); seek (arrow + scrubber, no pause/jump — the seek-robustness fixes must
-  still hold); resume at nonzero position with audio; scale modes + zoom/pan/rotation; EOS + replay; mute.
-- **HDR:** an HDR10 MKV renders correctly on the XDR (fp16 path). A DoVi MKV renders as a **clean HDR10 base
-  layer** (acceptable, documented).
-- **Regression:** MP4/MOV still route to AVPlayer and still resume/seek correctly (the seek-robustness
-  resume-audio + scrubber fixes were on both routes — don't regress).
+**Automatable (write these — the routing, locator mapping, rollback, reporting, and switching are pure
+logic, only the *smoothness* is perceptual):**
+- **Invert the existing macOS routing regression test** (`app_core_impl.rs` ~11572) — it currently asserts
+  MKV → sample-buffer; it must now assert MKV/WebM → Session, MP4/MOV → AVPlayer.
+- **Opt-in route test without mutating process-global env** (don't `std::env::set_var` in a test — thread a
+  flag or a test seam) so the parked `PB_SAMPLE_BUFFER=1` path stays covered.
+- **`session_audio_set_track`** against the committed `multitrack.mkv` fixture (conveniently switches
+  **44.1 kHz stereo AAC → 48 kHz 6-ch AC-3**, exercising the format rebuild): assert **success**,
+  **refusal/rollback** (old stream still playing, format intact), **actual-stream reporting** (the cached
+  `activeAudioStream` reflects what's playing, not what was requested), and **stale-generation completion**
+  (a superseded switch is dropped before touching the graph).
+- **Add a small HDR10 MKV fixture** (remux/generate) so HDR metadata carriage is verified for the **MKV**
+  container, not only the current MP4 fixture — Codex confirms the FFmpeg Session path already carries
+  per-frame color/transfer into P010/fp16, but there's no MKV regression fixture proving it.
+
+**Owner-verified (perceptual / A/V — no metric an agent can read):**
+- **Smoothness:** `Ad.Astra.…mkv` (local + SMB) plays smooth. The Session route has no `sb-play diag`;
+  verify by eye against the AVPlayer MP4 (known-smooth reference) and mpv. *(Optional: add a minimal Session
+  present-path drop counter for an objective number.)*
+- **Parity:** audio-track switch (`A`/menu/picker) with a confirmed toast **and a surviving tick on re-open**;
+  subtitles (`C`/`Shift+C`/picker/settings); seek (arrow + scrubber — the seek-robustness fixes must still
+  hold, no pause/jump); resume at nonzero position with audio; scale + zoom/pan/rotation; EOS/replay; mute.
+- **HDR (Codex P1 — corrected acceptance):** an HDR10 MKV renders correctly on the XDR (fp16). **DoVi
+  acceptance is profile-specific, NOT a blanket "clean HDR10 base layer":** Profiles **7 and 8.1** have
+  HDR10-compatible base layers and degrade cleanly; **Profile 5 is NOT HDR10/SDR-compatible** — ignoring its
+  RPU produces *visibly wrong* color (the green/purple tint), so it is **explicitly unsupported / known-bad**,
+  not "clean." State this in the release notes; don't claim all DoVi degrades gracefully.
+- **Regression:** MP4/MOV still route to AVPlayer and still resume/seek (the seek-robustness resume-audio +
+  scrubber fixes were on both routes — don't regress).
 
 ### 5. CHANGELOG + docs
 
@@ -180,23 +220,22 @@ sample-buffer route grew. Known gap + things to verify:
 
 ---
 
-## Open questions for Codex validation
+## Open questions — RESOLVED by Codex review (2026-07-15)
 
-1. **Is `macos_sample_buffer_route → false` the cleanest switch**, or should the sample-buffer selection be
-   removed from `start_video_session` entirely (with the env as the only way back)? Any caller besides
-   `start_video_session` that assumes MKV → sample-buffer?
-2. **Session-route audio parity scope** — is `SessionAudioPlayer.switchTrack` the *only* gap, or are there
-   core-side assumptions (`audio_active` reporting, the catalog's `av_plist` currency vs the session's
-   FFmpeg-stream currency) that differ between routes? `audio_track_ff_stream` vs `audio_track_av_plist`
-   (`CoreModel` ~3021/3025) — the two routes reach a track by different locators; confirm the Session route
-   uses the FFmpeg-stream one end-to-end.
-3. **Session-route audio robustness** — will making MKV the daily driver surface the overhaul's R2/R4/R5
-   post-seek/network-seek audio issues? Should those be in-scope here or a follow-up?
-4. **HDR10 correctness** on the Session route for MKV specifically (the sample-buffer route parsed the
-   ISOBMFF `colr` box directly for HEIF; does the Session/FFmpeg path carry HDR10 metadata correctly for
-   MKV?).
-5. **Anything the sample-buffer route did that's genuinely lost** and matters — DoVi is decided; is there a
-   second thing (e.g. a codec the Session route's FFmpeg build can't decode but VideoToolbox could)?
+1. **Route switch shape:** *Keep* `macos_sample_buffer_route` and the selection branch (it's called only
+   from `start_video_session` — smallest reversible seam); make it **exact opt-in via `PB_SAMPLE_BUFFER=1`**.
+2. **Audio parity scope:** `switchTrack` is **NOT the only gap** — also required: active-stream
+   caching/reporting, serialized decoder operations, graph rollback, clock coordination, and completion
+   generation. The Session route uses the **FFmpeg-stream** locator (`audio_track_ff_stream`) end-to-end.
+   (Folded into §2 above.)
+3. **Audio robustness:** R2/R4/R5 are **already closed** — test for regression, don't reopen. **R9**
+   (duplicate demuxers + shared read-ahead) is the remaining architecture item; **follow-up**, not this task.
+4. **HDR10/MKV:** the FFmpeg Session path **already extracts stream HDR metadata + carries per-frame
+   color/transfer into P010/fp16**. Requirement: add a real **MKV** HDR10 regression fixture before declaring
+   container parity (the current fixture is MP4 only). (Folded into §4 above.)
+5. **Anything else lost:** No second codec advantage — the parked sample-buffer route decodes **only H.264 +
+   HEVC** (`DemuxReader.swift` ~203); Session/FFmpeg is broader. **Dolby Vision is its only meaningful
+   distinction**, and that's decided (not built).
 
 ---
 
