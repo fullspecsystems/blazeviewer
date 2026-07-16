@@ -81,8 +81,101 @@ pub mod ids {
     pub const TOGGLE_SUBTITLES: &str = "toggle_subtitles";
     pub const SUBTITLE_CYCLE: &str = "subtitle_cycle";
 
+    /// Prefix for the Playback ▸ Subtitle Track flyout's **dynamic** ids
+    /// (`"subtitle_track:3"` → picker row 3). Every other id in this module is a constant,
+    /// because every other item exists for the life of the menu; these are rebuilt per file,
+    /// so the row index has to ride in the id itself. Parsed back by
+    /// [`subtitle_track_row`] — the only place that knows the encoding.
+    pub const SUBTITLE_TRACK_PREFIX: &str = "subtitle_track:";
+
     pub const HELP: &str = "help";
     pub const ABOUT: &str = "about";
+}
+
+/// The picker row a dynamic subtitle-track id names (`"subtitle_track:3"` → `Some(3)`), or
+/// `None` for any other id — including a malformed one, which is simply ignored the way
+/// [`action_for`] ignores an unknown id.
+///
+/// **The row is an index into `AppCore::subtitle_picker_rows`**, which is the same list
+/// `Shift+C` and the Mac's popover walk. That is the whole contract: the flyout may *hide*
+/// rows (it omits `Off`, which its own toggle owns) but must never renumber them, or a click
+/// would select a different track than the one it read.
+pub fn subtitle_track_row(id: &str) -> Option<usize> {
+    id.strip_prefix(ids::SUBTITLE_TRACK_PREFIX)?.parse().ok()
+}
+
+/// One row of the Playback ▸ Subtitle Track flyout, as a shell-neutral model.
+///
+/// The flyout's *rules* live here as a pure function ([`subtitle_track_rows`]) rather than
+/// inside the muda construction, so they can be unit-tested without a menu, a window, or an
+/// OS. The Windows builder just walks this.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TrackRow {
+    /// A pickable track: its **canonical picker index**, its label, and whether it is what
+    /// is on screen right now.
+    Track {
+        row: usize,
+        label: String,
+        active: bool,
+    },
+    /// A divider (under `Automatic` — see below).
+    Separator,
+    /// A disabled explanatory line. Never a track, never clickable.
+    Note(&'static str),
+}
+
+/// Build the Playback ▸ Subtitle Track flyout's rows from the core's picker list.
+///
+/// Three things this encodes, each of which was a defect somewhere first:
+///
+/// 1. **The tri-state is not collapsed.** "No Video", "Reading Tracks…" and "No Subtitle
+///    Tracks" are three different answers. Saying "no subtitles" over a file whose probe
+///    hasn't landed is a confident lie, and saying "reading tracks" over a photograph is
+///    nonsense.
+/// 2. **Row 0 (`Off`) is dropped, and every other row keeps its index.** The `Subtitles`
+///    toggle above the flyout owns off/on; an `Off` row here would be a second, competing
+///    answer to that question. Hiding a row is fine — renumbering would silently select the
+///    wrong track (see [`subtitle_track_row`]).
+/// 3. **`Automatic` gets a divider under it.** It is a different *kind* of answer from the
+///    tracks below it ("you choose" vs "this one"), so it doesn't read as one of them.
+pub fn subtitle_track_rows(
+    picker: &[pb_app_core::tracks::PickerRow],
+    video_showing: bool,
+    tracks_known: bool,
+) -> Vec<TrackRow> {
+    if !video_showing {
+        return vec![TrackRow::Note("No Video")];
+    }
+    let rows: Vec<TrackRow> = picker
+        .iter()
+        .enumerate()
+        .skip(1) // row 0 is Off — the toggle's job, not the flyout's
+        .flat_map(|(row, r)| {
+            let item = TrackRow::Track {
+                row,
+                label: r.label.clone(),
+                active: r.active,
+            };
+            // The Automatic row is a different kind of answer from the tracks under it.
+            if r.label == pb_app_core::tracks::AUTOMATIC_ROW {
+                vec![item, TrackRow::Separator]
+            } else {
+                vec![item]
+            }
+        })
+        .collect();
+    // Nothing but `Off` came back, which happens two ways: the probe hasn't landed (the list
+    // is empty), or it landed and the file has no renderable track (`picker_choices` returns
+    // a bare `[Off]`, since `Automatic` with nothing to resolve to would be a row that does
+    // nothing). Only `tracks_known` tells those apart, and they are not the same answer.
+    if rows.is_empty() {
+        return vec![TrackRow::Note(if tracks_known {
+            "No Subtitle Tracks"
+        } else {
+            "Reading Tracks…"
+        })];
+    }
+    rows
 }
 
 /// A menu action — one per clickable item. Each maps to an operation the keyboard
@@ -364,6 +457,17 @@ pub struct BuiltMenu {
     /// Image ▸ Compare with Pinned — the `Y` flip. Enabled once a pin exists.
     /// Starts disabled.
     pub compare_toggle: MenuItem,
+    /// The Playback ▸ Subtitle Track flyout (task #99). Held because its rows are **per
+    /// file**, so unlike everything else here they are rebuilt at runtime rather than
+    /// checked/enabled — see `App::refresh_subtitle_track_menu`. Starts empty.
+    ///
+    /// ⚠ **Never disable the holder** to say "no video". macOS learned this the hard way: a
+    /// disabled submenu item can't be hovered, so its delegate never fires again and nothing
+    /// can re-enable it — greying it out once greyed it out *permanently*. muda rebuilds
+    /// rather than pulls, so it isn't literally the same trap, but the rule that saves us is
+    /// the same one: the state lives in the submenu's **contents** ("No Video"), which are
+    /// always re-derivable, never in the holder's enabled flag.
+    pub subtitle_tracks: Submenu,
     pub checks: ViewChecks,
 }
 
@@ -472,17 +576,6 @@ pub fn build_menu(keymap: &Keymap) -> BuiltMenu {
         &item(ids::SLIDESHOW_FASTER, "Slideshow Faster\t["),
         &item(ids::SLIDESHOW_SLOWER, "Slideshow Slower\t]"),
         &sep(),
-        // Captions on a video (task #90). These lived only in the Linux egui bar until now:
-        // `C` and `Shift+C` both worked on Windows, but nothing in the UI said so — and a
-        // keyboard-only feature is one most people never find.
-        //
-        // A real track *list* here is the #99 flyout. macOS builds it in
-        // `NSMenuDelegate.menuNeedsUpdate`, pulling the per-file tracks as the menu opens;
-        // muda has no such hook (the tree is built once and only its checkmarks are
-        // mirrored onto it), so it needs machinery that doesn't exist yet.
-        &subtitles,
-        &item(ids::SUBTITLE_CYCLE, "Next Subtitle Track\tShift+C"),
-        &sep(),
         &toolbar,
         &info,
         &full_exif,
@@ -548,10 +641,24 @@ pub fn build_menu(keymap: &Keymap) -> BuiltMenu {
         &sep(),
         &compare_pin,
         &compare_toggle,
-        &sep(),
+    ]);
+
+    // Playback (task #99) — everything time-based in one place: the transport, and the track
+    // choices beside it. Mirrors the macOS bar, which is the owner's call (2026-07-15) over a
+    // View ▸ Subtitles flyout, and for the reason IINA and VLC both land here: the audio and
+    // subtitle pickers belong side by side, and "View" is where neither belongs. The transport
+    // items moved here out of Image, which keeps the still-image verbs.
+    //
+    // The Subtitle Track flyout starts empty; `App::refresh_subtitle_track_menu` fills it from
+    // the file on screen. macOS pulls its rows in `NSMenuDelegate.menuNeedsUpdate` (fires as
+    // the menu opens, so it can never be stale); muda has no such hook — the tree is built
+    // once and only its checkmarks are mirrored — so the shell rebuilds this on change instead.
+    let subtitle_tracks = Submenu::new("Subtitle Track", true);
+    let playback = Submenu::new("&Playback", true);
+    let _ = playback.append_items(&[
         &item(
             ids::PLAY_PAUSE,
-            &labeled(keymap, "Play/Pause Animation", Action::PlayPause),
+            &labeled(keymap, "Play/Pause", Action::PlayPause),
         ),
         &item(
             ids::FRAME_NEXT,
@@ -562,6 +669,14 @@ pub fn build_menu(keymap: &Keymap) -> BuiltMenu {
             &labeled(keymap, "Previous Frame", Action::FramePrev),
         ),
         &sep(),
+        // Two items, because they answer two different questions and neither may clobber the
+        // other (owner, 2026-07-15): "Subtitles" is on/off — the `C` key's twin — and
+        // "Subtitle Track" is *which*. Fusing them (an Off row inside the flyout, and no
+        // toggle) was the defect: turning subtitles off had to forget the track you had
+        // picked, so picking Chinese and toggling twice gave you English.
+        &subtitles,
+        &subtitle_tracks,
+        &sep(),
         &mute_live_audio,
     ]);
 
@@ -571,7 +686,7 @@ pub fn build_menu(keymap: &Keymap) -> BuiltMenu {
         &item(ids::ABOUT, &format!("About {}", pb_app_core::APP_NAME)),
     ]);
 
-    for sub in [&file, &edit, &view, &go, &image, &help] {
+    for sub in [&file, &edit, &view, &go, &image, &playback, &help] {
         if let Err(e) = menu.append(sub) {
             eprintln!("menu: failed to append submenu: {e}");
         }
@@ -584,6 +699,7 @@ pub fn build_menu(keymap: &Keymap) -> BuiltMenu {
         undo,
         compare_pin,
         compare_toggle,
+        subtitle_tracks,
         checks: ViewChecks {
             fit,
             fill,
@@ -772,27 +888,6 @@ pub fn menu_bar_spec(keymap: &Keymap, s: &crate::contract::MenuState) -> Vec<Men
                 item(MenuAction::SlideshowFaster, "Slideshow Faster\t[", true),
                 item(MenuAction::SlideshowSlower, "Slideshow Slower\t]", true),
                 sep(),
-                // Captions on a video (task #90). View for now — it moves beside the track
-                // picker when that lands (#99).
-                check(
-                    MenuAction::ToggleSubtitles,
-                    "Subtitles\tC",
-                    true,
-                    s.subtitles,
-                ),
-                // `Shift+C` has cycled tracks since #90.3, but nothing said so — a keyboard-
-                // only feature is a feature most people never find. Always enabled, like the
-                // toggle above it: the core answers "No subtitle tracks" / "Reading tracks…"
-                // with a toast, which is a better answer than a greyed-out item that explains
-                // nothing. A real track *list* here is the #99 flyout, and it needs machinery
-                // muda doesn't have (no `menuNeedsUpdate` equivalent — the tree is built once
-                // and only its checkmarks are mirrored).
-                item(
-                    MenuAction::SubtitleCycle,
-                    "Next Subtitle Track\tShift+C",
-                    true,
-                ),
-                sep(),
                 check(
                     MenuAction::ToggleToolbar,
                     "Show Toolbar",
@@ -874,10 +969,20 @@ pub fn menu_bar_spec(keymap: &Keymap, s: &crate::contract::MenuState) -> Vec<Men
                     &l("Compare with Pinned", Action::CompareToggle),
                     s.compare_toggle_enabled,
                 ),
-                sep(),
+            ],
+        },
+        // Playback — the same grouping as the Windows/macOS bars (task #99), so the three
+        // don't teach three different mental models. The one deliberate difference: **no
+        // track flyout**. This bar is a hand-rolled egui dropdown with no submenu support, so
+        // "which subtitle track" stays `Shift+C` here, and the item below advertises it. That
+        // is why `SubtitleCycle` survives in the model at all — the native bars dropped it
+        // once their flyout could answer the same question better.
+        MenuGroup {
+            title: "Playback",
+            items: vec![
                 item(
                     MenuAction::PlayPause,
-                    &l("Play/Pause Animation", Action::PlayPause),
+                    &l("Play/Pause", Action::PlayPause),
                     true,
                 ),
                 item(
@@ -888,6 +993,21 @@ pub fn menu_bar_spec(keymap: &Keymap, s: &crate::contract::MenuState) -> Vec<Men
                 item(
                     MenuAction::FramePrev,
                     &l("Previous Frame", Action::FramePrev),
+                    true,
+                ),
+                sep(),
+                check(
+                    MenuAction::ToggleSubtitles,
+                    "Subtitles\tC",
+                    true,
+                    s.subtitles,
+                ),
+                // Always enabled, like the toggle above it: the core answers "No subtitle
+                // tracks" / "Reading tracks…" with a toast, which is a better answer than a
+                // greyed-out item that explains nothing.
+                item(
+                    MenuAction::SubtitleCycle,
+                    "Next Subtitle Track\tShift+C",
                     true,
                 ),
                 sep(),
@@ -1428,5 +1548,109 @@ mod tests {
         assert_eq!(action_for(""), None);
         assert_eq!(action_for("not_a_real_id"), None);
         assert_eq!(action_for("OPEN_FILE"), None); // case-sensitive
+    }
+
+    // ── The Playback ▸ Subtitle Track flyout (task #99) ──────────────────
+
+    use pb_app_core::tracks::{PickerRow, AUTOMATIC_ROW, OFF_ROW};
+
+    /// The core's canonical picker list for a file with three renderable tracks, with the
+    /// tick sitting where `Automatic` resolved it (row 3) — the shape
+    /// `subtitle::picker_choices` guarantees: `Off`, `Automatic`, then the tracks.
+    fn picker() -> Vec<PickerRow> {
+        let row = |label: &str, active| PickerRow {
+            label: label.to_string(),
+            active,
+        };
+        vec![
+            row(OFF_ROW, false),
+            row(AUTOMATIC_ROW, false),
+            row("English · SubRip", false),
+            row("English SDH · SubRip", true),
+            row("Chinese · ASS", false),
+        ]
+    }
+
+    #[test]
+    fn a_track_id_round_trips_through_its_menu_id() {
+        // The encoding the flyout writes is the one the dispatcher reads — the pair only
+        // works if they agree, so pin them together.
+        for row in [0usize, 3, 42] {
+            let id = format!("{}{row}", ids::SUBTITLE_TRACK_PREFIX);
+            assert_eq!(subtitle_track_row(&id), Some(row));
+        }
+        // Not a track id: every constant id, and junk. A stray/foreign event is ignored.
+        assert_eq!(subtitle_track_row(ids::TOGGLE_SUBTITLES), None);
+        assert_eq!(subtitle_track_row(ids::SUBTITLE_CYCLE), None);
+        assert_eq!(subtitle_track_row(""), None);
+        assert_eq!(subtitle_track_row("subtitle_track:"), None);
+        assert_eq!(subtitle_track_row("subtitle_track:-1"), None);
+        assert_eq!(subtitle_track_row("subtitle_track:abc"), None);
+        // The two dispatchers must not both claim an id, or a click would fire twice.
+        assert_eq!(action_for("subtitle_track:2"), None);
+    }
+
+    #[test]
+    fn the_flyout_drops_the_off_row_without_renumbering_the_rest() {
+        // THE load-bearing property. `Off` is the toggle's job, so the flyout hides it — but
+        // the row index it hands back is the core's, and renumbering would select a
+        // different track than the one the user read.
+        let rows = subtitle_track_rows(&picker(), true, true);
+        let tracks: Vec<(usize, &str, bool)> = rows
+            .iter()
+            .filter_map(|r| match r {
+                TrackRow::Track { row, label, active } => Some((*row, label.as_str(), *active)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            tracks,
+            vec![
+                (1, AUTOMATIC_ROW, false),
+                (2, "English · SubRip", false),
+                (3, "English SDH · SubRip", true), // the tick rides along untouched
+                (4, "Chinese · ASS", false),
+            ],
+            "row 0 is hidden; every surviving row keeps its index into picker_choices"
+        );
+        assert!(
+            !rows
+                .iter()
+                .any(|r| matches!(r, TrackRow::Track { label, .. } if label == OFF_ROW)),
+            "the Off row must not appear beside the toggle that owns it"
+        );
+        // Automatic is a different kind of answer from the tracks, so it gets a divider.
+        assert_eq!(rows[1], TrackRow::Separator);
+    }
+
+    #[test]
+    fn the_flyout_keeps_the_three_empty_answers_apart() {
+        // Three different facts, and collapsing any pair of them is a lie. The list is empty
+        // in all three cases, so only the flags tell them apart.
+        assert_eq!(
+            subtitle_track_rows(&[], false, false),
+            vec![TrackRow::Note("No Video")]
+        );
+        // …and "no video" outranks the rest: "Reading Tracks…" over a photograph is nonsense.
+        assert_eq!(
+            subtitle_track_rows(&picker(), false, true),
+            vec![TrackRow::Note("No Video")]
+        );
+        // A video whose probe hasn't landed. NOT "no subtitles" — that would be a confident
+        // lie about a file we haven't finished reading.
+        assert_eq!(
+            subtitle_track_rows(&[], true, false),
+            vec![TrackRow::Note("Reading Tracks…")]
+        );
+        // Probed, and genuinely none. `picker_choices` returns a bare `[Off]` here — which,
+        // once Off is dropped, is indistinguishable from empty. Hence the flag.
+        let off_only = vec![PickerRow {
+            label: OFF_ROW.to_string(),
+            active: true,
+        }];
+        assert_eq!(
+            subtitle_track_rows(&off_only, true, true),
+            vec![TrackRow::Note("No Subtitle Tracks")]
+        );
     }
 }

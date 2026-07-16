@@ -41,13 +41,12 @@ with any pre-release suffix carried only by the tag.
   `C` prefers a forced/signs track matching the audio, then the file's own default track,
   then whatever it can read. (Image-based subtitles — PGS, VobSub — are not text and are
   still not shown.)
-- **Pick a subtitle track from a list** (macOS): a button on the playback bar, just right of
-  the running time, opens every track the file carries — named by language and format
-  ("English · SubRip · Forced"), with a tick on the one you're watching. The same list is in
-  the new **Playback ▸ Subtitle Track** menu. On every platform, `Shift+C` steps through the
-  very same tracks, and **View ▸ Next Subtitle Track** does it from the menu. Turning
-  subtitles off and on again brings back the track *you* chose, rather than reverting to the
-  app's guess.
+- **Pick a subtitle track from a list.** The new **Playback ▸ Subtitle Track** menu lists
+  every track the file carries — named by language and format ("English · SubRip · Forced"),
+  with a tick on the one you're watching. On macOS a button on the playback bar, just right of
+  the running time, opens the same list. `Shift+C` steps through those very same tracks
+  everywhere. Turning subtitles off and on again brings back the track *you* chose, rather
+  than reverting to the app's guess.
 - **Your subtitle language follows you to the next film.** Choose "Arabic (SDH)" on one
   episode and the next one starts on its Arabic track — even though the two files number
   their tracks differently, and even if one says `ara` where the other says `ar`. If a film
@@ -57,9 +56,10 @@ with any pre-release suffix carried only by the tag.
   on the one you're hearing, or press **`A`** to step through them (**`Shift+A`** goes back).
   It changes the sound without interrupting the picture. Blaze Viewer only ever says a track
   changed once it actually has, so the message can be trusted.
-- **A new Playback menu** (macOS) gathers the things that only apply to something playing —
-  Play/Pause, frame stepping, audio and subtitle tracks, and Live Photo audio — instead of
-  leaving them scattered through View and Image.
+- **A new Playback menu** gathers the things that only apply to something playing —
+  Play/Pause, frame stepping, subtitle tracks, and Live Photo audio — instead of leaving them
+  scattered through View and Image. (Choosing the **audio** track from the menu is macOS-only
+  for now.)
 - **Garbled subtitles repair themselves.** Subtitle text that arrives mangled — `â™ª`
   instead of `♪`, `Iâ€™m` instead of `I'm` — is a mis-encoding that has been quietly
   breaking subtitles everywhere for decades. Blaze Viewer now detects and undoes it, and

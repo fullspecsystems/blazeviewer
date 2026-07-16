@@ -557,6 +557,31 @@ struct App {
     /// A cue lives for seconds, so this skips the re-upload on all but a few frames — the
     /// `thumb_gen` contract, same as the macOS host's `NSImage` cache.
     subtitle_gen: u64,
+    /// The Playback ▸ Subtitle Track flyout (task #99), kept so its **rows** can be rebuilt
+    /// when the file on screen changes — every other menu handle only needs its checkmark
+    /// mirrored.
+    subtitle_tracks_menu: Option<muda::Submenu>,
+    /// What the flyout was last built for. muda has no `menuNeedsUpdate` (macOS's route), so
+    /// the rows are rebuilt on change instead of pulled at open — and this is what makes
+    /// "on change" cheap: the *inputs* the list depends on, `Copy` and allocation-free, so
+    /// the per-tick check is a tuple compare. Reading the real rows every tick would allocate
+    /// a `Vec<String>` behind a playing video, which is exactly the hot path.
+    subtitle_menu_sig: Option<SubtitleMenuSig>,
+}
+
+/// The inputs the Playback ▸ Subtitle Track flyout's rows depend on. When this is unchanged,
+/// the rows cannot have changed, so the rebuild is skipped (see `App::subtitle_menu_sig`).
+///
+/// `tracks_known` is the one that flips `false → true` when a probe lands, turning "Reading
+/// Tracks…" into the real list; `active` covers a `Shift+C` cycle moving the tick.
+#[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SubtitleMenuSig {
+    item: Option<usize>,
+    video_showing: bool,
+    tracks_known: bool,
+    active: Option<u64>,
+    on: bool,
 }
 
 /// A deferred dialog open (see [`App::pending_dialog`]). Carries only what the opener
@@ -952,6 +977,8 @@ impl App {
             play_hint_frame: None,
             play_hint_wake: None,
             subtitle_gen: 0,
+            subtitle_tracks_menu: None,
+            subtitle_menu_sig: None,
         }
     }
 
@@ -2329,7 +2356,74 @@ impl App {
             self.undo_item = Some(built.undo);
             self.compare_pin_item = Some(built.compare_pin);
             self.compare_toggle_item = Some(built.compare_toggle);
+            self.subtitle_tracks_menu = Some(built.subtitle_tracks);
             self.view_checks = Some(built.checks);
+        }
+    }
+
+    /// Rebuild the Playback ▸ Subtitle Track flyout's rows for the file on screen (task #99).
+    ///
+    /// **The one menu item whose *contents* are runtime state**, because the track list is a
+    /// property of the file rather than of the app. macOS gets this for free — its
+    /// `NSMenuDelegate.menuNeedsUpdate` fires as the menu opens, so the list is built from
+    /// whatever is on screen at that instant and there is nothing to invalidate. muda has no
+    /// such hook (the tree is built once; `apply_menu_to_native` only mirrors checkmarks onto
+    /// it), so this runs on the tick instead and guards itself with a cheap signature — a
+    /// tuple compare, no allocation — because the alternative is formatting a `Vec<String>`
+    /// of track labels every frame behind a playing video.
+    // Windows/macOS only: there is no native menu on Linux (its egui bar has no submenus,
+    // so `Shift+C` stays the route there).
+    #[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
+    fn refresh_subtitle_track_menu(&mut self) {
+        if self.subtitle_tracks_menu.is_none() {
+            return;
+        }
+        let sig = SubtitleMenuSig {
+            item: self.core.displayed_item,
+            video_showing: self.core.video_showing(),
+            tracks_known: self.core.subtitle_tracks_known(),
+            active: self.core.subtitles.active_track(),
+            on: self.core.subtitles_on(),
+        };
+        if self.subtitle_menu_sig == Some(sig) {
+            return;
+        }
+        self.subtitle_menu_sig = Some(sig);
+
+        // Only *now* — past the guard — is it worth asking the core for real rows.
+        let rows = menu::subtitle_track_rows(
+            &self.core.subtitle_picker_rows(),
+            sig.video_showing,
+            sig.tracks_known,
+        );
+        // `PB_SUBTITLE_TRACE=1` — what the flyout would show, without opening it. A native
+        // menu's contents are otherwise invisible to everything except a human with a mouse,
+        // which makes "is the list right?" the one question about this feature that no test
+        // can answer.
+        self.core
+            .subtitles
+            .trace(|| format!("menu: subtitle track flyout = {rows:?}"));
+        let Some(flyout) = self.subtitle_tracks_menu.as_ref() else {
+            return;
+        };
+        // muda has no `remove_all`, and `remove_at` shifts the rest down — so drain from 0.
+        while flyout.remove_at(0).is_some() {}
+        for row in rows {
+            let appended = match row {
+                menu::TrackRow::Separator => flyout.append(&muda::PredefinedMenuItem::separator()),
+                // A note is an item that says why there is nothing to pick. Disabled: it is an
+                // explanation, not an offer.
+                menu::TrackRow::Note(text) => {
+                    flyout.append(&muda::MenuItem::with_id(text, text, false, None))
+                }
+                menu::TrackRow::Track { row, label, active } => {
+                    let id = format!("{}{row}", menu::ids::SUBTITLE_TRACK_PREFIX);
+                    flyout.append(&muda::CheckMenuItem::with_id(id, label, true, active, None))
+                }
+            };
+            if let Err(e) = appended {
+                eprintln!("menu: failed to append a subtitle track row: {e}");
+            }
         }
     }
 
@@ -3931,7 +4025,16 @@ impl ApplicationHandler for App {
         // 0. Native menu-bar clicks (windowed mode). Map each id to the same action
         // the keyboard triggers and dispatch it; an unknown/foreign id is ignored.
         while let Ok(ev) = muda::MenuEvent::receiver().try_recv() {
-            if let Some(action) = menu::action_for(ev.id.as_ref()) {
+            // A Playback ▸ Subtitle Track row (task #99) — the one menu id that isn't a
+            // constant, because the rows are per-file. It carries a picker row rather than a
+            // verb, so it can't go through `dispatch_menu`: `Action` is the *keyboard's*
+            // fixed vocabulary, and a track pick has an argument. Same core call the Mac
+            // host's `pickSubtitleTrack` and the playback bar's popover make.
+            if let Some(row) = menu::subtitle_track_row(ev.id.as_ref()) {
+                self.core.select_subtitle_row(row);
+                self.menu_state = None;
+                self.subtitle_menu_sig = None;
+            } else if let Some(action) = menu::action_for(ev.id.as_ref()) {
                 self.dispatch_menu(action);
                 // muda auto-flips a clicked CheckMenuItem's native checkmark, which can
                 // desync from the real state (e.g. clicking the already-active scale mode
@@ -3945,6 +4048,11 @@ impl ApplicationHandler for App {
         // the native-fullscreen title. Cached field-by-field, so this per-tick call is a
         // no-op unless something actually changed.
         self.apply_menu_state();
+        // The Playback ▸ Subtitle Track flyout's *rows* (task #99) — not state to mirror but
+        // a list to rebuild, since the tracks belong to the file on screen. Its own signature
+        // guard, so this is a tuple compare on all but the few ticks where the list moved.
+        #[cfg(any(windows, target_os = "macos"))]
+        self.refresh_subtitle_track_menu();
         // 0b. Apply any files dropped on the window this burst (coalesced — winit
         // delivers one `DroppedFile` per file).
         if !self.pending_drops.is_empty() {
