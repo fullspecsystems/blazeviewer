@@ -1,15 +1,18 @@
 # macOS video smoothness — route MKV to the Session (wgpu) path, retire the sample-buffer route
 
 > Status: **PLAN — diagnosis COMPLETE + owner-confirmed; Codex-reviewed 2026-07-15 (findings
-> incorporated below); execution NOT started** · Owner: JD
+> incorporated below); second review 2026-07-15 (Claude — audio-switch transaction shape DECIDED,
+> DoVi door-open design added, all line refs re-verified against source); execution NOT started**
+> · Owner: JD
 > Scope: **macOS video playback smoothness.** The winit (Windows/Linux) shell already uses the
 > Session route and is unaffected. This is a routing + parity change, not a rendering rewrite.
 >
 > **One-line summary:** `AVSampleBufferDisplayLayer` (the macOS "sample-buffer" route we use for
 > MKV/WebM) drops ~3 frames/sec on steady-state playback that every other route plays flawlessly.
 > We already have a smooth, mpv-class renderer — the **Session route** (FFmpeg → wgpu → Metal).
-> Make it the default for MKV/WebM; keep the sample-buffer route parked for a possible future
-> Dolby-Vision path we've decided **not** to build.
+> Make it the default for MKV/WebM; keep the sample-buffer route parked — not as the future
+> Dolby-Vision implementation, but as its **reference renderer**. DoVi itself is deferred with the
+> door deliberately kept open (detection ships now; see *Keeping the DoVi door open*).
 
 ---
 
@@ -82,7 +85,7 @@ We investigated whether we could keep DoVi *and* smoothness. **mpv does DoVi ent
 `pl_map_avdovi_metadata` / `pl_hdr_metadata_from_dovi_rpu` applies the RPU reshaping in the GPU shader;
 dual-layer Profile 7 via `filters/f_enhancement_pair.c`). So DoVi does **not** require Apple's decoder.
 
-**But we decided NOT to build it, for concrete reasons:**
+**But we decided NOT to build it now, for concrete reasons** (the door stays open — next section):
 - **libplacebo doesn't fit wgpu.** Its GPU backends are Vulkan/OpenGL/D3D11 — no Metal, no wgpu. On macOS
   it runs over **MoltenVK**, i.e. a *parallel GPU stack* beside our wgpu renderer, **+~8–12 MB** download
   on macOS (libplacebo ~1–3 MB + MoltenVK + loader). Licensing is fine (LGPL-2.1+, like FFmpeg/libheif),
@@ -100,10 +103,43 @@ dual-layer Profile 7 via `filters/f_enhancement_pair.c`). So DoVi does **not** r
   laptop, where DoVi is currently *stuttery* anyway. So: can't verify it, main display can't show it, and
   where it could, smooth-HDR10 beats stuttery-DoVi.
 
-**Decision: retire the sample-buffer route as the default; ship the Session route; do not build DoVi.**
-Keep the sample-buffer code **parked** (not deleted) behind `PB_NO_SAMPLE_BUFFER`'s inverse, in case DoVi
-ever revives with a WGSL implementation. If HDR dynamic metadata ever matters, HDR10+ (the Samsung format)
-would be the one to consider — equally niche, equally unverifiable-by-agent, same conclusion.
+**Decision: retire the sample-buffer route as the default; ship the Session route; defer DoVi.**
+Keep the sample-buffer code **parked** (not deleted) behind the opt-in flag (§1). If HDR dynamic metadata
+ever matters beyond DoVi, HDR10+ (the Samsung format) would be the one to consider — equally niche,
+equally unverifiable-by-agent, same conclusion.
+
+### Keeping the DoVi door open (added 2026-07-15 — deliberate, and cheap now)
+
+Deferring DoVi must not mean architecting it out. Four commitments keep a later DoVi feature a
+*feature*, not a rework:
+
+1. **The revival vehicle is WGSL-in-Session, not the parked route.** If DoVi ever ships, it is the
+   RPU-reshaping pass in our existing fp16 scRGB shader (FFmpeg already exposes
+   `AV_FRAME_DATA_DOVI_METADATA` per frame; the math is unit-testable against libplacebo/libdovi
+   reference vectors — see the analysis above). Shipping DoVi by un-parking
+   `AVSampleBufferDisplayLayer` would reintroduce the exact ~3 drops/sec this plan exists to fix —
+   the parked route is never the end-state.
+2. **The parked route's real future role: reference renderer + Profile-5 escape hatch.** The
+   verification wall (perceptual color judgment, no agent-readable metric) shrinks a lot with an
+   on-device oracle: the same clip through Apple's DoVi pipeline (`PB_SAMPLE_BUFFER=1`) on the XDR
+   beside our shader output, plus mpv. That is why the route stays parked-and-tested rather than
+   deleted (§4's opt-in routing test is what keeps it from rotting), and why its
+   `DoviConfig` → `dvcC`/`dvvC` plumbing stays intact.
+3. **Detection lands NOW (§2, small).** `read_dovi`/`DoviConfig` — profile, level,
+   `bl_signal_compatibility_id`, the packed 24-byte config box — **already exists and is
+   unit-tested** in `pb-decode/src/ffmpeg/demux.rs` (built for the sample-buffer demux). The
+   Session producer reads the same stream side data at open and carries a slim summary on
+   `Opened`, giving us: an honest UX for non-backward-compatible DoVi (§2), a content inventory
+   (Details panel), and the input any future DoVi routing or shader work needs.
+4. **A documented-not-built policy option: auto-route compat-0 DoVi to the parked route.**
+   `bl_signal_compatibility_id == 0` (Profile 5, IPTPQc2) is the only DoVi flavor whose base layer
+   is *visibly wrong* without the RPU; Apple's decoder renders it correctly, slightly stuttery —
+   for that flavor alone, correct-but-stuttery beats wrong-color. If P5 content ever matters, a
+   producer-side classified fallback (Session → sample-buffer, the mirror of today's level-2) can
+   route just that flavor; the routing predicate itself must **never** synchronously probe a
+   container on the keypress path (never block the event loop), which is why this is a
+   producer-report design, not a `macos_sample_buffer_route` change. NOT built now — the owner's
+   corpus has zero DoVi-P5 — recorded so the option isn't re-derived from scratch.
 
 ---
 
@@ -118,12 +154,26 @@ would be the one to consider — equally niche, equally unverifiable-by-agent, s
     Invert the env flag: make the sample-buffer route **opt-IN** (e.g. `PB_SAMPLE_BUFFER=1`) so it stays
     reachable/parked for DoVi experiments and A/B. Keep `start_sample_buffer_video` and the whole
     presenter intact — just not selected by default.
+  - **One knob (added):** `PB_SAMPLE_BUFFER=1` is the *only* flag after the flip — **delete the
+    `PB_NO_SAMPLE_BUFFER` / `PB_SAMPLE_BUFFER=0` handling** (the default *is* no-sample-buffer now; a
+    legacy opt-out of an opt-in is noise). Read the env **once** into a field/constructor parameter
+    rather than per-call — that is also the §4 test seam (tests set the field; no process-global
+    `set_var`).
+  - **Fix the stale doc comments while there (added):** the routing narrative at `start_video_session`
+    (~7014), the `macos_sample_buffer_route` doc (~7163 — "Default on … the DoVi/HDR end-state"), and
+    the routing test's doc (~11572) all state the old rationale as current. This repo has a record of
+    stale comments misleading later agents; rewrite them to: Session is the smooth default,
+    sample-buffer is the parked DoVi reference (opt-in), and link this plan.
   - `macos_native_route` (AVPlayer for MP4/MOV) is checked **first** and is unaffected — MP4/MOV keep
     using AVPlayer (smooth).
 - **Not affected (Codex correction):** archive **MKVs** already fall through to Session (no file path);
   archive **MP4/MOV** use `PlayVideoBytes` (AVPlayer via a resource loader) and are untouched by this flip;
   **Live-Photo companions** use the animation/Live-Photo pipeline, not `start_video_session`, so they are
   unrelated. No extra verification needed for these beyond a smoke test.
+- **Bonus (verified, added):** the flip also removes a wasted hop for non-H.264/HEVC **WebM** — the
+  sample-buffer demux sample-decodes only H.264 + HEVC (`DemuxReader.buildFormatDescription` rejects
+  everything else), so a VP8/VP9/AV1 WebM today burns an open + classified failure + level-2 fallback
+  before landing on Session anyway. After the flip it goes there directly.
 
 ### 2. Close the parity gaps on the macOS Session route (the real work)
 
@@ -139,14 +189,59 @@ sample-buffer route grew. Known gap + things to verify:
   seek, buffer scheduling, or resumed playback. **Do NOT copy `AudioSampleFeeder.switchTrack`
   (`AudioSampleFeeder.swift` ~196) verbatim — after its decoder replacement, a format-build failure has no
   rollback.** Design a proper **transaction**:
-  - **Two-phase prepare/commit** (open the replacement decoder *without* blocking the playing one), or an
-    **intentional pause → re-anchor → resume** coordinated with the core — pick one and state it.
-  - **Generation-gated** (a superseded switch/seek can't land), **targets the authoritative playhead at
-    commit time** (not switch-issue time), **suppresses refills while switching**, and **rolls back to the
-    old stream + re-primes** if anything *after* decoder replacement fails.
-  - Reports through the existing `audio_track_switched(row:ok:)` path (#99's confirmed-switch rule); wire
-    `selectAudioTrack` to it. `cycle_audio_track` (`A`/`Shift+A`, `app_core_impl.rs` ~8126) drives it via the
-    same `SelectAudioTrack` effect.
+  - **DECIDED (2026-07-15): switch-as-rebuffer, on the existing feeder queue — no new FFI, no pause
+    choreography.** The core already makes this safe: `on_audio_clock` applies clock corrections **only
+    when the sample state is `Playing`** (`video_session.rs` ~703–746) — a `Buffering` sample is recorded
+    but never yanks or freezes the video, which keeps running on its monotonic clock and re-syncs by
+    bounded corrections once audio returns near the playhead. So a track switch is modeled as the
+    transient stall the machinery was built for (plan 1G), and the slow-storage "queue blocked while the
+    lookahead drains" hazard becomes a designed-for `Buffering` interlude inside an explicitly
+    user-initiated action — not a mystery stutter. The transaction:
+    1. *Main actor:* capture the authoritative playhead + target row/ff-stream; set `switching` (while
+       set, `sample()` reports **Buffering at the frozen position**); bump `seekGen` (drops every
+       in-flight read/seek completion); `node.stop()` (flush the old track's ~750 ms lookahead — the old
+       language must not keep playing over the switch); zero `inFlight`/`reading`, clear
+       `sourceDrained`/`rebuffering`.
+    2. *Feeder queue* (serialized behind any in-flight op; generation captured):
+       `session_audio_set_track(ptr, ffStream)`. **Refused (`false`)** → the old decoder is untouched,
+       but its engine lookahead was already flushed — so **re-prime the OLD track at the playhead** (the
+       `applySeek` dance) and report `ok = false`. **Succeeded** → read the new rate/channels +
+       `session_audio_stream_index` on the queue.
+    3. *Main-actor commit:* if rate/channels changed (`multitrack.mkv`'s 44.1 kHz-stereo-AAC →
+       48 kHz-6ch-AC-3 is the normal case, not an edge), rebuild `format` and disconnect/re-connect the
+       node with the new format — `PBCatchException`-shielded like every other graph call. A failure here
+       **rolls back**: feeder-queue `session_audio_set_track(oldStream)` + re-prime; if even the rollback
+       fails, latch `failed` — the core's existing degrade path (permanent silent fallback on the
+       monotonic clock; playback never dies with the audio).
+    4. *Feeder queue → main:* `session_audio_seek(ptr, playhead)` — the fresh decoder starts at zero, so
+       the seek is **mandatory** (same as `AudioSampleFeeder.switchTrack`'s "resume where the picture
+       is"); re-anchor `epochSecs`, clear `switching`, `topUp()`, `startNode()` unless paused.
+    5. Report the **actual outcome**: `audio_track_switched(row, ok)` + update the cached
+       `activeAudioStream` from `session_audio_stream_index` — what is *playing*, never what was asked
+       (`open_track`'s stale-track policy fallback makes those legitimately differ).
+    Concretely: add `OwnedAudioDecoder.setTrack(_:then:)` beside `read`/`seek`, and extend the `open`
+    callback to also return the initial stream index (it seeds `activeAudioStream`, next bullet).
+  - *Two-phase prepare/commit was considered and REJECTED:* it needs new FFI + a second queue + care with
+    raw-pointer aliasing on the shared `SessionAudioDecoder` (every feeder-queue call takes `&mut` to the
+    whole struct; a prep-queue read of `d.input` would alias it — UB territory), all to shave a stall the
+    rebuffer path already bounds and reports honestly. Revisit only if measured switch latency on SMB is
+    actually obnoxious.
+  - The transaction is **generation-gated** end-to-end and targets the playhead **at commit time**, per
+    the Codex requirements above — with one precision (added): supersession is only a plain *drop*
+    **before** decoder replacement (step 2). Once the decoder has been replaced, the format
+    rebuild/reporting **must still run** (the engine graph must match the live decoder — a dropped
+    half-switch is exactly the mis-strided-garble hazard); what a superseding seek wins is the *position*
+    (step 4 re-resolves to the latest authoritative playhead), and a superseding *switch* simply queues
+    behind on the serial feeder queue.
+  - **Interaction with preroll (verified, added):** `audio_ready_or_absent` (`video_session.rs` ~681)
+    counts only `Paused|Playing|Ended` as ready — a seek landing mid-switch sees `Buffering` audio and
+    waits, **bounded by `AUDIO_READY_TIMEOUT`**, then degrades to silent-until-the-clock-returns and
+    re-syncs through the clock bridge (the code's own design for a late-joining player). No deadlock is
+    possible; worst case is a brief silent preroll during a pathological seek-during-switch. Acceptable —
+    note it in the Swift-side transaction tests (§4).
+  - Wire `CoreModel.selectAudioTrack` to it (a `sessionAudio` branch beside `sbv`/`nv`), resolving the row
+    through `audioRowFfStream` — the FFmpeg-stream locator end-to-end. `cycle_audio_track` (`A`/`Shift+A`,
+    `app_core_impl.rs` ~8126) drives it via the same `SelectAudioTrack` effect and needs nothing new.
 - **⚠ Active-track reporting is a REQUIRED change, not "confirm" (Codex P1).** `resolveActiveAudioRow()`
   (`CoreModel.swift` ~3010) handles sample-buffer + AVPlayer and then **explicitly clears the tick for every
   Session video** — so even a *successful* switch loses its checkmark the next time the picker opens. Add a
@@ -155,6 +250,14 @@ sample-buffer route grew. Known gap + things to verify:
   `selectAudioTrack()`**. The two routes reach a track by *different locators* — the picker exposes
   `audio_track_ff_stream` (FFmpeg stream index, ~3021) and `audio_track_av_plist` (~3025); the Session route
   must use the **FFmpeg-stream** currency end-to-end.
+- **DoVi on the Session route — detect + warn (added, small).** Reuse `read_dovi`
+  (`pb-decode/src/ffmpeg/demux.rs` — already parsed + unit-tested for the sample-buffer demux) in the
+  Session producer's open path; carry a slim `(profile, bl_signal_compatibility_id)` summary on `Opened`.
+  When compat-id = 0 (Profile 5): a one-time toast — *"Dolby Vision (Profile 5): colors can't be shown
+  correctly"* — and a Details-panel fact. Compat-id 1/2/4 (P7/P8.x HDR10-/SDR-/HLG-compatible base
+  layers) play their base layer silently — that *is* correct degradation. This turns §4's "explicitly
+  unsupported / known-bad" from a release-note footnote into something the user is told at play time, and
+  it is the foundation piece of *Keeping the DoVi door open* above.
 - **Subtitles (#90)** — the core renders them as an overlay clocked off `video_position()`, route-agnostic
   in principle. **Verify** they render + are selectable on the Session route (they should be, but confirm
   `C`/`Shift+C`, the picker, the settings preview).
@@ -184,21 +287,36 @@ sample-buffer route grew. Known gap + things to verify:
 logic, only the *smoothness* is perceptual):**
 - **Invert the existing macOS routing regression test** (`app_core_impl.rs` ~11572) — it currently asserts
   MKV → sample-buffer; it must now assert MKV/WebM → Session, MP4/MOV → AVPlayer.
-- **Opt-in route test without mutating process-global env** (don't `std::env::set_var` in a test — thread a
-  flag or a test seam) so the parked `PB_SAMPLE_BUFFER=1` path stays covered.
-- **`session_audio_set_track`** against the committed `multitrack.mkv` fixture (conveniently switches
-  **44.1 kHz stereo AAC → 48 kHz 6-ch AC-3**, exercising the format rebuild): assert **success**,
-  **refusal/rollback** (old stream still playing, format intact), **actual-stream reporting** (the cached
-  `activeAudioStream` reflects what's playing, not what was requested), and **stale-generation completion**
-  (a superseded switch is dropped before touching the graph).
+- **Opt-in route test without mutating process-global env** (don't `std::env::set_var` in a test — the
+  env-read-once field from §1 *is* the seam; tests set the field) so the parked `PB_SAMPLE_BUFFER=1` path
+  stays covered — this is also what keeps the DoVi reference renderer from rotting.
+- **`session_audio_set_track` / `FfAudioDecoder::open_track`** against the committed `multitrack.mkv`
+  fixture, in `pb-decode/src/ffmpeg/audio_decoder.rs`'s existing test module (the fixture and `open_track`
+  both live there). The fixture conveniently switches **44.1 kHz stereo AAC → 48 kHz 6-ch AC-3**,
+  exercising the format rebuild: assert **success**, **refusal** (old stream still decoding, format
+  intact), **actual-stream reporting** (`stream_index()` reflects what's playing, not what was requested),
+  and **post-switch seek + read** yields frames (the transaction's step 4 is mandatory — a fresh decoder
+  starts at zero).
+- **The Swift-side transaction ordering** (generation gating, refused-switch re-prime, rollback,
+  stale-generation completions dropped before touching the graph): factor the switch state machine into a
+  plain-Swift component tested in the **PbSeek pattern** (`mac/PbSeek/Tests` is the precedent from the
+  seek-robustness arc) where practical; whatever genuinely can't be factored off `AVAudioEngine` goes on
+  the owner-verified list below.
+- **DoVi detection (§2):** unit-test the compat-id-0 warning trigger on a synthetic `DoviConfig`
+  (`build_dovi` is already unit-testable without a clip); extend the `PB_DOVI_TEST`-gated ignored test to
+  assert the Session producer surfaces the summary on a real DoVi clip.
 - **Add a small HDR10 MKV fixture** (remux/generate) so HDR metadata carriage is verified for the **MKV**
   container, not only the current MP4 fixture — Codex confirms the FFmpeg Session path already carries
   per-frame color/transfer into P010/fp16, but there's no MKV regression fixture proving it.
 
 **Owner-verified (perceptual / A/V — no metric an agent can read):**
-- **Smoothness:** `Ad.Astra.…mkv` (local + SMB) plays smooth. The Session route has no `sb-play diag`;
-  verify by eye against the AVPlayer MP4 (known-smooth reference) and mpv. *(Optional: add a minimal Session
-  present-path drop counter for an objective number.)*
+- **Smoothness:** `Ad.Astra.…mkv` (local + SMB) plays smooth. The Session route has no `sb-play diag`,
+  but the objective number is cheaper than assumed: **`VideoSession::dropped_frames()` already exists and
+  is unit-tested** (`video_session.rs` ~763, the plan-1C/0B late-frame counter) — it's just read by
+  nothing on the app path. **In scope (cheap):** surface it as a periodic `PB_TRACE` diag line (the
+  Session analog of `sb-play diag`). The saga's own lesson says don't accept a perceptual pass without a
+  number; this also gives future smoothness regressions a metric on day one. Then verify by eye against
+  the AVPlayer MP4 (known-smooth reference) and mpv.
 - **Parity:** audio-track switch (`A`/menu/picker) with a confirmed toast **and a surviving tick on re-open**;
   subtitles (`C`/`Shift+C`/picker/settings); seek (arrow + scrubber — the seek-robustness fixes must still
   hold, no pause/jump); resume at nonzero position with audio; scale + zoom/pan/rotation; EOS/replay; mute.
@@ -206,7 +324,9 @@ logic, only the *smoothness* is perceptual):**
   acceptance is profile-specific, NOT a blanket "clean HDR10 base layer":** Profiles **7 and 8.1** have
   HDR10-compatible base layers and degrade cleanly; **Profile 5 is NOT HDR10/SDR-compatible** — ignoring its
   RPU produces *visibly wrong* color (the green/purple tint), so it is **explicitly unsupported / known-bad**,
-  not "clean." State this in the release notes; don't claim all DoVi degrades gracefully.
+  not "clean." State this in the release notes; don't claim all DoVi degrades gracefully. The §2 play-time
+  Profile-5 warning is what makes "known-bad" honest — if a P5 sample is available, verify the toast fires
+  and that compat-1/2/4 content plays its base layer silently (no toast).
 - **Regression:** MP4/MOV still route to AVPlayer and still resume/seek (the seek-robustness resume-audio +
   scrubber fixes were on both routes — don't regress).
 
@@ -214,9 +334,12 @@ logic, only the *smoothness* is perceptual):**
 
 - User-facing `Fixed`: *"Video playback is smooth again (macOS) — MKV/WebM now use the same renderer as
   everything else instead of a path that dropped frames."*
+- User-facing `Added` (if the §2 DoVi warning ships): *"Dolby Vision Profile 5 videos now explain why
+  their colors look wrong instead of failing silently (macOS)."* (Wording to taste.)
 - Update `CLAUDE.md`'s video section: the macOS default for MKV/WebM is now the Session route; the
-  sample-buffer route is parked (DoVi-only, opt-in, not built). Update the memory note
-  `video-playback-overhaul` / add one for this.
+  sample-buffer route is parked (opt-in `PB_SAMPLE_BUFFER=1`, kept as the DoVi reference renderer; DoVi
+  itself deferred with detection shipped). Update the memory note `video-playback-overhaul` / the
+  `macos-video-smoothness-arc` note for this.
 
 ---
 
@@ -227,7 +350,8 @@ logic, only the *smoothness* is perceptual):**
 2. **Audio parity scope:** `switchTrack` is **NOT the only gap** — also required: active-stream
    caching/reporting, serialized decoder operations, graph rollback, clock coordination, and completion
    generation. The Session route uses the **FFmpeg-stream** locator (`audio_track_ff_stream`) end-to-end.
-   (Folded into §2 above.)
+   (Folded into §2 above.) **Transaction shape decided 2026-07-15: switch-as-rebuffer** — justified by the
+   verified core behavior that non-`Playing` clock samples never correct the video clock (§2).
 3. **Audio robustness:** R2/R4/R5 are **already closed** — test for regression, don't reopen. **R9**
    (duplicate demuxers + shared read-ahead) is the remaining architecture item; **follow-up**, not this task.
 4. **HDR10/MKV:** the FFmpeg Session path **already extracts stream HDR metadata + carries per-frame
@@ -235,7 +359,8 @@ logic, only the *smoothness* is perceptual):**
    container parity (the current fixture is MP4 only). (Folded into §4 above.)
 5. **Anything else lost:** No second codec advantage — the parked sample-buffer route decodes **only H.264 +
    HEVC** (`DemuxReader.swift` ~203); Session/FFmpeg is broader. **Dolby Vision is its only meaningful
-   distinction**, and that's decided (not built).
+   distinction**, and that's deferred — see *Keeping the DoVi door open* (added 2026-07-15): detection
+   ships now, the parked route is the future reference renderer, WGSL-in-Session is the revival vehicle.
 
 ---
 
@@ -257,4 +382,6 @@ logic, only the *smoothness* is perceptual):**
 - **Lesson from the saga:** the objective metric (`sb-play diag` dropped-frame count) is what let us kill
   seven wrong hypotheses cheaply and trust the two decisive route tests. When a fix is perceptual (DoVi) or
   when there's *no* metric, autonomous work stalls — which is exactly why we're routing to a known-smooth
-  path instead of perfecting `AVSampleBufferDisplayLayer`, and why we're **not** building DoVi.
+  path instead of perfecting `AVSampleBufferDisplayLayer`, and why DoVi is deferred until there's a
+  verification story (the parked route as an on-device reference oracle is that story's first half — see
+  *Keeping the DoVi door open*).
