@@ -5,7 +5,9 @@
 **Depends on:** `pb_source::archive_kind` (`crates/pb-source/src/kind.rs:61`) — shipped on `main`
 (#102 tar family, #103 RAR5, merged `631e970`).
 **Scope:** `pb-app-core` + `pb-decode` typing/poster; one keymap arm. Shell work is minimal —
-the door is a deck item, so it renders through the existing photo path.
+the door is a deck item, so it renders through the existing photo path. **But read *The audit*
+first:** adding a third `LibraryItemKind` to a two-kind world is the real work here, and it is
+not optional — two paths would otherwise read every archive with no keypress.
 
 > **rev4 (owner, 2026-07-16).** rev1–3 all assumed archives had to be reached through the
 > **folder tree**. The owner proposed the better shape: *"show the archive itself in the viewer
@@ -179,6 +181,54 @@ entering; the progress dialog handles the slow case honestly.
 A lazy-ZIP handle-pool cache is cheap and could return later **on measurement** — it is not what
 makes this design good.
 
+## ⚠ The audit that makes the promise true (owner question, 2026-07-16)
+
+> *"We only try to read (and prompt for a password) when a user clicks the 'oPen' button or hits
+> P, right?"*
+
+**That is the design. It is not what the code would do if we only added the `decode_item`
+arm.** Verified 2026-07-16 — there are at least two paths that read the whole archive with **no
+keypress**:
+
+| Site | What happens to a door | Cost |
+|---|---|---|
+| **Thumbs strip** — `decode_item_for` (`engine.rs:356`) | the guard is **negative** (`!matches!(kind, Video(_))`), so a door falls *into* the branch and calls `source.bytes(item)` (`:360`) | a full `fs::read` of **every archive in the folder**; `native_thumbs: true` by default (`main.rs:838`) |
+| **`Shift+I` panel** (`app_core_impl.rs:6544`) | the guard is **positive-for-video**, so a door falls past the probe into the image path's sync `fs::read` (`:6568`) | the whole archive, **on the event loop** |
+
+Still to audit (same pattern, unverified): `app_core_impl.rs:4046`, `:7114`, `:7315`.
+
+### Root cause — a two-kind world
+
+The tree encodes **video vs "everything else, therefore an image, therefore safe to read
+bytes."** Nine sites match on `LibraryItemKind` (`app_core_impl.rs` ×7, `engine.rs` ×2,
+`main.rs` ×1) and every one of them is an `if let` or a `!matches!`. A third variant silently
+lands in the *image* bucket at all of them — so **reading is the default**, which is backwards
+for a door.
+
+### The fix — make the compiler find them, don't grep
+
+`if let Video(_) = …` and `!matches!(…, Video(_))` **do not error when a variant is added.** So:
+
+1. **Invert the guards to positive** — `Image` reads bytes; everything else routes to the typed
+   dispatch. Then a future `LibraryItemKind` defaults to *not* reading.
+2. **Convert the kind guards to exhaustive `match`** before adding the variant. Adding
+   `Archive(_)` then produces a **compile error at every site that must decide**, which turns
+   "audit nine places and hope" into a list the compiler hands you.
+
+Do (2) **first**, as its own commit with no behaviour change. It is the difference between a
+promise and a hope.
+
+### 🪤 The no-trace test cannot catch this
+
+`viewing_a_folder_writes_nothing_to_disk` (`main.rs:5120`) asserts nothing is **written**.
+Reading a 2 GB archive writes nothing — **it passes while the app reads the entire corpus.** The
+guarantee here is about *reads*, which that test was never built to see.
+
+The test that catches it is a source whose **`bytes()` panics** (or counts calls), exercised
+across **every** entry point — `decode_item`, `decode_item_for` with `Purpose::Thumb` *and*
+`Purpose::Display`, and the panel path. rev4's Phase 1 originally specified this for
+`decode_item` only; that would have shipped both leaks above with a green suite.
+
 ## Open question — verify before building: can you get back out?
 
 **A door you cannot return from is a trap.** After entering, the deck is the archive's contents;
@@ -193,16 +243,25 @@ This is the one thing that could make rev4 bigger than it looks. Check it before
 
 ## Phases
 
+**Phase 0 — exhaustive guards, no behaviour change.** Convert the nine `LibraryItemKind` guards
+from `if let` / `!matches!` to exhaustive `match`, and invert the read guards to positive
+(`Image` reads bytes). Its own commit, green before and after. This is what makes Phase 1's
+variant addition produce a compiler-generated to-do list instead of a grep. See *The audit*.
+
 **Phase 1 — core typing + door, TDD, pure.** `LibraryItemKind::Archive`; the `item_kind` arm; the
-`decode_item_cancellable` arm **above** the `bytes()` read; `archive_placeholder`. Scan includes
-archives as items.
+`decode_item_cancellable` arm **above** the `bytes()` read (`engine.rs:491`);
+`archive_placeholder`. Scan includes archives as items. Every site Phase 0's compiler errors
+surfaced gets an explicit decision.
 
 Tests, mirroring the ones video already has:
 - an archive path types as `Archive(kind)`; `.tar.gz` types as `TarGz` (the double-extension case
   a name-based classifier gets wrong);
 - an archive **entry** inside an archive types as `Image`/not-a-door (path-only, by construction);
-- decoding a door returns the placeholder **without calling `bytes()`** — assert against a source
-  whose `bytes()` panics, which is the sharpest form of "never reads the archive";
+- **a door never reads the archive — across every entry point.** A source whose `bytes()`
+  **panics**, driven through `decode_item`, `decode_item_for` with `Purpose::Thumb` *and*
+  `Purpose::Display`, and the `Shift+I` panel path. This is the feature's central promise, and
+  both confirmed leaks live in entry points a `decode_item`-only test would miss. Mutation
+  check: it must fail against today's negative guard (`engine.rs:356`).
 - a door's tile is tiny (ring-budget property).
 
 **Phase 2 — enter.** `P` on a door → exactly one `BeginArchiveOpen { password: None }`, and it
