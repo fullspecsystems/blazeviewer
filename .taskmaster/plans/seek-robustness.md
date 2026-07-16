@@ -1,9 +1,42 @@
 # Seek robustness — fix the pre-roll clock, and make seeking regression-testable
 
-> Status: **PLAN v2 — revised per Codex review (2026-07-15), not started** · Owner: JD
+> Status: **PLAN v2 — instrumentation + testability + independent fixes LANDED (2026-07-15);
+> the clock-strategy spike is owner-gated** · Owner: JD
 > Scope: the **macOS sample-buffer route** (MKV/WebM), which is what `97f80bb4` changed.
 > AVPlayer (MP4/MOV) owns its own clock and is not implicated — *prove that in §0*, because
 > it splits the diagnosis in half.
+>
+> ## Progress (2026-07-15, session 1) — commits `360bf885`, `5433066a`, `a6b28544` on `main`
+>
+> **Done + verified (build/test green, NOT owner-verified on a display yet):**
+> - **§0 instrumentation** — seek-scoped diagnostics, reset per seek. Emits (behind `PB_TRACE`):
+>   first post-seek packet pts/dts, pre-roll count + last pre-roll pts, the first
+>   `isReadyForMoreMediaData==false`, and **whether `provide` re-fires** — the direct H1
+>   discriminator. (`DemuxReader.provide`/`seek`; `SampleBufferPresenter.performSeek`.)
+> - **T1** — pure `SeekFramePolicy` extracted to a dependency-free **`mac/PbSeek`** package,
+>   19 unit tests (`swift test --package-path mac/PbSeek`). `DemuxReader` now calls it.
+> - **H1c** — `SeekContext` + epoch gate on every callback (`onDecodeAnchor`, audio completion,
+>   reader completion). A stale seek can no longer re-anchor the clock.
+> - **H2' (the shippable half)** — the resume-audio bug (audio now resumes with the picture at
+>   open) + a seek issued before the audio decoder opens is **held and applied at open**, not
+>   dropped; audio seek returns an epoch-tagged completion.
+> - **H3** — scrubber pending-target pin (no more flash-back after a click-seek).
+> - **T3/T4** — checked-in `longgop.mkv`/`shortgop.mkv` fixtures + demux seek-contract tests
+>   (`cargo test -p pb-decode --features ffvideo`, 12 pass). **T5** — both run on the mac CI lane.
+>
+> **NOT done — owner-gated, must not be picked on paper (plan order 3, 5, 8):**
+> - **H1b — the clock-strategy A/B spike (S1/S2/S3):** the actual seek *deadlock* fix. Blocked
+>   on the §0 trace over a real long-GOP MKV (below). This is the headline symptom.
+> - **T2 — renderer-harness proof gate** (does a compressed fixture decode headlessly?).
+> - **The 1080p/4K pre-roll budget** number (`SeekFramePolicy.effectiveTarget`'s `budgetSecs`,
+>   wired to `nil` today) — needs corpus measurement; 320×240 fixtures can't choose it.
+>
+> **Repro corpus identified (`/Volumes/Media/Movies`, 2026-07-15):** the 184 `*.mkv` there are
+> all 1080p BluRay **H.264 with a ~10.4 s GOP** (x264 default 250-frame keyint @ 23.976 fps —
+> keyframes at 0 / 10.427 / 20.854 …) — *longer* than the synthetic `longgop.mkv`, and on an
+> SMB share, so they stress the long pre-roll **and** the network-seek latency at once. Any one
+> (e.g. `Ad.Astra.2019.…x264-Geek.mkv`) is a §0 trace subject. Run with `PB_TRACE=1`, open it,
+> seek, and read the `sb-seek diag epoch=…` lines against the §0 verdict table.
 >
 > **v1 was not execution-ready.** A review found three ways its fix could ship while seeking
 > stayed broken, and every finding was re-verified against the tree before this rewrite.
@@ -326,18 +359,33 @@ Before owner verification, all of:
 
 ## Order of work
 
-1. **Instrumentation** (§0) — seek-scoped diagnostics. Nothing is fixed before this.
-2. **`SeekContext` state machine + pure Swift `SeekFramePolicy` tests** (H1c, T1) — a live bug
-   today, and it makes the fix reviewable rather than a guess.
-3. **Renderer-harness proof gate** (T2) — before committing to the harness design.
-4. **A/V coordination** (H2') — the readiness contract, the pending-seek-before-open, and the
-   `startSecs` audio resume.
-5. **Clock-strategy A/B spike** (H1b) — S1/S2/S3 against all four mandatory cases. **Do not
-   pick the implementation on paper.**
-6. **UI pending target** (H3).
-7. **Fixtures + CI lane** (T3, T5).
-8. **Corpus measurement + owner verification** — audio continuity and the scrubber are things
-   a test can only approximate.
+1. ✅ **Instrumentation** (§0) — seek-scoped diagnostics. Nothing is fixed before this. *(done,
+   `360bf885`)*
+2. ✅ **`SeekContext` state machine + pure Swift `SeekFramePolicy` tests** (H1c, T1) — a live bug
+   today, and it makes the fix reviewable rather than a guess. *(done, `360bf885`)*
+3. 🔲 **Renderer-harness proof gate** (T2) — before committing to the harness design. *(owner-gated;
+   not started — the deprecation choice (legacy display-layer vs `AVSampleBufferVideoRenderer`)
+   and the headless-decode proof are still open.)*
+4. ◐ **A/V coordination** (H2') — the readiness contract, the pending-seek-before-open, and the
+   `startSecs` audio resume. *(the pending-seek-before-open and the resume-audio fix landed in
+   `360bf885`; the explicit A/V readiness barrier that holds the clock/unmute until both
+   renderers are ready is entangled with the clock strategy → deferred to step 5.)*
+5. 🔲 **Clock-strategy A/B spike** (H1b) — S1/S2/S3 against all four mandatory cases. **Do not
+   pick the implementation on paper.** *(owner-gated — THE headline deadlock fix; blocked on
+   step 1's trace over the `/Volumes/Media/Movies` long-GOP corpus.)*
+6. ✅ **UI pending target** (H3). *(done, `360bf885`)*
+7. ✅ **Fixtures + CI lane** (T3, T5). *(done, `5433066a` + `a6b28544`; ⚠ fixtures have no
+   burned-in timecode — this box's ffmpeg lacks `drawtext` — so the §T2 visual harness must
+   regenerate them on a libfreetype build. The generator script does it automatically.)*
+8. 🔲 **Corpus measurement + owner verification** — audio continuity and the scrubber are things
+   a test can only approximate. *(owner-gated.)*
+
+### Resume here (session 2)
+Run the **§0 trace** (order 1) on a `/Volumes/Media/Movies` long-GOP MKV — `PB_TRACE=1`, seek,
+read the `sb-seek diag` lines against the §0 verdict table — to **confirm or refute H1**. That
+verdict is the gate for the **clock-strategy spike** (order 5), which is the actual deadlock
+fix. Everything else already landed. Don't drive the app from a tool session while the owner is
+testing (`pkill` kills their window; a tool-launched bare binary is windowless — use `--pb-open`).
 
 ## Notes carried in
 
