@@ -67,6 +67,7 @@ final class SampleBufferPresenter {
     private var metricsTimer: Timer?
     private var lastDroppedFrames = 0
     private var lastTotalFrames = 0
+    private var lastOptimizedFrames = 0
     private var durationSecs: Double = 0
     private var fps: Double = 0
     /// The seek currently in flight (plan §H1c). Its `epoch` gates every callback — the
@@ -300,21 +301,28 @@ final class SampleBufferPresenter {
             guard let metrics else { return }
             let dropped = metrics.numberOfDroppedFrames
             let total = metrics.totalNumberOfFrames
+            // Frames scanned out on the power-efficient direct path (hardware overlay plane),
+            // i.e. NOT GPU-composited with other UI. If this tracks `total`, the video owns a
+            // display plane (like mpv); if it stays ~0, every frame is composited over our
+            // Metal layer — the leading cause of the source-independent drops.
+            let optimized = metrics.numberOfFramesDisplayedUsingOptimizedCompositing
             let delayMs = metrics.totalAccumulatedFrameDelay * 1000
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     guard let self else { return }
                     let dDrop = dropped - self.lastDroppedFrames
                     let dTotal = total - self.lastTotalFrames
+                    let dOpt = optimized - self.lastOptimizedFrames
                     self.lastDroppedFrames = dropped
                     self.lastTotalFrames = total
+                    self.lastOptimizedFrames = optimized
                     guard dTotal > 0 || dDrop > 0 else { return }
                     let pct = dTotal > 0 ? 100.0 * Double(dDrop) / Double(dTotal) : 0
                     pbTrace(
                         String(
                             format:
-                                "sb-play diag: +%d frames +%d dropped (%.1f%%/s), %d dropped total, delay %.1fms",
-                            dTotal, dDrop, pct, dropped, delayMs))
+                                "sb-play diag: +%d frames +%d dropped (%.1f%%/s), +%d optimized-composite, %d dropped total, delay %.1fms",
+                            dTotal, dDrop, pct, dOpt, dropped, delayMs))
                 }
             }
         }
