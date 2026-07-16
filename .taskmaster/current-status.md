@@ -156,23 +156,28 @@ catalogs at that moment (MF's was built first, then FFmpeg's supersedes). So:
 | `d364d2e` | `MfAudioDecoder::open_track` + the MF-order measurement above. |
 | `756cfff` | **The Playback menu + the subtitle track flyout** (above). The View items from `d34c7f2` moved into it. |
 
-## A false alarm worth not re-running (2026-07-16)
+## A false alarm worth not re-running (2026-07-16) — CLOSED
 
 Mid-verification the trace showed `Automatic` resolving to **Greek** on an English film with
-English audio — it loaded `eng`, then switched to `gre`. It looked like a real bug and it is
-**not one**:
+English audio — it loaded `eng`, then switched to `gre`. It looked like a real bug. It was
+**the owner selecting the Greek track as a test** while I was measuring (owner-confirmed).
+
+Kept here because the ruling-out is reusable, and because the diagnosis nearly went the
+wrong way:
 
 - `ffprobe` says **no** subtitle track in that file has `default` or `forced` set, and a
-  probe of `automatic()` printed `pref=None … -> default/first Some("eng")`. The resolve is
-  correct.
+  probe of `automatic()` printed `pref=None … -> default/first Some("eng")`. The resolve was
+  correct all along.
 - Greek can only come from `want == Track(gre_id)`, which `resolve()` returns **before**
-  calling `automatic()`.
-- **A/B settled it:** HEAD (no menu changes) and my branch, both 45 s of playback on the same
+  calling `automatic()` — i.e. only a deliberate pick puts it there.
+- **A/B settled it:** HEAD (no menu changes) vs. my branch, 45 s of playback each on the same
   film → `loading track 2 (eng, subrip)` and nothing else, on both.
 
-It was almost certainly **the owner driving the app while I tested** (they do this — check
-`Get-Process blazeviewer` before killing anything). If it resurfaces *unattended*, the thing
-to find is what sets `want` to a track nobody picked; `automatic()` is exonerated.
+**Two lessons:** ⚠ the owner drives the app while you test (check `Get-Process blazeviewer`
+before killing anything, and A/B before believing a mid-test anomaly) — and this pick, if it
+came from the new flyout, is the **only end-to-end confirmation of the click path** that
+exists: row 6 in the menu → `subtitle_track:6` → `select_subtitle_row(6)` → `FfStream(6)` →
+Greek played. That chain is exactly what no unit test can reach.
 
 **Owner-confirmed on screen 2026-07-16:** _"Subtitles do display!"_ — verified against a
 real film over SMB, and by trace (`loading track 2 (eng, subrip) — FfStream(2)` → cues
