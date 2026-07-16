@@ -675,15 +675,17 @@ pub fn load_archive(
             nonempty_resolved(path, src)
         }
         // RAR5 (.rar/.cbr, task #103): non-solid entries lazy, solid groups
-        // eagerly decoded by the open against the RAM budget. The password is
-        // ignored — RAR encryption is detected and refused honestly (no
-        // decrypt support), never routed to the password prompt.
+        // eagerly decoded by the open against the RAM budget. Encrypted archives
+        // (per-file `-p` or full-header `-hp`) decrypt with the supplied
+        // password; a missing or wrong one surfaces as `PasswordRequired` (from
+        // the source's header password-check), routing to the prompt like ZIP/7z.
         ArchiveKind::Rar => {
             let src = RarSource::open(
                 path,
                 is_supported_archive_entry,
                 Some(progress),
                 crate::archive::ram_budget(),
+                password.as_deref(),
             )?;
             nonempty_resolved(path, src)
         }

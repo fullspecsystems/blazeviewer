@@ -208,15 +208,15 @@ pub enum ArchiveOpenError {
     OutOfMemory,
     /// Damaged, truncated, or an unsupported compression method.
     Corrupt,
-    /// Encrypted (incl. encrypted header) with no password; not supported yet.
+    /// Encrypted (incl. encrypted header) with no password or a wrong one; the
+    /// app prompts (ZIP, 7z, and RAR5 all decrypt with the entered password).
     PasswordRequired,
     /// Opened fine but holds no supported images.
     Empty,
-    /// Recognized but deliberately not opened (RAR4, multi-volume RAR,
-    /// encrypted RAR). Carries the ready-to-show line — distinct from
-    /// [`PasswordRequired`](ArchiveOpenError::PasswordRequired) because the
-    /// password prompt cannot help (we detect RAR encryption, we don't decrypt
-    /// it; prompting would loop).
+    /// Recognized but deliberately not opened (RAR4, multi-volume RAR, an
+    /// unsupported RAR encryption version). Carries the ready-to-show line —
+    /// distinct from [`PasswordRequired`](ArchiveOpenError::PasswordRequired),
+    /// which the password prompt *can* answer.
     Unsupported(String),
     /// An I/O error opening or reading the file.
     Io(String),
@@ -240,7 +240,7 @@ impl ArchiveOpenError {
                     .into()
             }
             ArchiveOpenError::PasswordRequired => {
-                "This archive is password protected, which is not supported yet.".into()
+                "This archive is password protected.".into()
             }
             ArchiveOpenError::Empty => "This archive has no images to show.".into(),
             ArchiveOpenError::Unsupported(msg) => msg.clone(),

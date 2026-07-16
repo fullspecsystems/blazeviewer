@@ -27,12 +27,14 @@
 //!   both upstreams skip it, which turns corruption into silent garbage.
 //! * **A window cap** (64 MiB) *before* constructing a decoder — a hostile
 //!   header can demand a 1 GiB window.
-//! * **Encryption detection at the container layer** (the archive-encryption
-//!   header and per-file encryption records) → an honest "password protected,
-//!   not supported" message. Never [`OpenError::PasswordRequired`]: that routes
-//!   to the password prompt, and no password would help — we do not decrypt.
-//!   fstool's failure mode here (feed ciphertext to the decoder, report
-//!   "corrupt") is exactly what this avoids.
+//! * **Encryption at the container layer** (both per-file encryption, `-p`, and
+//!   full header encryption, `-hp`) → [`OpenError::PasswordRequired`] when no
+//!   password is supplied or the one given fails the header's password-check
+//!   value, routing to the app's password prompt; a correct one decrypts. RAR5
+//!   uses standard PBKDF2-HMAC-SHA256 + AES-256-CBC (see [`crate::rar_crypt`]) —
+//!   the tractable scheme, unlike RAR4's bespoke KDF. fstool's failure mode here
+//!   (feed ciphertext to the decoder, report "corrupt") is exactly what this
+//!   avoids.
 //! * **Solid-group degradation**: a member the codec refuses (the Delta/ARM
 //!   filters — WinRAR auto-picks Delta for BMP/RAW-shaped content) marks that
 //!   member *and the rest of its group* unavailable with an honest per-entry
@@ -41,10 +43,10 @@
 //!   photo case decodes.)
 //!
 //! Out of scope, detected and refused honestly: RAR4 (a different container
-//! *and* codec — the "20-year-old archive" case waits on upstream compcol),
-//! multi-volume sets, encrypted archives. Stored members inside a solid group
-//! are unavailable (they sit outside the LZ bitstream; decoding around them
-//! would desync — fstool's rule, kept).
+//! *and* codec — the "20-year-old archive" case waits on upstream compcol) and
+//! multi-volume sets. Stored members inside a solid group are unavailable (they
+//! sit outside the LZ bitstream; decoding around them would desync — fstool's
+//! rule, kept).
 //!
 //! **Privacy:** RAM-only, read-only, never extracted to disk — same as every
 //! source in this crate.
@@ -56,6 +58,7 @@ use std::path::{Path, PathBuf};
 
 use compcol::Decoder as _;
 
+use crate::rar_crypt::{self, KeyCache, MAX_LG2_COUNT, SIZE_IV, SIZE_PSWCHECK, SIZE_SALT};
 use crate::tar_source::{sane_name, OpenLimits};
 use crate::{
     ext_of, normalize_entry_name, out_of_range, ItemSource, OpenError, OpenProgress,
@@ -89,16 +92,20 @@ const FFLAG_MTIME: u64 = 0x02;
 const FFLAG_CRC: u64 = 0x04;
 // File extra-area record types.
 const XREC_ENCRYPTION: u64 = 0x01;
+// Encryption record / crypt-header flags.
+const ENC_FLAG_CHECK: u64 = 0x01; // password-check value is present
+const ENC_FLAG_MAC: u64 = 0x02; // stored checksum is a MAC, not a plain CRC32
+/// The only RAR5 encryption version (AES-256). Anything else is refused.
+const ENC_VERSION_AES256: u64 = 0;
+/// Bytes of the header's stored password-check field: 8-byte check + 4-byte CRC.
+const ENC_CHECK_BYTES: usize = 12;
 
 /// User-facing refusal lines (plain copy, reused by tests).
 const MSG_RAR4: &str =
     "This is an older RAR4 archive, which is not supported yet. Only RAR5 archives open.";
-const MSG_ENCRYPTED: &str =
-    "This RAR archive is password protected, which is not supported for RAR yet.";
 const MSG_VOLUME: &str = "Multi-volume RAR archives are not supported yet.";
 
 /// Why an entry's bytes cannot be produced (per-entry honest errors).
-const UNAVAIL_ENCRYPTED: &str = "this entry is password protected, which is not supported for RAR";
 const UNAVAIL_STORED_SOLID: &str =
     "this entry is stored inside a solid group, which cannot be unpacked reliably";
 const UNAVAIL_FILTER: &str =
@@ -114,11 +121,35 @@ enum EntryData {
         pack: u64,
         window: usize,
         store: bool,
+        /// When encrypted (`-p`), the AES key + IV for the packed run; the run
+        /// is CBC-decrypted before it reaches the store/codec path.
+        crypt: Option<RunKey>,
     },
     /// Solid-group member, decoded at open.
     Resident(Vec<u8>),
     /// Cannot be produced; `bytes(i)` reports the reason.
     Unavailable(&'static str),
+}
+
+/// The AES-256 key + IV that decrypt one encrypted packed run (per file — RAR5
+/// uses a fresh salt/IV for every encrypted member).
+#[derive(Clone)]
+struct RunKey {
+    key: [u8; 32],
+    iv: [u8; SIZE_IV],
+}
+
+/// The encryption record (extra-area type 0x01) parsed off a file header: the
+/// KDF cost and salt to derive the key, the IV for this run, and — if present —
+/// the password-check value that distinguishes a wrong password from damage.
+struct FileEnc {
+    lg2_count: u8,
+    salt: [u8; SIZE_SALT],
+    iv: [u8; SIZE_IV],
+    psw_check: Option<[u8; SIZE_PSWCHECK]>,
+    /// Flag 0x02: the header's stored checksum is a password MAC, not a plain
+    /// CRC32, so the plain-CRC check can't validate the decrypted bytes.
+    mac_checksums: bool,
 }
 
 struct RarEntry {
@@ -149,7 +180,8 @@ struct Member {
     crc: Option<u32>,
     method: u64,
     window: usize,
-    encrypted: bool,
+    /// The parsed encryption record when this member is password protected.
+    enc: Option<FileEnc>,
     /// Whether this member may appear in the item index (sane name). A
     /// non-indexable member still occupies its slot in the solid stream.
     indexable: bool,
@@ -163,15 +195,27 @@ impl RarSource {
     /// then eagerly decode any solid groups (RAM-budgeted against `budget`,
     /// cancellable and reporting decode progress through `progress`).
     /// `is_supported` is the entry predicate (the app passes its image+video
-    /// union). RAR has no last-resort sync path concerns — the app always opens
-    /// it off-thread ([`crate::ArchiveKind::background_open`]).
+    /// union). `password` decrypts an encrypted archive: `None` on the first
+    /// open (an encrypted archive then returns [`OpenError::PasswordRequired`],
+    /// which routes to the prompt), `Some` when re-opening with the entered one
+    /// (a wrong one returns `PasswordRequired` again). RAR has no last-resort
+    /// sync path concerns — the app always opens it off-thread
+    /// ([`crate::ArchiveKind::background_open`]).
     pub fn open(
         path: impl Into<PathBuf>,
         is_supported: impl Fn(&str) -> bool,
         progress: Option<&OpenProgress>,
         budget: u64,
+        password: Option<&str>,
     ) -> Result<Self, OpenError> {
-        Self::open_with_limits(path, is_supported, progress, budget, &OpenLimits::default())
+        Self::open_with_limits(
+            path,
+            is_supported,
+            progress,
+            budget,
+            password,
+            &OpenLimits::default(),
+        )
     }
 
     pub(crate) fn open_with_limits(
@@ -179,6 +223,7 @@ impl RarSource {
         is_supported: impl Fn(&str) -> bool,
         progress: Option<&OpenProgress>,
         budget: u64,
+        password: Option<&str>,
         limits: &OpenLimits,
     ) -> Result<Self, OpenError> {
         let path = path.into();
@@ -191,26 +236,9 @@ impl RarSource {
             &is_supported,
             progress,
             budget,
+            password,
             limits,
         )?;
-        // An archive whose every viewable item is unavailable for one shared
-        // reason (all encrypted, all stored-in-solid) reads better as a single
-        // honest refusal than as a deck of N items that all fail to decode.
-        if !items.is_empty() {
-            let all_unavailable = items
-                .iter()
-                .all(|&j| matches!(entries[j].data, EntryData::Unavailable(_)));
-            if all_unavailable {
-                if let EntryData::Unavailable(why) = entries[items[0]].data {
-                    if why == UNAVAIL_ENCRYPTED {
-                        return Err(OpenError::Unsupported(MSG_ENCRYPTED.into()));
-                    }
-                    return Err(OpenError::Unsupported(format!(
-                        "This RAR archive cannot be shown: {why}."
-                    )));
-                }
-            }
-        }
         Ok(Self {
             path,
             entries,
@@ -228,6 +256,7 @@ impl RarSource {
         pack: u64,
         window: usize,
         store: bool,
+        crypt: Option<&RunKey>,
     ) -> io::Result<Vec<u8>> {
         if e.unpack > MAX_ENTRY_BYTES {
             return Err(io::Error::new(
@@ -237,7 +266,6 @@ impl RarSource {
         }
         let mut file = File::open(&self.path)?;
         file.seek(SeekFrom::Start(offset))?;
-        let run = BufReader::with_capacity(1 << 16, file).take(pack);
         let mut buf = Vec::new();
         buf.try_reserve_exact(e.unpack as usize).map_err(|_| {
             io::Error::new(
@@ -245,16 +273,46 @@ impl RarSource {
                 "archive entry too large to allocate",
             )
         })?;
-        if store {
-            // Stored verbatim: the packed run IS the bytes.
-            run.take(e.unpack).read_to_end(&mut buf)?;
-        } else {
-            let dec = compcol::rar5::Decoder::with_unpack_size_and_window(e.unpack, window);
-            // Cap at the declared size so a lying stream cannot inflate past it.
-            compcol::io::DecoderReader::new(run, dec)
-                .take(e.unpack)
-                .read_to_end(&mut buf)
-                .map_err(remap_codec_refusal)?;
+        // `decode` turns the plaintext packed run (a `Read`) into the entry
+        // bytes: stored runs are the bytes verbatim; compressed runs go through
+        // the RAR5 codec, both capped at the declared size so a lying stream
+        // cannot inflate past it.
+        let unpack = e.unpack;
+        let mut decode = |run: &mut dyn Read| -> io::Result<()> {
+            if store {
+                run.take(unpack).read_to_end(&mut buf)?;
+            } else {
+                let dec = compcol::rar5::Decoder::with_unpack_size_and_window(unpack, window);
+                compcol::io::DecoderReader::new(run, dec)
+                    .take(unpack)
+                    .read_to_end(&mut buf)
+                    .map_err(remap_codec_refusal)?;
+            }
+            Ok(())
+        };
+        match crypt {
+            // Encrypted (`-p`): read the whole padded ciphertext run, CBC-decrypt
+            // it in RAM, then decode from the plaintext.
+            Some(rk) => {
+                let mut packed = Vec::new();
+                packed.try_reserve_exact(pack as usize).map_err(|_| {
+                    io::Error::new(io::ErrorKind::OutOfMemory, "encrypted run too large")
+                })?;
+                (&mut file).take(pack).read_to_end(&mut packed)?;
+                if packed.len() as u64 != pack {
+                    return Err(io::Error::new(
+                        io::ErrorKind::UnexpectedEof,
+                        "archive entry truncated",
+                    ));
+                }
+                let mut cipher = rar_crypt::new_cbc(&rk.key, &rk.iv);
+                rar_crypt::cbc_decrypt_blocks(&mut cipher, &mut packed);
+                decode(&mut io::Cursor::new(&packed[..]))?;
+            }
+            None => {
+                let mut run = BufReader::with_capacity(1 << 16, file).take(pack);
+                decode(&mut run)?;
+            }
         }
         if buf.len() as u64 != e.unpack {
             return Err(io::Error::new(
@@ -291,7 +349,8 @@ impl ItemSource for RarSource {
                 pack,
                 window,
                 store,
-            } => self.read_lazy(e, *offset, *pack, *window, *store),
+                crypt,
+            } => self.read_lazy(e, *offset, *pack, *window, *store, crypt.as_ref()),
             EntryData::Resident(bytes) => Ok(bytes.clone()),
             EntryData::Unavailable(why) => Err(io::Error::new(io::ErrorKind::Unsupported, *why)),
         }
@@ -374,40 +433,195 @@ impl<'a> Cur<'a> {
     }
 }
 
-/// Whether a file header's extra area carries an encryption record.
-fn extra_has_encryption(extra: &[u8]) -> bool {
+/// Parse a file header's extra area for an encryption record (type 0x01),
+/// returning the KDF/salt/IV/check needed to decrypt the run. `Ok(None)` means
+/// the file is not encrypted; an unsupported encryption *version* is refused
+/// (`Unsupported`) rather than silently mis-decoded.
+fn parse_file_encryption(extra: &[u8]) -> Result<Option<FileEnc>, OpenError> {
     let mut p = 0usize;
     while p < extra.len() {
-        let Some((rec_size, n)) = read_vint(extra, p) else {
-            return false;
-        };
-        p += n;
-        let Some((rec_type, _)) = read_vint(extra, p) else {
-            return false;
-        };
+        let (rec_size, n) = read_vint(extra, p)
+            .ok_or_else(|| OpenError::Corrupt("truncated RAR extra record".into()))?;
+        let body_start = p + n;
+        // `rec_size` spans Type + Data (from just after the size vint).
+        let rec_end = body_start
+            .checked_add(rec_size as usize)
+            .filter(|&e| e <= extra.len())
+            .ok_or_else(|| OpenError::Corrupt("RAR extra record overruns header".into()))?;
+        if rec_end <= body_start {
+            return Err(OpenError::Corrupt(
+                "RAR extra record does not advance".into(),
+            ));
+        }
+        let (rec_type, tn) = read_vint(extra, body_start)
+            .ok_or_else(|| OpenError::Corrupt("truncated RAR extra record".into()))?;
         if rec_type == XREC_ENCRYPTION {
-            return true;
+            let mut c = Cur {
+                b: &extra[..rec_end],
+                p: body_start + tn,
+            };
+            let version = c.vint()?;
+            if version != ENC_VERSION_AES256 {
+                return Err(OpenError::Unsupported(
+                    "This RAR archive uses an encryption version that is not supported yet.".into(),
+                ));
+            }
+            let flags = c.vint()?;
+            let lg2_count = c.bytes(1)?[0];
+            if lg2_count > MAX_LG2_COUNT {
+                return Err(OpenError::Corrupt(
+                    "RAR encryption KDF cost out of range".into(),
+                ));
+            }
+            let salt: [u8; SIZE_SALT] = c.bytes(SIZE_SALT)?.try_into().expect("16-byte salt");
+            let iv: [u8; SIZE_IV] = c.bytes(SIZE_IV)?.try_into().expect("16-byte IV");
+            let psw_check = if flags & ENC_FLAG_CHECK != 0 {
+                let chk = c.bytes(ENC_CHECK_BYTES)?;
+                let mut pc = [0u8; SIZE_PSWCHECK];
+                pc.copy_from_slice(&chk[..SIZE_PSWCHECK]);
+                Some(pc)
+            } else {
+                None
+            };
+            return Ok(Some(FileEnc {
+                lg2_count,
+                salt,
+                iv,
+                psw_check,
+                mac_checksums: flags & ENC_FLAG_MAC != 0,
+            }));
         }
-        let Some(next) = p.checked_add(rec_size as usize) else {
-            return false;
-        };
-        if next <= p {
-            return false; // zero-size record: refuse to spin
-        }
-        p = next;
+        p = rec_end;
     }
-    false
+    Ok(None)
+}
+
+/// Derive the AES key + IV for an encrypted member's packed run. An encrypted
+/// member implies a password was supplied (the scan returns `PasswordRequired`
+/// otherwise), so the unwrap can never fire.
+fn run_key(keys: &mut KeyCache, password: Option<&str>, fe: &FileEnc) -> RunKey {
+    let pw = password.expect("an encrypted member implies a password");
+    let derived = keys.get(pw.as_bytes(), &fe.salt, fe.lg2_count);
+    RunKey {
+        key: derived.key,
+        iv: fe.iv,
+    }
+}
+
+/// Read one RAR5 block header at `pos`, returning its plaintext bytes and the
+/// on-disk offset where the block's data run begins, or `None` at a ragged /
+/// truncated tail (serve what was scanned). When `header_key` is set (a `-hp`
+/// archive), the block is 16-byte-IV-prefixed and AES-CBC-encrypted; it is
+/// decrypted here. Either way the stored header CRC32 is verified before
+/// returning — a bit-flipped (or wrongly-keyed) header reads as damage.
+fn read_header_block<R: Read + Seek>(
+    reader: &mut R,
+    pos: u64,
+    file_len: u64,
+    header_key: Option<&[u8; 32]>,
+) -> Result<Option<(Vec<u8>, u64)>, OpenError> {
+    if let Some(key) = header_key {
+        return read_encrypted_header(reader, pos, file_len, key);
+    }
+    reader.seek(SeekFrom::Start(pos))?;
+    // CRC32 (4) + HeaderSize vint (≤ 3 bytes for our cap) + header.
+    let mut pre = [0u8; 8];
+    let pre_got = read_fully(reader, &mut pre)?;
+    let Some((head_size, hs_len)) = read_vint(&pre[..pre_got], 4) else {
+        return Ok(None); // ragged tail
+    };
+    if head_size > MAX_HEADER {
+        return Err(OpenError::Corrupt("RAR header too large".into()));
+    }
+    let header_start = pos + 4 + hs_len as u64;
+    let header_end = header_start + head_size;
+    if header_end > file_len {
+        return Ok(None); // truncated final header
+    }
+    let mut hdr = vec![0u8; head_size as usize];
+    reader.seek(SeekFrom::Start(header_start))?;
+    if read_fully(reader, &mut hdr)? != hdr.len() {
+        return Ok(None);
+    }
+    // RAR5 stores a CRC32 of (HeaderSize vint || header data).
+    let mut hasher = crc32fast::Hasher::new();
+    hasher.update(&pre[4..4 + hs_len]);
+    hasher.update(&hdr);
+    if hasher.finalize() != u32::from_le_bytes([pre[0], pre[1], pre[2], pre[3]]) {
+        return Err(OpenError::Corrupt("RAR header checksum mismatch".into()));
+    }
+    Ok(Some((hdr, header_end)))
+}
+
+/// Read and decrypt one `-hp` block header. Layout on disk: a 16-byte AES IV,
+/// then the CBC ciphertext of the plaintext block (CRC32 || HeaderSize vint ||
+/// header) padded up to a 16-byte boundary. The data run (if any) follows the
+/// ciphertext and is *not* part of the header alignment.
+fn read_encrypted_header<R: Read + Seek>(
+    reader: &mut R,
+    pos: u64,
+    file_len: u64,
+    key: &[u8; 32],
+) -> Result<Option<(Vec<u8>, u64)>, OpenError> {
+    reader.seek(SeekFrom::Start(pos))?;
+    let mut iv = [0u8; SIZE_IV];
+    if read_fully(reader, &mut iv)? != SIZE_IV {
+        return Ok(None);
+    }
+    let mut cipher = rar_crypt::new_cbc(key, &iv);
+    // Decrypt the first block to learn CRC + HeaderSize (both fit in 16 bytes:
+    // CRC is 4, HeaderSize ≤ 3 vint bytes for the 1 MiB header cap).
+    let mut first = [0u8; 16];
+    if read_fully(reader, &mut first)? != 16 {
+        return Ok(None);
+    }
+    rar_crypt::cbc_decrypt_blocks(&mut cipher, &mut first);
+    let Some((head_size, hs_len)) = read_vint(&first, 4) else {
+        return Err(OpenError::Corrupt("RAR encrypted header unreadable".into()));
+    };
+    if head_size > MAX_HEADER {
+        return Err(OpenError::Corrupt("RAR header too large".into()));
+    }
+    let plain_len = 4 + hs_len + head_size as usize;
+    let cipher_len = plain_len.div_ceil(16) * 16;
+    if pos + SIZE_IV as u64 + cipher_len as u64 > file_len {
+        return Ok(None);
+    }
+    let mut plain = Vec::with_capacity(cipher_len);
+    plain.extend_from_slice(&first);
+    if cipher_len > 16 {
+        let mut rest = vec![0u8; cipher_len - 16];
+        if read_fully(reader, &mut rest)? != rest.len() {
+            return Ok(None);
+        }
+        rar_crypt::cbc_decrypt_blocks(&mut cipher, &mut rest);
+        plain.extend_from_slice(&rest);
+    }
+    let stored_crc = u32::from_le_bytes([plain[0], plain[1], plain[2], plain[3]]);
+    let mut hasher = crc32fast::Hasher::new();
+    hasher.update(&plain[4..plain_len]);
+    if hasher.finalize() != stored_crc {
+        // The crypt-header password-check already passed, so a mismatch here is
+        // genuine damage rather than a wrong password.
+        return Err(OpenError::Corrupt("RAR header checksum mismatch".into()));
+    }
+    let hdr = plain[4 + hs_len..plain_len].to_vec();
+    let data_offset = pos + SIZE_IV as u64 + cipher_len as u64;
+    Ok(Some((hdr, data_offset)))
 }
 
 /// Scan the block chain, then eagerly decode solid groups. Split from
 /// [`RarSource::open`] over a generic reader so the fuzz harness drives it on
-/// raw bytes.
+/// raw bytes. `password` decrypts an encrypted archive; a missing or wrong one
+/// (checked against the header's password-check value) returns
+/// [`OpenError::PasswordRequired`].
 fn scan_and_load<R: Read + Seek>(
     reader: &mut R,
     file_len: u64,
     is_supported: &dyn Fn(&str) -> bool,
     progress: Option<&OpenProgress>,
     budget: u64,
+    password: Option<&str>,
     limits: &OpenLimits,
 ) -> Result<(Vec<RarEntry>, Vec<usize>), OpenError> {
     // Signature: RAR5 is `Rar!\x1A\x07\x01\x00`; RAR4 is `Rar!\x1A\x07\x00`.
@@ -429,37 +643,22 @@ fn scan_and_load<R: Read + Seek>(
     let mut groups: Vec<Vec<Member>> = Vec::new();
     let mut walked = 0usize;
     let mut name_bytes = 0u64;
+    // `-hp` archives encrypt every block after the crypt header; once we parse
+    // that header (and validate the password) this holds the header key so
+    // subsequent blocks are decrypted before parsing.
+    let mut header_key: Option<[u8; 32]> = None;
+    // Cache of derived keys for this open, and whether a password-check value has
+    // matched yet (so we only pay validation once for `-p`).
+    let mut keys = KeyCache::default();
+    let mut pw_validated = false;
     let mut pos: u64 = 8;
     while pos + 5 <= file_len {
-        reader.seek(SeekFrom::Start(pos))?;
-        // CRC32 (4) + HeaderSize vint (≤ 3 bytes for our cap) + header.
-        let mut pre = [0u8; 8];
-        let pre_got = read_fully(reader, &mut pre)?;
-        let Some((head_size, hs_len)) = read_vint(&pre[..pre_got], 4) else {
-            break; // ragged tail: serve what was scanned
+        let Some((hdr, data_offset)) =
+            read_header_block(reader, pos, file_len, header_key.as_ref())?
+        else {
+            break; // ragged/truncated tail: serve what was scanned
         };
-        if head_size > MAX_HEADER {
-            return Err(OpenError::Corrupt("RAR header too large".into()));
-        }
-        let header_start = pos + 4 + hs_len as u64;
-        let header_end = header_start + head_size;
-        if header_end > file_len {
-            break; // truncated final header: serve what was scanned
-        }
-        let mut hdr = vec![0u8; head_size as usize];
-        reader.seek(SeekFrom::Start(header_start))?;
-        if read_fully(reader, &mut hdr)? != hdr.len() {
-            break;
-        }
-        // RAR5 stores a CRC32 of (HeaderSize vint || header data). Verify it
-        // before trusting any parsed field — a bit-flipped header must read as
-        // damage, not as different names, sizes, or flags.
-        let mut hasher = crc32fast::Hasher::new();
-        hasher.update(&pre[4..4 + hs_len]);
-        hasher.update(&hdr);
-        if hasher.finalize() != u32::from_le_bytes([pre[0], pre[1], pre[2], pre[3]]) {
-            return Err(OpenError::Corrupt("RAR header checksum mismatch".into()));
-        }
+        let head_size = hdr.len() as u64;
         let mut c = Cur { b: &hdr, p: 0 };
         let htype = c.vint()?;
         let hflags = c.vint()?;
@@ -479,7 +678,45 @@ fn scan_and_load<R: Read + Seek>(
 
         match htype {
             HEAD_END => break,
-            HEAD_CRYPT => return Err(OpenError::Unsupported(MSG_ENCRYPTED.into())),
+            HEAD_CRYPT => {
+                // Full header encryption (`-hp`): the crypt header itself is
+                // plaintext and carries the KDF params for every later block.
+                if header_key.is_some() {
+                    return Err(OpenError::Corrupt("duplicate RAR crypt header".into()));
+                }
+                let version = c.vint()?;
+                if version != ENC_VERSION_AES256 {
+                    return Err(OpenError::Unsupported(
+                        "This RAR archive uses an encryption version that is not supported yet."
+                            .into(),
+                    ));
+                }
+                let cflags = c.vint()?;
+                let lg2_count = c.bytes(1)?[0];
+                if lg2_count > MAX_LG2_COUNT {
+                    return Err(OpenError::Corrupt(
+                        "RAR encryption KDF cost out of range".into(),
+                    ));
+                }
+                let salt: [u8; SIZE_SALT] = c.bytes(SIZE_SALT)?.try_into().expect("16-byte salt");
+                let stored_check = if cflags & ENC_FLAG_CHECK != 0 {
+                    Some(c.bytes(ENC_CHECK_BYTES)?[..SIZE_PSWCHECK].to_vec())
+                } else {
+                    None
+                };
+                // Without a password we cannot read any further header. Prompt.
+                let Some(pw) = password else {
+                    return Err(OpenError::PasswordRequired);
+                };
+                let derived = keys.get(pw.as_bytes(), &salt, lg2_count);
+                if let Some(want) = stored_check {
+                    if derived.psw_check.as_slice() != want.as_slice() {
+                        return Err(OpenError::PasswordRequired);
+                    }
+                    pw_validated = true;
+                }
+                header_key = Some(derived.key);
+            }
             HEAD_MAIN => {
                 let aflags = c.vint()?;
                 if aflags & AFLAG_VOLUME != 0 {
@@ -511,7 +748,36 @@ fn scan_and_load<R: Read + Seek>(
                 let name = normalize_entry_name(&String::from_utf8_lossy(raw_name));
                 let is_dir = fflags & FFLAG_DIR != 0;
                 let extra = &hdr[(head_size - extra_size) as usize..];
-                let encrypted = extra_size > 0 && extra_has_encryption(extra);
+                let enc = if extra_size > 0 {
+                    parse_file_encryption(extra)?
+                } else {
+                    None
+                };
+                // An encrypted entry needs a password. `-hp` validated it at the
+                // crypt header; for `-p`, validate against the first entry that
+                // carries a check value, so a wrong password prompts rather than
+                // decoding to garbage.
+                if let Some(fe) = &enc {
+                    let Some(pw) = password else {
+                        return Err(OpenError::PasswordRequired);
+                    };
+                    if !pw_validated {
+                        if let Some(want) = fe.psw_check {
+                            let derived = keys.get(pw.as_bytes(), &fe.salt, fe.lg2_count);
+                            if derived.psw_check != want {
+                                return Err(OpenError::PasswordRequired);
+                            }
+                            pw_validated = true;
+                        }
+                    }
+                }
+                // A MAC'd checksum (flag 0x02) is not a plain CRC32, so drop it —
+                // the plain-CRC check can't validate the decrypted bytes.
+                let crc = if enc.as_ref().is_some_and(|e| e.mac_checksums) {
+                    None
+                } else {
+                    crc
+                };
 
                 if !is_dir {
                     // An unsafe/overlong name means the entry is never shown or
@@ -547,19 +813,19 @@ fn scan_and_load<R: Read + Seek>(
                     // since blocks are sequential, it is necessarily the last
                     // one scanned. Kept (flagged) so its group can degrade
                     // honestly instead of the member silently vanishing.
-                    let truncated = header_end.saturating_add(data_size) > file_len;
+                    let truncated = data_offset.saturating_add(data_size) > file_len;
                     if !solid || groups.is_empty() {
                         groups.push(Vec::new());
                     }
                     groups.last_mut().expect("just pushed").push(Member {
                         name,
-                        data_offset: header_end,
+                        data_offset,
                         pack: data_size,
                         unpack,
                         crc,
                         method,
                         window,
-                        encrypted,
+                        enc,
                         indexable,
                         truncated,
                     });
@@ -568,7 +834,7 @@ fn scan_and_load<R: Read + Seek>(
             _ => {} // service/unknown headers: skip via data_size
         }
 
-        let Some(next) = header_end.checked_add(data_size) else {
+        let Some(next) = data_offset.checked_add(data_size) else {
             return Err(OpenError::Corrupt("RAR block overruns the file".into()));
         };
         if next <= pos {
@@ -610,30 +876,24 @@ fn scan_and_load<R: Read + Seek>(
                 // family's rule for its truncated tails, kept).
                 continue;
             }
-            let data = if m.encrypted {
-                EntryData::Unavailable(UNAVAIL_ENCRYPTED)
-            } else {
-                EntryData::Lazy {
-                    offset: m.data_offset,
-                    pack: m.pack,
-                    window: m.window,
-                    store: m.method == 0,
-                }
+            // An encrypted non-solid run carries its own key + IV; the lazy read
+            // CBC-decrypts before the store/codec.
+            let crypt = m.enc.as_ref().map(|fe| run_key(&mut keys, password, fe));
+            let data = EntryData::Lazy {
+                offset: m.data_offset,
+                pack: m.pack,
+                window: m.window,
+                store: m.method == 0,
+                crypt,
             };
             upsert(&mut latest, &mut resident, m.name, m.unpack, m.crc, data);
             continue;
         }
-        // Multi-member solid group.
-        let poisoned: Option<&'static str> = if members.iter().any(|m| m.encrypted) {
-            Some(UNAVAIL_ENCRYPTED)
-        } else if members.iter().any(|m| m.method == 0) {
-            // A stored member sits outside the LZ bitstream; decoding around
-            // it would desync the shared window (fstool's rule, kept).
-            Some(UNAVAIL_STORED_SOLID)
-        } else {
-            None
-        };
-        if let Some(why) = poisoned {
+        // Multi-member solid group. A stored member sits outside the LZ
+        // bitstream; decoding around it would desync the shared window (fstool's
+        // rule, kept) — poison the whole group. Encryption is handled inside the
+        // decode (each member's run is CBC-decrypted before the codec).
+        if members.iter().any(|m| m.method == 0) {
             for m in members {
                 if m.indexable {
                     upsert(
@@ -642,7 +902,7 @@ fn scan_and_load<R: Read + Seek>(
                         m.name,
                         m.unpack,
                         m.crc,
-                        EntryData::Unavailable(why),
+                        EntryData::Unavailable(UNAVAIL_STORED_SOLID),
                     );
                 }
             }
@@ -654,6 +914,8 @@ fn scan_and_load<R: Read + Seek>(
             is_supported,
             progress,
             budget,
+            password,
+            &mut keys,
             limits,
             &mut resident,
             &mut latest,
@@ -710,6 +972,11 @@ fn resident_under(latest: &BTreeMap<String, (u64, Option<u32>, EntryData)>, name
 /// never fails the archive. A truncated member (data past EOF — necessarily
 /// the group's tail) is excluded from the stream and marked cut off, so the
 /// intact members still serve.
+/// An encrypted solid group is CBC-decrypted per member: each run is padded to a
+/// 16-byte boundary and keyed by that member's own salt/IV, so the input cursor
+/// snaps to each member's run and starts a fresh CBC chain (skipping the padding
+/// tail of the previous one), while the single LZ decoder keeps the shared solid
+/// window across all of them.
 #[allow(clippy::too_many_arguments)]
 fn decode_solid_group<R: Read + Seek>(
     reader: &mut R,
@@ -717,6 +984,8 @@ fn decode_solid_group<R: Read + Seek>(
     is_supported: &dyn Fn(&str) -> bool,
     progress: Option<&OpenProgress>,
     budget: u64,
+    password: Option<&str>,
+    keys: &mut KeyCache,
     limits: &OpenLimits,
     resident: &mut u64,
     latest: &mut BTreeMap<String, (u64, Option<u32>, EntryData)>,
@@ -759,8 +1028,45 @@ fn decode_solid_group<R: Read + Seek>(
     // work adds `Decoder::add_file_boundary` (and Delta!) — register member
     // offsets here when the pin advances past it.
 
-    // Compressed-input cursor over the members' packed runs, in order.
-    let areas: Vec<(u64, u64)> = members.iter().map(|m| (m.data_offset, m.pack)).collect();
+    // Encrypted members are materialized up front: each run is CBC-decrypted
+    // (its own key/IV) and stripped of the 16-byte-boundary padding that would
+    // otherwise sit *between* files in the shared LZ stream — the decoder reads
+    // block framing eagerly and a padding byte reads as a bogus next-block
+    // header. Stripped runs are byte-exact continuations, so the continuous feed
+    // below is identical to the unencrypted path. `None` = read lazily from file.
+    let enc_runs: Vec<Option<Vec<u8>>> = members
+        .iter()
+        .map(|m| match m.enc.as_ref() {
+            Some(fe) => {
+                let rk = run_key(keys, password, fe);
+                let mut run = vec![0u8; m.pack as usize];
+                reader.seek(SeekFrom::Start(m.data_offset))?;
+                if read_fully(reader, &mut run)? != run.len() {
+                    return Err(OpenError::Corrupt("RAR data run truncated".into()));
+                }
+                let mut cipher = rar_crypt::new_cbc(&rk.key, &rk.iv);
+                rar_crypt::cbc_decrypt_blocks(&mut cipher, &mut run);
+                let real = rar5_stream_len(&run).ok_or_else(|| {
+                    OpenError::Corrupt("RAR encrypted block framing malformed".into())
+                })?;
+                run.truncate(real);
+                Ok(Some(run))
+            }
+            None => Ok(None),
+        })
+        .collect::<Result<_, OpenError>>()?;
+
+    // Compressed-input cursor over the members' runs, in order: an encrypted
+    // member reads from its stripped in-memory buffer, an unencrypted one from
+    // the file. Either way the runs concatenate to the exact solid stream.
+    let areas: Vec<(u64, u64)> = members
+        .iter()
+        .enumerate()
+        .map(|(i, m)| match &enc_runs[i] {
+            Some(v) => (0, v.len() as u64),
+            None => (m.data_offset, m.pack),
+        })
+        .collect();
     let mut in_area = 0usize;
     let mut in_off = 0u64;
     let mut in_buf = vec![0u8; CHUNK];
@@ -780,8 +1086,17 @@ fn decode_solid_group<R: Read + Seek>(
         }
         let (offset, pack) = areas[*in_area];
         let want = (in_buf.len() as u64).min(pack - *in_off) as usize;
-        reader.seek(SeekFrom::Start(offset + *in_off))?;
-        let got = read_fully(reader, &mut in_buf[..want])?;
+        let got = match &enc_runs[*in_area] {
+            Some(v) => {
+                let from = *in_off as usize;
+                in_buf[..want].copy_from_slice(&v[from..from + want]);
+                want
+            }
+            None => {
+                reader.seek(SeekFrom::Start(offset + *in_off))?;
+                read_fully(reader, &mut in_buf[..want])?
+            }
+        };
         if got == 0 {
             return Err(OpenError::Corrupt("RAR data run truncated".into()));
         }
@@ -930,6 +1245,53 @@ fn remap_codec_refusal(e: io::Error) -> io::Error {
     }
 }
 
+/// Byte length of a RAR5 compressed run's real block data: walk the block
+/// framing — a 2-byte header (`flags`, `cksum`) + a `byte_count+1`-byte
+/// little-endian `block_size` + `block_size` data bytes — until a block with the
+/// `last_block` flag is consumed, and return the offset just past it. An
+/// encrypted run is padded past this length to a 16-byte boundary; that padding
+/// must be dropped before the LZ decoder sees it, since the decoder reads block
+/// headers eagerly and a padding byte parses as a bogus one. `None` if the
+/// framing is malformed (matches compcol's own block-header validation).
+fn rar5_stream_len(data: &[u8]) -> Option<usize> {
+    let mut pos = 0usize;
+    loop {
+        if pos + 2 > data.len() {
+            return None;
+        }
+        let flags = data[pos];
+        let byte_count = ((flags >> 3) & 7) as usize;
+        if byte_count > 2 {
+            return None;
+        }
+        let last_block = flags & 0x40 != 0;
+        let cksum = data[pos + 1];
+        let size_len = byte_count + 1;
+        if pos + 2 + size_len > data.len() {
+            return None;
+        }
+        let mut size_bytes = [0u8; 3];
+        for (i, sb) in size_bytes.iter_mut().enumerate().take(size_len) {
+            *sb = data[pos + 2 + i];
+        }
+        if 0x5A ^ flags ^ size_bytes[0] ^ size_bytes[1] ^ size_bytes[2] != cksum {
+            return None;
+        }
+        let block_size =
+            u32::from_le_bytes([size_bytes[0], size_bytes[1], size_bytes[2], 0]) as usize;
+        if block_size == 0 {
+            return None;
+        }
+        pos = pos.checked_add(2 + size_len + block_size)?;
+        if pos > data.len() {
+            return None;
+        }
+        if last_block {
+            return Some(pos);
+        }
+    }
+}
+
 /// Read as many bytes as `buf` holds, tolerating a short tail. Returns bytes read.
 fn read_fully<R: Read>(reader: &mut R, buf: &mut [u8]) -> io::Result<usize> {
     let mut filled = 0;
@@ -965,6 +1327,18 @@ pub mod fuzz {
             &|_| true,
             None,
             1 << 24,
+            None,
+            &limits,
+        );
+        // Also exercise the decrypt paths with a fixed password.
+        let mut cur = io::Cursor::new(data);
+        let _ = scan_and_load(
+            &mut cur,
+            data.len() as u64,
+            &|_| true,
+            None,
+            1 << 24,
+            Some("password"),
             &limits,
         );
     }
@@ -981,6 +1355,7 @@ pub mod fuzz {
 //      extension, which would put the Delta-triggering .bmp first and poison
 //      the whole group instead of just its tail)
 //   rar a -ma5 -m3 -phunter2 encrypted.rar a.jpg b.png
+//   rar a -ma5 -m3 -s -phunter2 encrypted_solid.rar a.jpg b.png sub/c.webp
 //   rar a -ma5 -m3 -hphunter2 hdr_encrypted.rar a.jpg b.png
 // rar4.rar is the corpus's `rar4_signature_only.rar` (WinRAR 7 cannot write
 // RAR4; the corpus one came from rar 6.24 in WSL).
@@ -1035,21 +1410,27 @@ mod tests {
     const LZ_SOLID: &[u8] = include_bytes!("../tests/fixtures/rar/lz_solid.rar");
     const DELTA_SOLID: &[u8] = include_bytes!("../tests/fixtures/rar/delta_solid.rar");
     const ENCRYPTED: &[u8] = include_bytes!("../tests/fixtures/rar/encrypted.rar");
+    const ENCRYPTED_SOLID: &[u8] = include_bytes!("../tests/fixtures/rar/encrypted_solid.rar");
     const HDR_ENCRYPTED: &[u8] = include_bytes!("../tests/fixtures/rar/hdr_encrypted.rar");
     const RAR4: &[u8] = include_bytes!("../tests/fixtures/rar/rar4.rar");
 
     fn open(bytes: &[u8], tag: &str) -> Result<RarSource, OpenError> {
         let path = fixture(tag, bytes);
-        let src = RarSource::open(&path, is_img, None, u64::MAX);
+        let src = RarSource::open(&path, is_img, None, u64::MAX, None);
         // The lazy model re-reads from the path, so keep the file until the
         // source drops; tests clean up via the OS temp dir.
         src
     }
 
+    fn open_pw(bytes: &[u8], tag: &str, password: &str) -> Result<RarSource, OpenError> {
+        let path = fixture(tag, bytes);
+        RarSource::open(&path, is_img, None, u64::MAX, Some(password))
+    }
+
     #[test]
     fn store_nonsolid_lists_supported_sorted_and_reads_bytes() {
         let path = fixture("store", STORE_NONSOLID);
-        let src = RarSource::open(&path, is_img, None, u64::MAX).unwrap();
+        let src = RarSource::open(&path, is_img, None, u64::MAX, None).unwrap();
         assert_eq!(src.len(), 3, "the .txt is excluded");
         let names: Vec<&str> = (0..src.len()).map(|i| src.name(i)).collect();
         assert_eq!(names, vec!["a.jpg", "b.png", "sub/c.webp"]);
@@ -1068,7 +1449,7 @@ mod tests {
     #[test]
     fn lz_nonsolid_decodes_each_entry_lazily() {
         let path = fixture("lz", LZ_NONSOLID);
-        let src = RarSource::open(&path, is_img, None, u64::MAX).unwrap();
+        let src = RarSource::open(&path, is_img, None, u64::MAX, None).unwrap();
         let names: Vec<&str> = (0..src.len()).map(|i| src.name(i)).collect();
         assert_eq!(names, vec!["a.jpg", "b.png", "sub/c.webp"]);
         // Reads are independent + repeatable (the decode pool hits these from
@@ -1084,7 +1465,7 @@ mod tests {
     fn lz_solid_decodes_eagerly_with_progress() {
         let path = fixture("solid", LZ_SOLID);
         let progress = OpenProgress::new();
-        let src = RarSource::open(&path, is_img, Some(&progress), u64::MAX).unwrap();
+        let src = RarSource::open(&path, is_img, Some(&progress), u64::MAX, None).unwrap();
         let names: Vec<&str> = (0..src.len()).map(|i| src.name(i)).collect();
         assert_eq!(names, vec!["a.jpg", "b.png", "sub/c.webp"]);
         assert_eq!(src.bytes(0).unwrap(), jpg_a());
@@ -1105,7 +1486,7 @@ mod tests {
     #[test]
     fn delta_member_degrades_its_solid_group_not_the_archive() {
         let path = fixture("delta", DELTA_SOLID);
-        let src = RarSource::open(&path, is_img, None, u64::MAX).unwrap();
+        let src = RarSource::open(&path, is_img, None, u64::MAX, None).unwrap();
         let names: Vec<&str> = (0..src.len()).map(|i| src.name(i)).collect();
         assert_eq!(names, vec!["a.jpg", "gradient.bmp", "z.jpg"]);
         assert_eq!(src.bytes(0).unwrap(), jpg_a(), "before the Delta member");
@@ -1118,19 +1499,63 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
-    /// Encrypted RARs refuse with an honest message — NOT PasswordRequired,
-    /// which would route to a password prompt no password can satisfy (we
-    /// detect encryption; we do not decrypt).
+    /// Encrypted RARs prompt (PasswordRequired) with no password or a wrong one,
+    /// and decrypt byte-perfect with the right one — covering both per-file
+    /// (`-p`) and full-header (`-hp`) encryption. Password: "hunter2".
     #[test]
-    fn encrypted_archives_refuse_honestly() {
+    fn encrypted_archives_prompt_then_decrypt() {
         for (tag, bytes) in [("enc", ENCRYPTED), ("hdrenc", HDR_ENCRYPTED)] {
             match open(bytes, tag) {
-                Err(OpenError::Unsupported(msg)) => {
-                    assert!(msg.contains("password protected"), "{tag}: {msg}");
+                Err(OpenError::PasswordRequired) => {}
+                other => {
+                    panic!(
+                        "{tag} no-pw: expected PasswordRequired, got {:?}",
+                        other.err()
+                    )
                 }
-                other => panic!("{tag}: expected Unsupported, got {:?}", other.err()),
             }
+            match open_pw(bytes, tag, "wrongpass") {
+                Err(OpenError::PasswordRequired) => {}
+                other => panic!(
+                    "{tag} wrong-pw: expected PasswordRequired, got {:?}",
+                    other.err()
+                ),
+            }
+            let src = open_pw(bytes, tag, "hunter2")
+                .unwrap_or_else(|e| panic!("{tag}: correct password should open: {e:?}"));
+            let names: Vec<&str> = (0..src.len()).map(|i| src.name(i)).collect();
+            assert_eq!(names, vec!["a.jpg", "b.png"], "{tag}: names");
+            assert_eq!(src.bytes(0).unwrap(), jpg_a(), "{tag}: a.jpg decrypts");
+            assert_eq!(src.bytes(1).unwrap(), png_b(), "{tag}: b.png decrypts");
         }
+    }
+
+    /// A solid *and* encrypted group (`-m3 -s -phunter2`): each member's run is
+    /// CBC-decrypted with its own key/IV (padded to 16 bytes, so the decode
+    /// snaps past each run's padding) while the single LZ window carries across —
+    /// every member must decode byte-perfect.
+    #[test]
+    fn encrypted_solid_group_decrypts_every_member() {
+        assert!(
+            matches!(
+                open(ENCRYPTED_SOLID, "esolid"),
+                Err(OpenError::PasswordRequired)
+            ),
+            "no password prompts"
+        );
+        assert!(
+            matches!(
+                open_pw(ENCRYPTED_SOLID, "esolid", "nope"),
+                Err(OpenError::PasswordRequired)
+            ),
+            "wrong password re-prompts"
+        );
+        let src = open_pw(ENCRYPTED_SOLID, "esolid", "hunter2").expect("correct password opens");
+        let names: Vec<&str> = (0..src.len()).map(|i| src.name(i)).collect();
+        assert_eq!(names, vec!["a.jpg", "b.png", "sub/c.webp"]);
+        assert_eq!(src.bytes(0).unwrap(), jpg_a());
+        assert_eq!(src.bytes(1).unwrap(), png_b());
+        assert_eq!(src.bytes(2).unwrap(), webp_c());
     }
 
     #[test]
@@ -1151,7 +1576,7 @@ mod tests {
             other => panic!("expected Corrupt, got {:?}", other.err()),
         }
         let missing = std::env::temp_dir().join("pb_rar_missing_never_written.rar");
-        match RarSource::open(&missing, is_img, None, u64::MAX) {
+        match RarSource::open(&missing, is_img, None, u64::MAX, None) {
             Err(OpenError::Io(_)) => {}
             other => panic!("expected Io, got {:?}", other.err()),
         }
@@ -1171,7 +1596,7 @@ mod tests {
             .expect("stored content present");
         bytes[at + 4] ^= 0xFF;
         let path = fixture("crc", &bytes);
-        let src = RarSource::open(&path, is_img, None, u64::MAX).unwrap();
+        let src = RarSource::open(&path, is_img, None, u64::MAX, None).unwrap();
         let a = (0..src.len()).find(|&i| src.name(i) == "a.jpg").unwrap();
         let err = src.bytes(a).expect_err("corrupt bytes must not be served");
         assert!(err.to_string().contains("damaged"), "{err}");
@@ -1246,7 +1671,7 @@ mod tests {
         // Same length as "a.jpg" — the archive's first solid member.
         patch_header(&mut bytes, b"a.jpg", b"../.j");
         let path = fixture("insane", &bytes);
-        let src = RarSource::open(&path, is_img, None, u64::MAX).unwrap();
+        let src = RarSource::open(&path, is_img, None, u64::MAX, None).unwrap();
         let names: Vec<&str> = (0..src.len()).map(|i| src.name(i)).collect();
         assert_eq!(
             names,
@@ -1268,7 +1693,7 @@ mod tests {
         // 60 lands well inside the final data run of the 463-byte fixture).
         let chopped = &LZ_SOLID[..LZ_SOLID.len() - 60];
         let path = fixture("solidtrunc", chopped);
-        let src = RarSource::open(&path, is_img, None, u64::MAX).unwrap();
+        let src = RarSource::open(&path, is_img, None, u64::MAX, None).unwrap();
         let a = (0..src.len())
             .find(|&i| src.name(i) == "a.jpg")
             .expect("a.jpg listed");
@@ -1304,14 +1729,14 @@ mod tests {
     #[test]
     fn solid_open_refuses_past_the_budget() {
         let path = fixture("budget", LZ_SOLID);
-        match RarSource::open(&path, is_img, None, 100) {
+        match RarSource::open(&path, is_img, None, 100, None) {
             Err(OpenError::TooLarge { needed, budget }) => {
                 assert_eq!(budget, 100);
                 assert!(needed > 100);
             }
             other => panic!("expected TooLarge, got {:?}", other.err()),
         }
-        assert!(RarSource::open(&path, is_img, None, u64::MAX).is_ok());
+        assert!(RarSource::open(&path, is_img, None, u64::MAX, None).is_ok());
         let _ = std::fs::remove_file(&path);
     }
 
@@ -1320,7 +1745,7 @@ mod tests {
         let path = fixture("cancel", LZ_SOLID);
         let progress = OpenProgress::new();
         progress.request_cancel();
-        match RarSource::open(&path, is_img, Some(&progress), u64::MAX) {
+        match RarSource::open(&path, is_img, Some(&progress), u64::MAX, None) {
             Err(OpenError::Cancelled) => {}
             other => panic!("expected Cancelled, got {:?}", other.err()),
         }
@@ -1336,7 +1761,8 @@ mod tests {
             ceiling: 10,
             ..OpenLimits::default()
         };
-        let src = RarSource::open_with_limits(&path, is_img, None, u64::MAX, &limits).unwrap();
+        let src =
+            RarSource::open_with_limits(&path, is_img, None, u64::MAX, None, &limits).unwrap();
         assert!(src.is_empty(), "every fixture entry exceeds 10 bytes");
         let _ = std::fs::remove_file(&path);
     }
@@ -1365,11 +1791,13 @@ mod tests {
         for entry in std::fs::read_dir(&dir).expect("corpus dir") {
             let path = entry.unwrap().path();
             let name = path.file_name().unwrap().to_string_lossy().into_owned();
-            // RAR5, unencrypted only — the supported subset.
-            if !name.starts_with("rar5_") || !name.ends_with(".rar") || name.contains("enc") {
+            if !name.starts_with("rar5_") || !name.ends_with(".rar") {
                 continue;
             }
-            let src = match RarSource::open(&path, |_| true, None, u64::MAX) {
+            // The corpus's encrypted archives (`-ptestpass` / `-hptestpass`) are
+            // now decoded too — pass the password to both us and the oracle.
+            let password = name.contains("enc").then_some("testpass");
+            let src = match RarSource::open(&path, |_| true, None, u64::MAX, password) {
                 Ok(s) => s,
                 Err(e) => panic!("{name}: open failed: {e}"),
             };
@@ -1386,8 +1814,14 @@ mod tests {
                     }
                     Err(e) => panic!("{name}/{entry_name}: read failed: {e}"),
                 };
+                let mut args = vec!["p".to_string(), "-inul".to_string()];
+                if let Some(pw) = password {
+                    args.push(format!("-p{pw}"));
+                }
+                args.push(path.to_str().unwrap().to_string());
+                args.push(entry_name.clone());
                 let out = Command::new(&unrar)
-                    .args(["p", "-inul", path.to_str().unwrap(), &entry_name])
+                    .args(&args)
                     .output()
                     .expect("run unrar");
                 assert!(out.status.success(), "{name}/{entry_name}: unrar p failed");

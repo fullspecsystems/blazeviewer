@@ -54,6 +54,7 @@ use zip::ZipArchive;
 
 mod kind;
 mod rar;
+mod rar_crypt;
 mod tar_source;
 
 pub use kind::{archive_kind, ArchiveKind};

@@ -30,9 +30,13 @@ with any pre-release suffix carried only by the tag.
 ### Added
 - **RAR archives open too.** `.rar` files (the modern RAR5 format) and `.cbr`/`.cbz` comic
   books now open as browsable decks, with the contents verified byte-for-byte against the
-  reference unrar tool during development. Older RAR4 archives, password-protected RARs,
-  and a few rare compression filters are declined with a plain message saying exactly what
-  is not supported, instead of a generic error or garbled images.
+  reference unrar tool during development. Older RAR4 archives and a few rare compression
+  filters are declined with a plain message saying exactly what is not supported, instead
+  of a generic error or garbled images.
+- **Password-protected RAR archives open.** RAR5 archives encrypted with a password —
+  whether just the file contents (`-p`) or the whole archive including the file names
+  (`-hp`) — now prompt for the password and decrypt in memory, the same way ZIP and 7z
+  already do. A wrong password re-prompts rather than showing a confusing error.
 - **Tarballs open like folders.** Blaze Viewer now views images and plays videos inside
   `.tar`, `.tar.gz` (`.tgz`), `.tar.bz2` (`.tbz2`), `.tar.zst` (`.tzst`), and `.tar.xz`
   (`.txz`) archives, alongside the existing ZIP and 7z support. A plain `.tar` opens

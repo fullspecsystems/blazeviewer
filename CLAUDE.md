@@ -522,15 +522,22 @@ pragmatic crate choices differ from the table above and are the current baseline
   **RAR5** (#103): our own container parser (`pb-source/src/rar.rs`) over the
   `compcol::rar5` codec (exact-pinned fork rev with our x86 fix until upstream PR #121
   releases); non-solid lazy / solid eager, CRC32-verified, corpus-validated byte-identical
-  to `unrar`; RAR4 / multi-volume / encrypted RARs refuse with honest messages
-  (`ArchiveOpenError::Unsupported` — NOT the password prompt, which could never succeed);
-  Delta-filtered entries degrade per-entry (their solid-group tail goes unavailable), the
-  rest of the archive serves. RAM-only — never extracted to disk, so the no-trace
-  guarantee holds (`viewing_a_{zip,7z,tar,tar_gz,rar}_writes_nothing_to_disk`). Errors
-  surface in the egui `Message` dialog. Passwords: ZIP/7z prompt in-app; the tar family
-  has no standard encryption; RAR encryption is detect-and-refuse. Crates: `zip` +
-  `sevenz-rust2` + `tar`/`flate2`/`bzip2`/`ruzstd`/`lzma-rust2` + `compcol` (all pure
-  Rust, no C build risk).
+  to `unrar`; RAR4 / multi-volume refuse with honest messages
+  (`ArchiveOpenError::Unsupported`); Delta-filtered entries degrade per-entry (their
+  solid-group tail goes unavailable), the rest of the archive serves. **Encryption is
+  supported** (`pb-source/src/rar_crypt.rs`): per-file (`-p`) and full-header (`-hp`)
+  RAR5 use standard PBKDF2-HMAC-SHA256 + AES-256-CBC (the tractable scheme, unlike RAR4's
+  bespoke KDF), so a missing/wrong password returns `PasswordRequired` (prompts, like
+  ZIP/7z) and a correct one decrypts — validated byte-identical to `unrar` over the corpus
+  and a committed encrypted-solid fixture. Encrypted solid runs are padded to 16 bytes
+  *between* files, so each run is decrypted then stripped to its real block length
+  (`rar5_stream_len`) before the LZ decoder, which reads block framing eagerly and would
+  choke on the padding. RAM-only — never extracted to disk, so the no-trace guarantee holds
+  (`viewing_a_{zip,7z,tar,tar_gz,rar}_writes_nothing_to_disk`, the RAR one now covering a
+  decrypt). Errors surface in the egui `Message` dialog. Passwords: ZIP/7z/RAR5 all prompt
+  in-app; the tar family has no standard encryption. Crates: `zip` + `sevenz-rust2` +
+  `tar`/`flate2`/`bzip2`/`ruzstd`/`lzma-rust2` + `compcol` + `aes`/`cbc`/`hmac`/`sha2`
+  (all pure Rust, no C build risk).
 - **Known v1 limitations** (deliberate): Radiance-HDR / OpenEXR (image-crate, not WIC) still
   clamped to SDR; CMYK JPEG mis-colored; first frame only (GIF/animated-WebP/Live-Photo/
   multipage-TIFF). LUT/CLUT & gray/CMYK ICC profiles → sRGB passthrough (the `lcms2`-behind-a-

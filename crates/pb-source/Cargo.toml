@@ -50,6 +50,15 @@ compcol = { git = "https://github.com/jdlien/compcol", rev = "5c47b0ecf123cfb597
 # fstool reference verify it — silent garbage on corruption otherwise).
 # Already in-tree via flate2.
 crc32fast = "1"
+# RAR5 encryption (task #103): password-protected entries decrypt with standard
+# primitives — PBKDF2-HMAC-SHA256 key derivation (2^N iterations) + AES-256-CBC
+# over the packed runs — unlike RAR4's bespoke KDF (out of scope). All pure Rust
+# and all already in-tree (aes/cbc via sevenz-rust2's AES256; hmac/sha2 via the
+# 7z + zip crypto), so no new build risk. See src/rar_crypt.rs.
+aes = "0.9"
+cbc = "0.2"
+hmac = "0.12"
+sha2 = "0.10"
 
 [dev-dependencies]
 # Fixture generation only: XzWriter needs the encoder feature (test builds unify
