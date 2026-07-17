@@ -675,6 +675,18 @@ fn run_engine(
             // Drain commands (a disconnect = teardown).
             loop {
                 match cmd_rx.try_recv() {
+                    // 🪤 "Audio takes a couple seconds to come back on play (or after a
+                    // seek)" is almost always the OUTPUT DEVICE, not this engine —
+                    // check that FIRST before instrumenting here. A Bluetooth A2DP link
+                    // (esp. AirPods, which idle-sleep in ~1 s when off-head via the
+                    // proximity sensor) powers down while `Stop()`ped and takes 1–3 s to
+                    // re-establish on the next `Start()`. Signature (measured 2026-07-17,
+                    // `PB_AUDIO_TRACE`): `Start()` returns in <1 ms, the ~200 ms buffer is
+                    // full, yet the endpoint doesn't drain and there are NO underruns —
+                    // it's just the wireless link waking up. Reproduce wired and it's
+                    // gone. The engine-side mitigation (feeding silence during pause to
+                    // keep the link warm) was prototyped and reverted as unnecessary —
+                    // it's in git history if a device ever makes it worth shipping.
                     Ok(Cmd::Resume) => {
                         if !playing {
                             sink.client.Start().map_err(w)?;
