@@ -1,6 +1,6 @@
 # Task 104 — Archives as doors: visible in the deck, entered on purpose
 
-**Status:** planned — rev5 (2026-07-16, owner-approved direction; ready to implement)
+**Status:** rev6 — **Phases 0-3 IMPLEMENTED** (2026-07-16). Phase 4 = owner validation on a real folder.
 **Proposed task id:** 104 (add the task entry when this plan is approved)
 **Depends on:** `pb_source::archive_kind` (`crates/pb-source/src/kind.rs:61`) — shipped on `main`
 (#102 tar family, #103 RAR5, merged `631e970`).
@@ -38,11 +38,11 @@ built and load-bearing today:
 | Piece | Exists | Archive door needs |
 |---|---|---|
 | `LibraryItemKind` (`video.rs:31`) | `Image` \| `Video(VideoContainer)` | **+ `Archive(ArchiveKind)`** |
-| `item_kind` (`video.rs:145`) | types by extension | + one arm |
-| **Typed dispatch before `bytes()`** (`engine.rs:399`) | video returns before the read at `:504` | + one arm above the read |
-| `video_placeholder` (`engine.rs:520`) | 320×180 solid tile, `codec` names the container | **+ `archive_placeholder(kind)`** |
+| `item_kind` (`video.rs:167`) | types by extension | + one arm |
+| **Typed dispatch before `bytes()`** (`engine.rs:399`) | video returns before the read at `:510` | + one arm above the read |
+| `video_placeholder` (`engine.rs:526`) | 320×180 solid tile, `codec` names the container | **+ `archive_placeholder(kind)`** |
 | `P` = play/pause (`action.rs`) | contextual on the item's container-ness | + "enter" on a door |
-| `▶ P` HUD hint (`engine.rs:508`) | already tells you `P` does something here | reused |
+| `▶ P` HUD hint (`engine.rs:514`) | already tells you `P` does something here | reused |
 | `CoreEffect::BeginArchiveOpen` | drives pre-flight + progress + password re-open | reused verbatim |
 
 > Note (owner, 2026-07-16): the *unsupported-container* case is now rare — the OS decodes MKV
@@ -69,13 +69,19 @@ Blending archive *contents* into the deck stays rejected, and the door makes the
 **The prefetch ring is the whole argument.** A blended deck makes archive entries ordinary items,
 so the direction-biased window decodes ahead into them — decompressing archives the user never
 chose, as a side effect of scrolling nearby. A **door** has no such property, because *the door's
-decode is drawing a tile, not reading the archive* (`engine.rs:399` returns before `:504`'s
-`source.bytes()`). Prefetch can hold a hundred doors for the price of a hundred solid tiles —
-which `video_placeholder`'s own doc already promises: *"prefetch can hold many without denting
-the ring budget."*
+decode is drawing a tile, not reading the archive* (`engine.rs:399` returns before `:510`'s
+`source.bytes()`).
 
 That is the line the owner drew — *"not automatic where you suddenly OOM the user"* — enforced by
 where the `return` sits, not by a rule.
+
+> **Corrected in Phase 3 (2026-07-16).** Earlier revisions added *"prefetch can hold a hundred
+> doors for the price of a hundred solid tiles"*, borrowing `video_placeholder`'s promise. That
+> is **false now and was never the argument.** The video tile can stay 320×180 because a solid
+> colour's GPU upscale is invisible; a door carries an icon, and an icon upscaled ~12× to a
+> 7680-wide display is a blur — so the tile is **decode-to-fit** and costs one photo-sized ring
+> slot, i.e. what any item costs. What makes a door safe is the **decode**: a memset and a glyph
+> blit, never a decompression. Texture size was never the point.
 
 The other standing objections against blending:
 
@@ -109,7 +115,7 @@ pub enum LibraryItemKind {
 }
 ```
 
-In `item_kind` (`video.rs:145`), the arm is:
+In `item_kind` (`video.rs:167`), the arm is:
 
 ```rust
 source.path(item).and_then(pb_source::archive_kind).map(LibraryItemKind::Archive)
@@ -127,24 +133,23 @@ Two properties fall out **for free**, which is why it is written this way:
 
 ### 2. The tile
 
-`archive_placeholder(kind)` mirrors `video_placeholder` (`engine.rs:520`): tiny, `codec` naming
+`archive_placeholder(kind, fit)` mirrors `video_placeholder` (`engine.rs:526`): `codec` naming
 the format, so the GPU upscale is invisible and prefetch stays cheap.
 
-**Recommendation: give the door an icon, unlike the video tile.** For video the tile was a
-phase-1 stand-in that real posters replaced; for an archive the tile *is* the affordance — a
-featureless dark rectangle is a poor door, and the owner's framing was explicitly *"an icon or a
-button."* Rasterize the Font Awesome glyph via the `pb-decode` resvg stack and **cache one raster
-per `ArchiveKind`** (there are nine) — never per item, never per frame.
-
-If that proves fiddly, ship the solid tile first (exact video parity) and add the icon second;
-the mechanism does not depend on it.
+**Shipped (Phase 3):** the door carries the FA solid `file-zipper`, rasterized through
+**`pb-hud::icon::rasterize`** (the toasts' rasterizer — `pb-app-core` already depends on
+`pb-hud`; the plan's "`pb-decode` resvg stack" was the wrong seam). One glyph for every format,
+since the tile names the format itself. The raster is cached **by height** rather than per
+`ArchiveKind` — the tile is decode-to-fit, so size follows the viewport, and there are **eight**
+kinds, not nine. A folder of forty doors runs `resvg` once; an unparsable SVG degrades to the
+bare tile rather than failing the decode.
 
 ### 3. `P` enters (owner-approved)
 
 `Enter` is random-photo and `O` is the Open dialog — both taken. `P` is already **contextual on
 the item's container-ness** (play a video, play an animation, play a Live Photo), so "act on this
 container" extends cleanly to "enter this archive." Owner (2026-07-16): *"P is… weird but kind of
-fits… play this archive. I'm totally cool to use that."* The `▶ P` HUD hint (`engine.rs:508`)
+fits… play this archive. I'm totally cool to use that."* The `▶ P` HUD hint (`engine.rs:514`)
 already exists and carries it.
 
 Entering pushes the existing effect:
@@ -176,8 +181,8 @@ on the first attempt is correct, not a shortcut.
 rev4 flagged this as *the one thing that could change the size of the feature*: a door you cannot
 back out of is a trap. **It already works, and it is already tested.**
 
-`open_parent_cmd` (`app_core_impl.rs:2705`, `Action::OpenParent` = `Alt+Up`, `keymap.rs:616`)
-anchors on `self.source.container()` (`:2721`) — and **every** archive source returns its own path
+`open_parent_cmd` (`app_core_impl.rs:2712`, `Action::OpenParent` = `Alt+Up`, `keymap.rs:616`)
+anchors on `self.source.container()` (`:2728`) — and **every** archive source returns its own path
 on disk (`lib.rs:534`, `:986`, `:1053`, `rar.rs:339`, `tar_source.rs:548`). Its doc already
 describes the exact flow this plan needs:
 
@@ -186,7 +191,7 @@ describes the exact flow this plan needs:
 > file."*
 
 Tested end-to-end by `rescope_filters_the_deck_and_parent_steps_back_up`
-(`app_core_impl.rs:10861`), which asserts at `:10885` that from the archive root the containing
+(`app_core_impl.rs:10935`), which asserts at `:10959` that from the archive root the containing
 folder opens as a `BeginDirScan`.
 
 So the full loop closes with **no new code**: `P` a door → archive deck → `Alt+Up` → the folder of
@@ -224,7 +229,7 @@ keypress**:
 | Site | What happens to a door | Cost |
 |---|---|---|
 | **Thumbs strip** — `decode_item_for` (`engine.rs:364`) | the guard is **negative** (`!matches!(kind, Video(_))`), so a door falls *into* the branch and calls `source.bytes(item)` (`:366`) | a full `fs::read` of **every archive in the folder**; `native_thumbs: true` by default (`main.rs:838`) |
-| **`Shift+I` panel** (`app_core_impl.rs:6550`) | the guard is **positive-for-video**, so a door falls past the probe into the image path's sync `fs::read` (`:6573`) | the whole archive, **on the event loop** |
+| **`Shift+I` panel** (`app_core_impl.rs:6575`) | the guard is **positive-for-video**, so a door falls past the probe into the image path's sync `fs::read` (`:6620`) | the whole archive, **on the event loop** |
 
 Still to audit (same pattern, unverified): `app_core_impl.rs:4046`, `:7114`, `:7315`.
 
@@ -238,15 +243,15 @@ as an `if let` or a `!matches!` — so **reading is the default**, which is back
 > `!matches!`". That was wrong on both counts, and being mechanical about it would have meant
 > churning correct code. The real breakdown:
 >
-> - **3 were already exhaustive `match`es** (`app_core_impl.rs:7205`, `:7236`, `:8992`) — they
+> - **3 were already exhaustive `match`es** (`app_core_impl.rs:7263`, `:7297`, `:9056`) — they
 >   error on a new variant for free.
 > - **2 are `matches!` that are correct for any future kind and must be left alone**:
->   `item_is_video` (`app_core_impl.rs:6774`) asks a genuinely binary question (a door is not a
+>   `item_is_video` (`app_core_impl.rs:6821`) asks a genuinely binary question (a door is not a
 >   video → `false`), and `scan.rs:155` keys Live-Photo companion dedup off `Some(Image)` (a
 >   door never anchors a companion → correct).
 > - **4 needed the change**, and only these: `engine.rs:364` (the thumb read — inverted to a
 >   positive `Image` guard), `engine.rs:399` (the decode dispatch — `if let` → `match`),
->   `app_core_impl.rs:6550` (the panel read — restructured so the read lives *inside* the
+>   `app_core_impl.rs:6575` (the panel read — restructured so the read lives *inside* the
 >   `Image` arm), and `app_core_impl.rs:598` (rotation — `matches!` → `match`).
 >
 > The lesson generalises: convert a guard when its *else* branch assumes image-ness. Leave a
@@ -255,8 +260,8 @@ as an `if let` or a `!matches!` — so **reading is the default**, which is back
 ### 🪤 The compiler's worklist is platform-specific
 
 Verified by temporarily adding a variant and reading the errors: **Windows `cargo check` flags 4
-of the 6 sites.** `macos_native_route` (`app_core_impl.rs:7205`) and `macos_sample_buffer_route`
-(`:7236`) are `#[cfg(target_os = "macos")]`, so they are invisible here — **Phase 1 will compile
+of the 6 sites.** `macos_native_route` (`app_core_impl.rs:7263`) and `macos_sample_buffer_route`
+(`:7297`) are `#[cfg(target_os = "macos")]`, so they are invisible here — **Phase 1 will compile
 green on Windows and break the Mac build** unless they are handled deliberately. Both are video
 *routing* questions a door should never reach; give them an explicit arm rather than a
 catch-all, and confirm on a Mac build.
@@ -294,8 +299,8 @@ whose *else* branch assumed image-ness (`engine.rs:364` inverted to a positive `
 exhaustive. Fixed a stale `classify_library_file` doc found on the way. Green before and after.
 See *The audit* for the corrected breakdown and the **macOS-cfg trap**.
 
-**Phase 1 — core typing + door, TDD, pure.** `LibraryItemKind::Archive`; the `item_kind` arm; the
-`decode_item_cancellable` arm **above** the `bytes()` read (`engine.rs:504`);
+**Phase 1 — core typing + door, TDD, pure. ✅ DONE (2026-07-16, `cf8ae8a`).** `LibraryItemKind::Archive`; the `item_kind` arm; the
+`decode_item_cancellable` arm **above** the `bytes()` read (`engine.rs:510`);
 `archive_placeholder`. Scan includes archives as items. Every site Phase 0's compiler errors
 surfaced gets an explicit decision.
 
@@ -310,12 +315,12 @@ Tests, mirroring the ones video already has:
   check: it must fail against today's negative guard (`engine.rs:364`).
 - a door's tile is tiny (ring-budget property).
 
-**Phase 2 — enter.** `P` on a door → exactly one `BeginArchiveOpen { password: None }`, and it
+**Phase 2 — enter. ✅ DONE (2026-07-16, `646075b`).** `P` on a door → exactly one `BeginArchiveOpen { password: None }`, and it
 clears `climb_anchor` like any other navigation. Verify the climb-out (above).
 
-**Phase 3 — the icon.** Per-`ArchiveKind` cached raster in the tile.
+**Phase 3 — the icon. ✅ DONE (2026-07-16, `aacdffd`).** Cached by *height*, not per kind — the tile is decode-to-fit. See *The tile*.
 
-**Phase 4 — integration.** A folder of only archives shows doors and becomes the deck root (the
+**Phase 4 — integration. ← OWNER VALIDATION.** Automated coverage is in (the no-trace fixture now seeds a garbage `.zip`; 25 unit tests incl. both mutations). What is left needs a real folder and eyes: A folder of only archives shows doors and becomes the deck root (the
 blocker that rev3 could not solve); `P` a zip → deck; `P` a 7z → progress → deck; `P` an encrypted
 zip / 7z / **rar** → prompt → unlock → deck (rev5: RAR decrypts now); `Alt+Up` climbs out to the
 folder of doors and `P` enters the next one — including from a folder with **no photos**, which

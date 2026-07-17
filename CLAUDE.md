@@ -504,12 +504,36 @@ pragmatic crate choices differ from the table above and are the current baseline
   detection ships — a DoVi Profile-5 file on the Session route toasts an honest
   colors-can't-be-shown warning and the Details panel names every DoVi profile).
   `PB_TRACE=1` prints a per-2s Session dropped-frames diag (the `sb-play diag` analog).
+- **Archives are "doors" in the deck** (tasks.json #104, 2026-07-16): an archive **on disk** is a
+  typed item — `LibraryItemKind::Archive(ArchiveKind)`, the third arm beside `Image`/`Video` — so
+  a folder's `.zip`/`.7z`/`.cbz`/… are *visible while browsing* instead of reachable only via Open
+  File. It decodes to a flat 4:3 tile with the FA `file-zipper` glyph, and **`P` enters it**
+  (routed through `open_plan(Source::Archive)`, so it is the same operation as the picker's open —
+  password prompt, RAM pre-flight and progress dialog all included). `Alt+Up` climbs back out to
+  the folder (`open_parent_cmd` anchors on `source.container()`), which is how you reach the next
+  archive. Doors also make a folder of *only* archives openable: it now yields scan items, where
+  before it hit the keep-deck rule and reported no images.
+  - **The guarantee:** `decode_item_cancellable` returns the tile **above** the `source.bytes()`
+    request, so browsing past a door costs a memset + a glyph blit and *never* a decompression.
+    That — not the texture size — is why doors are safe where blending archive contents into the
+    deck was not (the prefetch ring would have decompressed archives nobody clicked). Pinned by a
+    panicking-`bytes()` source driven through **every** decode entry point.
+  - 🪤 **A new `LibraryItemKind` must opt *out* of byte reads, not into them.** The tree encodes a
+    two-kind world (video vs "everything else, therefore an image, therefore safe to read"). Guards
+    written `!matches!(…, Video(_))` or `if let Video(_)` silently drop a new kind in the *image*
+    bucket — which is how the thumbs strip and the `Shift+I` panel would each have `fs::read` every
+    archive in a folder. Read guards are **positive** (`Image` reads bytes) and kind matches are
+    **exhaustive** so the compiler lists the sites; note it only lists them *per platform* —
+    `macos_native_route`/`macos_sample_buffer_route` are `cfg(macos)` and invisible on Windows.
+  - Doors are typed off the item's **path**, not its name (unlike video, deliberately): an archive
+    entry has no path, so a `.zip` inside a `.zip` is unrepresentable rather than merely refused,
+    and `archive_kind` gets `.tar.gz` right where a name-based split sees `gz`.
 - **Archive viewing (ZIP + 7z + the tar family + RAR5)** (tasks.json #30, #102, #103) is
   wired in the `pb-source` crate behind the `ItemSource` seam, decoded via
   `pb_decode::decode_named_bytes` (bytes + extension hint). One classifier —
   `pb_source::archive_kind` — answers every "is this an archive, and which kind?"
-  question (shell `is_archive` predicates, `scan::open_archive` dispatch, double
-  extensions like `.tar.gz`, `.cbr`/`.cbz` comics). Two access models: **lazy** (ZIP via handle pool; plain
+  question (shell `is_archive` predicates, `scan::open_archive` dispatch, the `LibraryItemKind`
+  door arm, double extensions like `.tar.gz`, `.cbr`/`.cbz` comics). Two access models: **lazy** (ZIP via handle pool; plain
   `.tar` via a seek-over-data header index) and **eager decode-to-RAM** (7z; `.tar.gz` /
   `.tar.bz2` / `.tar.zst` / `.tar.xz` — solid streams have no cheap random access). 7z
   pre-flights its RAM budget from the header; a compressed tar has no size table, so its

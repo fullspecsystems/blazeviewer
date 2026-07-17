@@ -1291,6 +1291,19 @@
             "status": "done"
           }
         ]
+      },
+      {
+        "id": 104,
+        "title": "Archives as doors in the deck",
+        "description": "An archive on disk is a typed deck item (LibraryItemKind::Archive) that shows a glyph tile and opens on P, so a folder's .zip/.7z/.cbz are visible while browsing instead of reachable only via Open File. Alt+Up climbs back out to the folder, so the next archive is one keypress away. Plan: .taskmaster/plans/104-archives-in-the-folder-tree.md (rev6 records the implementation; rev1-3 planned the wrong surface and are kept as an appendix). IMPLEMENTED 2026-07-16, phases 0-3: the typed dispatch returns the tile above the bytes read, so browsing past a door never decompresses; Phase 0 first inverted the read guards to positive + made the kind matches exhaustive, without which the thumbs strip and the Shift+I panel would each fs::read every archive in the folder. Doors dissolve the old blocker: a folder of only archives now yields scan items, so it opens instead of hitting the keep-deck rule. REMAINING: owner validation on a real folder, and the two cfg(macos) routing arms need a Mac build to confirm.",
+        "status": "review",
+        "priority": "medium",
+        "dependencies": [
+          30,
+          102,
+          103
+        ],
+        "subtasks": []
       }
     ]
   }

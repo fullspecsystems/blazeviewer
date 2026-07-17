@@ -7,6 +7,15 @@ with any pre-release suffix carried only by the tag.
 
 ## [Unreleased]
 
+### Added
+- **Archives show up while you browse, and `P` opens them.** A `.zip`, `.7z`, `.rar`, `.cbz`,
+  `.cbr` or `.tar.*` sitting in a folder is no longer invisible: it appears as a tile with an
+  archive icon, and pressing `P` on it opens the archive as its own deck, exactly as if you had
+  picked it from Open File. `Alt+Up` takes you back out to the folder, so you can go straight
+  into the next one. Encrypted archives ask for the password the same way they always have.
+  A folder that holds nothing but archives now opens instead of reporting no images.
+  Browsing past an archive never opens or unpacks it — only pressing `P` does.
+
 ### Fixed
 - **Video playback is smooth again (macOS).** MKV and WebM files now play through the same
   renderer as everything else, instead of a path that quietly dropped a few frames every
