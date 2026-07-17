@@ -68,6 +68,10 @@ pub enum Icon {
     LivePhoto,
     /// Animated-image mark (GIF/APNG/… in the info readout) — a film strip.
     Film,
+    /// An archive: the "door" a `.zip`/`.7z`/`.cbz`/… shows in the deck, on the play-hint
+    /// pill that opens it (task #104; matches SF `doc.zipper`). Names the *meaning*, not the
+    /// format — one glyph covers every archive kind, since the row already names the format.
+    Archive,
     /// Settings ▸ General tab (matches SF `slider.horizontal.3`).
     Sliders,
     /// Settings ▸ Appearance tab (matches SF `paintbrush`).
@@ -166,6 +170,7 @@ fn svg(icon: Icon, family: Family) -> &'static str {
         Icon::Images => glyph!("images"),
         Icon::LivePhoto => glyph!("livephoto"),
         Icon::Film => glyph!("film"),
+        Icon::Archive => glyph!("file-zipper"),
         Icon::Sliders => glyph!("sliders"),
         Icon::Brush => glyph!("brush"),
         Icon::Keyboard => glyph!("keyboard"),

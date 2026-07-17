@@ -2965,6 +2965,11 @@ impl App {
         if kind != 0 {
             self.play_hint_kind = kind;
         }
+        // An archive door's pill is an affordance, not a reminder: the core marks it
+        // persistent and we never start the hold countdown, so it sits there for as long as
+        // the door is displayed. It still fades on `kind == 0` below — navigating off the
+        // door clears it like anything else.
+        let persistent = self.core.play_hint_persistent();
         if self.play_hint_hovered && kind != 0 {
             // Hover pins it fully open and restarts the hold clock (so un-hover resumes the
             // countdown from now).
@@ -2973,7 +2978,8 @@ impl App {
         } else if kind == 0 && self.play_hint_fade_out.is_none() {
             // The item stopped being a motion item (played / advanced) → fade out.
             self.play_hint_fade_out = Some(now);
-        } else if self.play_hint_fade_out.is_none()
+        } else if !persistent
+            && self.play_hint_fade_out.is_none()
             && now.duration_since(shown) >= PLAY_HINT_FADE_IN + PLAY_HINT_HOLD
         {
             // The hold elapsed → auto fade out.
@@ -3002,7 +3008,12 @@ impl App {
         const ANIM_FRAME: Duration = Duration::from_millis(16);
         self.play_hint_wake = if self.play_hint_fade_out.is_some() {
             Some(now + ANIM_FRAME)
-        } else if self.play_hint_hovered && kind != 0 {
+        } else if (self.play_hint_hovered || persistent) && kind != 0 {
+            // Nothing left to animate: hover-pinned or a door's persistent pill just sits
+            // there until an event re-ticks it. A wake here would be worse than useless —
+            // the hold-expiry below is in the *past* once the hold elapses, so scheduling it
+            // for a pill that never fades would fire, change nothing, and reschedule the same
+            // past instant, spinning the event loop for as long as the door is on screen.
             None
         } else if now.duration_since(shown) < PLAY_HINT_FADE_IN {
             Some(now + ANIM_FRAME)

@@ -1786,7 +1786,9 @@ impl AppCoreHandle {
     // native. The core signals *when* to flash it (seq) + *what* it is (kind); the host owns
     // the pill, its 3s fade, hover-to-hold, and click-to-play (via menu_action "play_pause").──
 
-    /// 0 = none (still / already playing), 1 = Live Photo, 2 = another animation.
+    /// 0 = none (still / already playing), 1 = Live Photo, 2 = another animation,
+    /// 3 = an archive door (task #104 — the zip mark; the pill reads *Open*, and `P`
+    /// enters the archive rather than playing anything).
     fn play_hint_kind(&self) -> u8 {
         self.core.play_hint_kind()
     }
@@ -1794,6 +1796,14 @@ impl AppCoreHandle {
     /// Bumped when a fresh motion item settles — the host flashes the hint on a change.
     fn play_hint_seq(&self) -> u64 {
         self.core.play_hint_seq
+    }
+
+    /// Whether the hint is an **affordance** rather than a reminder: hold it open instead
+    /// of running the 3 s fade. True only for an archive door — its tile says nothing on
+    /// its own, so fading the pill would leave a blank frame with no sign it opens. It
+    /// still hides normally when the kind goes to 0 (navigating off the door).
+    fn play_hint_persistent(&self) -> bool {
+        self.core.play_hint_persistent()
     }
 
     /// Horizontal placement from Settings: 0 = left, 1 = center, 2 = right (default).
@@ -4765,6 +4775,7 @@ mod ffi {
         fn info_line_align(&self) -> u8;
         fn play_hint_kind(&self) -> u8;
         fn play_hint_seq(&self) -> u64;
+        fn play_hint_persistent(&self) -> bool;
         fn settings_form(&self) -> SettingsFormFfi;
         fn settings_edited(&mut self, form: SettingsFormFfi);
 

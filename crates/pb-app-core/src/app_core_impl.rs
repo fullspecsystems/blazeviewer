@@ -3417,11 +3417,17 @@ impl AppCore {
         self.refresh_cursor();
     }
 
-    /// Flash the "▶ Press P to play" hint once when settling on an animated still —
-    /// suppressed while blazing (the nag the owner flagged) and once the user has engaged
-    /// (P / step, tracked via `anim_hint_shown_for`). An eager prep decoding in the
-    /// background does *not* suppress it — that's invisible work, and the hint is what
-    /// invites the user to press P in the first place.
+    /// Arm the play hint when settling on an item `P` acts on — suppressed while blazing
+    /// (the nag the owner flagged) and once the user has engaged (P / step, tracked via
+    /// `anim_hint_shown_for`). An eager prep decoding in the background does *not* suppress
+    /// it — that's invisible work, and the hint is what invites the user to press P in the
+    /// first place.
+    ///
+    /// For an animation or a clip this is a **flash** the shell fades out. For an archive
+    /// door (task #104) the same signal arms a pill the shell holds open — see
+    /// [`play_hint_persistent`](Self::play_hint_persistent) — because a door's tile says
+    /// nothing on its own, so the pill is the only thing telling you it opens. Both still
+    /// respect blazing: scrubbing a folder of archives must not strobe a pill.
     pub fn maybe_show_anim_hint(&mut self, blazing: bool) {
         if blazing || self.playback.is_some() {
             return;
@@ -3434,8 +3440,13 @@ impl AppCore {
         }
         // Videos show the hint too (task #79: poster + play badge is the UX shape) —
         // deliberately NOT via has_motion, which still gates the animation decode
-        // machinery videos must never enter (their bytes never enter RAM).
-        if self.has_motion(item) || self.item_is_video(item) {
+        // machinery videos must never enter (their bytes never enter RAM). Archive doors
+        // (task #104) ride the same signal for the same reason, and even more so: their
+        // bytes must not be touched until `P`, and the pill is their whole affordance.
+        if self.has_motion(item)
+            || self.item_is_video(item)
+            || self.item_archive_kind(item).is_some()
+        {
             self.anim_hint_shown_for = Some(item);
             // Both shells present the play hint natively (the winit egui overlay / the macOS
             // SwiftUI pill): flash-signal it (bump the seq); the shell renders + fades the pill
@@ -6797,8 +6808,9 @@ impl AppCore {
 
     /// The native play-hint kind for the current item: `0` = none (a still, or already
     /// playing — the hint's job is done), `1` = Live Photo (the livephoto mark), `2` = another
-    /// animation (play ▶). Stays consistent with `has_motion` (which bumps `play_hint_seq`):
-    /// a fresh motion item is a Live Photo (→1) or has an `animated` container (→2).
+    /// animation (play ▶), `3` = an **archive door** (task #104 — the zip mark; `P` opens it).
+    /// Stays consistent with `has_motion` (which bumps `play_hint_seq`): a fresh motion item is
+    /// a Live Photo (→1) or has an `animated` container (→2).
     pub fn play_hint_kind(&self) -> u8 {
         if self.playback.is_some() {
             return 0; // engaged — no hint while it plays/pauses
@@ -6806,7 +6818,10 @@ impl AppCore {
         let Some(item) = self.displayed_item else {
             return 0;
         };
-        if self.is_live_photo(item) {
+        // A door before the motion checks: it is neither, and it can never be playing.
+        if self.item_archive_kind(item).is_some() {
+            3
+        } else if self.is_live_photo(item) {
             1
         } else if self.current.as_ref().is_some_and(|m| m.animated.is_some())
             || self.item_is_video(item)
@@ -6815,6 +6830,21 @@ impl AppCore {
         } else {
             0
         }
+    }
+
+    /// Whether the play hint is an **affordance** rather than a transient hint — the shells
+    /// hold it open instead of flashing and fading it.
+    ///
+    /// True only for an archive door (task #104). For a photo or a clip the pill is a
+    /// *reminder* that `P` does something, and the content itself already says what the item
+    /// is; a door's tile says nothing on its own, so the pill **is** the affordance — fading
+    /// it out would leave a blank frame with no hint that it opens. It still disappears the
+    /// moment the item stops being a door, because that is [`play_hint_kind`] going to `0`.
+    ///
+    /// Core owns the policy and the shells own the animation, so neither shell has to encode
+    /// "kind 3 means sticky" for itself.
+    pub fn play_hint_persistent(&self) -> bool {
+        self.play_hint_kind() == 3
     }
 
     /// Whether item `item` is a video (task #79) — typed off the path, no I/O.
@@ -14211,6 +14241,44 @@ mod tests {
                 .any(|e| matches!(e, contract::CoreEffect::BeginArchiveOpen { .. })),
             "a nested .zip entry must not open"
         );
+    }
+
+    /// The door's pill is its whole affordance, so it must arm on settling and — unlike an
+    /// animation's flash — be marked persistent so the shells hold it open.
+    #[test]
+    fn a_door_arms_a_persistent_play_hint() {
+        let dir = std::env::temp_dir().join("pb_door_hint");
+        let mut core = core_on_a_door(&dir);
+
+        assert_eq!(core.play_hint_kind(), 3, "the archive/zip badge");
+        assert!(core.play_hint_persistent(), "a door's pill does not fade");
+
+        // Settling on it bumps the seq, which is what the shells watch to arm the pill.
+        let before = core.play_hint_seq;
+        core.maybe_show_anim_hint(false);
+        assert_ne!(core.play_hint_seq, before, "settling arms the hint");
+    }
+
+    /// The pill must not strobe while scrubbing a folder of archives — the same nag rule
+    /// animations already follow.
+    #[test]
+    fn blazing_past_doors_does_not_arm_the_hint() {
+        let dir = std::env::temp_dir().join("pb_door_blaze");
+        let mut core = core_on_a_door(&dir);
+        let before = core.play_hint_seq;
+        core.maybe_show_anim_hint(true);
+        assert_eq!(core.play_hint_seq, before, "blazing suppresses the hint");
+    }
+
+    /// A photo keeps kind 0 and a *transient* hint — the door arm must not make every
+    /// item's pill sticky.
+    #[test]
+    fn only_doors_get_a_persistent_hint() {
+        let dir = std::env::temp_dir().join("pb_door_hint_photo");
+        let mut core = core_on_a_door(&dir);
+        core.displayed_item = Some(0); // the .jpg
+        assert_eq!(core.play_hint_kind(), 0);
+        assert!(!core.play_hint_persistent());
     }
 
     /// **The loop the feature promises**: enter a door, then climb back out to the

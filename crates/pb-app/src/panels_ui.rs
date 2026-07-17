@@ -266,7 +266,9 @@ pub struct WelcomePanel {
 /// reusing the welcome button design. The shell owns the flash/fade timing (`alpha`).
 #[derive(Clone)]
 pub struct PlayHintFrame {
-    /// `1` = Live Photo (livephoto glyph), `2` = animation (play ▶).
+    /// `1` = Live Photo (livephoto glyph), `2` = animation (play ▶), `3` = archive door
+    /// (zip glyph — the button reads *Open*, and the shell holds it open instead of fading;
+    /// see `AppCore::play_hint_persistent`).
     pub kind: u8,
     /// The keyboard shortcut hint for play/pause (e.g. `P`).
     pub shortcut: String,
@@ -1614,17 +1616,19 @@ fn play_hint_panel(
     } else {
         EDGE
     };
-    let icon = if frame.kind == 1 {
-        Icon::LivePhoto
-    } else {
-        Icon::Play
+    // An archive door says *Open*, not Play: `P` enters it rather than playing anything,
+    // and "Play holiday.7z" would be nonsense. Same pill, same shortcut, same click.
+    let (icon, label) = match frame.kind {
+        1 => (Icon::LivePhoto, "Play"),
+        3 => (Icon::Archive, "Open"),
+        _ => (Icon::Play, "Play"),
     };
     egui::Area::new(egui::Id::new("pb_play_hint"))
         .anchor(Align2::CENTER_BOTTOM, egui::vec2(0.0, -bottom))
         .order(egui::Order::Middle)
         .show(ctx, |ui| {
             ui.set_opacity(frame.alpha);
-            let w = open_button_width(ui, "Play", &frame.shortcut);
+            let w = open_button_width(ui, label, &frame.shortcut);
             let (rect, resp) =
                 ui.allocate_exact_size(egui::vec2(w, OPEN_BTN_H), egui::Sense::click());
             if resp.hovered() {
@@ -1639,16 +1643,7 @@ fn play_hint_panel(
             let fill = Color32::from_rgba_unmultiplied(base.r(), base.g(), base.b(), base_alpha);
             // The pill's SDF fill/border fade via the explicit `frame.alpha` (set_opacity, applied
             // above for the text/icons, can't reach the shader callback).
-            draw_open_button(
-                ui,
-                rect,
-                p,
-                icon,
-                "Play",
-                &frame.shortcut,
-                fill,
-                frame.alpha,
-            );
+            draw_open_button(ui, rect, p, icon, label, &frame.shortcut, fill, frame.alpha);
             actions.push(PanelAction::PlayHintHover(resp.hovered()));
             if resp.clicked() {
                 actions.push(PanelAction::PlayPause);
