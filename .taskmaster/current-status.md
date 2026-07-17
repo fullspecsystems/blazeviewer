@@ -1,321 +1,227 @@
 # Blaze Viewer — Current Status (session handoff)
 
-_Last updated: 2026-07-17 (rev 10). Supersedes rev 9. **Archives are doors** (#104) and
-**the door card** (#105) ship on Windows, owner-confirmed on screen. What's left: command
-gating on a door, the macOS card, and the blaze measurement gate. Rev 9's subtitle work
-shipped; its still-live remainder (the FFmpeg→MF audio bridge) is carried forward below._
+_Last updated: 2026-07-17 (rev 11). Merges the macOS agent's rev 10 (below) with the
+Windows-side door items it flagged for this agent. **The macOS door card shipped and looks
+great**; the **egui/winit half is now being verified on Windows** (this session), and the
+door command-gating + Copy work is still open here. The subtitle/audio track is separate,
+summarized at the bottom (detail in git history + `.taskmaster/docs/90-*` / `98-*`)._
 
 ---
 
-# Where we are
+# ✅ SHIPPED on macOS this session (all pushed to main)
 
-An archive in a folder is no longer skipped — it's a **door**: a deck item you can see and
-step onto, showing a card that says *what it is* and *how to enter*. `P` (or the Open
-button) enters it, and it behaves like a folder from there. Nothing about the archive is
-read until you do that.
+| commit | what |
+|---|---|
+| `d91666a0` | **The archive door card, on macOS** (task #105 phase 3) — SwiftUI `DoorCardView` + FFI (`DoorCardFfi`, `door_art_*` free fns, `thumb_archive`, `key_is_bound`), overlay slot, archive thumb cells. Plus polish: artwork crop fix + bigger folder, `Cmd+↓`/`Alt+↓` = Open (Finder), panel shadow dialed down. |
+| `3d87006e` | Fixed the `pb-mac-ffi` password-recheck test (7z went async in #102; the test now pumps the worker) + #105 Phase-5 cleanup (most deletes already landed earlier). |
+| `fdcedd16` | **`pb_app_core::perf`** — episodic latency timers (open→first-photo, open→all-cached, resize→on-screen), `PB_PERF` env, folded into `--metrics`. |
+| `dc/51d5…` | Task #106 tracking + refinements. |
 
-```
-  ┌──────────────────────────┐
-  │  ZIP Archive             │   ← header: Help's own title type + separator
-  ├──────────────────────────┤
-  │                          │
-  │        [artwork]         │   ← the owner's folder art (yellow/Windows, blue/mac+Linux)
-  │                          │
-  │   wedding-photos.zip     │   ← middle-elided
-  │                          │
-  │        Open (P)          │
-  └──────────────────────────┘
-```
-
-**The one idea that made it work:** a door is **UI, not image content**. Four separate
-defects (a 12× glyph, a photo-sized ring slot, a grey box, 2.1× magnification) all had that
-one root cause. The frame is now a **1×1 transparent sentinel**; the card is chrome the
-shell draws. Doors also *dissolved* the original blocker — a folder of only archives used to
-produce zero scan items, so there was nothing to navigate.
+**Door card #105 status:** subtasks 1,2,5 done; **3 (macOS) is `review`** — owner tested live
+and it "looks great"; the only unseen bit is window-centering with both side panels open, and
+the **egui/Windows half** (window-centring + door card) is inspection-only on the Mac
+(`pb-app` won't build on macOS). **← that is this Windows session's job (below).** Subtask 4
+(blaze perf gate) still pending.
 
 ---
 
-# 🔜 What's left
+# 🪟 THIS SESSION (Windows) — verify the door card landed, then the open door items
 
-## 1. Command gating on a door — the live thread (owner discussion 2026-07-17)
+The door card and its shared-code changes were built and tuned on macOS. The **egui/winit
+half never ran there**, so confirm it here on a real build first. Shared code that moved and
+needs a Windows eyeball:
 
-**The real bug, confirmed — but smaller than first reported.** `copy_image`
-(`app_core_impl.rs:5395`) guards only on `displayed_item`, then calls `decode_item` — which
-on a door returns the 1×1 sentinel. **The file half already works:** `source.path(item)` on a
-door is a real path, so the `CF_HDROP` / `.fileURL` representation IS already offered and you
-can already paste the archive into Explorer. The defect is only that **a 1×1 transparent
-pixel rides along** as the image representation (paste into Photoshop → junk). Fix = don't
-offer an image when there isn't one (see #106 below, which subsumes this).
+- **artwork crop fix + bigger folder** — the winit door card draws the same
+  `door_artwork()` / `crop_to_content` (pb-app-core), so re-check centring + margins render
+  right in egui, not just SwiftUI.
+- **`Cmd+↓` / `Alt+↓` = Open** — the Mac added an Open-via-arrow binding; confirm the winit
+  keymap still opens a door on `P` and nothing regressed (`Alt+↑` climb-out especially).
+- the door card, archive **thumbnails**, and **window-centring with both side panels open**
+  (the one bit the Mac owner couldn't fully see).
+- corpus: the doors test archives under `D:\Media` (RARs with real photos), plus a
+  **folder of only archives** (the case that used to freeze — `9110327`).
 
-**Already correct:** `copy_path` (`:5424`) reads `source.path(item)`, which for a door *is*
-the archive. Works today, no change.
+## Door command gating (task 105.2 — still open on Windows)
 
-**Decided, don't re-raise (owner, 2026-07-17): there is no Copy Filename command and we
-don't want one.** `ids::COPY_PATH` ("Copy File Path") copies the **full path**, and the owner
-says that's the main use case and the more useful of the two. A bare-name copy is a non-goal.
-
-**The owner's model:** _"it can behave kinda like a scenario where nothing is open"_ — which
-maps onto machinery that already exists. `MenuState` carries per-command `_enabled` flags
-(`save_rotation_enabled`, `reveal_enabled`, `compare_pin_enabled`…) and `menu_state_from`
-already takes `displayed_item`. Gating is a flag, not new architecture.
+`copy_image` (`app_core_impl.rs`) guards only on `displayed_item`, then decodes — on a door
+that's the 1×1 sentinel, so **Ctrl+C silently copies a transparent pixel**. The *file* half
+already works (`source.path(item)` is real → CF_HDROP is offered), so this is fixed by #107,
+not disabled. Gate the rest via the existing `MenuState._enabled` pattern (`menu_state_from`
+already takes `displayed_item`):
 
 | | On a door |
 |---|---|
-| Open (`P`), navigation, Copy File Path, Reveal, Details, Delete | **work** — they're about the file, and a door *is* a file |
-| **Copy** | **works, once #106 lands** — offer the file, skip the image. Don't disable it: copying the archive file is genuinely useful and already half-works |
-| Copy Text from Image (OCR), Describe / Ask | **disable** — they'd scan a transparent pixel |
-| Compare (`compare_pin_cmd`, `:3280`) | **disable** — it'd pin a sentinel |
+| Open (`P`), navigation, Copy File Path, Reveal, Details, Delete | **work** — a door is a file |
+| **Copy** | **works once #107 lands** — offer the file, skip the image; don't disable it |
+| OCR / Copy Text, Describe / Ask, Compare (`compare_pin_cmd`) | **disable** — they'd scan/pin the sentinel |
 | Rotate / Save rotation | already toasts honestly |
-| Zoom | harmless no-op on a 1×1; leave it |
-| Copy Image Details | **works** — the Details panel already shows a door's size + format, so copying those facts is consistent (its own doc says the name means "the facts the panel shows", not "EXIF") |
+| Copy Image Details | **works** — the panel already shows a door's size + format |
 
-## 2. #106 — "Copy" copies whatever makes sense (owner's insight, 2026-07-17)
+## #107 — "Copy" copies whatever makes sense (renumbered from #106 to clear the collision)
 
-I argued Copy Image shouldn't double as copy-the-file because you couldn't tell which you
-got. **The owner is right that that's wrong:** _"on the mac, don't you kind of get both?"_
-Both platforms' clipboards are multi-representation, so you offer both and the **target**
-picks — Photoshop takes the pixels, Explorer takes the file. The ambiguity doesn't exist.
+Most of it already ships: the two-format clipboard (Windows CF_DIBV5 + CF_HDROP; macOS
+`.tiff` + `.fileURL`), and macOS's menu bar already says "Copy". Real remaining work: relabel
+"Copy Image" → **"Copy"** on Windows (`menu.rs:1269`) + the macOS context menu
+(`CoreModel.swift:1111`); emit **file-only** on a door (`ClipboardPayload::File`); ⚠ **Linux**
+(arboard, no file-list support) must fall back to **path-as-text** or it copies nothing. Full
+detail in `tasks.json` **#107**. Non-goal (owner): a Copy Filename command — Copy File Path is
+the useful one.
 
-**⚠ Most of this is ALREADY BUILT — check before planning it.** I over-sized this task on
-first pass. What's actually on disk today:
+## Load-bearing door knowledge (egui — don't re-derive)
 
-- **The two-format copy ships.** `clipboard.rs`'s module doc already argues exactly this
-  rationale. Windows writes **CF_DIBV5 + CF_HDROP** together (`win::set`, `path: Option`);
-  macOS writes **`.tiff` + `.fileURL`** on one `NSPasteboardItem` (`CoreModel.swift:3216`).
-- **The label is half-converged.** macOS's menu bar **already says "Copy"**
-  (`MenuBar.swift:293`). Only `menu.rs:1269` (Windows) and `CoreModel.swift:1111` (the macOS
-  *context* menu) still say "Copy Image".
-- **A door already copies its file.** `source.path(item)` is a real path, so CF_HDROP /
-  `.fileURL` is already offered. You can paste an archive into Explorer **today**.
-
-**So the real remaining work is small:**
-
-1. **Label:** "Copy Image" → **"Copy"** in the two places above (Finder's word; honest for
-   every item kind).
-2. **Don't offer an image when there isn't one:** on a door, skip the decode and emit
-   file-only — a `ClipboardPayload::File { path }` arm. Windows drops the DIB from
-   `win::set`; macOS's `if let tiff` is *already* conditional, so it just skips.
-3. **⚠ Linux is the wrinkle:** arboard has no file-list support, so `set_image_and_file`
-   there **already ignores the path** and copies pixels only. A file-only payload would land
-   **nothing** — fall back to the path as text, which is what "copy" can honestly mean when
-   the platform won't take a file.
-
-**Why "Copy", not per-item labels:** muda has no `menuNeedsUpdate`, so a per-item relabel
-means a **menu rebuild per item on the blaze path** (the rebuild-on-signature pattern we use
-for the subtitle flyout). One generic label needs no rebuild and is never a lie.
-
-**Keep it a separate commit from #105** (it touches both shells and improves photos too),
-but it's an afternoon, not a clipboard rewrite.
-
-## 3. macOS: the same card in SwiftUI (105.3)
-
-Blocked on a real Swift host build. Artwork crosses FFI via a **one-time
-generation + dims + RGBA accessor cached in `CoreModel`** — never clone ~4 MiB per pump.
-⚠ `cargo check -p pb-mac-ffi` validates only the Rust half; this needs a real-folder smoke
-test on the Mac. Also still open from #104: the two `cfg(macos)` routing arms.
-
-## 4. The blaze measurement gate (105.4) — the honest debt
-
-The card is the **first persistent chrome on the blaze hot path**, and its filename changes
-every frame while scrubbing consecutive doors. The plan's original "costs nil" claim was
-**withdrawn as unsupported** — per the prime directive, we don't guess. Compare an
-image-only deck vs. a consecutive-door deck at target res + 120 Hz; report **p50/p95/p99**
-CPU frame time and keypress→photon. Never means.
-
-## 5. Cleanup (105.5)
-
-`play_hint_persistent`, the kind-3 arms, `never_upscale`, the dead
-`pb_hud::icon::assets::FILE_ZIPPER` + its vendored SVG. **Drop `Icon::Archive`** (glyph
-arms, gallery entry, both vendored family SVGs) — the card uses the artwork, so it's likely
-unused now; check before deleting. `CHANGELOG.md` still describes an archive tile/icon.
-
-## 6. Task #104 is `review`
-
-Needs owner validation on a real folder. The card, the centring fix, and RAR4 viewing
-(#103) are all owner-confirmed already; what's unvalidated is the whole-feature pass.
+- **A new `LibraryItemKind` opts OUT of byte reads, not in** (`c19cfd6`). The no-read
+  guarantee rests on typed dispatch **above** `source.bytes()`; guards are **positive `Image`
+  + exhaustive matches** so the compiler names every site. ⚠ The worklist is per-platform (a
+  `cfg(macos)` arm won't fail a Windows build) — so a leak can hide on the side you didn't run.
+- **egui: never `load_texture` inside `data_mut`** (`9110327`, froze on a folder of archives).
+  `data_mut` write-locks the whole Context; `load_texture` re-enters it. Pattern = read → load
+  → insert (`pb_ui::icon::texture` has it right).
+- **egui: an auto-sized anchored Window places from the PREVIOUS run's rect** (`b2a7a28`, the
+  off-centre long-filename card). Compute the size yourself + anchor `LEFT_TOP`. ⚠ Test via
+  `ctx.memory(|m| m.area_rect(id))` — the SDF shadow's expanded clip rect reads a centred card
+  as 62 px off.
+- **Artwork is cropped subject-centred** (two bboxes: ink `alpha>=1`, subject `alpha>=200`),
+  and **keeps its alpha** — an opaque matte is what made the grey box against the `[10,10,12]`
+  letterbox. `pb-scene-pipeline` is `ALPHA_BLENDING`, so transparent frames blend over it.
+- **The retained overlay needs two seams:** `overlay_panel_visible()` (`main.rs:1458`) gates
+  drawing, `overlay_dirty` (`:525`, set `:1534`) gates rebuilds — nothing honours egui's own
+  repaint request, so a new persistent element must join both.
+- **The size readout goes through the scan worker** (`FsSource::new` stats archives only),
+  never the per-frame `info_line_parts` path (an SMB stat there blocks).
 
 ---
 
-# The load-bearing knowledge from this work (don't re-derive)
+# 🎯 ACTIVE (macOS agent) — Task #106: fast archive opens, instant resize, instant thumbnails
 
-## A new `LibraryItemKind` must opt OUT of byte reads, not into them
+**Prime directive: the app must FEEL fast. We measure, not guess.**
 
-`c19cfd6`. The door's whole guarantee — **nothing is read, and no password is prompted,
-until you press `P`** — rests on typed dispatch sitting **above** `source.bytes()`. Two
-byte-read leaks (the thumbs strip, `Shift+I`) were found in Phase 0 because the guards were
-written as *negative* (`if kind != Video`), so a third kind fell straight through into a
-read. They're now **positive `Image` guards + exhaustive matches**, so the compiler names
-every site the next kind must handle. ⚠ That worklist is **platform-specific** — a
-`cfg(macos)` arm won't fail a Windows build.
+## The measured baseline (owner ran `PB_PERF=1` on an SMB `album.zip`, 8 × ~36 MP JPEGs)
 
-## egui: never call `load_texture` inside `data_mut` — it deadlocks
+| metric | time |
+|---|---|
+| **open → first photo** | **7068 ms** |
+| open → all 8 cached | 8302 ms |
+| resize Fit↔1:1 | 711–993 ms |
 
-This froze the app on a folder of archives (`9110327`). `ctx.data_mut` holds a write lock on
-the **whole Context**; `load_texture` re-enters it. `pb_ui::icon::texture` already had the
-correct pattern — **read → load → insert** — and I invented a worse one anyway. Mutation-
-verified: hangs at 45 s vs. 0.02 s passing.
+**The shape is the finding:** the first photo is ~85 % of the whole open — the other 7 cache
+in **+1.2 s**. So metric 1 is a **large serial cost paid once** (archive-open + the first
+39 MB read over SMB), *not* per-photo throughput. Resize ≈ the SMB re-read + re-decode.
 
-## egui: an auto-sized anchored Window places from the PREVIOUS run's rect
+## The plan (5 subtasks in `tasks.json` #106)
 
-This is why a long filename left the *next* card off-centre too (`b2a7a28`). Fix: compute
-the size yourself and anchor `LEFT_TOP`. Mutation shows 192 px off. ⚠ When testing this,
-read `ctx.memory(|m| m.area_rect(id))` — the SDF shadow's expanded clip rect reports a
-perfectly centred card as 62 px off.
+1. **Encoded-byte cache** in front of `source.bytes()` — kills the re-read on resize /
+   preview→full / revisit / OCR / Describe. Bounded RAM-only LRU, archive-cheap, RAM-dropped
+   on nav/Esc (privacy #2). Fixes resize (~0.8 s → decode-only).
+2. **⏳ NEXT — break down the 7 s open→first-photo.** Sub-instrument metric 1 into phases to
+   find where the 6 s goes. (Details below.)
+3. **Thumbnails: keep a tiny window warm when parked.** Owner call: DON'T always-capture
+   everything (thumbs off by default — bad trade for never-users). When *parked*
+   (`held_nav().is_none()`), derive thumbs for **current + next 2–3** already-resident items
+   off-thread — pure downsample, zero source reads — so opening the panel shows neighbors
+   instantly instead of a placeholder wall. Blaze pays nothing; RAM capped.
+4. **First-image bandwidth throttle** — only if #2 shows read contention (vs a fixed cost).
+5. **Preview-first for big JPEGs via the embedded EXIF thumbnail** — the real metric-1 win.
+   (Details below.)
 
-## The size readout goes through the scan worker, never the frame path
+## Load-bearing perf findings (verified this session — don't re-derive)
 
-`info_line_parts` runs per frame; an SMB `stat` there would block it. So `FsSource::new`
-(which its doc notes runs **on the scan worker thread**) stats **archives only** and
-`size_hint(i)` serves it. `human_bytes()` uses decimal units to match Explorer/Finder.
+- **Every image decode re-reads the source.** `decode_item_cancellable` (`engine.rs:512`)
+  calls `source.bytes(item)` fresh every time — no byte cache in the pool or anywhere. So a
+  resize (epoch bump → re-decode) re-reads the whole 39 MB entry.
+- **ZIP is LAZY; 7z is EAGER (owner had these flipped).** `ZipSource::open` reads only the
+  central directory + a local header per entry; `bytes(i)` inflates **one entry on demand**.
+  It's **7z** that decompresses the *whole* archive to RAM on open (solid). So the ZIP's 7 s
+  is **not** a full-unzip — it's ~all the single 39 MB entry read over SMB + ~0.3 s decode.
+  ⚠ A ZIP is **not** `background_open` (`kind.rs:50`), so `scan::open_archive` runs **sync on
+  the event loop** — #106.2 must check that isn't itself a stall.
+- **The EXIF-thumbnail preview-first opportunity is real.** Big JPEGs embed a small thumb
+  near the file start (owner's file: `JPEGInterchangeFormat 240, len 22467` = 22 KB). We have
+  `pb_decode::exif_thumbnail` but use it **only for the thumbs strip** — the main viewer
+  decodes the full JPEG and shows nothing until done. Read ~128 KB → show the thumb in
+  ~100 ms → full lands + sharpens. Needs partial entry reads + a JPEG preview-first path.
+- **Thumbnails re-read because capture is gated.** `thumbs_capture` (`app_core_impl.rs:2160`)
+  already downsamples every decoded full — but `if !self.thumbs.enabled` (`thumbs.enabled`
+  only flips true on the **first panel open**, `thumbs.rs:107`). So browse-then-open throws
+  the thumbs away and re-decodes all N from source via `Job::thumb`.
+- **The prefetch already prioritizes the on-screen photo** (`request_prefetch` sharpen/head
+  tier). `mark_resolved` (`app_core_impl.rs:5988`) is THE present choke point (all present
+  paths funnel through it) — that's where the perf `presented()` hook lives.
 
-## The artwork is cropped subject-centred, not ink-centred
+## The PB_PERF harness (how to measure)
 
-`crop_to_content` takes **two** bboxes — ink (`alpha>=1`) and subject (`alpha>=200`) — and
-is symmetric about the *subject's* centre, so the drop shadow doesn't shove the folder
-off-centre. Measured: 1024² → 912×878, 49 px margins all round. **Keep the alpha** — an
-invented opaque matte is what produced the grey box against the `[10,10,12]` letterbox.
-Letterbox is configurable (`set_letterbox`), *not* `Color::BLACK`; `pb-scene-pipeline` uses
-`ALPHA_BLENDING`, so transparent frames blend over it (proven by
-`transparent_image_blends_over_letterbox`, `gpu.rs:4596`).
+`PB_PERF=1` → live `[perf] …` lines to stderr; works on the macOS host (unlike winit-only
+`--metrics`). Run the executable directly so stderr is captured:
+```
+PB_PERF=1 "target/swift-host/release/Blaze Viewer.app/Contents/MacOS/Blaze Viewer" \
+  <path-or-archive> 2>/tmp/pb-perf.log
+```
+Pure logic tested in `perf.rs`; wiring tested headless in
+`perf_hooks_fire_from_the_real_present_and_resize_paths` (reads episodes back out of the
+`--metrics` recorder, since the GUI can't run here).
 
-## The retained overlay needs two seams, and neither is egui's
+## #106.2 — what "break down the 7 s" means (the next concrete step)
 
-`overlay_panel_visible()` (`main.rs:1458`) gates whether it draws at all; `overlay_dirty`
-(`:525`, set `:1534`) gates rebuilds. **Nothing honours egui's own repaint request** — a new
-persistent element must join both or it silently never appears / never updates.
-
-## `ScaleMode::Fit` genuinely upscales
-
-`view::base_scale` is `(sw/rw).min(sh/rh)` with **no clamp**. `pb_render::fit_rect`'s "we do
-not upscale" doc describes a **dead function** — don't trust it.
-
----
-
-# Carried forward from rev 9 — the FFmpeg→MF audio bridge (still unbuilt)
-
-The Playback menu + subtitle track flyout **shipped** (`756cfff`, owner-confirmed). The
-**Audio flyout is deliberately absent on Windows** until this bridge exists — it would
-select the wrong language while confidently ticking the right one.
-
-**The measured blocker** — `crates/pb-decode/tests/fixtures/video/multitrack.mp4`, whose two
-audio tracks are a **440 Hz `eng`** tone then a **220 Hz `fra`** tone:
-
-| | ordinal 0 | ordinal 1 |
-|---|---|---|
-| FFmpeg / container | eng, 440 Hz | fra, 220 Hz |
-| **Media Foundation** | **fra, 220 Hz** | **eng, 440 Hz** |
-
-MF also reorders wholesale (`[audio, audio, video]` vs FFmpeg's `[video, audio, audio]`).
-Confirmed twice, independently: `mf_tracks.rs`'s phase-0 spike from the *enumeration* side,
-and rev 9's measurement from the *decode* side.
-
-**Why it bites:** on Windows the runtime catalog is **FFmpeg's** — it supersedes MF's at
-`media_details.rs:193-199`, because MF models **no subtitle tracks at all**. So picker rows
-carry `TrackLocator::FfStream` while the audio engine needs an MF ordinal.
-`TrackLocator::MfStream(u32)` **already exists** for exactly this; nothing bridges the two.
-
-**The agreed design** (owner picked "bridge audio next"): in `media_details.rs` under
-`cfg(all(windows, feature = "ffprobe"))` we hold **both** catalogs at that moment. Match each
-FFmpeg audio track to an MF one on **(language, codec, channels)** → `catalog.set_locator(id,
-MfStream(ordinal))` → picker row → `WasapiAudio::set_track(n)`. On **ambiguity** (two
-identical tracks) fall back to order *within that group* and document the residual risk.
-
-**The rest** (settled, unwritten): `MfAudioDecoder::open_track` is **done + tested**
-(`d364d2e`) and `next_chunk` reads `self.stream`, not `FIRST_AUDIO_STREAM`. `WasapiAudio`
-needs `Cmd::SetTrack(ordinal)` — `Cmd::Seek` (`wasapi_audio.rs:260`) already does the whole
-dance (stop → `Reset()` → `reseek` → `fill()` preroll → restart); a switch is that **plus
-swapping the decoder**. A **failed open must keep the old decoder playing** and report
-`false`. Report back via `Shared`: `active_track: AtomicI64` + `switch_seq`/`switch_ok`, then
-`core.set_active_audio_row(row)` / `core.audio_track_switched(row, ok)`
-(`app_core_impl.rs:8199` / `:8266`). `CoreEffect::SelectAudioTrack { row }` is already
-emitted and currently **ignored** at `main.rs:3165` — `A` / `Shift+A` do nothing on Windows
-today.
-
-⚠ **Never disable a flyout's holder** to mean "no video": macOS learned that a disabled
-submenu can't be hovered, so its delegate never fires and nothing can re-enable it. State
-lives in the submenu's **contents**.
-
-## One open owner call, still unanswered
-
-`Automatic` falls back past forced-only (forced+matching-audio → container default →
-anything renderable). Owner picked _"Forced its own row; Automatic = full subs"_ via the
-picker, then thought aloud about reversing (_"just select it"_). **The fact that decides it,
-given and unanswered:** a track pick **does not survive to the next film** —
-`SubtitleWant::Track(id)` is bound to one file's catalog by generation, so "just select it"
-means re-selecting forced on every film. A `Forced Only` *row* is portable, which is what
-someone who wants forced signs actually wants. **Don't build until confirmed.** If yes: one
-`SubtitleChoice` variant, one `resolve` branch, one picker row, `automatic()` loses its
-forced step. Separate commit.
+Split metric 1 into phases: **open-cmd → archive-open done (central-dir read) → first
+`bytes()` read → first decode → present.** Two high-value cuts:
+1. In `decode_item_cancellable` (`engine.rs`), **time `source.bytes()` vs `decode_named_bytes`
+   separately** and log under `PB_PERF` (with item + KB) — proves the 39 MB SMB read is the
+   cost, not the decode.
+2. Time `scan::open_archive` (the central-dir read) — proves the sync open isn't a stall.
+   (`perf_on()` / the env check lives in `app_core_impl` / `perf.rs`; `engine.rs` is in the
+   same crate so it can gate on the same env.)
 
 ---
-
-# Other open work
-
-- **⚠ AC-3 / E-AC-3 does not decode on Windows.** `SetCurrentMediaType` fails
-  `0xC00D36B4`. Seen on the fixture mkv's AC-3 5.1 track and a real `DD+2.0` film
-  (`Ali.Wong.Baby.Cobra`) that **plays silently**. Pre-existing, unfiled — a lot of films are
-  DD/DD+, so probably its own task.
-- **Linux is unverified** for subtitles. Same wgpu path as Windows, so it should follow.
-- **#90.3 remainder** — seek generations (no stale cue flash while scrubbing) and wiring
-  `controls_h` (hardcoded `0.0` at `app_core_impl.rs:8394` on **both** shells).
-- **Archived videos have no embedded cues** — `stream_cues` would mean decompressing the
-  whole archive to RAM. Sidecars in archives work.
-- **A winit playback-bar picker** is a *separate* ask from the menu: the winit bar is a
-  hand-laid-out egui info pill, not a transport `HStack`.
-- **#94.1 space-pauses-a-playing-video** — deferred; owner wants to workshop contextual keys.
-- Older loose ends: #80 slideshow×video, #82 macOS archive natives, #75/#76 CI/mirror.
-
----
-
-# THE authoritative docs
-
-- **Doors + the card:** `.taskmaster/plans/104-archives-in-the-folder-tree.md` (rev6),
-  `.taskmaster/plans/105-the-door-card.md` (rev4, Codex-reviewed).
-- **Subtitles:** `.taskmaster/docs/90-presenter-and-style-contract.md` — the owner's spec,
-  the frozen decisions, two post-mortems.
-- **Video:** `.taskmaster/docs/video-playback-overhaul.md` (root causes R1–R12).
-- **Track catalog:** `.taskmaster/docs/98-phase0-spike-findings.md` — read before any track
-  work; where MF's limits were first measured.
 
 # The rules that were bought with real time
 
 - **Look at the output.** Every door defect the owner reported was *visible*, and none of
-  them failed a test. `--egui-shot` / `PB_SHOT_DOOR=1|long` exist for this.
-- **Prove the pipe, then build through it.** ~1500 lines / ~75 tests of pure subtitle
-  modules were once merged before a single caller existed; the thin slice that followed
-  found five defects in an afternoon, every one in a *seam*.
-- **Never gate a feature on a backend.** Use `AppCore::video_showing()` / `video_position()`.
+  them failed a test. `--egui-shot` / `PB_SHOT_DOOR=1|long` (winit) and `--pb-door-shot <dir>`
+  (macOS `ImageRenderer`) exist for exactly this.
 - **When a plan and the code disagree, the code wins — fix the plan.** My own "nine guards"
-  claim was wrong (3 were already exhaustive, 2 were correct to leave, 4 needed changing);
+  claim was wrong (3 were already exhaustive, 2 correct to leave, 4 needed changing);
   following it mechanically would have made things worse.
+- **Never gate a feature on a backend.** Use `AppCore::video_showing()` / `video_position()`.
 
-# Notes carried forward
+---
 
-- **Commit + push directly to main** (owner-authorized); fetch/merge origin/main first.
-- ⚠ **The owner drives the app while you work.** Their instance locks
-  `target/debug/blazeviewer.exe` and blocks rebuilds ("Access is denied"). **Check
-  `Get-Process blazeviewer` before killing anything** — it is usually theirs. A separate
-  `CARGO_TARGET_DIR` under the scratchpad is the non-invasive way to build meanwhile.
-  A mid-test anomaly is often **the owner**, not a bug — A/B before believing it.
-- Never `git commit -am` / `add -A` — stage explicit paths.
-- ⚠ **`--features ffprobe` needs a VS Developer shell** (`. .\scripts\vs-dev-env.ps1`) **and
-  `VCPKG_ROOT` exported** — without it FFmpeg's bindgen dies. Embedded cues are
-  ffprobe-gated, so a plain `cargo build` gets **sidecars only**.
-- ⚠ **`cargo test --workspace` cannot build `pb-app` on macOS.** Use `--exclude pb-app`.
-- ⚠ **Always build `--features ffvideo` when testing video code** on the Mac: `ActiveVideo`
-  has a SECOND literal construction under `cfg(ffvideo/macos)`. Clippy on **both** sets.
-- **Windows cross-check from the Mac:** `cargo check -p pb-app --target
-  x86_64-pc-windows-msvc` after two temporary manifest edits — **blake3 `pure` must be a
-  DIRECT dep** + `ureq` `default-features = false` in both crates. Restore + `git checkout
-  Cargo.lock` after.
-- swift-bridge module: `//` comments only; `Vec<String>` does **not** cross back to Swift —
-  use indexed accessors.
-- `settings.save()` is **unguarded** in the older toggles, so dispatching them in a test
-  writes the owner's real `settings.toml`. Gate on `persist_prefs`. ⚠ `apply_settings`
-  doesn't check it either.
-- ⚠ **Scripted edits keep silently no-op'ing** because `cargo fmt` reflowed the target text
-  (it left doors arming a pill, and left debug prints in). The Bash tool also eats one
-  backslash in a heredoc'd Python needle, so `\t` becomes a real tab. **Use the Edit tool
-  for Rust string literals.**
-- **Verify with the corpus:** `\\beenas\Media\Movies` (163 films); the doors test archives
-  under `D:\Media` (RARs with real photos in them).
+# Carried-forward notes (cross-cutting — keep)
+
+- **Commit + push directly to main** (owner-authorized); **fetch/merge origin/main first** — a
+  parallel **macOS agent** also pushes there (and re-uses task IDs, so watch for collisions —
+  Copy was renumbered #106→#107 this merge). Stage explicit paths (avoid `add -A`; the owner
+  edits the repo concurrently).
+- ⚠ **The owner drives the app while you work** (their instance may lock the build). On
+  Windows check `Get-Process blazeviewer` before killing; a separate `CARGO_TARGET_DIR` under
+  the scratchpad builds without fighting them. A mid-test anomaly is often the owner, not a
+  bug — A/B before believing it.
+- **`pb-app` (winit/egui shell) does NOT build on macOS** by design — target-os guard, so the
+  egui half of shared changes is inspection-only there (hence this session). Windows
+  cross-check from the Mac: `cargo check -p pb-app --target x86_64-pc-windows-msvc` after two
+  temp manifest edits (blake3 `pure` as a DIRECT dep + `ureq` `default-features=false` in both
+  crates); restore + `git checkout Cargo.lock` after.
+- ⚠ **`cargo test --workspace` can't build `pb-app` on macOS** → `--workspace --exclude pb-app`.
+- **macOS build/run:** `./scripts/build-swift-host.sh` → `target/swift-host/release/Blaze
+  Viewer.app`. `--pb-door-shot <dir>` shoots the door card offscreen. `PB_PERF` / `PB_TRACE`
+  gate stderr diagnostics.
+- ⚠ **The Bash tool mangles `git show rev:path`** (the colon → `;`, slashes → `\`) and eats a
+  backslash in heredoc'd Python needles. Use **PowerShell** for `git show`, and the Edit tool
+  for Rust string literals.
+
+---
+
+# Separate in-flight track — Subtitles / Audio (Windows, the other agent)
+
+Not this session's focus. Summary so the knowledge isn't lost:
+- **Shipped:** subtitle display + Settings tab + the **Playback menu + Subtitle-Track flyout**
+  on Windows (`756cfff`).
+- **NEXT there:** the **Audio flyout**, blocked on an **FFmpeg→MF stream-order bridge** — MF
+  enumerates audio streams in a *different order* than FFmpeg/the container, so a naive wire
+  would tick the right track and play the wrong one. Bridge design is settled (match on
+  lang/codec/channels, set `TrackLocator::MfStream(ordinal)`); `MfAudioDecoder::open_track` is
+  done + tested (`d364d2e`). Wiring detail (the `Cmd::SetTrack` dance, the `Shared` atomics,
+  the ignored `SelectAudioTrack` effect at `main.rs:3165`) is in git history at rev 9.
+- **Authoritative docs:** `.taskmaster/docs/90-presenter-and-style-contract.md` (subtitles),
+  `98-phase0-spike-findings.md` (MF track-catalog limits — read before any track work),
+  `video-playback-overhaul.md` (R1–R12).
+- **Also unfiled:** ⚠ **AC-3/E-AC-3 doesn't decode on Windows** (`0xC00D36B4`) — many DD/DD+
+  films play silent; worth its own task.

@@ -725,8 +725,22 @@ impl AppCoreHandle {
         name.rsplit(['/', '\\']).next().unwrap_or(name).to_string()
     }
 
+    /// Whether the cell is an archive **door** — typed off the path, no I/O (task #105).
+    ///
+    /// A door has no thumbnail to decode: its frame is a 1×1 transparent sentinel, so a
+    /// cell that went through the normal pixel path above would come out blank. The host
+    /// draws the door artwork here instead, from the same one-time asset the card uses.
+    /// It never touches the archive — the strip has no more right to decompress one than
+    /// the prefetch ring does.
+    fn thumb_archive(&self, i: usize) -> bool {
+        self.core.item_archive_kind(i).is_some()
+    }
+
     /// Item-type badge: 0 none, 1 video, 2 Live Photo, 3 animated. Live/animated
     /// appear once their (lazily filled) caches know; video is always known.
+    ///
+    /// A door gets none: the folder artwork it draws already says what it is, which is
+    /// exactly the split the egui strip makes.
     fn thumb_badge(&self, i: usize) -> u8 {
         if matches!(
             pb_app_core::video::item_kind(self.core.source.as_ref(), i),
@@ -1797,6 +1811,33 @@ impl AppCoreHandle {
         self.core.play_hint_seq
     }
 
+    // ── The archive door card (task #105). A door's frame is a 1×1 transparent sentinel,
+    // so this card is an archive's ENTIRE on-screen presence: the host draws it as chrome
+    // over the letterbox, and `P` (or a click on it) goes in. The artwork is deliberately
+    // absent from the snapshot — it's a static asset the host pulls once via `door_art_*`
+    // and caches, never ~2.5 MiB cloned per pump.──
+
+    /// The presented door's card, or `visible: false` on anything else. One crossing rather
+    /// than a gate plus three accessors: the gate would repeat the same work the card does
+    /// (a `displayed_item` lookup + path typing — no I/O either way), and an absent card's
+    /// three `String`s are empty, which allocate nothing.
+    fn door_card(&self) -> ffi::DoorCardFfi {
+        match self.core.door_card() {
+            Some(c) => ffi::DoorCardFfi {
+                visible: true,
+                name: c.name,
+                format: c.format,
+                shortcut: c.shortcut,
+            },
+            None => ffi::DoorCardFfi {
+                visible: false,
+                name: String::new(),
+                format: String::new(),
+                shortcut: String::new(),
+            },
+        }
+    }
+
     /// Horizontal placement from Settings: 0 = left, 1 = center, 2 = right (default).
     fn info_line_align(&self) -> u8 {
         use pb_app_core::settings::InfoLineAlign;
@@ -2249,6 +2290,30 @@ impl AppCoreHandle {
         if let Some(key) = PbKey::from_name(key) {
             self.core.handle(CoreEvent::KeyUp { key });
         }
+    }
+
+    /// Whether the keymap binds this chord — the host's "did the core just take this key?"
+    /// question, asked so it knows whether to **consume** the event.
+    ///
+    /// It exists for ⌘ chords. The host forwards those to AppKit rather than eating them,
+    /// or the menu's own ⌘O / ⌘Q / ⌘, would never fire — but an unmatched ⌘ chord that
+    /// reaches the responder chain is answered with a **beep**, and since ⌘↓ (Open — the
+    /// Finder chord, task #105) is bound in the keymap and *not* in any menu, it would act
+    /// and beep. Asking here keeps the rule where the bindings are: the host consumes what
+    /// the core claims and passes on what it doesn't, without naming a single chord.
+    ///
+    /// Pure: a keymap lookup, no dispatch, no clock. Repeat is not a factor — an OS
+    /// auto-repeat is still a key the core owns, it just declines to act on it.
+    fn key_is_bound(&self, key: &str, ctrl: bool, shift: bool, alt: bool, logo: bool) -> bool {
+        PbKey::from_name(key).is_some_and(|k| {
+            let mods = Modifiers {
+                ctrl,
+                shift,
+                alt,
+                logo,
+            };
+            self.core.keymap.action_for(&mods.chord_with(k)).is_some()
+        })
     }
 
     /// The window lost key focus — the core clears held keys (the focus-loss release net).
@@ -2852,6 +2917,42 @@ impl AppCoreHandle {
             .effects
             .push(contract::CoreEffect::ReportError(msg));
     }
+}
+
+// ---- The door artwork (task #105) ----------------------------------------------
+//
+// The zippered-folder asset every archive door draws — in the card, and in the strip's
+// archive cells. Blue on macOS to match Finder (manila on Windows, for Explorer); the
+// split lives in `engine::door_artwork`, which also decodes it exactly once per process
+// and crops it to its content, so a shell's padding means what it says.
+//
+// **Free functions, pulled once.** Not a `PbCore` method and never per pump: these hand
+// over ~2.5 MiB of straight-alpha RGBA8, which the host turns into one cached `NSImage`
+// for the process. It is a static asset — there is no generation to watch, nothing to
+// invalidate, and no reason for it to ride the frame path.
+
+/// The door artwork's width in pixels, or `0` if the asset can't be decoded — in which
+/// case the host draws a card of text and a button rather than hiding the door.
+fn door_art_width() -> u32 {
+    pb_app_core::engine::door_artwork()
+        .map(|a| a.width)
+        .unwrap_or(0)
+}
+
+/// The door artwork's height in pixels, `0` if it can't be decoded (see `door_art_width`).
+fn door_art_height() -> u32 {
+    pb_app_core::engine::door_artwork()
+        .map(|a| a.height)
+        .unwrap_or(0)
+}
+
+/// The artwork's **straight-alpha** RGBA8 pixels — the `thumb_rgba` convention, so the
+/// `CGImage` wants `.last`, not `.premultipliedLast` (which `subtitle_rgba` uses). Empty
+/// if it can't be decoded.
+fn door_art_rgba() -> Vec<u8> {
+    pb_app_core::engine::door_artwork()
+        .map(|a| a.pixels.clone())
+        .unwrap_or_default()
 }
 
 // ---- The Subtitles tab's form conversions (task #90.4) -------------------------
@@ -4278,6 +4379,23 @@ mod ffi {
         h: u32,
     }
 
+    // What the host draws over the letterbox when an archive **door** is presented
+    // (task #105) — a mirror of `pb_app_core::app_core::DoorCard`, plus the `visible` flag
+    // its `Option` can't cross as. Semantic fields only: the artwork is a static asset the
+    // host pulls once (`door_art_*`), never cloned into a per-pump snapshot.
+    #[swift_bridge(swift_repr = "struct")]
+    struct DoorCardFfi {
+        // False on anything but a door — the other fields are then empty.
+        visible: bool,
+        // The full file name, e.g. `wedding-photos.zip`; the host middle-elides to fit and
+        // keeps the whole of it for the tooltip.
+        name: String,
+        // The heading, e.g. `ZIP Archive`.
+        format: String,
+        // The Open key, from the live keymap — never hard-code `P`, it is rebindable.
+        shortcut: String,
+    }
+
     // The current item's on-screen placement for the native video layer (task 79.9
     // phase 3) — the same geometry the wgpu still renderer uses, so the AVPlayerLayer
     // tracks Fit/Fill/Original + zoom + pan + rotation like a photo. x/y/w/h are physical
@@ -4482,6 +4600,9 @@ mod ffi {
             is_repeat: bool,
         );
         fn key_up(&mut self, key: &str);
+        // Does the core own this chord? The host consumes the event if so — see the impl:
+        // it is how a bound ⌘ chord acts without AppKit beeping at the unmatched equivalent.
+        fn key_is_bound(&self, key: &str, ctrl: bool, shift: bool, alt: bool, logo: bool) -> bool;
         fn focus_lost(&mut self);
         fn os_theme_changed(&mut self, dark: bool);
         fn tick(&mut self);
@@ -4681,6 +4802,7 @@ mod ffi {
         fn thumb_height(&self, i: usize) -> u32;
         fn thumb_rgba(&self, i: usize) -> Vec<u8>;
         fn thumb_name(&self, i: usize) -> String;
+        fn thumb_archive(&self, i: usize) -> bool;
         fn thumb_badge(&self, i: usize) -> u8;
         fn thumb_rotation(&self, i: usize) -> u8;
         fn thumb_failed(&self, i: usize) -> bool;
@@ -4766,6 +4888,12 @@ mod ffi {
         fn info_line_align(&self) -> u8;
         fn play_hint_kind(&self) -> u8;
         fn play_hint_seq(&self) -> u64;
+        // The archive door card (task #105) + its artwork. The card is a per-pump snapshot;
+        // the artwork is a static asset the host pulls exactly once and caches.
+        fn door_card(&self) -> DoorCardFfi;
+        fn door_art_width() -> u32;
+        fn door_art_height() -> u32;
+        fn door_art_rgba() -> Vec<u8>;
         fn settings_form(&self) -> SettingsFormFfi;
         fn settings_edited(&mut self, form: SettingsFormFfi);
 
@@ -4921,6 +5049,103 @@ mod tests {
         let mut h = test_handle(800, 600, 1.0);
         h.key_down("NotAKey", false, false, false, false, false);
         assert!(drain(&mut h).is_empty());
+    }
+
+    /// The host consumes a key the core owns and passes on one it doesn't — the rule that
+    /// lets ⌘↓ (Open) act without AppKit beeping at an unmatched key equivalent, while the
+    /// menu's own ⌘O still reaches the menu.
+    #[test]
+    fn key_is_bound_answers_for_the_hosts_consume_decision() {
+        let h = test_handle(1920, 1080, 2.0);
+        // ⌘↓ / ⌥↓: the keymap's Open aliases — the core's, so the host eats them. The name
+        // is `"Down"`, the string `KeyMap.pbKeyName` hands over for keyCode 0x7D — this
+        // query is only ever right if it speaks the host's vocabulary.
+        assert!(h.key_is_bound("Down", false, false, false, true));
+        assert!(h.key_is_bound("Down", false, false, true, false));
+        // ⌘O is a *menu* accelerator, deliberately not in the keymap — the host must pass
+        // it on, or Open File would stop working.
+        assert!(!h.key_is_bound("O", false, false, false, true));
+        // Bare P is bound (and consumed); an unknown key name never claims anything.
+        assert!(h.key_is_bound("P", false, false, false, false));
+        assert!(!h.key_is_bound("NotAKey", false, false, false, true));
+    }
+
+    /// A door on a deck of two items, presented — the fixture the door-card tests share.
+    /// `FsSource` types items off the path, so no archive has to exist on disk for the
+    /// card to describe one, which is the whole point: naming a door costs no read.
+    fn handle_on_a_door() -> AppCoreHandle {
+        let mut h = test_handle(1920, 1080, 2.0);
+        let dir = std::env::temp_dir().join("pb_ffi_door_card");
+        let src: std::sync::Arc<dyn pb_source::ItemSource> =
+            std::sync::Arc::new(pb_source::FsSource::new(vec![
+                dir.join("photo.jpg"),
+                dir.join("wedding-photos.zip"),
+            ]));
+        h.core
+            .rebuild_playlist(src, dir.clone(), Some(dir), false, 0);
+        h.core.displayed_item = Some(1); // the door
+        h
+    }
+
+    /// The card the host draws over the letterbox (task #105): visible only on a door, and
+    /// carrying everything the SwiftUI view needs — because a door's frame is a 1×1
+    /// transparent sentinel, so if the card is wrong or missing, the screen is *blank*.
+    #[test]
+    fn the_door_card_crosses_with_its_name_format_and_live_shortcut() {
+        let mut h = handle_on_a_door();
+
+        let card = h.door_card();
+        assert!(card.visible);
+        assert_eq!(card.name, "wedding-photos.zip", "the name, not the path");
+        assert_eq!(card.format, "ZIP Archive");
+        assert!(
+            !card.shortcut.is_empty(),
+            "the live keymap's Open key — the view must never hard-code P"
+        );
+
+        // On a photo the card is absent, not merely empty: the host gates its whole
+        // overlay on `visible`, and a card floating over a picture would be a bug.
+        h.core.displayed_item = Some(0);
+        let card = h.door_card();
+        assert!(!card.visible);
+        assert!(card.name.is_empty() && card.format.is_empty());
+    }
+
+    /// The artwork the card and the strip's archive cells draw. It is the **only** thing
+    /// on a door's screen with pixels in it, so "it decodes" is load-bearing — and it
+    /// crosses as straight-alpha RGBA8, which is what tells the host to build its CGImage
+    /// with `.last` rather than the subtitle overlay's `.premultipliedLast`.
+    #[test]
+    fn the_door_artwork_decodes_and_crosses_as_straight_alpha_rgba8() {
+        let (w, h) = (door_art_width(), door_art_height());
+        assert!(w > 0 && h > 0, "the asset decodes");
+        let rgba = door_art_rgba();
+        assert_eq!(
+            rgba.len(),
+            (w as usize) * (h as usize) * 4,
+            "RGBA8, four bytes a pixel — the host builds a CGImage straight off this"
+        );
+        // Cropped to its content, so the card's padding means what it says: an edge that
+        // is entirely transparent means the crop didn't run.
+        assert!(
+            rgba.chunks_exact(4).any(|px| px[3] > 0),
+            "the artwork has ink in it"
+        );
+    }
+
+    /// An archive cell in the Thumbnails strip draws the artwork instead of a thumbnail —
+    /// it has none, and asking for one would mean decompressing an archive nobody opened.
+    /// The strip has no more right to do that than the prefetch ring does.
+    #[test]
+    fn the_strip_types_a_door_without_reading_it() {
+        let h = handle_on_a_door();
+        assert!(h.thumb_archive(1), "the door");
+        assert!(!h.thumb_archive(0), "the photo");
+        assert_eq!(
+            h.thumb_badge(1),
+            0,
+            "no badge on a door — the folder artwork already says what it is"
+        );
     }
 
     /// The launch-preflight outcome mapping (task #78): help/version/usage-error/missing
@@ -5403,13 +5628,35 @@ mod tests {
             "retry shows the error"
         );
 
-        // Submit → Checking + BeginArchiveOpen (intercepted; the bogus path errors out,
-        // which closes the prompt and reports).
+        // Submit → Checking now, then BeginArchiveOpen (intercepted onto this crate's
+        // worker during the drain — `next_effect` calls `begin_archive_open`).
         h.password_submitted("hunter2".to_string());
         let effects = drain(&mut h);
         assert!(effects
             .iter()
             .any(|e| matches!(e, ffi::CoreEffectFfi::SetDialogChecking)));
+
+        // A 7z opens on a worker thread (`ArchiveKind::background_open`), so the failure —
+        // the bogus path can't be opened — lands via `poll_archive_load` on a later tick,
+        // not inline (this is why the old drain-only assertion broke once 7z went async in
+        // #102). Pump `tick()` until the load clears; bounded so a genuine hang fails the
+        // test instead of blocking CI. The worker errors on a missing file almost at once,
+        // so this is one or two iterations in practice.
+        let mut effects = Vec::new();
+        let mut settled = false;
+        for _ in 0..400 {
+            if h.archive_load.is_none() {
+                settled = true;
+                break;
+            }
+            h.tick();
+            effects.extend(drain(&mut h));
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(
+            settled,
+            "the worker never reported — the archive load is stuck"
+        );
         assert!(has_close(&effects));
         assert!(effects
             .iter()

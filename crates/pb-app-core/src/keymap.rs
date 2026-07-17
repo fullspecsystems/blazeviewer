@@ -642,7 +642,23 @@ fn default_bindings() -> Vec<(Action, Vec<KeyChord>)> {
         one(Action::SlideshowSlower, "]"),
         // Animation playback (on-demand; `P` toggles play/pause). `.`/`,` step a
         // frame forward/back (hold to scrub); they pause playback first.
-        one(Action::PlayPause, "P"),
+        //
+        // ⌘↓ / Alt+↓ are **aliases**, not a separate action: on an archive door `P` means
+        // *open* (task #105), which is exactly Finder's ⌘↓ — and it inverts the ⌘↑ / Alt+↑
+        // that already climb out (`OpenParent` above), so the pair reads as one idiom. They
+        // ride PlayPause rather than an `Open` action of their own because that is what the
+        // key already does: enter the door, play the video, run the animation. Owner call
+        // (2026-07-17): "cheap solution is to just have it be a second alias for P".
+        //
+        // `P` stays FIRST, and that is load-bearing: `AppCore::shortcut_for` takes
+        // `.first()`, so the door card's Open button, the play hint and the toolbar all keep
+        // showing the one key worth teaching. On Windows ⌘ is the Win key, so ⌘↓ never
+        // arrives (the OS minimizes the window instead) — harmless, and Alt+↓ carries it
+        // there.
+        (
+            Action::PlayPause,
+            vec![p("P"), p("Cmd+Down"), p("Alt+Down")],
+        ),
         one(Action::FrameNext, "."),
         one(Action::FramePrev, ","),
         one(Action::MuteLiveAudio, "M"),
@@ -784,6 +800,31 @@ mod tests {
         assert_eq!(macos_menu_chord(Action::Next), None);
         assert_eq!(macos_menu_chord(Action::PlayPause), None);
         assert_eq!(macos_menu_chord(Action::RotateCw), None);
+    }
+
+    /// The Finder-idiomatic Open aliases (2026-07-17): ⌘↓ / ⌥↓ enter an archive door, play
+    /// a video, run an animation — all of which `P` already does, so they are extra chords
+    /// on `PlayPause`, not an action of their own.
+    ///
+    /// The order is the real assertion. `shortcut_for` shows `bindings_for(..).first()`, so
+    /// a well-meaning "alphabetize the chords" would silently relabel the door card's Open
+    /// button, the play hint and the toolbar with ⌘↓ — a key the owner deliberately did not
+    /// want taught there.
+    #[test]
+    fn the_open_aliases_ride_play_pause_and_never_displace_p() {
+        let km = Keymap::defaults();
+        let chord = |s: &str| KeyChord::parse(s).unwrap();
+        assert_eq!(km.action_for(&chord("Cmd+Down")), Some(Action::PlayPause));
+        assert_eq!(km.action_for(&chord("Alt+Down")), Some(Action::PlayPause));
+        // Bare ↓ still pans: the aliases are distinct chords, not a modifier fall-through.
+        assert_eq!(km.action_for(&chord("Down")), Some(Action::PanDown));
+        assert_eq!(
+            km.bindings_for(Action::PlayPause)
+                .first()
+                .map(|c| c.shortcut_label()),
+            Some("P".to_string()),
+            "P must stay the FIRST binding — it is the one every shell displays"
+        );
     }
 
     #[test]

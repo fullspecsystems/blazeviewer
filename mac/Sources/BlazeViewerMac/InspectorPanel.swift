@@ -58,7 +58,7 @@ struct InspectorPanelView: View {
     /// Below this width the segmented control's icon + label pair overflows (the
     /// "Describe" segment is the tightest), so drop the icons and keep the labels —
     /// the words carry the meaning; the glyphs are only reinforcement. Lets the panel
-    /// shrink to the 280pt floor cleanly. (Threshold sits just above the ~294pt where
+    /// shrink to the 260pt floor cleanly. (Threshold sits just above the ~294pt where
     /// icon+label starts to clip.)
     private var compactTabs: Bool {
         min(model.inspectorWidth, maxWidth) < 300
@@ -149,13 +149,14 @@ struct InspectorPanelView: View {
         }
         .frame(width: min(model.inspectorWidth, maxWidth))
         .panelBackground(opacity: model.panelOpacity)
-        // Drag the leading edge to widen (280pt minimum — matches the Folders panel).
+        // Drag the leading edge to resize (260pt floor — the text-only tab labels
+        // still fit there).
         .overlay(alignment: .leading) {
             ResizeHandle(
                 model: model,
                 width: Binding(
                     get: { model.inspectorWidth }, set: { model.inspectorWidth = $0 }),
-                minWidth: 280, maxWidth: maxWidth, sign: -1)
+                minWidth: 260, maxWidth: maxWidth, sign: -1)
         }
         .arrowCursorOnHover()
     }

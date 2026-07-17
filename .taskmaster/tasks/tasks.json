@@ -1324,14 +1324,14 @@
           {
             "id": 2,
             "title": "winit/egui: the card, its lifecycle, thumbnails, command gating",
-            "description": "PanelFrame.door + the visibility/signature seam (the retained overlay will NOT show the card on its own: overlay_panel_visible gates it and overlay_dirty gates rebuilds). Card from pb-ui atoms + middle_truncate, sized per the plan's formula (the fixed 512pt rule was wrong: it breaks past 200% scaling and cannot fit the 520x360 macOS minimum). Archive thumbnails, or the strip goes blank. Command gating (Copy Image / OCR / Describe / Compare). Shows while blazing.  STATUS 2026-07-17: the card, its lifecycle, the signature seam and thumbnails are DONE and owner-confirmed on screen (1ae1052, 9110327, 30b320b, b2a7a28). REMAINING = command gating only. copy_image() guards only on displayed_item then calls decode_item, so Ctrl+C on a door silently copies the 1x1 transparent sentinel and toasts success (Codex blocker 4, confirmed). copy_path() already works (source.path(item) IS the archive). Gate via the existing MenuState._enabled pattern (menu_state_from already takes displayed_item): disable Copy Image, OCR/Copy Text, Describe/Ask, and Compare (compare_pin_cmd) on a door; leave Open/P, navigation, Copy File Path, Reveal, Details, Delete and Copy Image Details working; Rotate already toasts honestly. See current-status.md 'What's left' item 1 for the full matrix.",
-            "status": "in-progress"
+            "description": "PanelFrame.door + the visibility/signature seam (the retained overlay will NOT show the card on its own: overlay_panel_visible gates it and overlay_dirty gates rebuilds). Card from pb-ui atoms + middle_truncate, sized per the plan's formula (the fixed 512pt rule was wrong: it breaks past 200% scaling and cannot fit the 520x360 macOS minimum). Archive thumbnails, or the strip goes blank. Command gating (Copy Image / OCR / Describe / Compare). Shows while blazing.",
+            "status": "done"
           },
           {
             "id": 3,
             "title": "macOS: the same card in SwiftUI + a one-time artwork bridge",
-            "description": "SwiftUI card, thumbnails, command gating. Artwork via a one-time generation+dims+RGBA accessor cached in CoreModel - never clone ~4MiB through FFI per pump. Requires a real Swift host build and a real-folder smoke test; cargo check -p pb-mac-ffi only validates the Rust half.",
-            "status": "pending"
+            "description": "SwiftUI card, thumbnails, command gating. Artwork via a one-time generation+dims+RGBA accessor cached in CoreModel - never clone ~4MiB through FFI per pump. Requires a real Swift host build and a real-folder smoke test; cargo check -p pb-mac-ffi only validates the Rust half. STATUS (2026-07-17): built. FFI seam (DoorCardFfi + door_art_* free fns + thumb_archive), CoreModel pump + one-time NSImage, DoorCardView, the overlay slot, and archive thumb cells all land; pb-mac-ffi tests cover the seam. Verified visually via the new --pb-door-shot <dir> harness (ImageRenderer, no window/core needed - it runs in App.init because onAppear never fires on a Mac at the login window): short/long-name/no-art/min-window/tiny x light+dark all correct. STILL NEEDS the owner real-folder smoke test on a live window - screen capture and Accessibility are unavailable to the agent, so the pump->doorVisible->overlay path is unverified on screen.",
+            "status": "review"
           },
           {
             "id": 4,
@@ -1342,13 +1342,65 @@
           {
             "id": 5,
             "title": "Cleanup + docs",
-            "description": "Delete play_hint_persistent, the kind-3 arms, never_upscale, and the already-dead pb_hud::icon::assets::FILE_ZIPPER + its vendored SVG; drop Icon::Archive (glyph arms, gallery entry, both vendored family SVGs) if it ends up unused. Extend --egui-shot (the viewer-overlay harness, NOT --settings-shot) with door-card modes. Update CHANGELOG.md, whose text still describes an archive tile/icon.",
-            "status": "pending"
+            "description": "Delete play_hint_persistent, the kind-3 arms, never_upscale, and the already-dead pb_hud::icon::assets::FILE_ZIPPER + its vendored SVG; drop Icon::Archive (glyph arms, gallery entry, both vendored family SVGs) if it ends up unused. Extend --egui-shot (the viewer-overlay harness, NOT --settings-shot) with door-card modes. Update CHANGELOG.md, whose text still describes an archive tile/icon. DONE (2026-07-17): play_hint_persistent, never_upscale, the kind-3 arms, and pb_hud FILE_ZIPPER were already removed in the earlier winit door-card commits (play_hint_kind is now 0/1/2, no door arm). Icon::Archive is KEPT — still used by the egui door card Open button + gallery. egui_shot already carries a door mode; the macOS shell gained --pb-door-shot (offscreen ImageRenderer harness). CHANGELOG updated: the stale tile/icon wording now reads card.",
+            "status": "done"
           }
         ]
       },
       {
         "id": 106,
+        "title": "Performance: fast archive opens, instant resize, instant thumbnails",
+        "description": "Measured baseline (2026-07-17, PB_PERF on an SMB album.zip of 8 ~36MP JPEGs): open->first-photo 7068ms, open->all-cached 8302ms, resize Fit<->1:1 711-993ms. The first photo is ~85% of the whole open (all 7 remaining cache in +1.2s), so metric 1 is a large SERIAL/fixed cost, not per-photo throughput. Instrumentation lives in pb_app_core::perf (PB_PERF env; folded into --metrics). Prime directive: the app must FEEL fast.",
+        "status": "in-progress",
+        "priority": "high",
+        "dependencies": [],
+        "subtasks": [
+          {
+            "id": 1,
+            "title": "Encoded-byte cache in front of source.bytes()",
+            "description": "Every image decode calls source.bytes(item) (engine.rs:512), which for a ZIP re-inflates/re-reads the entry every call - so a resize (epoch bump -> re-decode) re-reads 39MB off SMB (~0.8s measured). Add a small bounded RAM-only LRU of encoded (inflated) bytes, consulted before source.bytes(). Kills the re-read for resize, preview->full upgrade, revisit, OCR, Describe. Highest value on archives/SMB (expensive bytes()), near-free on FsSource (OS page cache). RAM-only, dropped on nav/Esc (privacy #2, same category as pending_uploads). Decide scope (archive-only vs all) + byte budget. Behind a seam + A/B via PB_PERF resize numbers.",
+            "status": "pending"
+          },
+          {
+            "id": 2,
+            "title": "Break down the 7s open->first-photo (it is NOT a full unzip)",
+            "description": "CORRECTION: a ZIP is already lazy - open reads only the central directory + a local header per entry (ZipSource::open), then bytes(i) inflates ONE entry on demand. It is 7z that is eager (whole archive -> RAM on open, because solid). So the 7s is NOT unzip-everything; it is ~all the 39MB single-entry read over SMB + ~0.3s decode. Sub-instrument metric 1 into phases (open-cmd -> worker/central-dir done -> first bytes() read -> first decode -> present) to confirm the read dominates. NB a ZIP is not background_open (kind.rs:50) so open runs sync on the event loop; verify that is not itself a stall.",
+            "status": "in-progress"
+          },
+          {
+            "id": 3,
+            "title": "Thumbnails: keep a tiny window warm when parked (bounded, off by default cost)",
+            "description": "Owner call: do NOT always-capture everything (thumbs are off by default; bad trade for never-users). Happy medium: keep capture off by default, but when PARKED (held_nav is none), derive thumbs for a tiny window - current + next 2-3 - off-thread on the existing derive thread. Those items are already decoded/resident, so it is pure downsample (tens of ms each), zero source reads. Result: opening the panel always shows the neighbors instantly + rest fill on scroll, instead of a wall of placeholders for seconds. Blaze pays nothing (parked-gate); RAM capped (handful). Today thumbs_capture (app_core_impl.rs:2160) is gated on thumbs.enabled which only flips on first panel open (thumbs.rs:107), so a browse-then-open re-reads all N from SMB via Job::thumb. The ring-reuse (GPU-downsample a resident VRAM texture) stays a fallback for evicted items.",
+            "status": "pending"
+          },
+          {
+            "id": 4,
+            "title": "First-image priority / bandwidth on a slow source",
+            "description": "The prefetch already ranks the on-screen photo tier-1 (request_prefetch sharpen/head), but on a slow source its full-res read competes for bandwidth with the whole window's preview reads. Explore throttling concurrent reads from an archive/slow source so the first image isn't fighting its neighbors. Separable from the byte cache; only pursue if #2 shows read-bandwidth contention (vs a fixed open cost).",
+            "status": "pending"
+          },
+          {
+            "id": 5,
+            "title": "Preview-first for big JPEGs via the embedded EXIF thumbnail",
+            "description": "The real fix for the 7s first-photo over SMB. Large JPEGs embed a small thumbnail near the file start (owner test file: JPEGInterchangeFormat 240, len 22467 = 22KB). We already have pb_decode::exif_thumbnail but only use it for the thumbs strip; the main viewer decodes the full JPEG and shows nothing until done. Read just the first ~128KB of the entry, pull the embedded thumb, show it in ~100ms (blurry, fit-to-screen), then read the full entry in the background and upgrade to sharp (the preview-first model RAW/HEIC already use). Needs (a) a partial entry read - bytes() reads the whole entry today; (b) a JPEG preview-first path in decode. Turns 7s of placeholder into instant-preview->sharpen.",
+            "status": "pending"
+          },
+          {
+            "id": 6,
+            "title": "Resize: jump to true 1:1 SIZE instantly (upscale the fit texture), then sharpen",
+            "description": "Owner-observed two-stage Fit->1:1: (1) a small grow to an intermediate size, (2) ~1s spinner, (3) a jump to true pixel-1:1. Cause: in Fit mode finalize (common.rs:84) downscales the texture to the fit box (true res kept only as orig_width/orig_height), and ViewTransform base_scale for Original is 1.0 = draw the bound texture at 1:1 of ITS dims (view.rs:110). So the toggle shows the low-res fit texture at 1:1-of-reduced-dims (near fit size, wrong) until the full-res re-decode lands and present_slot re-places at the true dims (the big jump). Fix: on the toggle, place the quad at the TRUE size using orig_width/orig_height and let the GPU upscale the fit texture - so you jump to the correct SIZE instantly (soft), then only sharpness improves when the full decode arrives. One soft->sharp transition, no intermediate size step. The resize twin of #106.5 (EXIF preview-first); pairs with #106.1 (byte cache) so the sharpen is not gated on an SMB re-read.",
+            "status": "pending"
+          },
+          {
+            "id": 7,
+            "title": "Hold the full-res of the PARKED photo so 1:1/zoom is instant (the real zoom win)",
+            "description": "MEASUREMENT (warm, PB_PERF): reads are ~37ms/33-38MB (OS SMB cache warm - the 7s first-photo was the ONE-TIME cold read); steady-state the DECODE (~300-500ms per 36MP JPEG) is the whole cost. Every Fit<->1:1 toggle bumps the geometry epoch and re-decodes the WHOLE ring at the new fit (log: items 0-7 re-decode around each resize). Root cause (owner, confirmed): decode-to-fit only caches the fit-sized texture and discards the full-res (true res kept only as orig_width/orig_height, common.rs:84), so 1:1 re-decodes every time - even toggling back and forth.\n\nDESIGN (owner, 2026-07-17): while BLAZING keep decode-to-fit (small, the prime directive). When PARKED, background-decode + HOLD the full-res for a small SEQUENTIAL window - current + previous + next (radius 1, 3 items) by default; NOT the random-deck neighbors. Then Fit<->1:1<->Fit on the current photo (and on an immediate neighbor after one nav) are instant REBINDS - decode paid once, in the background, never on the toggle. Serve BOTH modes from the full-res (GPU downscales for Fit, 1:1 for Original). Drop full-res outside the window on nav.\n\nCONFIGURABLE + OOM-SAFE (owner: easy to dial in; constrained systems must be able to reduce it): a Settings knob for the full-res cache radius - 0 = current only (or off), 1 = current+/-1 (default), maybe up to a small cap. VRAM math: 36MP RGBA8 ~= 144MB each, so radius 1 = ~432MB of full-res on top of the fit ring; bound it against a VRAM budget and let a slow box dial to 0. Random-deck neighbors are a possible later addition (owner may want after real use), left out for now. REPRIORITIZES: #106.1 byte-cache is a COLD/SMB win (nothing for a warm resize); THIS is the actual zoom win.",
+            "status": "pending"
+          }
+        ]
+      },
+      {
+        "id": 107,
         "title": "Copy: one honest \"Copy\" that copies whatever makes sense (pixels and/or the file)",
         "description": "Owner's insight 2026-07-17: \"on the mac, don't you kind of get both?\" Both platforms' clipboards are multi-representation, so offer every representation that makes sense and let the TARGET pick - Photoshop takes the pixels, Explorer takes the file. *** SCOPE WARNING: most of this is ALREADY BUILT - verify before planning. *** (1) The two-format copy SHIPS: clipboard.rs's module doc already argues this rationale; Windows writes CF_DIBV5 + CF_HDROP together (win::set takes path: Option<&Path>), macOS writes .tiff + .fileURL on one NSPasteboardItem (CoreModel.swift:3216). (2) The label is half-converged: macOS's menu bar ALREADY says \"Copy\" (MenuBar.swift:293); only menu.rs:1269 (Windows) and CoreModel.swift:1111 (the macOS context menu) still say \"Copy Image\". (3) A door ALREADY copies its file - source.path(item) is a real path, so CF_HDROP is already offered and you can paste an archive into Explorer today. REAL REMAINING WORK: (a) relabel \"Copy Image\" -> \"Copy\" in the two places above; (b) don't offer an image when there isn't one - on a door, skip the decode and emit a ClipboardPayload::File { path } arm (Windows drops the DIB from win::set; macOS's `if let tiff` is already conditional so it just skips); (c) LINUX WRINKLE: arboard has no file-list support, so set_image_and_file there already ignores the path and copies pixels only - a file-only payload would land NOTHING, so fall back to the path as text. WHY ONE GENERIC LABEL: muda has no menuNeedsUpdate, so per-item relabelling means a menu rebuild per item ON THE BLAZE PATH (the rebuild-on-signature pattern used by the subtitle flyout). \"Copy\" needs no rebuild and is never a lie. NON-GOAL (owner, 2026-07-17): a Copy Filename command. Copy File Path copies the full path and the owner says that's the main use case and the more useful of the two. Separate commit from #105 (touches both shells, improves photos too), but it's an afternoon.",
         "status": "pending",
