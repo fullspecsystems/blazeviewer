@@ -1019,14 +1019,17 @@ fn decode_solid_group<R: Read + Seek>(
         .iter()
         .fold(0u64, |acc, m| acc.saturating_add(m.unpack));
     let mut dec = compcol::rar5::Decoder::with_unpack_size_and_window(total, window);
-    // Known limitation of the pinned compcol rev: the x86 filter computes call
-    // targets relative to the solid *stream*, but unrar computes them relative
-    // to the containing *file* — so an x86-filtered member after the first in
-    // a solid group decodes with wrong call-target bytes. Our CRC check
-    // catches it (per-entry "damaged", archive still opens), and x86 filters
-    // never apply to photos. The in-flight upstream `rar3-standard-filters`
-    // work adds `Decoder::add_file_boundary` (and Delta!) — register member
-    // offsets here when the pin advances past it.
+    // Register each member's start offset (the cumulative unpacked size of the
+    // members before it) so position-dependent filters (x86 E8/E9) compute call
+    // targets relative to the containing *file*, the way unrar does — not the
+    // solid stream. Without this, an x86-filtered member after the first in a
+    // solid group decodes with wrong call targets (our CRC catches it as
+    // "damaged"). Delta is position-independent and needs no boundary.
+    let mut boundary = 0u64;
+    for m in members {
+        dec.add_file_boundary(boundary);
+        boundary = boundary.saturating_add(m.unpack);
+    }
 
     // Encrypted members are materialized up front: each run is CBC-decrypted
     // (its own key/IV) and stripped of the 16-byte-boundary padding that would
@@ -1479,23 +1482,21 @@ mod tests {
         assert_eq!(src.bytes(0).unwrap(), jpg_a());
     }
 
-    /// The Delta degradation (plan #103 §2): WinRAR auto-picks the Delta filter
-    /// for gradient-BMP content, which the pinned compcol refuses. The member
-    /// and everything after it in its solid group turn unavailable with an
-    /// honest error; earlier members and the archive itself still serve.
+    /// The Delta filter now decodes (compcol's `rar3-standard-filters` work):
+    /// WinRAR auto-picks Delta for gradient-BMP content, and every member of the
+    /// solid group — including the Delta member and the one after it — reads
+    /// back. `bytes()` CRC-verifies against the header, so a successful read is
+    /// byte-correct by construction. Delta is position-independent, so it needs
+    /// no `add_file_boundary` registration (unlike the x86 filter).
     #[test]
-    fn delta_member_degrades_its_solid_group_not_the_archive() {
+    fn delta_member_and_its_solid_group_decode() {
         let path = fixture("delta", DELTA_SOLID);
         let src = RarSource::open(&path, is_img, None, u64::MAX, None).unwrap();
         let names: Vec<&str> = (0..src.len()).map(|i| src.name(i)).collect();
         assert_eq!(names, vec!["a.jpg", "gradient.bmp", "z.jpg"]);
         assert_eq!(src.bytes(0).unwrap(), jpg_a(), "before the Delta member");
-        let bmp = src.bytes(1);
-        let z = src.bytes(2);
-        assert!(bmp.is_err(), "the Delta-filtered member is unavailable");
-        assert!(z.is_err(), "members after it in the group are unavailable");
-        let msg = bmp.unwrap_err().to_string();
-        assert!(msg.contains("not supported"), "honest reason: {msg}");
+        assert!(src.bytes(1).is_ok(), "the Delta-filtered member decodes");
+        assert!(src.bytes(2).is_ok(), "the member after it decodes");
         let _ = std::fs::remove_file(&path);
     }
 
