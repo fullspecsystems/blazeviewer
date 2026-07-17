@@ -118,22 +118,6 @@ not drift, for no gain.
 The card's button dispatches `PanelAction::PlayPause`, exactly as the pill does today —
 which already enters a door. `P` is unchanged. No new action, no new keymap entry.
 
-## Phases
-
-**Phase 1 — core.** Transparent tile; `door_card()`; expose the art pixels. Tests: the
-tile is transparent and still costs no read; `door_card` is `Some` only on a door and
-carries the live shortcut.
-
-**Phase 2 — winit/egui.** `PanelFrame.door` + `door_card()` in `panels_ui.rs`; the art
-texture uploaded once into the ctx, drawn at **512 pt, shrinking to fit** (§5). Shows
-while blazing — do *not* gate it on the pill's nag rule. Remove the pill's kind-3 path.
-
-**Phase 3 — macOS.** The same card in SwiftUI; art over the bridge. ⚠ Cannot be compiled
-here — `cargo check -p pb-mac-ffi` covers only the Rust half.
-
-**Phase 4 — cleanup.** Delete `play_hint_persistent`, the kind-3 arms, `Icon::Archive`
-if now unused, and resolve `never_upscale` (adopt or revert).
-
 ### 5. Sizing: 512 pt of artwork, shrinking to fit (owner, 2026-07-17)
 
 The card's artwork draws at **512 pt** — not the art's full 1024, and never the
@@ -154,6 +138,22 @@ instead of clamping a scale.
 **It must still shrink.** 512 pt is a *maximum*: on a small window the card scales down
 so it always fits, art and all. Nothing about a door should ever be clipped or push
 past the viewport.
+
+## Phases
+
+**Phase 1 — core.** Transparent tile; `door_card()`; expose the art pixels. Tests: the
+tile is transparent and still costs no read; `door_card` is `Some` only on a door and
+carries the live shortcut.
+
+**Phase 2 — winit/egui.** `PanelFrame.door` + `door_card()` in `panels_ui.rs`; the art
+texture uploaded once into the ctx, drawn at **512 pt, shrinking to fit** (§5). Shows
+while blazing — do *not* gate it on the pill's nag rule. Remove the pill's kind-3 path.
+
+**Phase 3 — macOS.** The same card in SwiftUI; art over the bridge. ⚠ Cannot be compiled
+here — `cargo check -p pb-mac-ffi` covers only the Rust half.
+
+**Phase 4 — cleanup.** Delete `play_hint_persistent`, the kind-3 arms, `Icon::Archive`
+if now unused, and resolve `never_upscale` (adopt or revert).
 
 ## Open questions — decide before building
 
