@@ -195,7 +195,7 @@ pub use mf_poster::{
 };
 #[cfg(windows)]
 pub use mf_stream::mem_istream;
-pub use thumb::{derive_thumbnail, exif_thumbnail};
+pub use thumb::{derive_thumbnail, exif_thumbnail, jpeg_preview_first, jpeg_sof_dims};
 // Platform-neutral (defined in `video`); both platform probes construct it.
 #[cfg(windows)]
 pub use mf_video::{decode_live_motion, decode_live_motion_streaming};

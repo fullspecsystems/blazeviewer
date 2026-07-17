@@ -5260,10 +5260,14 @@ impl AppCore {
         // sequential window's *other* representation resident — the full-res Original while
         // displaying Fit, or the Fit while displaying Original — so a Fit↔1:1 toggle / zoom on
         // those photos is an instant rebind, not a re-decode. Radius from `full_res_radius`;
-        // order is current → compare-pin → sequential neighbours (§ pin). Queued BELOW every
-        // display want, so a blaze never waits on it and it decodes in the pool's spare
-        // capacity. Excludes video / archive doors / SVG / RAW and anything past the gigapixel
-        // ceiling (§8/§9). While a key is held this whole tier is empty (blazing stays lean).
+        // order is current → compare-pin → sequential neighbours (§ pin). Excludes video /
+        // archive doors / SVG / RAW and anything past the gigapixel ceiling (§8/§9). While a key
+        // is held this whole tier is empty (blazing stays lean). Collected here but appended
+        // **below the thumb fills** (§5): a full-res Original decode is ~400 ms, and priority is
+        // list position, so keeping it under the thumb strip is what stops a few big originals
+        // from starving the visible thumbnails (owner-reported). With the strip closed there are
+        // no thumb jobs, so it still decodes right after the fulls — the toggle stays fast.
+        let mut parked: Vec<Job> = Vec::new();
         if self.held_nav().is_none() {
             let (other_kind, other_fit) = match dk {
                 pb_core::RepKind::Fit => (pb_core::RepKind::Original, None),
@@ -5282,7 +5286,7 @@ impl AppCore {
                     {
                         continue;
                     }
-                    jobs.push(Job::display(it, other_fit, false));
+                    parked.push(Job::display(it, other_fit, false));
                 }
             }
         }
@@ -5308,6 +5312,9 @@ impl AppCore {
                 }
             }
         }
+        // Parked full-res originals go LAST — below the display ladder and the thumb fills — so
+        // they only ever decode in the pool's genuinely spare capacity (#106.7 §5).
+        jobs.append(&mut parked);
         self.pool.set_targets(self.epoch, &self.source, &jobs);
     }
 
@@ -9120,7 +9127,16 @@ impl AppCore {
         // Epoch-aware so the pie also shows while a same-index frame is being re-decoded
         // at a new fit (resize / scale-mode). Live video re-resolves every frame
         // (`present_video_frame`), so it stays caught-up and never shows the pie.
-        let not_ready = self.target_pending();
+        //
+        // Also keep the pie up while the on-screen photo is only a **preview** and its full
+        // decode is still coming (#106.5): preview-first paints an instant blurry thumbnail, so
+        // `target_caught_up` flips true immediately — but without the pie a slow big-photo open
+        // looks *finished* at the blurry stage, and the owner's fear is a user seeing soft
+        // photos, thinking "these are terrible," and deleting them before they sharpen.
+        // `sharpen_now()` is exactly this state: parked, displayed is a resident preview not yet
+        // upgraded (and it is `None` while blazing and once the full lands, so the pie doesn't
+        // spin during a fast blaze or after sharpening).
+        let not_ready = self.target_pending() || self.sharpen_now().is_some();
         if not_ready {
             self.pie_finish = None;
             let start = *self.wait_started.get_or_insert(now);
@@ -14392,6 +14408,49 @@ mod tests {
             "no held Original → fall back to the async re-decode (epoch bumps)"
         );
         assert!(core.target_pending(), "the re-decode is pending");
+    }
+
+    #[test]
+    fn a_preview_awaiting_its_full_still_reads_as_loading() {
+        // #106.5 owner note: preview-first paints an instant blurry thumbnail, so the target
+        // is "caught up" — but the loading pie must keep spinning until the sharp full lands,
+        // or a slow open looks finished at the blurry stage. `sharpen_now()` is that signal.
+        let mut core = test_core();
+        core.source = photos_named(&["a.jpg"]);
+        core.playlist = Playlist::new(1, 0).with_cursor(0);
+        core.ring = ResidentRing::new(4);
+        core.fit = Some(FitBox {
+            max_width: 100,
+            max_height: 100,
+        });
+        core.view.mode = ScaleMode::Fit;
+        // The photo is on screen as a PREVIEW (blurry embedded thumbnail); the full is pending.
+        let fit_rep = core.rep_of(pb_core::RepKind::Fit);
+        make_resident(&mut core, 0, fit_rep, &[0]);
+        core.preview_resident.insert(0);
+        core.targets = vec![0];
+        core.displayed_item = Some(0);
+        core.target_item = Some(0);
+        core.mark_resolved(0);
+
+        assert!(
+            core.target_caught_up(),
+            "the preview is presented, so the target is caught up"
+        );
+        assert!(
+            !core.target_pending(),
+            "target_pending alone would hide the pie at the blurry stage"
+        );
+        assert_eq!(
+            core.sharpen_now(),
+            Some(0),
+            "…but sharpen_now flags that a sharper full is still coming — keep the pie up"
+        );
+
+        // The full upgrades in: no longer a preview → nothing left to sharpen → pie can finish.
+        core.preview_resident.remove(&0);
+        core.upgrade_done.insert(0);
+        assert_eq!(core.sharpen_now(), None, "sharp now — the pie stops");
     }
 
     #[test]

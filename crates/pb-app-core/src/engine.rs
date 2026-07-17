@@ -62,6 +62,19 @@ pub const MAX_FULL_RING: usize = 24;
 /// transient decode buffer.
 pub const FULL_RES_MAX_PIXELS: u64 = 200_000_000;
 
+/// How many bytes the preview-first path (#106.5) reads from the front of a JPEG to find
+/// its embedded EXIF thumbnail + SOF header. The IFD1 thumbnail is ~22 KB near the file
+/// start; 256 KB comfortably covers it (and the SOF) while staying a small fraction of a
+/// 39 MB entry over SMB. A thumbnail beyond this simply falls back to the full decode.
+pub const PREVIEW_PREFIX_BYTES: usize = 256 * 1024;
+
+/// Whether `name` ends in a JPEG extension — the only format the preview-first prefix
+/// path (#106.5) applies to.
+fn is_jpeg_name(name: &str) -> bool {
+    let lower = name.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
+    matches!(lower.as_str(), "jpg" | "jpeg" | "jpe" | "jfif")
+}
+
 /// Hold-to-zoom curve: the e-folding zoom rate (per second) ramps from a gentle
 /// start (fine tuning) to a fast max over `ZOOM_RAMP_SECS`, along the
 /// **quadratic ease-in** [`hold_ramp`] so a brief tap barely moves — the fine
@@ -376,6 +389,26 @@ pub fn decode_item_for(
     purpose: crate::decode_pool::Purpose,
     cancel: &AtomicBool,
 ) -> Result<DecodedImage, DecodeError> {
+    // Preview-first for big JPEGs (#106.5): a `Display` preview want shows the embedded
+    // EXIF thumbnail from a bounded ~256 KB prefix read INSTANTLY, then the full decode
+    // (the sharpen/`allow_preview = false` want) upgrades it in place — turning a 7 s black
+    // screen over SMB into an instant blurry→sharp. JPEG only (HEIC/RAW already preview-first
+    // via their backends; other formats embed no usable IFD1 thumbnail). Falls through to the
+    // full decode when there is no thumbnail, the read fails, or it isn't a plain image.
+    if allow_preview
+        && purpose == crate::decode_pool::Purpose::Display
+        && is_jpeg_name(source.name(item))
+        && matches!(
+            crate::video::item_kind(source, item),
+            crate::video::LibraryItemKind::Image
+        )
+    {
+        if let Ok(prefix) = source.bytes_prefix(item, PREVIEW_PREFIX_BYTES) {
+            if let Some(img) = pb_decode::jpeg_preview_first(&prefix) {
+                return Ok(img);
+            }
+        }
+    }
     if purpose == crate::decode_pool::Purpose::Thumb {
         // Videos poster through the normal routing below (already thumb-friendly);
         // for images, a cheap embedded EXIF thumbnail beats any full decode.

@@ -118,6 +118,21 @@ pub trait ItemSource: Send + Sync {
     /// on decode-pool worker threads. Out-of-range `i` is a `NotFound` error.
     fn bytes(&self, i: usize) -> io::Result<Vec<u8>>;
 
+    /// Read up to `max` bytes from the **start** of item `i`'s encoded data — the
+    /// preview-first read (#106.5). A big JPEG's embedded EXIF thumbnail and its SOF
+    /// header live in the first ~128 KB, so this shows an instant blurry preview
+    /// without pulling the whole (e.g. 39 MB) entry over SMB first; the full decode
+    /// then upgrades it in the background. The default reads the whole item and
+    /// truncates — correct, and free for the eager/RAM sources (7z, tar, rar) whose
+    /// bytes are already resident; [`FsSource`] and `ZipSource` override it with a
+    /// genuinely bounded read that never touches the tail. Still read-only + RAM-only
+    /// (privacy #2). Out-of-range `i` is a `NotFound` error.
+    fn bytes_prefix(&self, i: usize, max: usize) -> io::Result<Vec<u8>> {
+        let mut b = self.bytes(i)?;
+        b.truncate(max);
+        Ok(b)
+    }
+
     /// Whether items can be fetched independently and cheaply (filesystem, ZIP)
     /// rather than requiring a one-time whole-archive decompression (solid 7z,
     /// tar.gz). The prefetch model assumes `true`; both current impls satisfy it.
@@ -280,6 +295,19 @@ impl ItemSource for FsSource {
     fn bytes(&self, i: usize) -> io::Result<Vec<u8>> {
         let path = self.paths.get(i).ok_or_else(out_of_range)?;
         std::fs::read(path)
+    }
+
+    /// A genuinely bounded read: open the file and pull at most `max` bytes from the
+    /// front — over SMB this is a small handful of round-trips instead of the whole
+    /// 39 MB entry (#106.5).
+    fn bytes_prefix(&self, i: usize, max: usize) -> io::Result<Vec<u8>> {
+        use io::Read;
+        let path = self.paths.get(i).ok_or_else(out_of_range)?;
+        let mut buf = Vec::new();
+        std::fs::File::open(path)?
+            .take(max as u64)
+            .read_to_end(&mut buf)?;
+        Ok(buf)
     }
 }
 
@@ -607,6 +635,31 @@ impl ItemSource for ZipSource {
                 )
             })?;
             file.take(size).read_to_end(&mut buf)?;
+        }
+        self.checkin(archive);
+        Ok(buf)
+    }
+
+    /// A bounded prefix of the entry (#106.5): `take(max)` on the decompressing reader
+    /// pulls only enough of the compressed stream to yield `max` uncompressed bytes — so
+    /// the embedded EXIF thumbnail (near the front of the JPEG) is served without
+    /// inflating the whole 39 MB entry over SMB.
+    fn bytes_prefix(&self, i: usize, max: usize) -> io::Result<Vec<u8>> {
+        let entry = self.entries.get(i).ok_or_else(out_of_range)?;
+        let mut archive = self.checkout()?;
+        let mut buf = Vec::new();
+        {
+            let file = match &self.password {
+                Some(pw) => archive
+                    .by_index_decrypt(entry.zip_index, pw)
+                    .map_err(zip_to_io)?,
+                None => archive.by_index(entry.zip_index).map_err(zip_to_io)?,
+            };
+            // Cap at the smaller of the request and the entry's real size; reserve
+            // recoverably so a lying header can't OOM us.
+            let want = (max as u64).min(file.size()) as usize;
+            let _ = buf.try_reserve(want);
+            file.take(want as u64).read_to_end(&mut buf)?;
         }
         self.checkin(archive);
         Ok(buf)
@@ -1100,6 +1153,11 @@ impl ItemSource for ScopedSource {
         self.inner.bytes(j)
     }
 
+    fn bytes_prefix(&self, i: usize, max: usize) -> io::Result<Vec<u8>> {
+        let &j = self.index.get(i).ok_or_else(out_of_range)?;
+        self.inner.bytes_prefix(j, max)
+    }
+
     fn random_access(&self) -> bool {
         self.inner.random_access()
     }
@@ -1299,6 +1357,45 @@ mod tests {
         }
         zw.finish().unwrap();
         path
+    }
+
+    #[test]
+    fn bytes_prefix_is_bounded_on_fs_and_zip() {
+        // A distinctive 100 KB body so a bounded prefix is verifiable byte-for-byte (#106.5).
+        let data: Vec<u8> = (0..100_000u32).map(|i| (i % 251) as u8).collect();
+
+        // FsSource: reads only the front, and clamps `max` to the file length.
+        let fpath = temp_path("prefix_fs", "jpg");
+        std::fs::write(&fpath, &data).unwrap();
+        let fs = FsSource::new(vec![fpath.clone()]);
+        let p = fs.bytes_prefix(0, 4096).unwrap();
+        assert_eq!(
+            p,
+            &data[..4096],
+            "fs prefix is exactly the first 4096 bytes"
+        );
+        assert_eq!(
+            fs.bytes_prefix(0, 1 << 20).unwrap(),
+            data,
+            "max past EOF = whole file"
+        );
+        let _ = std::fs::remove_file(&fpath);
+
+        // ZipSource: the same bounded semantics through the decompressing entry reader.
+        let zpath = write_zip("prefix_zip", &[("a.jpg", &data)], None);
+        let zs = ZipSource::open(&zpath, None, is_img).unwrap();
+        let zp = zs.bytes_prefix(0, 4096).unwrap();
+        assert_eq!(
+            zp,
+            &data[..4096],
+            "zip entry prefix is the first 4096 uncompressed bytes"
+        );
+        assert_eq!(
+            zs.bytes(0).unwrap(),
+            data,
+            "the full entry still reads whole"
+        );
+        let _ = std::fs::remove_file(&zpath);
     }
 
     #[test]
