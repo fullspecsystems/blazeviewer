@@ -200,6 +200,78 @@ pub fn exif_thumbnail(bytes: &[u8]) -> Option<DecodedImage> {
     Some(img)
 }
 
+/// Parse a JPEG's true (unoriented) pixel dimensions from its Start-Of-Frame marker —
+/// a header scan over the leading segments, so it works on a bounded prefix (#106.5).
+/// Returns `(width, height)`, or `None` if no SOF appears before the scan data (or the
+/// bytes aren't a JPEG). Used to stamp the *full* image's size onto a preview built from
+/// the tiny embedded thumbnail, so the panel and Original-mode placement don't snap to
+/// ~160 px (Codex P1.9).
+pub fn jpeg_sof_dims(bytes: &[u8]) -> Option<(u32, u32)> {
+    if bytes.len() < 2 || bytes[0] != 0xFF || bytes[1] != 0xD8 {
+        return None; // not a JPEG (no SOI)
+    }
+    let mut i = 2;
+    while i + 1 < bytes.len() {
+        if bytes[i] != 0xFF {
+            i += 1;
+            continue;
+        }
+        // A marker is 0xFF followed by a non-0xFF, non-0x00 byte; consume fill 0xFFs.
+        let mut m = i + 1;
+        while m < bytes.len() && bytes[m] == 0xFF {
+            m += 1;
+        }
+        let marker = *bytes.get(m)?;
+        i = m + 1;
+        // Standalone markers (SOI/EOI/RSTn/TEM) carry no length payload.
+        if marker == 0x01 || (0xD0..=0xD9).contains(&marker) {
+            continue;
+        }
+        // SOS begins the entropy-coded image data — stop before it.
+        if marker == 0xDA {
+            return None;
+        }
+        let len_hi = *bytes.get(i)?;
+        let len_lo = *bytes.get(i + 1)?;
+        let seg_len = u16::from_be_bytes([len_hi, len_lo]) as usize;
+        if seg_len < 2 {
+            return None;
+        }
+        // SOF0..SOF15 except the non-frame DHT(C4)/JPG(C8)/DAC(CC) markers.
+        let is_sof = (0xC0..=0xCF).contains(&marker) && !matches!(marker, 0xC4 | 0xC8 | 0xCC);
+        if is_sof {
+            // Segment payload after the 2 length bytes: precision(1) height(2) width(2).
+            let p = i + 2;
+            let h = u16::from_be_bytes([*bytes.get(p + 1)?, *bytes.get(p + 2)?]) as u32;
+            let w = u16::from_be_bytes([*bytes.get(p + 3)?, *bytes.get(p + 4)?]) as u32;
+            return (w > 0 && h > 0).then_some((w, h));
+        }
+        i += seg_len; // `i` is at the length bytes; the length spans the whole segment
+    }
+    None
+}
+
+/// JPEG preview-first (#106.5): from a bounded prefix, extract the embedded EXIF
+/// thumbnail and stamp the **full** image's oriented dimensions (from the SOF header) as
+/// `orig_width/height`, so the metadata panel and Original-mode placement are correct
+/// from the first blurry frame rather than snapping to the thumbnail's ~160 px (Codex
+/// P1.9). Returns `is_preview = true`; the full decode upgrades it in place. `None` when
+/// the prefix carries no usable thumbnail — the caller falls back to a full decode.
+pub fn jpeg_preview_first(prefix: &[u8]) -> Option<DecodedImage> {
+    let mut img = exif_thumbnail(prefix)?;
+    if let Some((w, h)) = jpeg_sof_dims(prefix) {
+        // `exif_thumbnail` already applied the container orientation to the thumbnail's
+        // pixels, so a 90°/270° container swaps the full dims to match.
+        let (ow, oh) = match crate::common::read_orientation(prefix) {
+            5..=8 => (h, w),
+            _ => (w, h),
+        };
+        img.orig_width = ow;
+        img.orig_height = oh;
+    }
+    Some(img)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -218,6 +290,44 @@ mod tests {
             peak: 1.0,
             animated: None,
         }
+    }
+
+    #[test]
+    fn jpeg_sof_dims_parses_the_frame_size() {
+        let mut b = vec![0xFF, 0xD8]; // SOI
+                                      // APP0 (length 4 = 2 length bytes + 2 payload), skipped.
+        b.extend_from_slice(&[0xFF, 0xE0, 0x00, 0x04, 0x00, 0x00]);
+        // SOF0: length 0x0011, precision 8, height 0x0400 (1024), width 0x0600 (1536), 3 comps.
+        b.extend_from_slice(&[0xFF, 0xC0, 0x00, 0x11, 0x08, 0x04, 0x00, 0x06, 0x00]);
+        b.extend_from_slice(&[0x03, 0x01, 0x22, 0x00, 0x02, 0x11, 0x01, 0x03, 0x11, 0x01]);
+        assert_eq!(jpeg_sof_dims(&b), Some((1536, 1024)));
+    }
+
+    #[test]
+    fn jpeg_sof_dims_rejects_non_jpeg_and_pre_sos() {
+        assert_eq!(
+            jpeg_sof_dims(&[0x89, 0x50, 0x4E, 0x47]),
+            None,
+            "PNG magic → None"
+        );
+        assert_eq!(jpeg_sof_dims(&[0xFF, 0xD8]), None, "SOI only → None");
+        // SOI then SOS (image data) with no SOF → None (never parse past the scan).
+        let sos = [0xFF, 0xD8, 0xFF, 0xDA, 0x00, 0x0C, 0x03, 0x01];
+        assert_eq!(jpeg_sof_dims(&sos), None);
+    }
+
+    #[test]
+    fn jpeg_sof_dims_skips_a_large_leading_segment() {
+        // A big APP1 (EXIF) before the SOF must be skipped by its length, not scanned byte
+        // by byte into a false marker match.
+        let mut b = vec![0xFF, 0xD8];
+        let payload = 200usize;
+        let seg_len = payload + 2;
+        b.extend_from_slice(&[0xFF, 0xE1, (seg_len >> 8) as u8, (seg_len & 0xFF) as u8]);
+        b.extend(std::iter::repeat_n(0xABu8, payload)); // arbitrary EXIF-ish bytes
+        b.extend_from_slice(&[0xFF, 0xC2, 0x00, 0x11, 0x08, 0x01, 0x00, 0x02, 0x00]); // SOF2 256×512
+        b.extend_from_slice(&[0x03, 0x01, 0x22, 0x00, 0x02, 0x11, 0x01, 0x03, 0x11, 0x01]);
+        assert_eq!(jpeg_sof_dims(&b), Some((512, 256)));
     }
 
     #[test]
