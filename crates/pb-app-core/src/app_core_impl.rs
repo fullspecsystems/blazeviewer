@@ -354,7 +354,7 @@ impl AppCore {
             || self
                 .targets
                 .iter()
-                .any(|&t| self.ring.slot_for(t).is_none() && !self.failed.contains(&t))
+                .any(|&t| self.display_slot(t).is_none() && !self.failed.contains(&t))
     }
 
     /// Dispatch a one-shot [`Action`] — the single entry point shared by the keyboard
@@ -5166,13 +5166,14 @@ impl AppCore {
             }
         }
         let fit = self.decode_fit();
-        // Drop tier bookkeeping for items no longer resident (evicted).
+        let dk = self.display_kind();
+        // Drop tier bookkeeping for items no longer resident (evicted) in the display rep.
         self.preview_resident
-            .retain(|i| self.ring.slot_for(*i).is_some());
+            .retain(|i| self.ring.slot_for_rep(*i, dk).is_some());
         self.upgrade_done
-            .retain(|i| self.ring.slot_for(*i).is_some());
+            .retain(|i| self.ring.slot_for_rep(*i, dk).is_some());
         self.full_requested_at
-            .retain(|i, _| self.ring.slot_for(*i).is_some());
+            .retain(|i, _| self.ring.slot_for_rep(*i, dk).is_some());
         // Items decoded but not yet uploaded must not be re-requested (the pool no
         // longer tracks them, so it would decode them again).
         let pending: HashSet<usize> = self.pending_uploads.iter().map(|o| o.key.item).collect();
@@ -5201,7 +5202,7 @@ impl AppCore {
             if self.failed.contains(&t) || pending.contains(&t) {
                 continue;
             }
-            let resident = self.ring.slot_for(t).is_some();
+            let resident = self.ring.slot_for_rep(t, dk).is_some();
             let is_prev = resident && self.preview_resident.contains(&t);
             if resident && !is_prev {
                 continue; // already full
@@ -5253,6 +5254,35 @@ impl AppCore {
         }
     }
 
+    /// The ring [`Representation`] the current scale mode's decode produces: a
+    /// viewport-sized `Fit` (Fit mode) or the full-resolution `Original` (Fill /
+    /// Original — those decode at native size, geometry-independent). The parked
+    /// full-res tier (#106.7) later requests `Original` explicitly even in Fit mode;
+    /// this is only the *display* mode's own decode.
+    pub fn display_rep(&self) -> pb_core::Representation {
+        match self.decode_fit() {
+            Some(_) => pb_core::Representation::Fit {
+                geometry_epoch: self.epoch,
+            },
+            None => pb_core::Representation::Original,
+        }
+    }
+
+    /// The representation kind the current scale mode displays from — the key for every
+    /// "is `item` resident / which slot do I rebind" query on the display path.
+    pub fn display_kind(&self) -> pb_core::RepKind {
+        self.display_rep().kind()
+    }
+
+    /// The resident ring slot to display `item` from in the current scale mode: its slot in
+    /// the display [`Representation`] (`Fit` in Fit mode, `Original` in Fill/Original). The
+    /// rebind hit-test — `Some` means "present without decoding." Distinct from the parked
+    /// full-res `Original` slot (#106.7), which the display path rebinds only after a Fit↔1:1
+    /// toggle flips the display kind.
+    pub fn display_slot(&self, item: usize) -> Option<usize> {
+        self.ring.slot_for_rep(item, self.display_kind())
+    }
+
     /// Estimated bytes for one resident ring slot at the current scale mode: the
     /// decode-target box for bounded modes (Fit, and Fill later), or the current
     /// photo's true full-res size for Original. Sizes the ring so VRAM stays in
@@ -5285,7 +5315,7 @@ impl AppCore {
             return None;
         }
         let d = self.displayed_item?;
-        (self.ring.slot_for(d).is_some()
+        (self.display_slot(d).is_some()
             && self.preview_resident.contains(&d)
             && !self.upgrade_done.contains(&d))
         .then_some(d)
@@ -5313,7 +5343,7 @@ impl AppCore {
         .into_iter()
         .filter(|&i| {
             Some(i) != sharpen
-                && self.ring.slot_for(i).is_some()
+                && self.display_slot(i).is_some()
                 && self.preview_resident.contains(&i)
                 && !self.upgrade_done.contains(&i)
                 && !self.is_raw_item(i)
@@ -6061,7 +6091,7 @@ impl AppCore {
             self.present_failed(item);
             return true;
         }
-        if let Some(slot) = self.ring.slot_for(item) {
+        if let Some(slot) = self.display_slot(item) {
             self.present_item(item, slot);
             true
         } else {
@@ -6076,6 +6106,9 @@ impl AppCore {
     /// next tick (so the target never waits behind neighbors), keeping their pool
     /// byte-budget reservation as backpressure.
     pub fn drain_results(&mut self) {
+        // The representation kind the display path rebinds from this epoch (#106.7): every
+        // "is item resident / which slot" query below is against the display rep.
+        let dk = self.display_kind();
         // Gather everything ready plus last tick's leftovers, dropping stale /
         // duplicate / errored results so only live decoded images remain.
         let mut ready: Vec<Outcome> = std::mem::take(&mut self.pending_uploads);
@@ -6108,7 +6141,7 @@ impl AppCore {
                 return false; // stale geometry
             }
             let item = o.key.item;
-            let resident = self.ring.slot_for(item).is_some();
+            let resident = self.ring.slot_for_rep(item, dk).is_some();
             if let Err(ref e) = o.result {
                 if resident {
                     // A full-upgrade decode failed, but the resident preview is fine
@@ -6171,12 +6204,14 @@ impl AppCore {
             // in-place upgrade (the retain above kept only real fulls; preview-only
             // upgrade results were already marked `upgrade_done` and dropped).
             let upgrade =
-                self.preview_resident.contains(&item) && self.ring.slot_for(item).is_some();
+                self.preview_resident.contains(&item) && self.ring.slot_for_rep(item, dk).is_some();
             if uploads >= UPLOADS_PER_TICK {
                 // Carry still-wanted leftovers to the next tick (in priority order);
                 // drop now-obsolete ones so they don't pin pool byte-budget while
                 // the loop idles (work_pending wouldn't keep polling for them).
-                if self.targets.contains(&item) && (upgrade || self.ring.slot_for(item).is_none()) {
+                if self.targets.contains(&item)
+                    && (upgrade || self.ring.slot_for_rep(item, dk).is_none())
+                {
                     leftover.push(outcome);
                 }
                 continue;
@@ -6186,8 +6221,16 @@ impl AppCore {
                 self.meta_cache.insert(item, m);
             }
             let item_bytes = img.pixels.len() as u64;
+            // The representation + content generation this decode belongs to (#106.7). Stale
+            // (old-geometry / old-content) outcomes were already filtered above, so the current
+            // display rep is correct for every survivor here.
+            let rep = self.display_rep();
+            let cg = self.content_gen;
             if upgrade {
-                let slot = self.ring.slot_for(item).expect("resident as preview");
+                let slot = self
+                    .ring
+                    .slot_for_rep(item, dk)
+                    .expect("resident as preview");
                 if let Some(a) = self.renderer.as_mut() {
                     let t0 = Instant::now();
                     a.upload_slot(
@@ -6201,7 +6244,7 @@ impl AppCore {
                     );
                     self.metrics.record("upload", t0.elapsed());
                 }
-                self.ring.set_slot_bytes(item, item_bytes);
+                self.ring.set_slot_bytes(item, rep.kind(), item_bytes);
                 self.preview_resident.remove(&item);
                 self.perf_note_full(item); // preview upgraded to full → one more cached
                                            // Real end-to-end sharpen latency for the ON-SCREEN photo (what the
@@ -6231,7 +6274,7 @@ impl AppCore {
             }
             if let Some(res) = self
                 .ring
-                .reserve_bytes(item, self.epoch, item_bytes, &self.targets)
+                .reserve_bytes(item, cg, rep, item_bytes, &self.targets)
             {
                 if let Some(a) = self.renderer.as_mut() {
                     let t0 = Instant::now();
@@ -6246,7 +6289,7 @@ impl AppCore {
                     );
                     self.metrics.record("upload", t0.elapsed());
                 }
-                self.ring.mark_resident(item, res.slot, self.epoch);
+                self.ring.mark_resident(item, res.slot, cg, rep);
                 if img.is_preview {
                     self.preview_resident.insert(item);
                 } else {
@@ -9383,7 +9426,7 @@ impl AppCore {
         let Some(item) = self.displayed_item else {
             return;
         };
-        if let Some(slot) = self.ring.slot_for(item) {
+        if let Some(slot) = self.display_slot(item) {
             self.present_item(item, slot);
         } else {
             self.load_current_sync();
@@ -13787,10 +13830,7 @@ mod tests {
         core.pending_uploads
             .push(Outcome::synthetic(0, core.epoch, Ok(poster)));
         core.drain_results();
-        assert!(
-            core.ring.slot_for(0).is_some(),
-            "the poster became resident"
-        );
+        assert!(core.display_slot(0).is_some(), "the poster became resident");
         assert_eq!(
             core.presented_epoch,
             Some(core.epoch),
