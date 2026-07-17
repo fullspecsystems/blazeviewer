@@ -14,7 +14,7 @@
 //! Mute writes silence but keeps rendering, so the clock runs muted and A/V sync
 //! is mute-independent.
 
-use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicU8, Ordering};
 use std::sync::mpsc::{Receiver, Sender, TryRecvError};
 use std::sync::Arc;
 use std::time::Duration;
@@ -48,6 +48,16 @@ struct Shared {
     state: AtomicU8,
     /// Media position (time into the clip) in nanoseconds.
     position_nanos: AtomicU64,
+    /// The **MF reader stream index** actually being decoded (`-1` = unknown) — the
+    /// `TrackLocator::MfStream` currency, so the shell can tick the picker row that is
+    /// really playing (task #99). Set at open and after every confirmed switch.
+    active_track: AtomicI64,
+    /// The sequence of the last completed `SetTrack`, and its outcome. The engine runs
+    /// on its own thread, so the shell polls [`WasapiAudio::switch_result`] rather than
+    /// blocking; `switch_ok` is only meaningful for the latest sequence, and the shell
+    /// only ever has one switch in flight.
+    switch_done: AtomicU64,
+    switch_ok: AtomicBool,
 }
 
 impl Shared {
@@ -66,6 +76,12 @@ enum Cmd {
     Pause,
     SetMuted(bool),
     Seek(Duration),
+    /// Switch to the audio stream at MF reader stream index `stream` (task #99),
+    /// reporting completion of `seq` through `Shared::switch_done`/`switch_ok`.
+    SetTrack {
+        stream: u32,
+        seq: u64,
+    },
 }
 
 /// The public handle — a thin front for the audio thread. Dropping it disconnects
@@ -74,6 +90,8 @@ pub struct WasapiAudio {
     cmd_tx: Sender<Cmd>,
     shared: Arc<Shared>,
     session_id: VideoSessionId,
+    /// Sequence numbers for [`Self::set_track`] asks (the engine echoes them back).
+    switch_seq: AtomicU64,
 }
 
 impl WasapiAudio {
@@ -90,6 +108,9 @@ impl WasapiAudio {
         let shared = Arc::new(Shared {
             state: AtomicU8::new(ST_OPENING),
             position_nanos: AtomicU64::new(0),
+            active_track: AtomicI64::new(-1),
+            switch_done: AtomicU64::new(0),
+            switch_ok: AtomicBool::new(false),
         });
         let thread_shared = shared.clone();
         let input = input.clone();
@@ -113,6 +134,7 @@ impl WasapiAudio {
             cmd_tx,
             shared,
             session_id,
+            switch_seq: AtomicU64::new(0),
         })
     }
 
@@ -127,6 +149,36 @@ impl WasapiAudio {
     }
     pub fn seek(&self, position: Duration) {
         let _ = self.cmd_tx.send(Cmd::Seek(position));
+    }
+
+    /// Ask the engine to switch to the audio stream at MF reader stream index `stream`
+    /// (task #99). Asynchronous: returns a sequence to poll with
+    /// [`Self::switch_result`]. A refused switch leaves the current track playing —
+    /// the engine's rule, not the caller's to enforce.
+    pub fn set_track(&self, stream: u32) -> u64 {
+        let seq = self.switch_seq.fetch_add(1, Ordering::Relaxed) + 1;
+        let _ = self.cmd_tx.send(Cmd::SetTrack { stream, seq });
+        seq
+    }
+
+    /// The outcome of switch `seq`, once the engine has processed it (`None` = still
+    /// pending). Only the latest sequence's answer is held, which matches the caller:
+    /// the shell keeps at most one switch in flight.
+    ///
+    /// A **failed engine answers `false`** rather than pending forever: `Failed` means
+    /// the render thread exited (e.g. an AC-3 main track MF refused to decode at open —
+    /// real corpus films hit this), so nothing is left to serve the ask.
+    pub fn switch_result(&self, seq: u64) -> Option<bool> {
+        if self.shared.switch_done.load(Ordering::Acquire) >= seq {
+            return Some(self.shared.switch_ok.load(Ordering::Acquire));
+        }
+        (self.shared.state.load(Ordering::Acquire) == ST_FAILED).then_some(false)
+    }
+
+    /// The MF reader stream index actually being decoded (`-1` = unknown) — what the
+    /// picker's tick should report, via `AppCore::audio_row_for_mf_stream`.
+    pub fn active_track(&self) -> i64 {
+        self.shared.active_track.load(Ordering::Acquire)
     }
 
     /// The current clock sample (lock-free reads). The core drops stale session ids.
@@ -192,9 +244,14 @@ fn run_engine(
         let fmt = device_format(mix_ptr);
 
         // 2. Decode the clip's audio to f32 at the device rate (channels = source).
-        let mut decoder =
-            MfAudioDecoder::open(input, fmt.sample_rate).map_err(|e| e.to_string())?;
+        let decoder = MfAudioDecoder::open(input, fmt.sample_rate).map_err(|e| e.to_string())?;
         let src_channels = decoder.format().channels as usize;
+        // Report which stream is actually decoding (the default open resolves it), so
+        // the picker's tick starts honest rather than blank.
+        shared.active_track.store(
+            decoder.reader_stream().map_or(-1, |s| s as i64),
+            Ordering::Release,
+        );
 
         // 3. Initialize shared-mode, event-driven, with a ~200 ms buffer for slack.
         let buffer_hns: i64 = 2_000_000; // 200 ms in 100-ns units
@@ -223,7 +280,7 @@ fn run_engine(
             buffer_frames,
             fmt: &fmt,
             src_channels,
-            decoder: &mut decoder,
+            decoder,
             pending: Vec::new(),
             pending_pos: 0,
             base_position: Duration::ZERO,
@@ -272,6 +329,48 @@ fn run_engine(
                             playing = true;
                         }
                     }
+                    // The audio track switch (task #99): the Seek dance, plus swapping
+                    // the decoder. The new decoder opens and seeks BEFORE playback is
+                    // touched — a failed switch costs the user the choice, never the
+                    // sound (the old track plays on, untouched).
+                    Ok(Cmd::SetTrack { stream, seq }) => {
+                        let target = engine.playhead();
+                        let ok = match MfAudioDecoder::open_reader_stream(
+                            input,
+                            fmt.sample_rate,
+                            stream,
+                        )
+                        .and_then(|mut next| next.seek(target).map(|()| next))
+                        {
+                            Ok(next) => {
+                                let was_playing = playing;
+                                if playing {
+                                    let _ = client.Stop();
+                                    playing = false;
+                                }
+                                let _ = client.Reset();
+                                engine.swap_decoder(next, target);
+                                engine.fill(muted)?; // preroll the new track at the playhead
+                                shared.set_position(target);
+                                shared.active_track.store(stream as i64, Ordering::Release);
+                                if was_playing {
+                                    client.Start().map_err(w)?;
+                                    playing = true;
+                                }
+                                true
+                            }
+                            Err(e) => {
+                                // AC-3/E-AC-3 land here: MF finds the stream but its
+                                // decoder declines (0xC00D36B4). Keep playing.
+                                eprintln!(
+                                    "audio track switch failed, keeping the current track: {e}"
+                                );
+                                false
+                            }
+                        };
+                        shared.switch_ok.store(ok, Ordering::Release);
+                        shared.switch_done.store(seq, Ordering::Release);
+                    }
                     Err(TryRecvError::Empty) => break,
                     Err(TryRecvError::Disconnected) => {
                         if playing {
@@ -294,14 +393,15 @@ fn run_engine(
     }
 }
 
-/// The per-buffer render state, split out so `fill`/`reseek` borrow cleanly.
+/// The per-buffer render state, split out so `fill`/`reseek` borrow cleanly. Owns the
+/// decoder so a track switch (task #99) can swap it without a self-borrow fight.
 struct Engine<'a> {
     client: &'a IAudioClient,
     render: &'a IAudioRenderClient,
     buffer_frames: u32,
     fmt: &'a DeviceFormat,
     src_channels: usize,
-    decoder: &'a mut MfAudioDecoder,
+    decoder: MfAudioDecoder,
     /// Decoded source-interleaved f32 not yet written, from `pending_pos`.
     pending: Vec<f32>,
     pending_pos: usize,
@@ -389,13 +489,30 @@ impl Engine<'_> {
         Ok(())
     }
 
-    /// Publish the media position: base + (written − still-queued) / rate.
-    fn publish_clock(&self, shared: &Arc<Shared>, playing: bool) {
+    /// Replace the decoder with one already positioned at `at` (a track switch, #99):
+    /// the clock re-bases exactly as a seek does, and the channel map follows the new
+    /// track — a 5.1 commentary beside a stereo main is the normal case, not an edge.
+    fn swap_decoder(&mut self, next: MfAudioDecoder, at: Duration) {
+        self.src_channels = next.format().channels as usize;
+        self.decoder = next;
+        self.pending.clear();
+        self.pending_pos = 0;
+        self.base_position = at;
+        self.frames_since_base = 0;
+        self.eos = false;
+    }
+
+    /// The media position right now: base + (written − still-queued) / rate.
+    fn playhead(&self) -> Duration {
         let padding = unsafe { self.client.GetCurrentPadding() }.unwrap_or(0);
         let rendered = self.frames_since_base.saturating_sub(padding as u64);
-        let pos = self.base_position
-            + Duration::from_secs_f64(rendered as f64 / self.fmt.sample_rate.max(1) as f64);
-        shared.set_position(pos);
+        self.base_position
+            + Duration::from_secs_f64(rendered as f64 / self.fmt.sample_rate.max(1) as f64)
+    }
+
+    /// Publish the media position.
+    fn publish_clock(&self, shared: &Arc<Shared>, playing: bool) {
+        shared.set_position(self.playhead());
         let _ = playing;
     }
 

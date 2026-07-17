@@ -87,6 +87,12 @@ pub mod ids {
     /// so the row index has to ride in the id itself. Parsed back by
     /// [`subtitle_track_row`] — the only place that knows the encoding.
     pub const SUBTITLE_TRACK_PREFIX: &str = "subtitle_track:";
+    /// Prefix for the Playback ▸ Audio Track flyout's dynamic ids (task #99) — same
+    /// scheme, parsed back by [`audio_track_row`].
+    pub const AUDIO_TRACK_PREFIX: &str = "audio_track:";
+    /// Matches `Action::AudioNext.id()` (the Linux egui bar's cycle item; the native
+    /// bars answer "which track" with the flyout instead).
+    pub const AUDIO_CYCLE: &str = "audio_next";
 
     pub const HELP: &str = "help";
     pub const ABOUT: &str = "about";
@@ -102,6 +108,15 @@ pub mod ids {
 /// would select a different track than the one it read.
 pub fn subtitle_track_row(id: &str) -> Option<usize> {
     id.strip_prefix(ids::SUBTITLE_TRACK_PREFIX)?.parse().ok()
+}
+
+/// The picker row a dynamic audio-track id names (`"audio_track:2"` → `Some(2)`), or
+/// `None` for any other id. **The row indexes `AppCore::audio_picker_rows`** — the same
+/// list `A`/`Shift+A` cycle and the Mac's flyout walk, and unlike the subtitle list it
+/// has no synthetic rows (no `Off`, no `Automatic`), so the flyout shows every row and
+/// the indices are naturally canonical.
+pub fn audio_track_row(id: &str) -> Option<usize> {
+    id.strip_prefix(ids::AUDIO_TRACK_PREFIX)?.parse().ok()
 }
 
 /// One row of the Playback ▸ Subtitle Track flyout, as a shell-neutral model.
@@ -178,6 +193,39 @@ pub fn subtitle_track_rows(
     rows
 }
 
+/// Build the Playback ▸ Audio Track flyout's rows (task #99) — the audio twin of
+/// [`subtitle_track_rows`], with two deliberate differences (both the macOS bar's shape):
+/// no `Off`/`Automatic` rows exist to drop (you cannot turn audio *off* from a track
+/// list — that's Mute — and "no choice" already *is* one of these rows: the default the
+/// tick sits on), and therefore no separator either. The tri-state notes are the same
+/// three honest answers, and every row keeps its canonical picker index.
+pub fn audio_track_rows(
+    picker: &[pb_app_core::tracks::PickerRow],
+    video_showing: bool,
+    tracks_known: bool,
+) -> Vec<TrackRow> {
+    if !video_showing {
+        return vec![TrackRow::Note("No Video")];
+    }
+    let rows: Vec<TrackRow> = picker
+        .iter()
+        .enumerate()
+        .map(|(row, r)| TrackRow::Track {
+            row,
+            label: r.label.clone(),
+            active: r.active,
+        })
+        .collect();
+    if rows.is_empty() {
+        return vec![TrackRow::Note(if tracks_known {
+            "No Audio Tracks"
+        } else {
+            "Reading Tracks…"
+        })];
+    }
+    rows
+}
+
 /// A menu action — one per clickable item. Each maps to an operation the keyboard
 /// already triggers; `main.rs` dispatches it to the matching `App` method. Keeping
 /// the id→action step a pure function (no `App`, no muda) makes it unit-testable.
@@ -232,6 +280,7 @@ pub enum MenuAction {
     MuteLiveAudio,
     ToggleSubtitles,
     SubtitleCycle,
+    AudioCycle,
     Help,
     About,
 }
@@ -291,6 +340,7 @@ impl MenuAction {
             MenuAction::MuteLiveAudio => Action::MuteLiveAudio,
             MenuAction::ToggleSubtitles => Action::ToggleSubtitles,
             MenuAction::SubtitleCycle => Action::SubtitleCycle,
+            MenuAction::AudioCycle => Action::AudioNext,
             MenuAction::Help => Action::Help,
             MenuAction::About => Action::About,
         }
@@ -351,6 +401,7 @@ pub fn action_for(id: &str) -> Option<MenuAction> {
         MUTE_LIVE_AUDIO => MenuAction::MuteLiveAudio,
         TOGGLE_SUBTITLES => MenuAction::ToggleSubtitles,
         SUBTITLE_CYCLE => MenuAction::SubtitleCycle,
+        AUDIO_CYCLE => MenuAction::AudioCycle,
         HELP => MenuAction::Help,
         ABOUT => MenuAction::About,
         _ => return None,
@@ -468,6 +519,9 @@ pub struct BuiltMenu {
     /// the same one: the state lives in the submenu's **contents** ("No Video"), which are
     /// always re-derivable, never in the holder's enabled flag.
     pub subtitle_tracks: Submenu,
+    /// The Playback ▸ Audio Track flyout (task #99) — same rebuilt-per-file contract
+    /// (and the same ⚠ never-disable-the-holder rule) as `subtitle_tracks`.
+    pub audio_tracks: Submenu,
     pub checks: ViewChecks,
 }
 
@@ -654,6 +708,10 @@ pub fn build_menu(keymap: &Keymap) -> BuiltMenu {
     // the menu opens, so it can never be stale); muda has no such hook — the tree is built
     // once and only its checkmarks are mirrored — so the shell rebuilds this on change instead.
     let subtitle_tracks = Submenu::new("Subtitle Track", true);
+    // The Audio Track flyout (task #99): audio and subtitles side by side is the reason
+    // this menu exists. No toggle pairs with it — you can't turn audio *off* from a
+    // track list (that's Mute) — and it sits above the subtitle pair, macOS-style.
+    let audio_tracks = Submenu::new("Audio Track", true);
     let playback = Submenu::new("&Playback", true);
     let _ = playback.append_items(&[
         &item(
@@ -669,6 +727,7 @@ pub fn build_menu(keymap: &Keymap) -> BuiltMenu {
             &labeled(keymap, "Previous Frame", Action::FramePrev),
         ),
         &sep(),
+        &audio_tracks,
         // Two items, because they answer two different questions and neither may clobber the
         // other (owner, 2026-07-15): "Subtitles" is on/off — the `C` key's twin — and
         // "Subtitle Track" is *which*. Fusing them (an Off row inside the flyout, and no
@@ -700,6 +759,7 @@ pub fn build_menu(keymap: &Keymap) -> BuiltMenu {
         compare_pin,
         compare_toggle,
         subtitle_tracks,
+        audio_tracks,
         checks: ViewChecks {
             fit,
             fill,
@@ -996,6 +1056,10 @@ pub fn menu_bar_spec(keymap: &Keymap, s: &crate::contract::MenuState) -> Vec<Men
                     true,
                 ),
                 sep(),
+                // No flyouts in this hand-rolled bar (no submenu support), so "which
+                // audio track" stays `A` here — this item is what advertises it, the
+                // same reason `Next Subtitle Track` survives below.
+                item(MenuAction::AudioCycle, "Next Audio Track\tA", true),
                 check(
                     MenuAction::ToggleSubtitles,
                     "Subtitles\tC",
@@ -1652,5 +1716,85 @@ mod tests {
             subtitle_track_rows(&off_only, true, true),
             vec![TrackRow::Note("No Subtitle Tracks")]
         );
+    }
+
+    // -- the Playback ▸ Audio Track flyout (task #99) -------------------------
+
+    fn arow(label: &str, active: bool) -> PickerRow {
+        PickerRow {
+            label: label.to_string(),
+            active,
+        }
+    }
+
+    #[test]
+    fn an_audio_track_id_round_trips_through_its_menu_id() {
+        for row in [0usize, 3, 42] {
+            let id = format!("{}{row}", ids::AUDIO_TRACK_PREFIX);
+            assert_eq!(audio_track_row(&id), Some(row));
+        }
+        assert_eq!(audio_track_row(ids::MUTE_LIVE_AUDIO), None);
+        assert_eq!(audio_track_row(""), None);
+        assert_eq!(audio_track_row("audio_track:"), None);
+        assert_eq!(audio_track_row("audio_track:abc"), None);
+        // The dispatchers must not both claim an id, or a click would fire twice —
+        // and the two flyouts' namespaces must not bleed into each other.
+        assert_eq!(action_for("audio_track:2"), None);
+        assert_eq!(subtitle_track_row("audio_track:2"), None);
+        assert_eq!(audio_track_row("subtitle_track:2"), None);
+    }
+
+    /// The audio flyout shows **every** picker row at its canonical index — there is no
+    /// `Off`/`Automatic` to hide (you can't turn audio off from a track list; that's
+    /// Mute) and therefore no separator either.
+    #[test]
+    fn the_audio_flyout_lists_every_row_at_its_canonical_index() {
+        let picker = vec![
+            arow("English · E-AC-3 · 5.1", true),
+            arow("French · AAC · Stereo", false),
+        ];
+        assert_eq!(
+            audio_track_rows(&picker, true, true),
+            vec![
+                TrackRow::Track {
+                    row: 0,
+                    label: "English · E-AC-3 · 5.1".into(),
+                    active: true,
+                },
+                TrackRow::Track {
+                    row: 1,
+                    label: "French · AAC · Stereo".into(),
+                    active: false,
+                },
+            ]
+        );
+    }
+
+    /// The same three honest empty answers as the subtitle flyout, never collapsed.
+    #[test]
+    fn the_audio_flyout_keeps_the_three_empty_answers_apart() {
+        assert_eq!(
+            audio_track_rows(&[], false, false),
+            vec![TrackRow::Note("No Video")]
+        );
+        assert_eq!(
+            audio_track_rows(&[arow("English · AAC", true)], false, true),
+            vec![TrackRow::Note("No Video")]
+        );
+        assert_eq!(
+            audio_track_rows(&[], true, false),
+            vec![TrackRow::Note("Reading Tracks…")]
+        );
+        assert_eq!(
+            audio_track_rows(&[], true, true),
+            vec![TrackRow::Note("No Audio Tracks")]
+        );
+    }
+
+    /// The Linux bar's cycle item dispatches through the same action the `A` key uses.
+    #[test]
+    fn the_audio_cycle_item_maps_to_audio_next() {
+        assert_eq!(action_for(ids::AUDIO_CYCLE), Some(MenuAction::AudioCycle));
+        assert_eq!(MenuAction::AudioCycle.to_action(), Action::AudioNext);
     }
 }

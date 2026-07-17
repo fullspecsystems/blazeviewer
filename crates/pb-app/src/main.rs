@@ -571,6 +571,19 @@ struct App {
     /// the per-tick check is a tuple compare. Reading the real rows every tick would allocate
     /// a `Vec<String>` behind a playing video, which is exactly the hot path.
     subtitle_menu_sig: Option<SubtitleMenuSig>,
+    /// The Playback ▸ Audio Track flyout (task #99) — same rebuilt-rows shape as
+    /// `subtitle_tracks_menu`, same reasons.
+    audio_tracks_menu: Option<muda::Submenu>,
+    audio_menu_sig: Option<AudioMenuSig>,
+    /// An in-flight audio track switch: (engine sequence, requested picker row). The
+    /// engine runs on its own thread and confirms asynchronously; the sample tick polls
+    /// the outcome and reports it to the core, which toasts **only on a confirmed
+    /// switch** (#99 — audio may fail while the old track plays on, and a toast naming
+    /// a track over unchanged audio teaches the user to distrust every toast).
+    pending_audio_switch: Option<(u64, usize)>,
+    /// The active-audio picker row last reported to the core (`-1` = none) — dedupes
+    /// the per-sample-tick report, since the engine's answer rarely changes.
+    audio_row_reported: i64,
 }
 
 /// The inputs the Playback ▸ Subtitle Track flyout's rows depend on. When this is unchanged,
@@ -586,6 +599,18 @@ struct SubtitleMenuSig {
     tracks_known: bool,
     active: Option<u64>,
     on: bool,
+}
+
+/// The inputs the Playback ▸ Audio Track flyout's rows depend on — the audio twin of
+/// [`SubtitleMenuSig`], minus `on` (audio has no off toggle: that's Mute).
+#[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct AudioMenuSig {
+    item: Option<usize>,
+    video_showing: bool,
+    tracks_known: bool,
+    /// The active track's `local_id` (the shell-reported tick).
+    active: Option<u64>,
 }
 
 /// A deferred dialog open (see [`App::pending_dialog`]). Carries only what the opener
@@ -984,6 +1009,10 @@ impl App {
             subtitle_gen: 0,
             subtitle_tracks_menu: None,
             subtitle_menu_sig: None,
+            audio_tracks_menu: None,
+            audio_menu_sig: None,
+            pending_audio_switch: None,
+            audio_row_reported: -1,
         }
     }
 
@@ -2354,6 +2383,7 @@ impl App {
             self.compare_pin_item = Some(built.compare_pin);
             self.compare_toggle_item = Some(built.compare_toggle);
             self.subtitle_tracks_menu = Some(built.subtitle_tracks);
+            self.audio_tracks_menu = Some(built.audio_tracks);
             self.view_checks = Some(built.checks);
         }
     }
@@ -2424,6 +2454,79 @@ impl App {
         }
     }
 
+    /// Rebuild the Playback ▸ Audio Track flyout's rows (task #99) — the audio twin of
+    /// [`Self::refresh_subtitle_track_menu`], same signature guard, same "state lives in
+    /// the contents, never the holder's enabled flag" rule.
+    #[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
+    fn refresh_audio_track_menu(&mut self) {
+        if self.audio_tracks_menu.is_none() {
+            return;
+        }
+        let sig = AudioMenuSig {
+            item: self.core.displayed_item,
+            video_showing: self.core.video_showing(),
+            tracks_known: self.core.subtitle_tracks_known(),
+            active: self.core.audio_active.map(|id| id.local_id),
+        };
+        if self.audio_menu_sig == Some(sig) {
+            return;
+        }
+        self.audio_menu_sig = Some(sig);
+
+        let rows = menu::audio_track_rows(
+            &self.core.audio_picker_rows(),
+            sig.video_showing,
+            sig.tracks_known,
+        );
+        // Same `PB_SUBTITLE_TRACE=1` window the subtitle flyout gets — a native menu's
+        // contents are otherwise invisible to everything but a human with a mouse.
+        self.core
+            .subtitles
+            .trace(|| format!("menu: audio track flyout = {rows:?}"));
+        let Some(flyout) = self.audio_tracks_menu.as_ref() else {
+            return;
+        };
+        while flyout.remove_at(0).is_some() {}
+        for row in rows {
+            let appended = match row {
+                menu::TrackRow::Separator => flyout.append(&muda::PredefinedMenuItem::separator()),
+                menu::TrackRow::Note(text) => {
+                    flyout.append(&muda::MenuItem::with_id(text, text, false, None))
+                }
+                menu::TrackRow::Track { row, label, active } => {
+                    let id = format!("{}{row}", menu::ids::AUDIO_TRACK_PREFIX);
+                    flyout.append(&muda::CheckMenuItem::with_id(id, label, true, active, None))
+                }
+            };
+            if let Err(e) = appended {
+                eprintln!("menu: failed to append an audio track row: {e}");
+            }
+        }
+    }
+
+    /// Switch the playing video's audio to picker row `row` (task #99) — the winit half
+    /// of `CoreEffect::SelectAudioTrack`, also called directly by the flyout. The row is
+    /// translated to the engine's own currency (Windows: an MF reader stream index, via
+    /// MF's catalog or the FFmpeg→MF bridge; Linux: an FFmpeg stream index). A row the
+    /// engine can't reach is refused immediately — the core toasts the failure and the
+    /// tick stays on what is actually playing, never the request.
+    fn select_audio_track(&mut self, row: usize) {
+        #[cfg(windows)]
+        let stream = self.core.audio_row_mf_stream(row);
+        #[cfg(not(windows))]
+        let stream = self.core.audio_row_ff_stream(row);
+        let seq = match &self.video_audio {
+            Some(audio) if stream >= 0 => audio.set_track(stream),
+            // No engine (silent clip / failed open) or no locator in this engine's
+            // currency: a switch that cannot happen must not pretend to be in flight.
+            _ => {
+                self.core.audio_track_switched(row, false);
+                return;
+            }
+        };
+        self.pending_audio_switch = Some((seq, row));
+    }
+
     /// Derive the current [`contract::MenuState`] from live app state and, **only when it
     /// changed** since the last one applied (`self.menu_state`), emit a single
     /// [`CoreEffect::SetMenuState`] — the shell mirrors it onto the native menu in the drain
@@ -2438,7 +2541,7 @@ impl App {
         #[cfg(all(unix, not(target_os = "macos")))]
         {
             let next = self.current_menu_state();
-            if self.menu_state != Some(next) {
+            if self.menu_state.as_ref() != Some(&next) {
                 self.menu_state = Some(next);
                 self.overlay_dirty = true;
             }
@@ -3243,6 +3346,8 @@ impl App {
                         muted,
                     } => {
                         self.video_audio_ready = false; // fast sampling until it opens
+                        self.pending_audio_switch = None; // a switch can't outlive its session
+                        self.audio_row_reported = -1;
                         self.video_audio = video_audio::VideoAudio::open(&input, session_id, muted);
                         if self.video_audio.is_none() {
                             // No player (creation failed / platform stub): tell the
@@ -3257,13 +3362,17 @@ impl App {
                                 });
                         }
                     }
-                    // Audio track selection (task #99) is macOS-only so far. This shell's
-                    // audio is the Session route, where audio is the MASTER CLOCK — a
-                    // mid-playback re-open has to re-prime it, which is the genuinely hard
-                    // half and deliberately not attempted yet. Ignoring the ask is the
-                    // honest response: `A` simply does nothing here rather than half-work.
-                    contract::CoreEffect::SelectAudioTrack { .. } => {}
-                    contract::CoreEffect::StopVideoAudio => self.video_audio = None,
+                    // Audio track selection (task #99): translate the row to the
+                    // engine's currency and ask it to switch; the outcome comes back
+                    // through the sample tick (`switch_result`) and only a confirmed
+                    // switch toasts. `A` / `Shift+A` and the Playback ▸ Audio Track
+                    // flyout both land here.
+                    contract::CoreEffect::SelectAudioTrack { row } => self.select_audio_track(row),
+                    contract::CoreEffect::StopVideoAudio => {
+                        self.video_audio = None;
+                        self.pending_audio_switch = None;
+                        self.audio_row_reported = -1;
+                    }
                     contract::CoreEffect::PauseVideoAudio => {
                         if let Some(a) = &self.video_audio {
                             a.pause();
@@ -4039,6 +4148,12 @@ impl ApplicationHandler for App {
                 self.core.select_subtitle_row(row);
                 self.menu_state = None;
                 self.subtitle_menu_sig = None;
+            } else if let Some(row) = menu::audio_track_row(ev.id.as_ref()) {
+                // A Playback ▸ Audio Track row — same shape, but the tick does NOT move
+                // here: the shell attempts the switch and the engine confirms it (#99);
+                // the flyout re-ticks when the report lands.
+                self.select_audio_track(row);
+                self.menu_state = None;
             } else if let Some(action) = menu::action_for(ev.id.as_ref()) {
                 self.dispatch_menu(action);
                 // muda auto-flips a clicked CheckMenuItem's native checkmark, which can
@@ -4058,6 +4173,8 @@ impl ApplicationHandler for App {
         // guard, so this is a tuple compare on all but the few ticks where the list moved.
         #[cfg(any(windows, target_os = "macos"))]
         self.refresh_subtitle_track_menu();
+        #[cfg(any(windows, target_os = "macos"))]
+        self.refresh_audio_track_menu();
         // 0b. Apply any files dropped on the window this burst (coalesced — winit
         // delivers one `DroppedFile` per file).
         if !self.pending_drops.is_empty() {
@@ -4091,7 +4208,9 @@ impl ApplicationHandler for App {
         // because preroll waits on "audio ready" and a 250 ms grid would quantize
         // P → first-frame; ~4 Hz once it's up (plenty for the clock).
         if let Some(va) = &self.video_audio {
-            let cadence = if self.video_audio_ready {
+            // Fast while opening (preroll waits on "audio ready") and while a track
+            // switch is in flight (its confirmation — tick + toast — rides this poll).
+            let cadence = if self.video_audio_ready && self.pending_audio_switch.is_none() {
                 Duration::from_millis(250)
             } else {
                 Duration::from_millis(30)
@@ -4102,6 +4221,26 @@ impl ApplicationHandler for App {
                     self.video_audio_ready =
                         !matches!(sample.state, pb_app_core::video::AudioClockState::Opening);
                     self.core.video_audio_clock(sample);
+                }
+                // Audio track selection (task #99): pick up a finished switch, and keep
+                // the picker's tick pinned to what the engine is ACTUALLY decoding —
+                // the mac host's `reportActiveAudioStream` rule, ported. Active first,
+                // then the outcome toast, so the toast names the new track.
+                let switch = self
+                    .pending_audio_switch
+                    .and_then(|(seq, row)| va.switch_result(seq).map(|ok| (row, ok)));
+                let active = va.active_stream();
+                #[cfg(windows)]
+                let active_row = self.core.audio_row_for_mf_stream(active);
+                #[cfg(not(windows))]
+                let active_row = self.core.audio_row_for_ff_stream(active);
+                if active_row != self.audio_row_reported {
+                    self.audio_row_reported = active_row;
+                    self.core.set_active_audio_row(active_row);
+                }
+                if let Some((row, ok)) = switch {
+                    self.pending_audio_switch = None;
+                    self.core.audio_track_switched(row, ok);
                 }
             }
         }
