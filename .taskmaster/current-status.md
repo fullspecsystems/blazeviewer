@@ -1,13 +1,14 @@
 # Blaze Viewer — Current Status (session handoff)
 
-_Last updated: 2026-07-17 (rev 10). Supersedes rev 9 (subtitle/audio, Windows — that work
-is a **separate in-flight track**, summarized at the bottom; its detail lives in git history
-+ `.taskmaster/docs/90-*` / `98-*`). **This session is macOS: the door card shipped, then a
-performance investigation.** Active work: **task #106 (performance)**, starting **#106.2**._
+_Last updated: 2026-07-17 (rev 11). Merges the macOS agent's rev 10 (below) with the
+Windows-side door items it flagged for this agent. **The macOS door card shipped and looks
+great**; the **egui/winit half is now being verified on Windows** (this session), and the
+door command-gating + Copy work is still open here. The subtitle/audio track is separate,
+summarized at the bottom (detail in git history + `.taskmaster/docs/90-*` / `98-*`)._
 
 ---
 
-# ✅ SHIPPED this session (all pushed to main)
+# ✅ SHIPPED on macOS this session (all pushed to main)
 
 | commit | what |
 |---|---|
@@ -18,16 +19,86 @@ performance investigation.** Active work: **task #106 (performance)**, starting 
 
 **Door card #105 status:** subtasks 1,2,5 done; **3 (macOS) is `review`** — owner tested live
 and it "looks great"; the only unseen bit is window-centering with both side panels open, and
-the **egui/Windows half** (window-centring + door card) is inspection-only here (`pb-app`
-won't build on macOS — Windows agent / cross-check should confirm). Subtask 4 (blaze perf
-gate) still pending. **HARD CONSTRAINT: the macOS GUI does not come up in this agent env** —
-screen capture returns the wallpaper, `onAppear` never fires, a launched app produces no
-output. Verify SwiftUI via the offscreen `--pb-door-shot <dir>` `ImageRenderer` harness
-(runs in `App.init`, before any scene); real-window smoke tests are the owner's.
+the **egui/Windows half** (window-centring + door card) is inspection-only on the Mac
+(`pb-app` won't build on macOS). **← that is this Windows session's job (below).** Subtask 4
+(blaze perf gate) still pending.
 
 ---
 
-# 🎯 ACTIVE — Task #106: fast archive opens, instant resize, instant thumbnails
+# 🪟 THIS SESSION (Windows) — door card verified on Windows; a build break fixed
+
+**✅ The door card renders correctly on Windows** (`PB_SHOT_DOOR=1|long` → PNG): centred in
+the window, adaptive width for long names with middle-elision, 162 pt artwork well-proportioned,
+"ZIP Archive" header + separator + "Open (P)". The macOS centring + bigger-folder changes
+landed right in egui.
+
+**⚠ But the macOS merge broke the Windows build — fixed in `66c7ca6`** (the exact hazard this
+section warned about: `pb-app` doesn't compile on macOS, so the Mac agent couldn't catch it):
+- `AppCore` grew a `perf` field; `main.rs`'s struct literal didn't set it → **E0063**. Wired it
+  like `AppCore::headless` (gated on `perf::env_enabled()`).
+- the new whole-window centring left `PanelFrame.left_pane` with no reader → **dead-code
+  warning** = a `clippy -D warnings` CI failure. Removed the field + its 5 setters.
+- ⚠ **A `| tail` on the build masked cargo's non-zero exit** (pipe reports tail's 0), so the
+  first "build" looked green and ran a **stale** binary. Capture the real exit code, or don't
+  pipe the build.
+
+**Still owed a real interactive smoke test** (the shot harness can't do these): `P` opens a
+door and `Alt+↑` climbs out; archive **thumbnails**; **window-centring with both side panels
+open** (the one bit the Mac owner couldn't see); a **folder of only archives** (the case that
+used to freeze — `9110327`). Corpus: the doors test archives under `D:\Media` (RARs with real
+photos). `Cmd+↓` never arrives on Windows (Win+↓ minimizes) — `Alt+↓` carries the Open alias.
+
+## Door command gating (task 105.2 — still open on Windows)
+
+`copy_image` (`app_core_impl.rs`) guards only on `displayed_item`, then decodes — on a door
+that's the 1×1 sentinel, so **Ctrl+C silently copies a transparent pixel**. The *file* half
+already works (`source.path(item)` is real → CF_HDROP is offered), so this is fixed by #107,
+not disabled. Gate the rest via the existing `MenuState._enabled` pattern (`menu_state_from`
+already takes `displayed_item`):
+
+| | On a door |
+|---|---|
+| Open (`P`), navigation, Copy File Path, Reveal, Details, Delete | **work** — a door is a file |
+| **Copy** | **works once #107 lands** — offer the file, skip the image; don't disable it |
+| OCR / Copy Text, Describe / Ask, Compare (`compare_pin_cmd`) | **disable** — they'd scan/pin the sentinel |
+| Rotate / Save rotation | already toasts honestly |
+| Copy Image Details | **works** — the panel already shows a door's size + format |
+
+## #107 — "Copy" copies whatever makes sense (renumbered from #106 to clear the collision)
+
+Most of it already ships: the two-format clipboard (Windows CF_DIBV5 + CF_HDROP; macOS
+`.tiff` + `.fileURL`), and macOS's menu bar already says "Copy". Real remaining work: relabel
+"Copy Image" → **"Copy"** on Windows (`menu.rs:1269`) + the macOS context menu
+(`CoreModel.swift:1111`); emit **file-only** on a door (`ClipboardPayload::File`); ⚠ **Linux**
+(arboard, no file-list support) must fall back to **path-as-text** or it copies nothing. Full
+detail in `tasks.json` **#107**. Non-goal (owner): a Copy Filename command — Copy File Path is
+the useful one.
+
+## Load-bearing door knowledge (egui — don't re-derive)
+
+- **A new `LibraryItemKind` opts OUT of byte reads, not in** (`c19cfd6`). The no-read
+  guarantee rests on typed dispatch **above** `source.bytes()`; guards are **positive `Image`
+  + exhaustive matches** so the compiler names every site. ⚠ The worklist is per-platform (a
+  `cfg(macos)` arm won't fail a Windows build) — so a leak can hide on the side you didn't run.
+- **egui: never `load_texture` inside `data_mut`** (`9110327`, froze on a folder of archives).
+  `data_mut` write-locks the whole Context; `load_texture` re-enters it. Pattern = read → load
+  → insert (`pb_ui::icon::texture` has it right).
+- **egui: an auto-sized anchored Window places from the PREVIOUS run's rect** (`b2a7a28`, the
+  off-centre long-filename card). Compute the size yourself + anchor `LEFT_TOP`. ⚠ Test via
+  `ctx.memory(|m| m.area_rect(id))` — the SDF shadow's expanded clip rect reads a centred card
+  as 62 px off.
+- **Artwork is cropped subject-centred** (two bboxes: ink `alpha>=1`, subject `alpha>=200`),
+  and **keeps its alpha** — an opaque matte is what made the grey box against the `[10,10,12]`
+  letterbox. `pb-scene-pipeline` is `ALPHA_BLENDING`, so transparent frames blend over it.
+- **The retained overlay needs two seams:** `overlay_panel_visible()` (`main.rs:1458`) gates
+  drawing, `overlay_dirty` (`:525`, set `:1534`) gates rebuilds — nothing honours egui's own
+  repaint request, so a new persistent element must join both.
+- **The size readout goes through the scan worker** (`FsSource::new` stats archives only),
+  never the per-frame `info_line_parts` path (an SMB stat there blocks).
+
+---
+
+# 🎯 ACTIVE (macOS agent) — Task #106: fast archive opens, instant resize, instant thumbnails
 
 **Prime directive: the app must FEEL fast. We measure, not guess.**
 
@@ -114,37 +185,54 @@ Split metric 1 into phases: **open-cmd → archive-open done (central-dir read) 
 
 ---
 
+# The rules that were bought with real time
+
+- **Look at the output.** Every door defect the owner reported was *visible*, and none of
+  them failed a test. `--egui-shot` / `PB_SHOT_DOOR=1|long` (winit) and `--pb-door-shot <dir>`
+  (macOS `ImageRenderer`) exist for exactly this.
+- **When a plan and the code disagree, the code wins — fix the plan.** My own "nine guards"
+  claim was wrong (3 were already exhaustive, 2 correct to leave, 4 needed changing);
+  following it mechanically would have made things worse.
+- **Never gate a feature on a backend.** Use `AppCore::video_showing()` / `video_position()`.
+
+---
+
 # Carried-forward notes (cross-cutting — keep)
 
 - **Commit + push directly to main** (owner-authorized); **fetch/merge origin/main first** — a
-  parallel **Windows agent** also pushes there. Stage explicit paths (avoid `add -A` when
-  unrelated files are dirty; the perf/door work staged cleanly).
+  parallel **macOS agent** also pushes there (and re-uses task IDs, so watch for collisions —
+  Copy was renumbered #106→#107 this merge). Stage explicit paths (avoid `add -A`; the owner
+  edits the repo concurrently).
 - ⚠ **The owner drives the app while you work** (their instance may lock the build). On
   Windows check `Get-Process blazeviewer` before killing; a separate `CARGO_TARGET_DIR` under
-  the scratchpad builds without fighting them.
-- **`pb-app` (winit/egui shell) does NOT build on macOS** by design — target-os guard. So the
-  egui half of shared changes is inspection-only here. Windows cross-check from the Mac:
-  `cargo check -p pb-app --target x86_64-pc-windows-msvc` after two temp manifest edits (blake3
-  `pure` as a DIRECT dep + `ureq` `default-features=false` in both crates); restore + `git
-  checkout Cargo.lock` after.
+  the scratchpad builds without fighting them. A mid-test anomaly is often the owner, not a
+  bug — A/B before believing it.
+- **`pb-app` (winit/egui shell) does NOT build on macOS** by design — target-os guard, so the
+  egui half of shared changes is inspection-only there (hence this session). Windows
+  cross-check from the Mac: `cargo check -p pb-app --target x86_64-pc-windows-msvc` after two
+  temp manifest edits (blake3 `pure` as a DIRECT dep + `ureq` `default-features=false` in both
+  crates); restore + `git checkout Cargo.lock` after.
 - ⚠ **`cargo test --workspace` can't build `pb-app` on macOS** → `--workspace --exclude pb-app`.
 - **macOS build/run:** `./scripts/build-swift-host.sh` → `target/swift-host/release/Blaze
   Viewer.app`. `--pb-door-shot <dir>` shoots the door card offscreen. `PB_PERF` / `PB_TRACE`
   gate stderr diagnostics.
-- **The pre-existing `pb-mac-ffi` failure is GONE** (fixed in `3d87006e`); the suite is green.
+- ⚠ **The Bash tool mangles `git show rev:path`** (the colon → `;`, slashes → `\`) and eats a
+  backslash in heredoc'd Python needles. Use **PowerShell** for `git show`, and the Edit tool
+  for Rust string literals.
 
 ---
 
 # Separate in-flight track — Subtitles / Audio (Windows, the other agent)
 
-Not this session. Summary so the knowledge isn't lost:
+Not this session's focus. Summary so the knowledge isn't lost:
 - **Shipped:** subtitle display + Settings tab + the **Playback menu + Subtitle-Track flyout**
   on Windows (`756cfff`).
 - **NEXT there:** the **Audio flyout**, blocked on an **FFmpeg→MF stream-order bridge** — MF
   enumerates audio streams in a *different order* than FFmpeg/the container, so a naive wire
   would tick the right track and play the wrong one. Bridge design is settled (match on
   lang/codec/channels, set `TrackLocator::MfStream(ordinal)`); `MfAudioDecoder::open_track` is
-  done + tested (`d364d2e`).
+  done + tested (`d364d2e`). Wiring detail (the `Cmd::SetTrack` dance, the `Shared` atomics,
+  the ignored `SelectAudioTrack` effect at `main.rs:3165`) is in git history at rev 9.
 - **Authoritative docs:** `.taskmaster/docs/90-presenter-and-style-contract.md` (subtitles),
   `98-phase0-spike-findings.md` (MF track-catalog limits — read before any track work),
   `video-playback-overhaul.md` (R1–R12).
