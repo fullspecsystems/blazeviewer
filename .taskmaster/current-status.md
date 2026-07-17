@@ -25,21 +25,28 @@ the **egui/Windows half** (window-centring + door card) is inspection-only on th
 
 ---
 
-# 🪟 THIS SESSION (Windows) — verify the door card landed, then the open door items
+# 🪟 THIS SESSION (Windows) — door card verified on Windows; a build break fixed
 
-The door card and its shared-code changes were built and tuned on macOS. The **egui/winit
-half never ran there**, so confirm it here on a real build first. Shared code that moved and
-needs a Windows eyeball:
+**✅ The door card renders correctly on Windows** (`PB_SHOT_DOOR=1|long` → PNG): centred in
+the window, adaptive width for long names with middle-elision, 162 pt artwork well-proportioned,
+"ZIP Archive" header + separator + "Open (P)". The macOS centring + bigger-folder changes
+landed right in egui.
 
-- **artwork crop fix + bigger folder** — the winit door card draws the same
-  `door_artwork()` / `crop_to_content` (pb-app-core), so re-check centring + margins render
-  right in egui, not just SwiftUI.
-- **`Cmd+↓` / `Alt+↓` = Open** — the Mac added an Open-via-arrow binding; confirm the winit
-  keymap still opens a door on `P` and nothing regressed (`Alt+↑` climb-out especially).
-- the door card, archive **thumbnails**, and **window-centring with both side panels open**
-  (the one bit the Mac owner couldn't fully see).
-- corpus: the doors test archives under `D:\Media` (RARs with real photos), plus a
-  **folder of only archives** (the case that used to freeze — `9110327`).
+**⚠ But the macOS merge broke the Windows build — fixed in `66c7ca6`** (the exact hazard this
+section warned about: `pb-app` doesn't compile on macOS, so the Mac agent couldn't catch it):
+- `AppCore` grew a `perf` field; `main.rs`'s struct literal didn't set it → **E0063**. Wired it
+  like `AppCore::headless` (gated on `perf::env_enabled()`).
+- the new whole-window centring left `PanelFrame.left_pane` with no reader → **dead-code
+  warning** = a `clippy -D warnings` CI failure. Removed the field + its 5 setters.
+- ⚠ **A `| tail` on the build masked cargo's non-zero exit** (pipe reports tail's 0), so the
+  first "build" looked green and ran a **stale** binary. Capture the real exit code, or don't
+  pipe the build.
+
+**Still owed a real interactive smoke test** (the shot harness can't do these): `P` opens a
+door and `Alt+↑` climbs out; archive **thumbnails**; **window-centring with both side panels
+open** (the one bit the Mac owner couldn't see); a **folder of only archives** (the case that
+used to freeze — `9110327`). Corpus: the doors test archives under `D:\Media` (RARs with real
+photos). `Cmd+↓` never arrives on Windows (Win+↓ minimizes) — `Alt+↓` carries the Open alias.
 
 ## Door command gating (task 105.2 — still open on Windows)
 
