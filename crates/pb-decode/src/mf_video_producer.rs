@@ -32,6 +32,34 @@ use crate::video::{
 };
 use crate::{FitBox, PixelFormat};
 
+/// A forward seek no larger than this decodes forward from the **live** reader
+/// instead of recreating it (task #4, the "short-forward-hop"). Two costs vanish:
+/// the SMB container re-open (measured ~222 ms on a 1080p corpus film) and the
+/// keyframe backtrack — a `+2 s` tap otherwise seeks to a keyframe up to a whole
+/// GOP *behind* the target and re-decodes it (measured 536 ms vs 161 ms for the
+/// hop). Capped so a hop never re-runs more than a GOP or so: past this a keyframe
+/// seek is competitive, and held/coarse scrubbing (`Shift`+arrow = ±10 s) falls
+/// through to the recreate/in-place path below. In 100 ns units.
+const FORWARD_HOP_MAX_HNS: i64 = 5 * 10_000_000; // 5 s
+
+/// Whether a seek to `abs_target` (container time base) should **hop** — decode
+/// forward from the live reader at `reader_pos` — rather than recreate the reader
+/// (task #4). True only for a forward move within [`FORWARD_HOP_MAX_HNS`] of a
+/// *known* live position: backward, too-far, or unknown-position seeks recreate,
+/// which always lands correctly. Pure so the decision is unit-tested without MF.
+fn should_hop(reader_pos: Option<i64>, abs_target: i64) -> bool {
+    reader_pos.is_some_and(|p| abs_target >= p && abs_target - p <= FORWARD_HOP_MAX_HNS)
+}
+
+/// `PB_VIDEO_DIAG=1` — the Windows seek path had no instrumentation (the "measure,
+/// never guess" gap task #4 called out). One line per seek: hop-vs-recreate, run-up
+/// frame count, and wall time — so a slow SMB seek is a measurement, not a guess.
+/// Matches the FFmpeg producer's env var.
+fn video_diag() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("PB_VIDEO_DIAG").is_ok_and(|v| v != "0"))
+}
+
 /// Run the producer to completion on the **current thread** (the app spawns a
 /// dedicated thread for it — never the event loop). Returns when the stream ends,
 /// the session says stop, the session is dropped, or decoding fails; every exit
@@ -151,6 +179,11 @@ pub fn run_video_producer(
     let mut credits: usize = 0;
     let mut pending: Option<(Duration, crate::video::SeekGeneration)> = None;
     let mut active: Option<IMFSourceReader> = Some(active_reader);
+    // Where the live reader is positioned — the abs ts (container time base) of the
+    // last frame read from it. Drives the short-forward-hop (task #4): a forward seek
+    // within reach of this decodes forward rather than recreating the reader. `None`
+    // whenever there is no live reader (start before the first frame; parked at EOS).
+    let mut reader_pos: Option<i64> = None;
 
     'outer: loop {
         // 1. Absorb messages; block only when there is nothing to do.
@@ -184,23 +217,38 @@ pub fn run_video_producer(
         // publishes a frame.
         if let Some((target, g)) = pending.take() {
             gen = g;
-            if let Some(r) = active.take() {
-                retire_reader(r);
-            }
             let abs_target = origin
                 .unwrap_or(0)
                 .saturating_add((target.as_nanos() / 100) as i64);
-            let reader = match unsafe { reopen_at(input, (w, h), abs_target, manager.as_ref()) } {
-                Ok((r, k)) => {
-                    kind = k;
-                    r
+            // Short-forward-hop (task #4): a small FORWARD seek from a live reader
+            // decodes forward in place — the decode-forward loop below reads from the
+            // reader wherever it sits, so a reader already at `reader_pos` just before
+            // the target needs no reopen and no keyframe backtrack. Anything else
+            // (backward, large forward, no live reader, or parked at EOS) recreates.
+            let hop = active.is_some() && should_hop(reader_pos, abs_target);
+            let seek_started = video_diag().then(std::time::Instant::now);
+            let mut run_up_frames = 0u32;
+            if !hop {
+                if let Some(r) = active.take() {
+                    retire_reader(r);
                 }
-                Err(e) => {
-                    fail(e);
-                    break 'outer;
-                }
-            };
-            active = Some(reader);
+                let reader = match unsafe { reopen_at(input, (w, h), abs_target, manager.as_ref()) }
+                {
+                    Ok((r, k)) => {
+                        kind = k;
+                        r
+                    }
+                    Err(e) => {
+                        fail(e);
+                        break 'outer;
+                    }
+                };
+                active = Some(reader);
+                // The fresh reader sits on a keyframe ≤ abs_target; its exact ts isn't
+                // known until the first read, so a subsequent hop must not trust a
+                // stale position. The run-up's first frame re-establishes it.
+                reader_pos = None;
+            }
             let mut landed: Option<(i64, Vec<u8>)> = None;
             loop {
                 // Watch for supersede/stop between reads (latest-value).
@@ -227,15 +275,21 @@ pub fn run_video_producer(
                         if let Some(r) = active.take() {
                             retire_reader(r);
                         }
+                        reader_pos = None;
                         break;
                     }
                     Ok(Read1::Gap) => {}
                     Ok(Read1::Frame { ts, pixels }) => {
+                        // Every read advances the reader — track it even for discarded
+                        // run-up frames, so a supersede mid-run-up leaves `reader_pos`
+                        // truthful for the next hop decision.
+                        reader_pos = Some(ts);
                         if ts >= abs_target {
                             landed = Some((ts, pixels));
                             break;
                         }
                         // Keyframe→target run-up: discard, keep decoding forward.
+                        run_up_frames += 1;
                     }
                     Err(e) => {
                         fail(e);
@@ -244,6 +298,15 @@ pub fn run_video_producer(
                 }
             }
             if let Some((ts, pixels)) = landed {
+                if let Some(t0) = seek_started {
+                    eprintln!(
+                        "[pb-video] seek {} to {:.1}s: {} run-up frames in {:?}",
+                        if hop { "HOP" } else { "recreate" },
+                        (abs_target - origin.unwrap_or(0)).max(0) as f64 / 1e7,
+                        run_up_frames,
+                        t0.elapsed(),
+                    );
+                }
                 // The landing frame consumes a credit like any other (the session
                 // granted fresh ones right behind the SeekTo). Block for one if
                 // needed — Stop/SeekTo still interrupt.
@@ -299,9 +362,11 @@ pub fn run_video_producer(
                     if let Some(r) = active.take() {
                         retire_reader(r);
                     }
+                    reader_pos = None;
                 }
                 Ok(Read1::Gap) => {}
                 Ok(Read1::Frame { ts, pixels }) => {
+                    reader_pos = Some(ts); // the live reader advanced (hop reference)
                     let o = *origin.get_or_insert(ts);
                     let pts_hns = (ts - o).max(0) as u64;
                     let frame = VideoFrame {
@@ -495,6 +560,218 @@ mod tests {
             run_video_producer(&input, None, SID, GEN, events_tx, msgs_rx);
         });
         (msgs_tx, events_rx)
+    }
+
+    /// Diagnostic (opt-in): where does a Windows seek's wall-clock go **over SMB**?
+    /// The spike measured the reader open at ~4-20 ms *locally*; this measures it plus
+    /// the decode-forward run-up against a real (network) file, and A/B's the current
+    /// recreate-the-reader strategy vs. an in-place `SetCurrentPosition` and a
+    /// decode-forward hop — the two candidate optimizations (task #4).
+    /// `PB_SEEK_CLIP=\\server\share\film.mkv cargo test -p pb-decode --release seek_cost_probe -- --ignored --nocapture`
+    #[test]
+    #[ignore = "diagnostic — needs PB_SEEK_CLIP (ideally over SMB)"]
+    fn seek_cost_probe() {
+        use std::time::Instant;
+        let Ok(clip) = std::env::var("PB_SEEK_CLIP") else {
+            eprintln!("PB_SEEK_CLIP not set — skipping");
+            return;
+        };
+        let input = VideoInput::Path(clip.clone().into());
+        ensure_mf();
+        unsafe {
+            // Establish geometry, duration, codec, and the origin (first frame ts) —
+            // the software RGB32 path (H.264 corpus decodes fine in software; the
+            // hardware NV12 path needs a DXGI manager the producer owns).
+            let t = Instant::now();
+            let reader0 = open_video_reader(&input).expect("open");
+            let info = stream_info(&reader0).expect("stream info");
+            let (w, h, _stride) = negotiate_rgb32(&reader0, None).expect("negotiate");
+            let mut kind = OutKind::Rgb32 {
+                stride: (w * 4) as i32,
+            };
+            eprintln!(
+                "clip: {} {}x{} {:?} dur={:?} | cold open+negotiate {:?}",
+                info.codec,
+                w,
+                h,
+                info.color,
+                info.duration,
+                t.elapsed()
+            );
+            // First frame → origin (container time base).
+            let origin = loop {
+                match read_one(&reader0, w, h, &mut kind).expect("read") {
+                    Read1::Frame { ts, .. } => break ts,
+                    Read1::Gap => {}
+                    Read1::Eos => panic!("no frames"),
+                }
+            };
+            let dur_hns = info.duration.map_or(0, |d| (d.as_nanos() / 100) as i64);
+
+            // Decode-forward from a reader until a frame's ts >= `abs_target`;
+            // returns (frames_discarded, wall, landed_ts).
+            let run_up = |reader: &IMFSourceReader, kind: &mut OutKind, abs_target: i64| {
+                let t = Instant::now();
+                let mut n = 0u32;
+                loop {
+                    match read_one(reader, w, h, kind).expect("read") {
+                        Read1::Frame { ts, .. } => {
+                            if ts >= abs_target {
+                                break (n, t.elapsed(), ts);
+                            }
+                            n += 1;
+                        }
+                        Read1::Gap => {}
+                        Read1::Eos => break (n, t.elapsed(), -1),
+                    }
+                }
+            };
+
+            // ── A. The CURRENT strategy: recreate the reader at ~40%, then run up.
+            let mid = origin + dur_hns * 2 / 5;
+            let t = Instant::now();
+            let (reader_a, mut kind_a) = reopen_at(&input, (w, h), mid, None).expect("reopen_at");
+            let reopen_wall = t.elapsed();
+            let (fa, run_a, land_a) = run_up(&reader_a, &mut kind_a, mid);
+            eprintln!(
+                "\n[A] RECREATE seek to 40%: reopen(open+negotiate+setpos) {:?} + run-up {} frames {:?} = TOTAL {:?}  (landed {:.1}s past target)",
+                reopen_wall,
+                fa,
+                run_a,
+                reopen_wall + run_a,
+                (land_a - mid) as f64 / 1e7,
+            );
+
+            // ── B. IN-PLACE on the now-WARM reader to ~60% (SetCurrentPosition +
+            //       run-up). For H.264 the warm reposition is cheap (spike); for HEVC
+            //       it's the ~1 s MFT penalty. This is the number that decides whether
+            //       in-place beats recreate for THIS clip's codec over SMB.
+            let mid2 = origin + dur_hns * 3 / 5;
+            let t = Instant::now();
+            let pv = crate::mf_poster::propvariant_i8(mid2.max(0));
+            reader_a
+                .SetCurrentPosition(&windows::core::GUID::zeroed(), &pv)
+                .expect("in-place seek");
+            let setpos_wall = t.elapsed();
+            let (fb, run_b, land_b) = run_up(&reader_a, &mut kind_a, mid2);
+            eprintln!(
+                "[B] IN-PLACE seek to 60% (warm reader): SetCurrentPosition {:?} + run-up {} frames {:?} = TOTAL {:?}  (landed {:.1}s past target)",
+                setpos_wall,
+                fb,
+                run_b,
+                setpos_wall + run_b,
+                (land_b - mid2) as f64 / 1e7,
+            );
+
+            // ── C. A small +2 s FORWARD tap, two ways from the same warm position.
+            //       C1 = in-place seek +2 s; C2 = decode-forward-only (no seek at all,
+            //       the "short-forward-hop" — mirrors the FFmpeg backend).
+            let here = land_b; // where B left the reader
+            let plus2 = here + 2 * 10_000_000;
+            let t = Instant::now();
+            let pv = crate::mf_poster::propvariant_i8(plus2.max(0));
+            reader_a
+                .SetCurrentPosition(&windows::core::GUID::zeroed(), &pv)
+                .expect("seek +2s");
+            let setpos2 = t.elapsed();
+            let (fc1, run_c1, _) = run_up(&reader_a, &mut kind_a, plus2);
+            eprintln!(
+                "\n[C1] +2s tap via IN-PLACE seek: SetCurrentPosition {:?} + run-up {} frames {:?} = TOTAL {:?}",
+                setpos2,
+                fc1,
+                run_c1,
+                setpos2 + run_c1,
+            );
+            // C2: a fresh warm reader positioned at `here`, then decode-forward 2 s
+            // WITHOUT seeking (what a short-forward-hop would do from the live reader).
+            let (reader_c, mut kind_c) =
+                reopen_at(&input, (w, h), here, None).expect("reopen at here");
+            let _ = run_up(&reader_c, &mut kind_c, here); // land at `here`
+            let (fc2, run_c2, _) = run_up(&reader_c, &mut kind_c, here + 2 * 10_000_000);
+            eprintln!(
+                "[C2] +2s tap via DECODE-FORWARD only (no seek): {} frames {:?}  <-- the short-forward-hop",
+                fc2, run_c2,
+            );
+            retire_reader(reader0);
+            retire_reader(reader_a);
+            retire_reader(reader_c);
+            eprintln!("\nreopen_wall is the SMB re-open cost the local spike never saw; compare [A] vs [B] for recreate-vs-in-place, and [C1] vs [C2] for the forward-hop.");
+        }
+    }
+
+    /// The short-forward-hop decision (task #4). The hop must fire ONLY for a forward
+    /// move within the cap from a known live position — everything else recreates,
+    /// which always lands correctly. The stale/backward cases are the ones that would
+    /// silently break (decode-forward can never reach a target behind the reader).
+    #[test]
+    fn hop_only_on_a_small_forward_move_from_a_known_position() {
+        let s = 10_000_000i64; // 1 s in hns
+        assert!(should_hop(Some(10 * s), 12 * s), "a +2 s tap hops");
+        assert!(
+            should_hop(Some(10 * s), 10 * s),
+            "seeking where we sit hops"
+        );
+        assert!(
+            should_hop(Some(10 * s), 10 * s + FORWARD_HOP_MAX_HNS),
+            "exactly at the cap still hops"
+        );
+        assert!(
+            !should_hop(Some(10 * s), 10 * s + FORWARD_HOP_MAX_HNS + 1),
+            "one tick past the cap recreates"
+        );
+        assert!(
+            !should_hop(Some(10 * s), 8 * s),
+            "a backward seek recreates"
+        );
+        assert!(
+            !should_hop(None, 12 * s),
+            "unknown position (fresh/parked reader) recreates"
+        );
+    }
+
+    /// Diagnostic (opt-in): drive the REAL producer over SMB and watch the hop fire.
+    /// Unlike `seek_cost_probe` (raw MF ops), this exercises the producer's seek
+    /// path — the code the app runs — so `PB_VIDEO_DIAG` prints HOP vs recreate.
+    /// `PB_SEEK_CLIP=\\server\share\film.mkv PB_VIDEO_DIAG=1 cargo test -p pb-decode --release producer_seek_diag -- --ignored --nocapture`
+    #[test]
+    #[ignore = "diagnostic — needs PB_SEEK_CLIP + PB_VIDEO_DIAG=1"]
+    fn producer_seek_diag() {
+        let Ok(clip) = std::env::var("PB_SEEK_CLIP") else {
+            eprintln!("PB_SEEK_CLIP not set — skipping");
+            return;
+        };
+        let (msgs, events) = spawn_input(VideoInput::Path(clip.into()));
+        let _ = events
+            .recv_timeout(Duration::from_secs(20))
+            .expect("opened");
+        // Land somewhere mid-film (recreate), then probe: +2 s (hop), +10 s (recreate,
+        // past the cap), backward (recreate). Each diag line names which path ran.
+        let seek = |ms: u64, g: u64| {
+            msgs.send(VideoProducerMsg::SeekTo {
+                target: Duration::from_millis(ms),
+                generation: SeekGeneration(g),
+            })
+            .unwrap();
+            msgs.send(VideoProducerMsg::Credit).unwrap();
+            match events
+                .recv_timeout(Duration::from_secs(30))
+                .expect("landing")
+            {
+                VideoProducerEvent::Frame(f) => eprintln!("  landed at {:?}", f.pts),
+                other => panic!("expected a landing, got {other:?}"),
+            }
+        };
+        eprintln!("-- initial seek to 30 s (recreate expected):");
+        seek(30_000, 1);
+        eprintln!("-- +2 s tap to 32 s (HOP expected):");
+        seek(32_000, 2);
+        eprintln!("-- +2 s tap to 34 s (HOP expected):");
+        seek(34_000, 3);
+        eprintln!("-- +10 s Shift-tap to 44 s (recreate expected — past the 5 s cap):");
+        seek(44_000, 4);
+        eprintln!("-- backward to 20 s (recreate expected):");
+        seek(20_000, 5);
+        let _ = msgs.send(VideoProducerMsg::Stop);
     }
 
     #[test]
