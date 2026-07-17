@@ -306,10 +306,6 @@ pub struct PanelFrame {
     /// The archive **door card** (task #105), when a door is presented. A door's frame is a
     /// 1×1 transparent sentinel, so this is the entire on-screen presence of an archive.
     pub door: Option<pb_app_core::app_core::DoorCard>,
-    /// Whether the left pane is occupied — by the tree **or** its other tab, the thumbnail
-    /// strip. The door card centres itself in what's left, and `tree.is_some()` alone would
-    /// miss the strip.
-    pub left_pane: bool,
     pub dark: bool,
     /// The panel surface alpha (0–255), from Settings ▸ Appearance ▸ *Info panel opacity*
     /// (`info_opacity` — the old HUD opacity). The winit shell has no separate `panel_opacity`
@@ -398,7 +394,6 @@ impl PanelFrame {
             // Shell-owned (fade timing); the shell sets this in `render_overlay_frame`.
             play_hint: None,
             door: core.door_card(),
-            left_pane: core.tree_panel_visible() || core.thumbs_visible(),
             dark: core.hud_dark,
             panel_alpha: opacity_to_alpha(core.settings.info_opacity),
             // Shell-owned (menu-bar visibility lives in the shell); set in render_overlay_frame.
