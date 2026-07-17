@@ -500,7 +500,7 @@ pub fn decode_item_cancellable(
         // in the prefetch window costs a solid-colour tile, never a decompression,
         // so scrubbing past a folder of 2 GB archives touches none of them. The
         // archive is read only when the viewer presses `P` to enter it.
-        crate::video::LibraryItemKind::Archive(kind) => return Ok(archive_placeholder(kind)),
+        crate::video::LibraryItemKind::Archive(kind) => return Ok(archive_placeholder(kind, fit)),
         // Exhaustive on purpose: everything below this match reads the item's whole
         // encoded bytes, so only a kind we know is an image may fall through to it.
         // A new kind gets a compile error here rather than a silent full read.
@@ -543,27 +543,105 @@ pub fn video_placeholder(container: crate::video::VideoContainer) -> DecodedImag
     }
 }
 
-/// The tile an archive **door** displays (task #104): a small flat frame whose
-/// `codec` row names the format. Returned by [`decode_item_cancellable`]
-/// *before* it requests the item's bytes, which is the door's whole contract —
-/// the archive is read only when the viewer presses `P` to enter it.
+/// A rasterized icon: straight-alpha RGBA8 pixels + its width and height. Shared
+/// (an `Arc`) because the door-glyph cache hands the same raster to every decode
+/// worker that draws a door.
+type Glyph = Arc<(Vec<u8>, u32, u32)>;
+
+/// The rasterized door glyph at `height` px, cached across calls.
 ///
-/// Deliberately tiny for the same reason as [`video_placeholder`]: it is a solid
-/// colour, so the GPU upscale is invisible and the prefetch ring can hold a
-/// folder's worth of doors without denting its budget. Squarer than the video
-/// tile (4:3) because an archive is not footage — the difference is legible at a
-/// glance while scrubbing. Phase 3 composites the per-kind icon in here.
-pub fn archive_placeholder(kind: pb_source::ArchiveKind) -> DecodedImage {
-    const W: u32 = 240;
-    const H: u32 = 180;
+/// Keyed by height because the tile is **decode-to-fit** (see
+/// [`archive_placeholder`]), so the glyph size follows the viewport. In practice
+/// that is one entry — the fit only changes on a resize — so a folder of forty
+/// doors runs `resvg` once, not forty times. Never touched on the render thread:
+/// this is decode-worker work, like any other decode.
+///
+/// `None` if the SVG can't be rasterized: a door with no glyph is still a door,
+/// and a missing icon must never fail a decode.
+fn door_glyph(height: u32) -> Option<Glyph> {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    static CACHE: OnceLock<Mutex<HashMap<u32, Option<Glyph>>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut cache = cache.lock().ok()?;
+    cache
+        .entry(height)
+        .or_insert_with(|| {
+            pb_hud::icon::rasterize(pb_hud::icon::assets::FILE_ZIPPER, height, [225, 225, 232])
+                .map(Arc::new)
+        })
+        .clone()
+}
+
+/// Alpha-composite the archive glyph into the centre of a door tile.
+fn blit_door_glyph(pixels: &mut [u8], w: u32, h: u32) {
+    // ~40% of the tile height: legible without crowding the frame.
+    let Some(glyph) = door_glyph((h * 2 / 5).max(1)) else {
+        return;
+    };
+    let (data, gw, gh) = (&glyph.0, glyph.1, glyph.2);
+    if gw > w || gh > h {
+        return;
+    }
+    let (ox, oy) = ((w - gw) / 2, (h - gh) / 2);
+    for y in 0..gh {
+        for x in 0..gw {
+            let s = ((y * gw + x) * 4) as usize;
+            let a = data[s + 3] as u32;
+            if a == 0 {
+                continue;
+            }
+            let d = (((y + oy) * w + (x + ox)) * 4) as usize;
+            // Straight-alpha source over an opaque tile: the destination stays
+            // opaque, so only the colour channels need blending.
+            for c in 0..3 {
+                let src = data[s + c] as u32;
+                let dst = pixels[d + c] as u32;
+                pixels[d + c] = ((src * a + dst * (255 - a)) / 255) as u8;
+            }
+        }
+    }
+}
+
+/// The tile an archive **door** displays (task #104): a flat 4:3 frame carrying the
+/// archive glyph, whose `codec` row names the format. Returned by
+/// [`decode_item_cancellable`] *before* it requests the item's bytes, which is the
+/// door's whole contract — the archive is read only when the viewer presses `P`.
+///
+/// **Built to fit, unlike [`video_placeholder`].** That tile can be 320×180 forever
+/// because it is a solid colour and (as its doc says) "the GPU upscale is
+/// invisible". This one carries an icon, and an icon upscaled ~12× to a 7680-wide
+/// display is a blur — so the tile is decoded to fit like any image, which is the
+/// house rule anyway ("never decode more pixels than the display shows"; SVGs are
+/// already rasterized at on-screen res). It costs one photo-sized slot in the ring,
+/// which is simply what an item costs. The *decode* stays trivial — a memset and a
+/// glyph blit, never a decompression — and that, not the texture size, is what
+/// makes a door safe to prefetch.
+///
+/// 4:3 rather than the video tile's 16:9: an archive is not footage, and the
+/// difference is legible at a glance while scrubbing.
+pub fn archive_placeholder(kind: pb_source::ArchiveKind, fit: Option<FitBox>) -> DecodedImage {
+    // The largest 4:3 box inside the viewport, so it displays 1:1 and stays crisp.
+    // Without a fit (tests, headless) a small default keeps the tile cheap.
+    const AR_W: u32 = 4;
+    const AR_H: u32 = 3;
+    let (w, h) = match fit {
+        Some(f) => {
+            let (fw, fh) = (f.max_width.max(1), f.max_height.max(1));
+            let h = (fh).min(fw * AR_H / AR_W);
+            ((h * AR_W / AR_H).max(1), h.max(1))
+        }
+        None => (240, 180),
+    };
     // A touch lighter than the video tile: a door is a place you can go, not a
     // frame that failed to decode.
-    let pixels: Vec<u8> = [38u8, 38, 42, 255].repeat((W * H) as usize);
+    let mut pixels: Vec<u8> = [38u8, 38, 42, 255].repeat((w * h) as usize);
+    blit_door_glyph(&mut pixels, w, h);
     DecodedImage {
-        width: W,
-        height: H,
-        orig_width: W,
-        orig_height: H,
+        width: w,
+        height: h,
+        orig_width: w,
+        orig_height: h,
         codec: kind.name(),
         format: PixelFormat::Rgba8,
         pixels,
@@ -1236,11 +1314,100 @@ mod tests {
     /// of doors — the property that makes doors safe where blending was not.
     #[test]
     fn the_door_tile_is_tiny_enough_to_prefetch_freely() {
-        let img = archive_placeholder(pb_source::ArchiveKind::Zip);
+        let img = archive_placeholder(pb_source::ArchiveKind::Zip, None);
         assert!(
             img.pixels.len() < 256 * 1024,
             "a door tile is {} bytes; 100 of them must not dent the ring budget",
             img.pixels.len()
+        );
+    }
+
+    /// The tile carries the glyph — the door's actual affordance. Proven by pixels
+    /// differing from the flat background, since "it rasterized" is the thing that
+    /// silently regresses (a bad SVG path returns `None` and the door goes blank).
+    #[test]
+    fn the_door_tile_has_a_glyph_composited_into_it() {
+        let img = archive_placeholder(pb_source::ArchiveKind::Zip, None);
+        let bg = [38u8, 38, 42, 255];
+        let lit = img.pixels.chunks_exact(4).filter(|p| *p != bg).count();
+        assert!(
+            lit > 500,
+            "only {lit} non-background pixels — the glyph did not composite"
+        );
+        // The centre is where the glyph is; a corner must stay bare tile.
+        let px = |x: u32, y: u32| -> [u8; 4] {
+            let i = ((y * img.width + x) * 4) as usize;
+            [
+                img.pixels[i],
+                img.pixels[i + 1],
+                img.pixels[i + 2],
+                img.pixels[i + 3],
+            ]
+        };
+        assert_eq!(px(2, 2), bg, "the corner is bare tile");
+        assert!(
+            img.pixels.chunks_exact(4).all(|p| p[3] == 255),
+            "the tile stays opaque — it is composited, not punched through"
+        );
+    }
+
+    /// Every kind shares one glyph, so two doors of different formats produce an
+    /// identical tile — one cached raster serves the folder.
+    #[test]
+    fn the_door_glyph_is_rasterized_once_and_reused() {
+        let a = archive_placeholder(pb_source::ArchiveKind::Zip, None);
+        let b = archive_placeholder(pb_source::ArchiveKind::Rar, None);
+        assert_eq!(a.pixels, b.pixels, "same glyph, same tile — one raster");
+    }
+
+    /// **Decode-to-fit.** The tile is built at display size rather than upscaled to
+    /// it: `video_placeholder` can stay 320×180 forever because a solid colour's
+    /// upscale is invisible, but this tile carries an icon, and a ~12× GPU upscale
+    /// of a glyph is a blur. Regressing to a fixed tile would not fail any other
+    /// test here — it would just quietly look bad — so pin it.
+    #[test]
+    fn the_door_tile_is_built_to_fit_so_its_glyph_stays_crisp() {
+        let big = archive_placeholder(
+            pb_source::ArchiveKind::Zip,
+            Some(FitBox {
+                max_width: 7680,
+                max_height: 2160,
+            }),
+        );
+        // The largest 4:3 box inside 7680×2160 is height-bound: 2880×2160.
+        assert_eq!((big.width, big.height), (2880, 2160));
+        assert_eq!(
+            big.width * 3,
+            big.height * 4,
+            "stays 4:3 — an archive is not footage"
+        );
+
+        // A narrow viewport binds on width instead, and never overflows it.
+        let narrow = archive_placeholder(
+            pb_source::ArchiveKind::Zip,
+            Some(FitBox {
+                max_width: 400,
+                max_height: 2000,
+            }),
+        );
+        assert!(narrow.width <= 400 && narrow.height <= 2000);
+        assert_eq!((narrow.width, narrow.height), (400, 300));
+
+        // The glyph scales with the tile — that is what "crisp" means here.
+        let small = archive_placeholder(
+            pb_source::ArchiveKind::Zip,
+            Some(FitBox {
+                max_width: 800,
+                max_height: 600,
+            }),
+        );
+        let bg = [38u8, 38, 42, 255];
+        let lit = |i: &DecodedImage| i.pixels.chunks_exact(4).filter(|p| *p != bg).count();
+        assert!(
+            lit(&big) > lit(&small) * 4,
+            "a bigger tile draws a bigger glyph ({} vs {})",
+            lit(&big),
+            lit(&small)
         );
     }
 
@@ -1257,7 +1424,10 @@ mod tests {
             pb_source::ArchiveKind::TarXz,
             pb_source::ArchiveKind::Rar,
         ] {
-            assert!(!archive_placeholder(kind).codec.is_empty(), "{kind:?}");
+            assert!(
+                !archive_placeholder(kind, None).codec.is_empty(),
+                "{kind:?}"
+            );
         }
     }
 }
