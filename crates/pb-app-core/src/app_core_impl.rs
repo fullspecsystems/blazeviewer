@@ -3481,6 +3481,26 @@ impl AppCore {
             self.video_play_pause(item);
             return;
         }
+        // An archive door (task #104): `P` **enters** it. Consistent rather than
+        // cute — `P` already acts on whatever the current item contains (play a
+        // clip, play an animation, play a Live Photo), and an archive's contents
+        // are simply reached by going in. This is the *only* path that ever reads
+        // an archive: browsing past a door costs a tile (see `engine`'s dispatch).
+        //
+        // Routed through `open_plan`, not a hand-pushed effect, so entering is the
+        // same operation as opening the archive from the picker: it ends an
+        // Open-Parent climb, and the RAM pre-flight, progress dialog and password
+        // prompt all come along unchanged. `Alt+Up` climbs back out to the folder
+        // of doors (`open_parent_cmd` anchors on the source's container).
+        if self.item_archive_kind(item).is_some() {
+            if let Some(path) = self.source.path(item).map(Path::to_path_buf) {
+                self.open_plan(
+                    pb_core::open::Source::Archive(path),
+                    pb_core::open::Cursor::First,
+                );
+            }
+            return;
+        }
         // Eagerly prepared on dwell → play instantly (no decode wait).
         if self.prepared.as_ref().is_some_and(|p| p.item == item) {
             let anim = self.prepared.take().unwrap().anim;
@@ -6803,6 +6823,17 @@ impl AppCore {
             crate::video::item_kind(self.source.as_ref(), item),
             crate::video::LibraryItemKind::Video(_)
         )
+    }
+
+    /// The format of item `item` if it is an archive **door** (task #104), else
+    /// `None` — typed off the path, no I/O. A door is an archive sitting on disk
+    /// that the viewer can enter with `P`; an archive *entry* is never one, so
+    /// this answers `None` inside an open archive.
+    pub fn item_archive_kind(&self, item: usize) -> Option<pb_source::ArchiveKind> {
+        match crate::video::item_kind(self.source.as_ref(), item) {
+            crate::video::LibraryItemKind::Archive(kind) => Some(kind),
+            crate::video::LibraryItemKind::Image | crate::video::LibraryItemKind::Video(_) => None,
+        }
     }
 
     /// The active video's Windows/Linux [`VideoSession`] bundle, if the backend is
@@ -14083,5 +14114,151 @@ mod tests {
         assert_eq!(core.left_tab, crate::overlay::LeftTab::Thumbnails);
         assert!(core.thumbs_visible());
         assert!(!core.tree_panel_visible());
+    }
+
+    // --- archive doors: entering (task #104) ------------------------------
+
+    /// A disk deck of `photo.jpg` + `album.zip` in `dir`, cursor on the door.
+    fn core_on_a_door(dir: &Path) -> AppCore {
+        let mut core = test_core();
+        let src: Arc<dyn ItemSource> = Arc::new(FsSource::new(vec![
+            dir.join("photo.jpg"),
+            dir.join("album.zip"),
+        ]));
+        core.rebuild_playlist(src, dir.to_path_buf(), Some(dir.to_path_buf()), false, 0);
+        core.displayed_item = Some(1); // the door
+        core
+    }
+
+    /// The door's only read. `P` on an archive emits exactly one archive open, with
+    /// no password on the first attempt (the shell's failure path prompts and
+    /// re-opens with `Some`, which is why guessing here would be wrong).
+    #[test]
+    fn p_on_a_door_opens_the_archive_and_nothing_else() {
+        let dir = std::env::temp_dir().join("pb_door_enter");
+        let mut core = core_on_a_door(&dir);
+        core.effects.clear();
+
+        core.toggle_play_pause();
+
+        let opens: Vec<_> = core
+            .effects
+            .iter()
+            .filter_map(|e| match e {
+                contract::CoreEffect::BeginArchiveOpen { path, password } => {
+                    Some((path.clone(), password.clone()))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            opens,
+            vec![(dir.join("album.zip"), None)],
+            "exactly one open, un-passworded"
+        );
+        assert!(
+            core.playback.is_none(),
+            "a door never starts the animation machinery"
+        );
+    }
+
+    /// Entering is an open like any other, so it ends an Open-Parent climb — else
+    /// the next `Alt+Up` would resume from a stale rung and jump somewhere absurd.
+    #[test]
+    fn entering_a_door_ends_a_climb() {
+        let dir = std::env::temp_dir().join("pb_door_climb");
+        let mut core = core_on_a_door(&dir);
+        core.climb_anchor = Some(dir.join("somewhere/else"));
+
+        core.toggle_play_pause();
+
+        assert_eq!(core.climb_anchor, None);
+    }
+
+    /// `P` keeps its existing meanings — the door arm must not shadow a photo.
+    #[test]
+    fn p_on_a_photo_is_unaffected_by_the_door_arm() {
+        let dir = std::env::temp_dir().join("pb_door_photo");
+        let mut core = core_on_a_door(&dir);
+        core.displayed_item = Some(0); // the .jpg
+        core.effects.clear();
+
+        core.toggle_play_pause();
+
+        assert!(
+            !core
+                .effects
+                .iter()
+                .any(|e| matches!(e, contract::CoreEffect::BeginArchiveOpen { .. })),
+            "a photo must never open an archive"
+        );
+    }
+
+    /// Inside an open archive, an entry named `inner.zip` is **not** a door — so `P`
+    /// cannot enter it. Nesting stays unrepresentable rather than merely refused.
+    #[test]
+    fn p_inside_an_archive_cannot_enter_a_nested_zip() {
+        let mut core = archive_core(&["a.jpg", "inner.zip"]);
+        core.displayed_item = Some(1);
+        core.effects.clear();
+
+        assert_eq!(core.item_archive_kind(1), None, "an entry is never a door");
+        core.toggle_play_pause();
+        assert!(
+            !core
+                .effects
+                .iter()
+                .any(|e| matches!(e, contract::CoreEffect::BeginArchiveOpen { .. })),
+            "a nested .zip entry must not open"
+        );
+    }
+
+    /// **The loop the feature promises**: enter a door, then climb back out to the
+    /// folder of doors so the next one is a keypress away. The climb half already
+    /// worked (`open_parent_cmd` anchors on the source's container); this pins the
+    /// two halves together, which is what a viewer actually does.
+    #[test]
+    fn enter_a_door_then_climb_back_out_to_the_folder_of_doors() {
+        let dir = std::env::temp_dir().join("pb_door_loop");
+        let mut core = core_on_a_door(&dir);
+
+        // 1. P enters album.zip.
+        core.effects.clear();
+        core.toggle_play_pause();
+        assert!(core
+            .effects
+            .iter()
+            .any(|e| matches!(e, contract::CoreEffect::BeginArchiveOpen { path, .. } if *path == dir.join("album.zip"))));
+
+        // 2. The archive deck lands (what the shell feeds back as ArchiveResolved).
+        let entries: Arc<dyn ItemSource> = Arc::new(FakeArchive {
+            names: vec!["1.jpg".to_string(), "2.jpg".to_string()],
+            container: dir.join("album.zip"),
+        });
+        core.apply_archive(crate::scan::Resolved {
+            root: dir.join("album.zip"),
+            scan_root: None,
+            recursive: false,
+            source: entries,
+            start: 0,
+        });
+        assert_eq!(core.source.len(), 2, "viewing inside the archive");
+
+        // 3. Alt+Up climbs out to the folder that holds the archive — the folder of
+        //    doors, which is where the next door is.
+        core.effects.clear();
+        core.open_parent_cmd();
+        let scanned = core.effects.iter().rev().find_map(|e| match e {
+            contract::CoreEffect::BeginDirScan {
+                source: pb_core::open::Source::Scan { roots, .. },
+                ..
+            } => roots.first().cloned(),
+            _ => None,
+        });
+        assert_eq!(
+            scanned,
+            Some(dir),
+            "climbing out of an archive lands on its folder"
+        );
     }
 }
