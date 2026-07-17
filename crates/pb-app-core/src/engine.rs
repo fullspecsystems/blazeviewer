@@ -543,40 +543,94 @@ pub fn video_placeholder(container: crate::video::VideoContainer) -> DecodedImag
     }
 }
 
-/// The tile an archive **door** displays (task #104): a flat 4:3 frame carrying the
-/// archive glyph, whose `codec` row names the format. Returned by
-/// [`decode_item_cancellable`] *before* it requests the item's bytes, which is the
-/// door's whole contract — the archive is read only when the viewer presses `P`.
+/// The **door artwork**: a zippered folder with photos peeking out, drawn by the owner
+/// (2026-07-17) and shipped per platform to match the OS's own folder colour —
+/// manila on Windows (Explorer), blue everywhere else (Finder, and GNOME Adwaita /
+/// KDE Breeze both lean blue too).
 ///
-/// Deliberately flat and tiny, exactly like [`video_placeholder`]: it is a solid
-/// colour, so the GPU upscale is invisible and the prefetch ring can hold a folder's
-/// worth of doors without denting its budget.
+/// A viewer only ever sees one, so the split costs nothing in consistency — unlike
+/// keying colour off the *format*, which would have put `.cbz` and `.cbr` (both
+/// comics) in different colours for a reason nothing on screen explains.
+#[cfg(windows)]
+const DOOR_ART: &[u8] = include_bytes!("../assets/folder-zip-yellow.webp");
+#[cfg(not(windows))]
+const DOOR_ART: &[u8] = include_bytes!("../assets/folder-zip-blue.webp");
+
+/// The finished door tile — artwork composited onto the backdrop — built once for the
+/// process as `(pixels, w, h)`.
+///
+/// Every door in every folder shows the same picture (only `codec` differs), so the
+/// WebP decode and the composite each run exactly once and each call just clones the
+/// buffer. Never per frame: this is decode-worker work.
+///
+/// `None` if the art can't be decoded, which degrades to a flat tile rather than
+/// failing the decode — a door with no picture is still a door, and the pill still
+/// says it opens.
+fn door_tile() -> Option<&'static (Vec<u8>, u32, u32)> {
+    use std::sync::OnceLock;
+    static TILE: OnceLock<Option<(Vec<u8>, u32, u32)>> = OnceLock::new();
+    TILE.get_or_init(|| {
+        let art = decode_named_bytes("door.webp", DOOR_ART, None, false).ok()?;
+        let mut pixels: Vec<u8> = DOOR_BG.repeat((art.width * art.height) as usize);
+        // Straight-alpha source over an opaque backdrop: only the colour channels
+        // blend, and the result stays opaque.
+        for (dst, src) in pixels.chunks_exact_mut(4).zip(art.pixels.chunks_exact(4)) {
+            let a = src[3] as u32;
+            if a == 0 {
+                continue;
+            }
+            for c in 0..3 {
+                dst[c] = ((src[c] as u32 * a + dst[c] as u32 * (255 - a)) / 255) as u8;
+            }
+        }
+        Some((pixels, art.width, art.height))
+    })
+    .as_ref()
+}
+
+/// The door tile's backdrop: a touch lighter than the video tile, because a door is a
+/// place you can go rather than a frame that failed to decode.
+const DOOR_BG: [u8; 4] = [38, 38, 42, 255];
+
+/// The tile an archive **door** displays (task #104): the folder artwork on a flat
+/// backdrop, with `codec` naming the format. Returned by [`decode_item_cancellable`]
+/// *before* it requests the item's bytes, which is the door's whole contract — the
+/// archive is read only when the viewer presses `P`.
 ///
 /// **The affordance is the shell's play-hint pill, not this tile** (owner,
-/// 2026-07-16). A door briefly carried the archive glyph baked in here, which meant
-/// rasterizing an icon drawn for 16 px at the full height of a 7680-wide display —
-/// the owner's verdict was that it looked like what it was. The pill already exists,
-/// already means "`P` acts on this item", and renders natively at a fixed size, so it
-/// stays crisp for free and this tile gets to be cheap again. See
-/// `AppCore::play_hint_kind` (`3`) / `play_hint_persistent`.
+/// 2026-07-16). A door briefly carried a Font Awesome glyph baked in here, which meant
+/// an icon drawn for 16 px stretched to the full height of a 7680-wide display. The
+/// pill fixed that: it already means "`P` acts on this item" and renders natively at a
+/// fixed size. This artwork is the tile *earning its place* rather than apologising —
+/// it is drawn to be seen large. See `AppCore::play_hint_kind` (`3`) /
+/// `play_hint_persistent`.
 ///
-/// 4:3 rather than the video tile's 16:9: an archive is not footage.
+/// The art is composited onto an **opaque** backdrop rather than shipped with its
+/// alpha: every other decoded image reaches the ring opaque, and relying on the
+/// present path to blend a transparent frame would be a new assumption for one item
+/// type. The drop shadow disappearing against the dark backdrop is accepted (owner).
 ///
-/// The tile itself is a placeholder in the honest sense — printing the file's name
-/// with a prominent extension is the eventual design (owner's lean, deferred: it
-/// needs design work, and baked-in text would hit the same upscale trap the glyph
-/// did, so it likely belongs in the shell's overlay too).
+/// **Scaling: it is just an image.** No per-item rule — the door rides whatever
+/// `ScaleMode` the viewer is already in, like a photo (owner, 2026-07-17: *"I don't
+/// think it's wrong to just have it match the display mode the user is already in.
+/// It's not super crisp on a 6k monitor, but it's just an icon (albeit a very big
+/// one)"*). Worth knowing that `Fit` genuinely **upscales** — `view::base_scale` is
+/// `(sw/rw).min(sh/rh)` with no clamp to 1, and `pb_render::fit_rect`'s "we do not
+/// upscale" doc describes a function that is not on the live path — so 1024 px art
+/// shows at ~2.1× on a 7680×2160 display. Accepted; a 2048 px export would land at
+/// ~1.05× and is a drop-in swap if it ever grates.
 pub fn archive_placeholder(kind: pb_source::ArchiveKind) -> DecodedImage {
-    const W: u32 = 320;
-    const H: u32 = 240;
-    // A touch lighter than the video tile: a door is a place you can go, not a frame
-    // that failed to decode. 4:3 rather than video's 16:9 — an archive is not footage.
-    let pixels: Vec<u8> = [38u8, 38, 42, 255].repeat((W * H) as usize);
+    let (pixels, w, h) = match door_tile() {
+        Some((px, w, h)) => (px.clone(), *w, *h),
+        // The art failed to decode: a flat tile still reads as an item, and the pill
+        // still says `P` opens it.
+        None => (DOOR_BG.repeat(320 * 240), 320, 240),
+    };
     DecodedImage {
-        width: W,
-        height: H,
-        orig_width: W,
-        orig_height: H,
+        width: w,
+        height: h,
+        orig_width: w,
+        orig_height: h,
         codec: kind.name(),
         format: PixelFormat::Rgba8,
         pixels,
@@ -1200,7 +1254,12 @@ mod tests {
         let img = decode_item(&src, 0, None, true).expect("a door needs no read");
         assert_eq!(img.codec, "7z");
         assert!(img.is_well_formed(), "tile pixels match its geometry");
-        assert_eq!((img.width, img.height), (320, 240));
+        // Identify the tile by what it *is*, not by a size that moves whenever the
+        // artwork is re-exported.
+        assert_eq!(
+            (img.width, img.height),
+            door_tile().map_or((320, 240), |(_, w, h)| (*w, *h))
+        );
     }
 
     /// **The feature's central promise.** Both leaks Phase 0 fixed lived in entry
@@ -1236,42 +1295,89 @@ mod tests {
                 ),
             ] {
                 let img = got.unwrap_or_else(|e| panic!("{file} via {entry}: {e:?}"));
-                assert_eq!(
-                    (img.width, img.height),
-                    (320, 240),
+                assert!(
+                    !img.codec.is_empty() && img.is_well_formed(),
                     "{file} via {entry} should be the door tile"
                 );
             }
         }
     }
 
-    /// The tile stays cheap enough that the prefetch ring can hold a folder's worth
-    /// of doors — the property that makes doors safe where blending was not. Tied to
-    /// the real budget rather than a magic size, so it stays meaningful if the tile's
-    /// dimensions change: a hundred doors must not cost even 5% of the ring.
+    /// A ring full of doors must never be the thing that exhausts the byte budget: the
+    /// ring is capped at 64 slots, so the door tile has to be small enough that the
+    /// *slot* cap binds first. Stated against the real constants so it survives the
+    /// tile's dimensions changing — which they have, twice.
+    ///
+    /// Note this is a **comfort** property, not the safety one. What makes a door safe
+    /// to prefetch past is that its decode never reads the archive
+    /// (`a_door_is_never_read_through_any_entry_point`), not its texture size.
     #[test]
-    fn the_door_tile_is_tiny_enough_to_prefetch_freely() {
+    fn a_full_ring_of_doors_fits_the_byte_budget() {
         let img = archive_placeholder(pb_source::ArchiveKind::Zip);
-        let hundred = 100 * img.pixels.len() as u64;
+        let slots = RING_BUDGET_BYTES / img.pixels.len() as u64;
         assert!(
-            hundred < RING_BUDGET_BYTES / 20,
-            "100 doors = {} MB of a {} MB ring budget",
-            hundred / 1_000_000,
-            RING_BUDGET_BYTES / 1_000_000
+            slots >= 64,
+            "the ring budget affords only {slots} door tiles ({} MB each); the 64-slot \
+             cap must bind before the byte budget",
+            img.pixels.len() / 1_000_000
         );
     }
 
-    /// The tile is **flat** — the affordance is the shell's pill, not a giant baked-in
-    /// glyph (owner, 2026-07-16). Pin it: a future "let's draw something on the tile"
-    /// change should have to face this test and the reasoning on `archive_placeholder`.
+    /// The tile carries the owner's folder artwork, composited **opaque** onto the
+    /// backdrop. Both halves matter: a silent failure to decode the WebP would leave a
+    /// flat tile that still passes every other test here, and shipping the art's alpha
+    /// through would ask the present path to blend a transparent frame — a new
+    /// assumption no other item type makes.
     #[test]
-    fn the_door_tile_is_flat_because_the_pill_is_the_affordance() {
+    fn the_door_tile_carries_the_folder_artwork() {
         let img = archive_placeholder(pb_source::ArchiveKind::Zip);
-        let bg = [38u8, 38, 42, 255];
+        let lit = img.pixels.chunks_exact(4).filter(|p| *p != DOOR_BG).count();
         assert!(
-            img.pixels.chunks_exact(4).all(|p| p == bg),
-            "the door tile is a solid colour, so its GPU upscale stays invisible"
+            lit > 10_000,
+            "only {lit} pixels differ from the backdrop — the artwork did not decode"
         );
+        assert!(
+            img.pixels.chunks_exact(4).all(|p| p[3] == 255),
+            "the tile is opaque: the art is composited, not passed through with alpha"
+        );
+        assert!(img.is_well_formed(), "pixels match the tile's geometry");
+    }
+
+    /// **Both** artworks decode, on every platform — not just the one this build ships.
+    /// `DOOR_ART` is `cfg`-selected, so a corrupt or re-exported blue file would sail
+    /// through every Windows build and CI run and only surface on a Mac. Same blind
+    /// spot as the `cfg(macos)` routing arms; cheap to close here.
+    #[test]
+    fn both_platform_artworks_decode() {
+        for (name, bytes) in [
+            (
+                "yellow",
+                include_bytes!("../assets/folder-zip-yellow.webp").as_slice(),
+            ),
+            (
+                "blue",
+                include_bytes!("../assets/folder-zip-blue.webp").as_slice(),
+            ),
+        ] {
+            let img = decode_named_bytes("door.webp", bytes, None, false)
+                .unwrap_or_else(|e| panic!("the {name} door artwork does not decode: {e:?}"));
+            assert!(img.is_well_formed(), "{name}");
+            assert_eq!(img.width, img.height, "{name}: the art is square");
+            assert!(
+                img.pixels.chunks_exact(4).any(|p| p[3] < 255),
+                "{name}: expected an alpha channel to composite over the backdrop"
+            );
+        }
+    }
+
+    /// One decode, one composite, one picture for every kind — a folder of forty doors
+    /// must not re-run the WebP decode forty times.
+    #[test]
+    fn every_door_shares_one_decoded_tile() {
+        let a = archive_placeholder(pb_source::ArchiveKind::Zip);
+        let b = archive_placeholder(pb_source::ArchiveKind::Rar);
+        assert_eq!(a.pixels, b.pixels, "same artwork, built once");
+        assert_ne!(a.codec, b.codec, "only the format name differs");
     }
 
     /// Every kind names itself, so the tile never shows a blank format row.

@@ -14,7 +14,8 @@ with any pre-release suffix carried only by the tag.
   picked it from Open File. `Alt+Up` takes you back out to the folder, so you can go straight
   into the next one. Encrypted archives ask for the password the same way they always have.
   A folder that holds nothing but archives now opens instead of reporting no images.
-  Browsing past an archive never opens or unpacks it — only pressing `P` does.
+  Browsing past an archive never opens or unpacks it — only pressing `P` does. Archives show a
+  zippered folder, and a button on screen tells you `P` opens it.
 
 ### Fixed
 - **Video playback is smooth again (macOS).** MKV and WebM files now play through the same

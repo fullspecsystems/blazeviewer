@@ -75,13 +75,15 @@ decode is drawing a tile, not reading the archive* (`engine.rs:399` returns befo
 That is the line the owner drew — *"not automatic where you suddenly OOM the user"* — enforced by
 where the `return` sits, not by a rule.
 
-> **Corrected in Phase 3 (2026-07-16).** Earlier revisions added *"prefetch can hold a hundred
-> doors for the price of a hundred solid tiles"*, borrowing `video_placeholder`'s promise. That
-> is **false now and was never the argument.** The video tile can stay 320×180 because a solid
-> colour's GPU upscale is invisible; a door carries an icon, and an icon upscaled ~12× to a
-> 7680-wide display is a blur — so the tile is **decode-to-fit** and costs one photo-sized ring
-> slot, i.e. what any item costs. What makes a door safe is the **decode**: a memset and a glyph
-> blit, never a decompression. Texture size was never the point.
+> **Stop arguing from the tile's size (2026-07-17).** Earlier revisions borrowed
+> `video_placeholder`'s promise — *"prefetch can hold a hundred doors for the price of a hundred
+> solid tiles"* — and it has since been true, false, true, and false again as the tile went
+> flat → decode-to-fit glyph → flat → the owner's 1024² artwork (~4 MB). **It was never the
+> argument.** A door is safe to prefetch past because *its decode returns above the
+> `source.bytes()` request* — no archive is read, whatever the tile weighs. The size only has to
+> clear a comfort bar, which is now stated against the real constants
+> (`a_full_ring_of_doors_fits_the_byte_budget`: the ring's 64-slot cap must bind before its byte
+> budget; a door is ~4 MB against a fit photo's up-to-66 MB).
 
 The other standing objections against blending:
 
