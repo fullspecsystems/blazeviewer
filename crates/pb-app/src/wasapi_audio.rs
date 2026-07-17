@@ -675,6 +675,18 @@ fn run_engine(
             // Drain commands (a disconnect = teardown).
             loop {
                 match cmd_rx.try_recv() {
+                    // 🪤 "Audio takes a couple seconds to come back on play (or after a
+                    // seek)" is almost always the OUTPUT DEVICE, not this engine —
+                    // check that FIRST before instrumenting here. A Bluetooth A2DP link
+                    // (esp. AirPods, which idle-sleep in ~1 s when off-head via the
+                    // proximity sensor) powers down while `Stop()`ped and takes 1–3 s to
+                    // re-establish on the next `Start()`. Signature (measured 2026-07-17,
+                    // `PB_AUDIO_TRACE`): `Start()` returns in <1 ms, the ~200 ms buffer is
+                    // full, yet the endpoint doesn't drain and there are NO underruns —
+                    // it's just the wireless link waking up. Reproduce wired and it's
+                    // gone. The engine-side mitigation (feeding silence during pause to
+                    // keep the link warm) was prototyped and reverted as unnecessary —
+                    // it's in git history if a device ever makes it worth shipping.
                     Ok(Cmd::Resume) => {
                         if !playing {
                             sink.client.Start().map_err(w)?;
@@ -691,18 +703,35 @@ fn run_engine(
                     }
                     Ok(Cmd::SetMuted(m)) => muted = m,
                     Ok(Cmd::Seek(pos)) => {
+                        // Wall time of the reseek — the term that stacks on the core's
+                        // settle residual (PB_AV_SYNC) to make the felt A/V gap. The
+                        // decoder seek is where SMB shows up (FfAudioDecoder does an
+                        // avformat_seek_file + decode-forward to the target).
+                        let t0 = trace_on().then(std::time::Instant::now);
                         let was_playing = playing;
                         if playing {
                             let _ = sink.client.Stop();
                             playing = false;
                         }
                         let _ = sink.client.Reset(); // flush the queued buffer (needs Stopped)
+                        let t_seek = trace_on().then(std::time::Instant::now);
                         engine.reseek(pos)?;
+                        let seek_wall = t_seek.map(|t| t.elapsed());
                         engine.fill(&sink, muted)?; // preroll at the new position
                         shared.set_position(pos);
                         if was_playing {
                             sink.client.Start().map_err(w)?;
                             playing = true;
+                        }
+                        if let Some(t0) = t0 {
+                            atrace(|| {
+                                format!(
+                                    "reseek to {:.2}s: decoder seek {:?}, total (stop+reset+seek+preroll) {:?}",
+                                    pos.as_secs_f64(),
+                                    seek_wall.unwrap_or_default(),
+                                    t0.elapsed(),
+                                )
+                            });
                         }
                     }
                     // The audio track switch (task #99). The open can block for
