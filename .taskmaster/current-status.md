@@ -1,16 +1,18 @@
 # Blaze Viewer — Current Status (session handoff)
 
-_Last updated: 2026-07-17 (rev 11). Supersedes rev 10. **Audio track selection AND
-FFmpeg-first audio decode are built** on branch `feat/audio-track-selection` — films get
-sound on Windows (MF can't decode AC-3/E-AC-3/DTS, `0xC00D36B4`, corpus-probed; the
-trimmed FFmpeg already ships the decoders at zero bundle cost). `90330d1`: WASAPI engine
-decodes FFmpeg-first (MF fallback), sink takes the source format + `AUTOCONVERTPCM` (OS
-SRC + center-aware downmix; mix-format fallback kept), switches carry both (ff, mf)
-currencies and rebuild the sink pipeline-first on format change. `889aaec` fixed the
-flyout (tracks over the poster; muda's auto-flipped checkmarks). **Owner audible verify
-pending** (no endpoint over RDP); needs `--features libheif,dav1d,ffprobe`. Next queued:
-the MF poster deep-walk port (task #1, owner-approved — Windows posters measure pure
-black on films)._
+_Last updated: 2026-07-17 (rev 12). Supersedes rev 11. **Audio track selection + FFmpeg-first
+decode built** on `feat/audio-track-selection`; films get sound on Windows. Owner smoke-tested:
+default track plays clean (7.1 main), but hit crackle-after-switch, can't-switch-back, and
+no-default-tick. **All three were one bug — the FFmpeg→MF locator bridge — now DELETED
+(`bcb20af`).** The bridge overwrote each audio row's `FfStream` locator with its MF twin, so on
+the FFmpeg-first engine switches fell to the MF decoder (crackly AC-3 / refused DTS) and the
+tick couldn't resolve. Also fixed (`e682d3e`): >2ch sinks now use `WAVEFORMATEXTENSIBLE` +
+speaker mask (was bare `WAVEFORMATEX` → garbled multichannel); track-switch open moved
+OFF-thread (was blocking the engine thread for SMB seconds → buffer drain + master-clock jump →
+jerky video); tick report un-deduped + menu sig keyed on (generation, id). `PB_AUDIO_TRACE=1`
+diag lever added. **Owner re-verify pending** (needs `--features libheif,dav1d,ffprobe`; the
+bridge deletion should make switches decode via FFmpeg like the clean default does). Next
+queued: MF poster deep-walk port (task #1 — Windows posters measure pure black on films)._
 
 ## What we worked on today
 
