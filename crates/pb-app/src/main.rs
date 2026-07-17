@@ -810,6 +810,7 @@ impl App {
             compare_pin_id: None,
             compare_carry: None,
             epoch: 1,
+            content_gen: 1,
             root,
             scan_root,
             recursive,

@@ -166,6 +166,7 @@ impl AppCore {
             compare_pin_id: None,
             compare_carry: None,
             epoch: 1,
+            content_gen: 1,
             root: PathBuf::new(),
             scan_root: None,
             recursive: false,
@@ -634,7 +635,8 @@ impl AppCore {
                 self.failed.remove(&item);
                 self.preview_resident.remove(&item);
                 self.upgrade_done.remove(&item);
-                self.invalidate_geometry();
+                // A saved rotation rewrites the file's pixels-as-displayed → content change.
+                self.invalidate_content();
                 self.load_current_sync();
                 self.target_item = self.playlist.current();
                 self.request_prefetch();
@@ -679,7 +681,8 @@ impl AppCore {
                         // scrolled off (or is no longer in the deck), the cache drop above is
                         // enough — it re-decodes reverted next time it's shown.
                         if idx == self.displayed_item {
-                            self.invalidate_geometry();
+                            // The reverted orientation rewrote the file's pixels → content change.
+                            self.invalidate_content();
                             self.load_current_sync();
                             self.target_item = self.playlist.current();
                             self.request_prefetch();
@@ -2945,7 +2948,7 @@ impl AppCore {
         // Keep every undo entry (all path-keyed, deck-independent) so the delete that emptied the
         // deck — and any rotation recorded before it — stay undoable; the restore rebuilds a
         // one-photo deck.
-        self.invalidate_geometry();
+        self.invalidate_content();
         self.displayed_item = None;
         self.target_item = None;
         self.clear_compare_pin();
@@ -3072,7 +3075,8 @@ impl AppCore {
         // for its ring-size estimate, so clear the stale metadata only afterward. Nothing is
         // presented yet (`displayed_item = None`), so readiness holds the old deck's frame
         // (kept by the renderer) with the loading pie until the first new frame lands.
-        self.invalidate_geometry();
+        // A new deck reassigns every index → content change (purges retained Originals, #106.7).
+        self.invalidate_content();
         // Drop the old deck's metadata (a genuinely new frame is incoming) and mark it
         // un-presented at this epoch: `displayed_item` still names the logical current index,
         // but `presented_epoch = None` makes `target_caught_up` false, so `drain_results`
@@ -6348,6 +6352,17 @@ impl AppCore {
         self.behind = behind;
         // Drop decodes staged for the old geometry; they free their pool budget.
         self.pending_uploads.clear();
+    }
+
+    /// A **content** change (as opposed to a bare geometry change): the pixels behind one or
+    /// more indices changed — a deck rebuild (indices reassigned), source replacement, a saved
+    /// EXIF rotation, delete/undo, or teardown. Bumps `content_gen` (purging every retained
+    /// full-resolution `Original`, #106.7 §2) and then invalidates geometry as usual. Use this
+    /// — not bare `invalidate_geometry` — anywhere index `N` may now name different pixels; a
+    /// resize / scale toggle keeps `content_gen` so a retained Original survives it.
+    pub fn invalidate_content(&mut self) {
+        self.content_gen = self.content_gen.wrapping_add(1);
+        self.invalidate_geometry();
     }
 
     /// Start / stop the slideshow (task #23, the `S` key + View ▸ Slideshow). Starting
@@ -13640,6 +13655,71 @@ mod tests {
             core.current.as_ref().map(|m| (m.w, m.h)),
             Some((100, 80)),
             "invalidate_geometry must keep `current`"
+        );
+    }
+
+    // ── #106.7 §2: content_gen is split from the geometry epoch ──
+
+    #[test]
+    fn bare_geometry_invalidation_keeps_the_content_generation() {
+        // A resize / fit-toggle bumps only the geometry epoch; the content generation is
+        // unchanged, so a retained full-res Original decoded for the same pixels survives it.
+        let mut core = test_core();
+        let (e0, c0) = (core.epoch, core.content_gen);
+        core.invalidate_geometry();
+        assert_eq!(core.epoch, e0.wrapping_add(1), "geometry epoch advances");
+        assert_eq!(
+            core.content_gen, c0,
+            "content generation is unchanged by a resize"
+        );
+    }
+
+    #[test]
+    fn scale_mode_change_is_geometry_only_not_content() {
+        // Fit↔1:1 is the central #106.7 toggle: it must NOT purge retained Originals.
+        let mut core = test_core();
+        let c0 = core.content_gen;
+        let e0 = core.epoch;
+        core.set_scale_mode(ScaleMode::Original);
+        assert_eq!(core.content_gen, c0, "a scale-mode change is geometry-only");
+        assert_eq!(
+            core.epoch,
+            e0.wrapping_add(1),
+            "…but still bumps the geometry epoch"
+        );
+    }
+
+    #[test]
+    fn invalidate_content_bumps_both_generations() {
+        let mut core = test_core();
+        let (e0, c0) = (core.epoch, core.content_gen);
+        core.invalidate_content();
+        assert_eq!(
+            core.content_gen,
+            c0.wrapping_add(1),
+            "content generation advances"
+        );
+        assert_eq!(
+            core.epoch,
+            e0.wrapping_add(1),
+            "a content change also invalidates geometry"
+        );
+    }
+
+    #[test]
+    fn a_new_deck_advances_the_content_generation() {
+        // A deck rebuild reassigns every index — index N now names different pixels, so the
+        // content generation must advance (this is what purges retained Originals).
+        let mut core = test_core();
+        let c0 = core.content_gen;
+        let root = PathBuf::from("photos");
+        let src: Arc<dyn ItemSource> =
+            Arc::new(FsSource::new(vec![root.join("a.jpg"), root.join("b.jpg")]));
+        core.rebuild_playlist(src, root, None, false, 0);
+        assert_eq!(
+            core.content_gen,
+            c0.wrapping_add(1),
+            "a new deck is a content change"
         );
     }
 

@@ -435,6 +435,14 @@ pub struct AppCore {
     /// Geometry generation; bumped on resize / fit toggle. Stale-epoch decodes are discarded
     /// so an old-size result can't land on screen.
     pub epoch: u64,
+    /// Content generation; bumped whenever the *pixels behind an index change* — a deck
+    /// rebuild (indices reassigned), source replacement, saved EXIF rotation, delete/undo,
+    /// or teardown. Distinct from `epoch` (#106.7): a resize / scale toggle bumps only the
+    /// geometry `epoch`, so a retained full-resolution `Original` texture survives it, but a
+    /// `content_gen` bump means index `N` now names *different pixels*, so every retained
+    /// Original must be purged (bypassing the geometry epoch would present the old deck's item
+    /// N as the new deck's — the sharpest bug in the Codex review).
+    pub content_gen: u64,
     /// The root the playlist was opened from — for showing paths relative to it.
     pub root: PathBuf,
     /// The directory the current playlist was scanned from (enables the `Ctrl+R` recursive
