@@ -1,352 +1,272 @@
 # Blaze Viewer — Current Status (session handoff)
 
-_Last updated: 2026-07-16 (rev 9). Supersedes rev 8. **Subtitles display + configure on
-Windows** (owner-confirmed on screen), and **the Playback menu + subtitle track flyout now
-ship on Windows** (`756cfff`). Next: the Audio flyout, after an FFmpeg→MF bridge._
+_Last updated: 2026-07-17 (rev 10). Supersedes rev 9. **Archives are doors** (#104) and
+**the door card** (#105) ship on Windows, owner-confirmed on screen. What's left: command
+gating on a door, the macOS card, and the blaze measurement gate. Rev 9's subtitle work
+shipped; its still-live remainder (the FFmpeg→MF audio bridge) is carried forward below._
 
 ---
 
-# ✅ DONE — the Playback menu (#99, Windows) — `756cfff`
+# Where we are
 
-**Owner ask (2026-07-16):** "menu parity with macOS for the 'Playback' menu for selecting
-subtitles and audio tracks."
-
-**Owner decision when I hit the audio blocker (see below): _"Ship Subtitles flyout now,
-bridge audio next."_** So:
-
-## The shipped shape (matches macOS `MenuBar.swift`)
-
-Transport moved out of Image; the subtitle items moved out of View.
+An archive in a folder is no longer skipped — it's a **door**: a deck item you can see and
+step onto, showing a card that says *what it is* and *how to enter*. `P` (or the Open
+button) enters it, and it behaves like a folder from there. Nothing about the archive is
+read until you do that.
 
 ```
-Playback
-  Play/Pause            P
-  Next Frame            .
-  Previous Frame        ,
-  ──────────────────────
-  Subtitles             C   ← on/off toggle
-  Subtitle Track      ▸     ← Automatic / ──── / English · SubRip / …   WORKS
-  ──────────────────────
-  Mute Live Photo Audio M
+  ┌──────────────────────────┐
+  │  ZIP Archive             │   ← header: Help's own title type + separator
+  ├──────────────────────────┤
+  │                          │
+  │        [artwork]         │   ← the owner's folder art (yellow/Windows, blue/mac+Linux)
+  │                          │
+  │   wedding-photos.zip     │   ← middle-elided
+  │                          │
+  │        Open (P)          │
+  └──────────────────────────┘
 ```
 
-The **Audio flyout is deliberately absent on Windows** until the bridge below exists.
+**The one idea that made it work:** a door is **UI, not image content**. Four separate
+defects (a 12× glyph, a photo-sized ring slot, a grey box, 2.1× magnification) all had that
+one root cause. The frame is now a **1×1 transparent sentinel**; the card is chrome the
+shell draws. Doors also *dissolved* the original blocker — a folder of only archives used to
+produce zero scan items, so there was nothing to navigate.
 
-**Two items, not one** (owner, 2026-07-15, reaffirmed 2026-07-16): "Subtitles" is on/off,
-"Subtitle Track" is *which*. Fusing them was the original defect — turning subtitles off had
-to forget the track you picked, so picking Chinese and toggling twice gave you English.
+---
 
-**Verified live** on a 26-track film over SMB: `Automatic` at row 1, a separator, then rows
-2..26 with canonical indices and the tick on the resolved track. `PB_SUBTITLE_TRACE=1` now
-prints what the flyout would show (`menu: subtitle track flyout = […]`) — a native menu's
-contents are invisible to everything but a human with a mouse, which makes "is the list
-right?" the one question about this feature no test can answer.
+# 🔜 What's left
 
-### How it works — don't redesign this
+## 1. Command gating on a door — the live thread (owner discussion 2026-07-17)
 
-macOS pulls its rows in `NSMenuDelegate.menuNeedsUpdate` (fires as the menu opens → never
-stale). muda has **no such hook**: `build_menu` builds the tree **once** and
-`apply_menu_to_native` only mirrors checkmarks onto it. So rows are **rebuilt on change**,
-guarded by `SubtitleMenuSig` (`main.rs`) — a `Copy`, allocation-free tuple of (item /
-showing / probed / active / on). Calling `subtitle_picker_rows()` every tick would format a
-`Vec<String>` of track labels behind a playing video, which is exactly the hot path. The
-rules live in the pure `menu::subtitle_track_rows` (testable with no menu/window/OS); the
-muda builder just walks the result.
+**The real bug, confirmed:** `copy_image` (`app_core_impl.rs:5395`) guards only on
+`displayed_item`, then calls `decode_item` — which on a door returns the 1×1 sentinel. So
+**`Ctrl+C` on a door silently copies a 1×1 transparent pixel and toasts success.** Confident
+and invisible; this is Codex's blocker 4 and it's real.
 
-⚠ **Never disable the flyout's holder** to mean "no video". macOS learned this the hard way:
-a disabled submenu item can't be hovered, so its delegate never fires again and nothing can
-re-enable it — greying it out once greyed it out *permanently*. State lives in the submenu's
-**contents**, which are always re-derivable.
+**Already correct:** `copy_path` (`:5424`) reads `source.path(item)`, which for a door *is*
+the archive. Works today, no change. ⚠ Note there is **no "Copy Filename" command** in the
+codebase — `ids::COPY_PATH` is labelled **"Copy File Path"** and copies the full path.
 
-**The core API it stands on** — shell-agnostic, do not rebuild any of it:
-- `AppCore::subtitle_picker_rows() -> Vec<PickerRow>` (`app_core_impl.rs:8109`) — row 0 is
-  **Off**, a real choice. Labels come from `tracks::track_summary` — **do not format
-  tracks twice**.
-- `AppCore::select_subtitle_row(row)` (`:8320`) — out-of-range is *ignored, not clamped*
-  (a list that changed under the user must not silently select a different track).
-- `AppCore::subtitle_tracks_known()` (`:8307`) / `subtitles_on()` (`:8301`).
-- **The tri-state must not collapse:** no video → "No Video"; video whose probe hasn't
-  landed → "Reading Tracks…"; probed and genuinely none → "No Subtitle Tracks". Saying
-  "No subtitles" over an unread file is a confident lie. All three look empty — only
-  `subtitle_tracks_known()` tells them apart.
-- **Row 0 (Off) is dropped from the flyout; every surviving row keeps its index.** The
-  toggle owns off/on. Hiding a row is fine; **renumbering silently selects a different track
-  than the one the user read** — `the_flyout_drops_the_off_row_without_renumbering_the_rest`
-  was verified to fail on exactly that mutation (every row shifted by one).
-- **Linux keeps `Next Subtitle Track`**: its egui bar is hand-rolled with no submenus, so
-  `Shift+C` stays the route there and that item is what advertises it. That's why
-  `MenuAction::SubtitleCycle` still exists after the native bars dropped it.
+**The owner's model:** _"it can behave kinda like a scenario where nothing is open"_ — which
+maps onto machinery that already exists. `MenuState` carries per-command `_enabled` flags
+(`save_rotation_enabled`, `reveal_enabled`, `compare_pin_enabled`…) and `menu_state_from`
+already takes `displayed_item`. Gating is a flag, not new architecture.
 
-## NEXT — the Audio flyout, AFTER the FFmpeg→MF bridge
+| | On a door |
+|---|---|
+| Open (`P`), navigation, Copy File Path, Reveal, Details, Delete | **work** — they're about the file, and a door *is* a file |
+| **Copy Image** | **disable** — there's no image |
+| Copy Text from Image (OCR), Describe / Ask | **disable** — they'd scan a transparent pixel |
+| Compare (`compare_pin_cmd`, `:3280`) | **disable** — it'd pin a sentinel |
+| Rotate / Save rotation | already toasts honestly |
+| Zoom | harmless no-op on a 1×1; leave it |
+| Copy Image Details | **works** — the Details panel already shows a door's size + format, so copying those facts is consistent (its own doc says the name means "the facts the panel shows", not "EXIF") |
 
-**Do not wire an Audio flyout until the bridge exists.** It would select the wrong
-language while confidently ticking the right one — and #99's rule is that audio may only
-toast on a **confirmed** switch, precisely because a toast naming a track over unchanged
-audio teaches the user to distrust every other toast.
+## 2. "Copy" should be multi-representation — a SEPARATE task (owner's insight, 2026-07-17)
 
-### The blocker, measured this session (this is the load-bearing finding)
+I argued Copy Image shouldn't double as copy-the-file because you couldn't tell which you
+got. **The owner is right that this is wrong:** _"on the mac, don't you kind of get both?"_
 
-**MF enumerates audio streams in a different order than the container / FFmpeg.**
-Measured on `crates/pb-decode/tests/fixtures/video/multitrack.mp4`, whose two audio tracks
-are a **440 Hz `eng`** tone then a **220 Hz `fra`** tone (fixtures README):
+**Both platforms' clipboards are multi-representation.** `NSPasteboard` is built for it, and
+the Windows clipboard takes several formats on one copy — `CF_DIB` **and** `CF_HDROP`
+together. The *target* picks: Photoshop takes the pixels, Explorer takes the file. So the
+ambiguity I was worried about doesn't exist.
+
+That reframes the label, too. If `Ctrl+C` means **"copy this thing, with every
+representation that makes sense"**, it's honest for every item type with **no per-item
+relabelling** — which matters, because muda has no `menuNeedsUpdate` and a per-door relabel
+would mean a **menu rebuild per item on the blaze path** (the rebuild-on-signature pattern
+we already use for the subtitle flyout). The item wants to be **"Copy"** (Finder's word),
+not "Copy Image": a photo offers pixels + file, a door offers the file, a video offers the
+file.
+
+**Why it's separate from #105:** it touches clipboard code on both shells and improves
+*photos* (copy the `.jpg` straight into Explorer or an email). It's a feature on its own
+merits, not a door special case. **File it, don't smuggle it in.** Until it lands, gate per
+the table above.
+
+## 3. macOS: the same card in SwiftUI (105.3)
+
+Blocked on a real Swift host build. Artwork crosses FFI via a **one-time
+generation + dims + RGBA accessor cached in `CoreModel`** — never clone ~4 MiB per pump.
+⚠ `cargo check -p pb-mac-ffi` validates only the Rust half; this needs a real-folder smoke
+test on the Mac. Also still open from #104: the two `cfg(macos)` routing arms.
+
+## 4. The blaze measurement gate (105.4) — the honest debt
+
+The card is the **first persistent chrome on the blaze hot path**, and its filename changes
+every frame while scrubbing consecutive doors. The plan's original "costs nil" claim was
+**withdrawn as unsupported** — per the prime directive, we don't guess. Compare an
+image-only deck vs. a consecutive-door deck at target res + 120 Hz; report **p50/p95/p99**
+CPU frame time and keypress→photon. Never means.
+
+## 5. Cleanup (105.5)
+
+`play_hint_persistent`, the kind-3 arms, `never_upscale`, the dead
+`pb_hud::icon::assets::FILE_ZIPPER` + its vendored SVG. **Drop `Icon::Archive`** (glyph
+arms, gallery entry, both vendored family SVGs) — the card uses the artwork, so it's likely
+unused now; check before deleting. `CHANGELOG.md` still describes an archive tile/icon.
+
+## 6. Task #104 is `review`
+
+Needs owner validation on a real folder. The card, the centring fix, and RAR4 viewing
+(#103) are all owner-confirmed already; what's unvalidated is the whole-feature pass.
+
+---
+
+# The load-bearing knowledge from this work (don't re-derive)
+
+## A new `LibraryItemKind` must opt OUT of byte reads, not into them
+
+`c19cfd6`. The door's whole guarantee — **nothing is read, and no password is prompted,
+until you press `P`** — rests on typed dispatch sitting **above** `source.bytes()`. Two
+byte-read leaks (the thumbs strip, `Shift+I`) were found in Phase 0 because the guards were
+written as *negative* (`if kind != Video`), so a third kind fell straight through into a
+read. They're now **positive `Image` guards + exhaustive matches**, so the compiler names
+every site the next kind must handle. ⚠ That worklist is **platform-specific** — a
+`cfg(macos)` arm won't fail a Windows build.
+
+## egui: never call `load_texture` inside `data_mut` — it deadlocks
+
+This froze the app on a folder of archives (`9110327`). `ctx.data_mut` holds a write lock on
+the **whole Context**; `load_texture` re-enters it. `pb_ui::icon::texture` already had the
+correct pattern — **read → load → insert** — and I invented a worse one anyway. Mutation-
+verified: hangs at 45 s vs. 0.02 s passing.
+
+## egui: an auto-sized anchored Window places from the PREVIOUS run's rect
+
+This is why a long filename left the *next* card off-centre too (`b2a7a28`). Fix: compute
+the size yourself and anchor `LEFT_TOP`. Mutation shows 192 px off. ⚠ When testing this,
+read `ctx.memory(|m| m.area_rect(id))` — the SDF shadow's expanded clip rect reports a
+perfectly centred card as 62 px off.
+
+## The size readout goes through the scan worker, never the frame path
+
+`info_line_parts` runs per frame; an SMB `stat` there would block it. So `FsSource::new`
+(which its doc notes runs **on the scan worker thread**) stats **archives only** and
+`size_hint(i)` serves it. `human_bytes()` uses decimal units to match Explorer/Finder.
+
+## The artwork is cropped subject-centred, not ink-centred
+
+`crop_to_content` takes **two** bboxes — ink (`alpha>=1`) and subject (`alpha>=200`) — and
+is symmetric about the *subject's* centre, so the drop shadow doesn't shove the folder
+off-centre. Measured: 1024² → 912×878, 49 px margins all round. **Keep the alpha** — an
+invented opaque matte is what produced the grey box against the `[10,10,12]` letterbox.
+Letterbox is configurable (`set_letterbox`), *not* `Color::BLACK`; `pb-scene-pipeline` uses
+`ALPHA_BLENDING`, so transparent frames blend over it (proven by
+`transparent_image_blends_over_letterbox`, `gpu.rs:4596`).
+
+## The retained overlay needs two seams, and neither is egui's
+
+`overlay_panel_visible()` (`main.rs:1458`) gates whether it draws at all; `overlay_dirty`
+(`:525`, set `:1534`) gates rebuilds. **Nothing honours egui's own repaint request** — a new
+persistent element must join both or it silently never appears / never updates.
+
+## `ScaleMode::Fit` genuinely upscales
+
+`view::base_scale` is `(sw/rw).min(sh/rh)` with **no clamp**. `pb_render::fit_rect`'s "we do
+not upscale" doc describes a **dead function** — don't trust it.
+
+---
+
+# Carried forward from rev 9 — the FFmpeg→MF audio bridge (still unbuilt)
+
+The Playback menu + subtitle track flyout **shipped** (`756cfff`, owner-confirmed). The
+**Audio flyout is deliberately absent on Windows** until this bridge exists — it would
+select the wrong language while confidently ticking the right one.
+
+**The measured blocker** — `crates/pb-decode/tests/fixtures/video/multitrack.mp4`, whose two
+audio tracks are a **440 Hz `eng`** tone then a **220 Hz `fra`** tone:
 
 | | ordinal 0 | ordinal 1 |
 |---|---|---|
 | FFmpeg / container | eng, 440 Hz | fra, 220 Hz |
 | **Media Foundation** | **fra, 220 Hz** | **eng, 440 Hz** |
 
-MF also reorders wholesale: it enumerates `[audio, audio, video]` where FFmpeg reads
-`[video, audio, audio]`. `mf_tracks.rs`'s phase-0 spike found the same thing from the
-*enumeration* side ("MF marks the **French Director's Commentary** `selected=true` … it
-simply takes the first stream of the `MF_SD_MUTUALLY_EXCLUSIVE` group"); this session
-confirmed it independently from the *decode* side. Two measurements, one conclusion.
+MF also reorders wholesale (`[audio, audio, video]` vs FFmpeg's `[video, audio, audio]`).
+Confirmed twice, independently: `mf_tracks.rs`'s phase-0 spike from the *enumeration* side,
+and rev 9's measurement from the *decode* side.
 
-**Why it bites:** on Windows the runtime catalog is **FFmpeg's** — it *supersedes* MF's in
+**Why it bites:** on Windows the runtime catalog is **FFmpeg's** — it supersedes MF's at
 `media_details.rs:193-199`, because MF models **no subtitle tracks at all**. So picker rows
-are in FFmpeg's order with `TrackLocator::FfStream` locators, while the audio engine needs
-MF's ordinal. `TrackLocator::MfStream(u32)` **already exists** for exactly this ("an FFmpeg
-stream index, an MF stream ordinal … are different namespaces" — `tracks.rs:24`), but
-**nothing bridges the two**.
+carry `TrackLocator::FfStream` while the audio engine needs an MF ordinal.
+`TrackLocator::MfStream(u32)` **already exists** for exactly this; nothing bridges the two.
 
-### The agreed bridge design (owner picked "bridge audio next")
+**The agreed design** (owner picked "bridge audio next"): in `media_details.rs` under
+`cfg(all(windows, feature = "ffprobe"))` we hold **both** catalogs at that moment. Match each
+FFmpeg audio track to an MF one on **(language, codec, channels)** → `catalog.set_locator(id,
+MfStream(ordinal))` → picker row → `WasapiAudio::set_track(n)`. On **ambiguity** (two
+identical tracks) fall back to order *within that group* and document the residual risk.
 
-In `media_details.rs`, on `#[cfg(all(windows, feature = "ffprobe"))]`, we hold **both**
-catalogs at that moment (MF's was built first, then FFmpeg's supersedes). So:
+**The rest** (settled, unwritten): `MfAudioDecoder::open_track` is **done + tested**
+(`d364d2e`) and `next_chunk` reads `self.stream`, not `FIRST_AUDIO_STREAM`. `WasapiAudio`
+needs `Cmd::SetTrack(ordinal)` — `Cmd::Seek` (`wasapi_audio.rs:260`) already does the whole
+dance (stop → `Reset()` → `reseek` → `fill()` preroll → restart); a switch is that **plus
+swapping the decoder**. A **failed open must keep the old decoder playing** and report
+`false`. Report back via `Shared`: `active_track: AtomicI64` + `switch_seq`/`switch_ok`, then
+`core.set_active_audio_row(row)` / `core.audio_track_switched(row, ok)`
+(`app_core_impl.rs:8199` / `:8266`). `CoreEffect::SelectAudioTrack { row }` is already
+emitted and currently **ignored** at `main.rs:3165` — `A` / `Shift+A` do nothing on Windows
+today.
 
-1. Match each FFmpeg audio track to an MF audio track on **(language, codec, channels)**.
-2. `catalog.set_locator(id, TrackLocator::MfStream(ordinal))` on the FFmpeg catalog's
-   audio tracks.
-3. Picker row → `MfStream(n)` → `WasapiAudio::set_track(n)`.
-4. **Ambiguity** (two identical tracks — same lang/codec/channels): fall back to order
-   *within that group*. Document the residual risk; don't pretend it's exact.
+⚠ **Never disable a flyout's holder** to mean "no video": macOS learned that a disabled
+submenu can't be hovered, so its delegate never fires and nothing can re-enable it. State
+lives in the submenu's **contents**.
 
-### The rest of the audio switch (design is settled, code not written)
+## One open owner call, still unanswered
 
-- **`MfAudioDecoder::open_track(input, rate, Some(ordinal))` is DONE + tested** (committed
-  this session, `d364d2e`). `next_chunk` reads `self.stream`, not `FIRST_AUDIO_STREAM` —
-  that mistake would play the old track while ticking the new one.
-- **`WasapiAudio` needs `Cmd::SetTrack(ordinal)`.** `Cmd::Seek` (`wasapi_audio.rs:260`)
-  already does the whole dance — stop client → `Reset()` → `engine.reseek(pos)` →
-  `engine.fill()` preroll → restart if it was playing. A track switch is **that, plus
-  swapping the decoder**: open a new `MfAudioDecoder` on the ordinal, seek it to the
-  playhead, replace, preroll, restart.
-  - A **failed open must keep the old decoder playing** (#99: a failed switch costs you the
-    choice, not the sound) and report `false`.
-  - Channel-count changes are already handled — the WASAPI client's format is the
-    *device's*, and `write_frame`/`map_sample` map source→device channels.
-  - Windows audio **is the master clock**, so the re-prime is the delicate half.
-- **Reporting back:** the engine runs on its own thread. Add to `Shared`: `active_track:
-  AtomicI64` (-1 unknown), plus a `switch_seq: AtomicU64` + `switch_ok: AtomicBool` so the
-  shell can pick up the outcome once. Shell then calls `core.set_active_audio_row(row)` +
-  `core.audio_track_switched(row, ok)` (`app_core_impl.rs:8199` / `:8266`).
-- **The effect is already plumbed**: `CoreEffect::SelectAudioTrack { row }` is emitted by
-  `cycle_audio_track` and currently **ignored** at `main.rs:3165`. `A` / `Shift+A` are
-  bound and dispatched — they just do nothing on Windows today.
+`Automatic` falls back past forced-only (forced+matching-audio → container default →
+anything renderable). Owner picked _"Forced its own row; Automatic = full subs"_ via the
+picker, then thought aloud about reversing (_"just select it"_). **The fact that decides it,
+given and unanswered:** a track pick **does not survive to the next film** —
+`SubtitleWant::Track(id)` is bound to one file's catalog by generation, so "just select it"
+means re-selecting forced on every film. A `Forced Only` *row* is portable, which is what
+someone who wants forced signs actually wants. **Don't build until confirmed.** If yes: one
+`SubtitleChoice` variant, one `resolve` branch, one picker row, `automatic()` loses its
+forced step. Separate commit.
 
 ---
 
-# ✅ Done this session (5 commits, pushed to main)
+# Other open work
 
-| commit | what |
-|---|---|
-| `e9e2047` | **The winit presenter** — `Renderer::set_subtitle_overlay` + `App::present_subtitles`. Windows/Linux draw subtitles at last. Also fixed the launch-preference bug. |
-| `d984f3a` | **Settings ▸ Subtitles tab** (egui) over the live preview — all eight axes. |
-| `d34c7f2` | **The Windows menu had NO subtitle entry at all** — added `Subtitles` + `Next Subtitle Track` to the native View menu. |
-| `a40f610` | Section spacing on the Subtitles tab (`SECTION_GAP` between cards). |
-| `d364d2e` | `MfAudioDecoder::open_track` + the MF-order measurement above. |
-| `756cfff` | **The Playback menu + the subtitle track flyout** (above). The View items from `d34c7f2` moved into it. |
-
-## A false alarm worth not re-running (2026-07-16) — CLOSED
-
-Mid-verification the trace showed `Automatic` resolving to **Greek** on an English film with
-English audio — it loaded `eng`, then switched to `gre`. It looked like a real bug. It was
-**the owner selecting the Greek track as a test** while I was measuring (owner-confirmed).
-
-Kept here because the ruling-out is reusable, and because the diagnosis nearly went the
-wrong way:
-
-- `ffprobe` says **no** subtitle track in that file has `default` or `forced` set, and a
-  probe of `automatic()` printed `pref=None … -> default/first Some("eng")`. The resolve was
-  correct all along.
-- Greek can only come from `want == Track(gre_id)`, which `resolve()` returns **before**
-  calling `automatic()` — i.e. only a deliberate pick puts it there.
-- **A/B settled it:** HEAD (no menu changes) vs. my branch, 45 s of playback each on the same
-  film → `loading track 2 (eng, subrip)` and nothing else, on both.
-
-**Two lessons:** ⚠ the owner drives the app while you test (check `Get-Process blazeviewer`
-before killing anything, and A/B before believing a mid-test anomaly) — and this pick, if it
-came from the new flyout, is the **only end-to-end confirmation of the click path** that
-exists: row 6 in the menu → `subtitle_track:6` → `select_subtitle_row(6)` → `FfStream(6)` →
-Greek played. That chain is exactly what no unit test can reach.
-
-**Owner-confirmed on screen 2026-07-16:** _"Subtitles do display!"_ — verified against a
-real film over SMB, and by trace (`loading track 2 (eng, subrip) — FfStream(2)` → cues
-streaming 15→382 → `drew 532x93` → `placed at Rect { x: 469.0, y: 718.89, … }`, x centred
-exactly).
-
-# 🔜 Remaining after the Playback menu
-
-- **Linux is unverified.** Same wgpu path as Windows, so it should follow — nobody ran it.
+- **⚠ AC-3 / E-AC-3 does not decode on Windows.** `SetCurrentMediaType` fails
+  `0xC00D36B4`. Seen on the fixture mkv's AC-3 5.1 track and a real `DD+2.0` film
+  (`Ali.Wong.Baby.Cobra`) that **plays silently**. Pre-existing, unfiled — a lot of films are
+  DD/DD+, so probably its own task.
+- **Linux is unverified** for subtitles. Same wgpu path as Windows, so it should follow.
 - **#90.3 remainder** — seek generations (no stale cue flash while scrubbing) and wiring
-  `controls_h` (hardcoded `0.0` at `app_core_impl.rs:8394` on **both** shells; `place()`
-  supports the lift, nothing measures a bar yet).
-- **Archive'd videos have no embedded cues** — `stream_cues` would mean decompressing the
+  `controls_h` (hardcoded `0.0` at `app_core_impl.rs:8394` on **both** shells).
+- **Archived videos have no embedded cues** — `stream_cues` would mean decompressing the
   whole archive to RAM. Sidecars in archives work.
-- **A winit playback-bar picker** (the Mac's popover, right of the runtime) is a *separate*
-  ask from the menu: the winit "playback bar" is a hand-laid-out egui info pill
-  (`panels_ui.rs`), not a transport `HStack`, so it means manual layout + hit-testing +
-  joining the `video_bar_interactive` pointer gate.
-
-## ⚠ One open owner call — now half-answered, awaiting a final yes/no
-
-**The question was:** `Automatic` falls back past the frozen forced-only rule (order today:
-forced+matching-audio → container default → anything renderable). Strict forced-only showed
-**nothing** for the commonest case — English film, full English track, no forced track —
-right after a toast saying "Subtitles on".
-
-**Owner picked (2026-07-16, via the picker):** _"Forced its own row; Automatic = full subs"_
-— add `SubtitleChoice::Forced` as a portable, persisted choice; `Automatic` then drops its
-forced step and means "container default → anything renderable". That retires the question
-above, and `automatic()` gets **simpler**, not bigger.
-
-**Then the owner thought aloud and may be reversing:** _"Forced subtitles are always their
-own track, right? So if that's what you want, just select it. … Handling those properly is
-probably a bit of extra scope."_
-
-**The fact that decides it, which I gave them and they haven't answered yet:** a track pick
-**does not survive to the next film**. `SubtitleWant::Track(id)` is bound to one file's
-catalog by generation, so "just select it" means re-selecting forced on every single film. A
-`Forced Only` *row* is a portable preference — which is what someone who wants forced signs
-actually wants: always, on every film. And it's the only route left for them, because "Off
-means off, no forced exception" is frozen.
-
-**Do not build this until the owner confirms.** If they do: one `SubtitleChoice` variant,
-one `resolve` branch, one picker row, `automatic()` loses its forced step. **Separate commit
-from the menu**, so it can revert alone.
+- **A winit playback-bar picker** is a *separate* ask from the menu: the winit bar is a
+  hand-laid-out egui info pill, not a transport `HStack`.
+- **#94.1 space-pauses-a-playing-video** — deferred; owner wants to workshop contextual keys.
+- Older loose ends: #80 slideshow×video, #82 macOS archive natives, #75/#76 CI/mirror.
 
 ---
 
-# The load-bearing knowledge (don't re-derive these)
+# THE authoritative docs
 
-## The subtitle bitmap is PREMULTIPLIED, and the CPU overlays are not
-
-`pb_hud::subtitle` emits **premultiplied** RGBA (its own tests enforce it). Every *other*
-CPU overlay — toast, info line, pie, tree, chip — is authored **straight** and shares a
-pipeline whose `ALPHA_BLENDING` multiplies by alpha. Send one through the other and it
-multiplies **twice**: measured **0.108 vs 0.216** linear, which reads as every antialiased
-glyph edge going muddy. So the subtitle layer has **its own premultiplied-blend pipeline**
-(`Pipelines::subtitle`), identical to `overlay` in every other respect.
-
-`the_subtitle_pipeline_blends_premultiplied_not_straight` (pb-render, GPU readback) fails on
-exactly that mistake — confirmed by pointing it at the wrong pipeline. The value it asserts
-is **also what the macOS `CGImage` `.premultipliedLast` path produces**, so the two shells
-match by construction rather than by eye. Don't "simplify" it onto `overlay_pipeline`.
-
-## The presenter is shell-local, and must stay that way
-
-`App::present_subtitles` (winit) and `subtitle_rgba`/`subtitle_rect` (pb-mac-ffi) are two
-presenters over **one** rasterizer. Putting the wgpu call in the shared `tick_subtitles`
-would draw every cue **twice** on macOS — once into a canvas the `AVPlayerLayer` covers,
-once for real.
-
-## Cues STREAM — the ratio, not an optimization
-
-Reading an embedded track is a **full linear pass over the container**. **Measured 39 s** on
-the corpus MKV (4.4 GB over SMB) — as a blocking wait, indistinguishable from broken. But
-the reader walks in **presentation order** at ~113 MB/s while playback consumes ~1.6 MB/s —
-**~70× faster than playback needs** — so it hands cues over as it finds them: **first batch
-at 1.06 s**. Confirmed live on Windows 2026-07-16 (15 → 382 cues while playing). Cancelling
-stops a read in ~1 s (`CueLoad::drop`).
-
-*The optimization NOT to take:* the playback demuxer already reads these packets and
-discards them — but that exists only on routes using **our** demuxer, and **a feature must
-never be gated on a backend**. Layer it *under* this reader; never replace it.
-
-## The rules that were bought with real time
-
-- **Prove the pipe, then build through it.** ~1500 lines / ~75 tests of pure subtitle modules
-  were once merged before a single caller existed; the thin slice that followed found five
-  defects in an afternoon, every one in a *seam*.
-- **Look at the output.** Both ASS defects were found by *printing real cues*; every unit
-  test passed. It paid three more times on 2026-07-16 — the egui swatch asked for a
-  **9888 px** texture (egui's first frame reports a default `screen_rect`, and egui *panics*
-  past the GPU limit rather than clamping); the tab shot showed the preview was the only
-  thing that couldn't be reviewed from the code; and **the MF track-order finding above
-  killed a fix that would otherwise have shipped playing the wrong language**. Use
-  `PB_PREVIEW_OUT=<dir> cargo test -p pb-app-core --lib -- --ignored dump_preview`, and
-  `--settings-shot --tab=subtitles`.
-- **Never gate a feature on a backend.** Use `AppCore::video_showing()` / `video_position()`.
-- **The unit rule:** position and size are **viewport**-relative; decoration is **text**-relative.
-  `REFERENCE_FONT_PX` is a **fixed anchor at 47.5** and must not track the default size.
-- **`#[serde(default)]` on a by-value nested settings struct is load-bearing.** Without it one
-  typo in `[subtitle_style]` makes the file unparseable, and `Settings::load` answers that by
-  discarding **every other setting** in it.
-- **A scaled egui control must write back only on `.changed()`.** Round-tripping a fraction
-  through `×100` / `÷100` is not bit-exact (`0.04` → `0.040000001`) and the settings fold
-  saves on any diff — so an unconditional write-back spews a config write **every frame the
-  tab is open**.
-- **Settings pages set `item_spacing.y = 0`** (`settings_ui`): every gap is explicit. Cards
-  need `ui.add_space(pbui::SECTION_GAP)` **between** them or the headings sit flush.
-
-## Verify with the corpus
-
-- **`\\beenas\Media\Movies`** — 163 films (the owner's pointer; the old `/Volumes/Media`
-  paths are the Mac's view of the same share). `Ali.Wong.Baby.Cobra` (stream 2, `eng`
-  subrip) is a clean fast check. `Ad.Astra` has Chinese ASS (stream 5, drawing mode);
-  `Avatar…3D` (stream 3) authors every subtitle twice; `Alita.Battle.Angel…DON` is
-  **PGS-only** → "No subtitle tracks" is **correct**.
-- `crates/pb-decode/tests/fixtures/video/multitrack.{mkv,mp4}` — 1 s, local, instant. The
-  **mp4** is the one for audio work: 2 AAC tracks, 440 Hz `eng` / 220 Hz `fra`, so the
-  decoded *tone* proves which stream you got. The **mkv**'s 2nd audio track is **AC-3 and MF
-  refuses to decode it** (see below) — don't reach for it.
-- Diagnostics: **`PB_SUBTITLE_TRACE=1`** answers "why is nothing on screen" in one line —
-  it prints the gate that stopped it, then `loading track N`, `drew WxH at t`, `placed at
-  Rect{…}`. `PB_VIDEO_DIAG=1` for playback.
-- ⚠ **`--features ffprobe` needs a VS Developer shell** (`. .\scripts\vs-dev-env.ps1`) **and
-  `VCPKG_ROOT` exported** — without it FFmpeg's bindgen dies on `pkg-config`. Embedded cues
-  are ffprobe-gated, so a plain `cargo build` gets **sidecars only** and an embedded track
-  looks broken.
-
-## THE authoritative docs
-
-- **Subtitles:** `.taskmaster/docs/90-presenter-and-style-contract.md` — the owner's spec, the
-  frozen decisions, and **two post-mortems**.
+- **Doors + the card:** `.taskmaster/plans/104-archives-in-the-folder-tree.md` (rev6),
+  `.taskmaster/plans/105-the-door-card.md` (rev4, Codex-reviewed).
+- **Subtitles:** `.taskmaster/docs/90-presenter-and-style-contract.md` — the owner's spec,
+  the frozen decisions, two post-mortems.
 - **Video:** `.taskmaster/docs/video-playback-overhaul.md` (root causes R1–R12).
-- **Track catalog:** `.taskmaster/docs/98-phase0-spike-findings.md` — read this before any
-  track work; it is where MF's limits were first measured.
+- **Track catalog:** `.taskmaster/docs/98-phase0-spike-findings.md` — read before any track
+  work; where MF's limits were first measured.
 
----
+# The rules that were bought with real time
 
-# Comic archives — CBZ / CBT / CBR (owner raised 2026-07-16)
-
-Rides on the owner's `102-tar-family-archives.md` plan (untracked, theirs). My read:
-
-- **CBZ = ZIP, CBT = TAR — same bytes, different extension.** Two more arms in that plan's
-  `archive_kind` classifier (`cbz → Zip`, `cbt → Tar`) and they work: `ScopedSource`, name
-  sorting (which *is* page order for comics), and the no-trace guarantee all carry over.
-  Nearly free; should ride along with #102 rather than be its own task.
-- **CBR = RAR is the one that costs**, and #102 already calls RAR a non-goal. UnRAR's licence
-  permits decompression — which is all we'd ever do ("we only ever DECODE" covers it) — but
-  it is **not OSI-approved, not Apache-compatible** for the FSL→Apache-2.0 conversion in two
-  years, and it's a **C dep on three platforms**, exactly the build risk
-  `pb-source/Cargo.toml` says the crate exists to avoid. No usable pure-Rust RAR5 decoder.
-- **Cheap partial win regardless:** many `.cbr` files in the wild are **actually ZIPs** that
-  were misnamed. Sniffing magic bytes (`Rar!\x1a\x07` vs `PK\x03\x04`) instead of trusting
-  the extension opens those for free, and lets a genuine RAR say so instead of failing
-  obscurely. Worth doing even if UnRAR is never taken.
-
-# Other open work (not subtitles)
-
-- **⚠ AC-3 / E-AC-3 audio does not decode on Windows.** `SetCurrentMediaType` fails with
-  `0xC00D36B4` ("audio format not decodable"). Seen twice on 2026-07-16: the fixture mkv's
-  AC-3 5.1 track, and a real `DD+2.0` film (`Ali.Wong.Baby.Cobra`) that **plays silently**.
-  Pre-existing, unfiled, unrelated to subtitles — but a lot of films are DD/DD+, so this is
-  probably worth a task of its own.
-- **Phase 2 follow-ons** (deferred, no blockers): planar rotation in geometry/UV, planar-`Vec`
-  pool + two-plane single-submit upload, MF P010 on Windows.
-- **#94.1 — space-pauses-a-playing-video** — deferred UX; owner wants to workshop the
-  contextual-key idea first.
-- Older Windows/loose ends (#80 slideshow×video, #82 macOS archive natives, #75/#76 CI/mirror).
+- **Look at the output.** Every door defect the owner reported was *visible*, and none of
+  them failed a test. `--egui-shot` / `PB_SHOT_DOOR=1|long` exist for this.
+- **Prove the pipe, then build through it.** ~1500 lines / ~75 tests of pure subtitle
+  modules were once merged before a single caller existed; the thin slice that followed
+  found five defects in an afternoon, every one in a *seam*.
+- **Never gate a feature on a backend.** Use `AppCore::video_showing()` / `video_position()`.
+- **When a plan and the code disagree, the code wins — fix the plan.** My own "nine guards"
+  claim was wrong (3 were already exhaustive, 2 were correct to leave, 4 needed changing);
+  following it mechanically would have made things worse.
 
 # Notes carried forward
 
@@ -355,18 +275,26 @@ Rides on the owner's `102-tar-family-archives.md` plan (untracked, theirs). My r
   `target/debug/blazeviewer.exe` and blocks rebuilds ("Access is denied"). **Check
   `Get-Process blazeviewer` before killing anything** — it is usually theirs. A separate
   `CARGO_TARGET_DIR` under the scratchpad is the non-invasive way to build meanwhile.
+  A mid-test anomaly is often **the owner**, not a bug — A/B before believing it.
 - Never `git commit -am` / `add -A` — stage explicit paths.
-- **Windows cross-check from the Mac:** `cargo check -p pb-app --target x86_64-pc-windows-msvc`
-  after two temporary manifest edits — **blake3 `pure` must be a DIRECT dep** + `ureq`
-  `default-features = false` in both crates. Restore them and `git checkout Cargo.lock` after.
-- ⚠ **`cargo test --workspace` cannot build `pb-app` on macOS.** Use `--workspace --exclude pb-app`.
-- ⚠ **Always build `--features ffvideo` when testing video code** on the Mac: `ActiveVideo` has a
-  SECOND literal construction under `cfg(ffvideo/macos)`. Run clippy on **both** feature sets.
-- swift-bridge bridge module: `//` comments only; `Vec<String>` does **not** cross back to
-  Swift — use indexed accessors.
-- `settings.save()` is called **unguarded** by the older toggles, so dispatching them in a test
-  writes the user's real `settings.toml`. `ToggleSubtitles` / `SubtitleCycle` gate on
-  `persist_prefs` instead. ⚠ `apply_settings` does **not** check it either.
-- ⚠ **The Bash tool eats one backslash** in a heredoc'd Python patch script, so a needle
-  containing `\t` silently becomes a real tab and never matches. Use the Edit tool for Rust
-  string literals.
+- ⚠ **`--features ffprobe` needs a VS Developer shell** (`. .\scripts\vs-dev-env.ps1`) **and
+  `VCPKG_ROOT` exported** — without it FFmpeg's bindgen dies. Embedded cues are
+  ffprobe-gated, so a plain `cargo build` gets **sidecars only**.
+- ⚠ **`cargo test --workspace` cannot build `pb-app` on macOS.** Use `--exclude pb-app`.
+- ⚠ **Always build `--features ffvideo` when testing video code** on the Mac: `ActiveVideo`
+  has a SECOND literal construction under `cfg(ffvideo/macos)`. Clippy on **both** sets.
+- **Windows cross-check from the Mac:** `cargo check -p pb-app --target
+  x86_64-pc-windows-msvc` after two temporary manifest edits — **blake3 `pure` must be a
+  DIRECT dep** + `ureq` `default-features = false` in both crates. Restore + `git checkout
+  Cargo.lock` after.
+- swift-bridge module: `//` comments only; `Vec<String>` does **not** cross back to Swift —
+  use indexed accessors.
+- `settings.save()` is **unguarded** in the older toggles, so dispatching them in a test
+  writes the owner's real `settings.toml`. Gate on `persist_prefs`. ⚠ `apply_settings`
+  doesn't check it either.
+- ⚠ **Scripted edits keep silently no-op'ing** because `cargo fmt` reflowed the target text
+  (it left doors arming a pill, and left debug prints in). The Bash tool also eats one
+  backslash in a heredoc'd Python needle, so `\t` becomes a real tab. **Use the Edit tool
+  for Rust string literals.**
+- **Verify with the corpus:** `\\beenas\Media\Movies` (163 films); the doors test archives
+  under `D:\Media` (RARs with real photos in them).
