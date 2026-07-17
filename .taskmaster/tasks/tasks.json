@@ -1304,6 +1304,48 @@
           103
         ],
         "subtasks": []
+      },
+      {
+        "id": 105,
+        "title": "The door card: render archives as chrome, not through the photo pipeline",
+        "description": "An archive door is UI, not image content, and rendering it through the photo pipeline caused four defects in a row (a 16px glyph upscaled 12x; a decode-to-fit tile costing a photo-sized ring slot; an invented grey backdrop; artwork magnified 2.1x) plus a filename with nowhere to live. Replace the artwork tile with a 1x1 transparent sentinel and render one centred card (artwork + filename + Open) in egui/SwiftUI. Plan: .taskmaster/plans/105-the-door-card.md (rev4, Codex-reviewed). Net deletes more than it adds: play_hint kind 3, play_hint_persistent, never_upscale, and the dead pb-hud FILE_ZIPPER all go.",
+        "status": "pending",
+        "priority": "medium",
+        "dependencies": [
+          104
+        ],
+        "subtasks": [
+          {
+            "id": 1,
+            "title": "Core: sentinel, door_card(), omit dimensions, non-blocking size",
+            "description": "1x1 transparent sentinel; door_card() keyed off the PRESENTED item (not the playlist cursor); omit dimensions for doors in the info line, Details and Copy Details; a size source that never stats on the event loop or a blaze step (prefer teaching the scan to carry sizes - read_dir gives metadata nearly free on Windows and FsSource has no size_hint today; a stat over SMB can block). Tests include: no fs::metadata on the frame path.",
+            "status": "pending"
+          },
+          {
+            "id": 2,
+            "title": "winit/egui: the card, its lifecycle, thumbnails, command gating",
+            "description": "PanelFrame.door + the visibility/signature seam (the retained overlay will NOT show the card on its own: overlay_panel_visible gates it and overlay_dirty gates rebuilds). Card from pb-ui atoms + middle_truncate, sized per the plan's formula (the fixed 512pt rule was wrong: it breaks past 200% scaling and cannot fit the 520x360 macOS minimum). Archive thumbnails, or the strip goes blank. Command gating (Copy Image / OCR / Describe / Compare). Shows while blazing.",
+            "status": "pending"
+          },
+          {
+            "id": 3,
+            "title": "macOS: the same card in SwiftUI + a one-time artwork bridge",
+            "description": "SwiftUI card, thumbnails, command gating. Artwork via a one-time generation+dims+RGBA accessor cached in CoreModel - never clone ~4MiB through FFI per pump. Requires a real Swift host build and a real-folder smoke test; cargo check -p pb-mac-ffi only validates the Rust half.",
+            "status": "pending"
+          },
+          {
+            "id": 4,
+            "title": "Measure the blaze cost (the gate)",
+            "description": "The card is the first persistent chrome in the blaze hot path, and its filename changes each frame while scrubbing consecutive doors. The 'costs nil' claim was withdrawn as unsupported. Compare an image-only deck against a consecutive-door deck at target res + 120Hz; report p50/p95/p99 CPU frame time and keypress->photon, never means. If full-window egui repaint is material, retain the card in a smaller overlay texture.",
+            "status": "pending"
+          },
+          {
+            "id": 5,
+            "title": "Cleanup + docs",
+            "description": "Delete play_hint_persistent, the kind-3 arms, never_upscale, and the already-dead pb_hud::icon::assets::FILE_ZIPPER + its vendored SVG; drop Icon::Archive (glyph arms, gallery entry, both vendored family SVGs) if it ends up unused. Extend --egui-shot (the viewer-overlay harness, NOT --settings-shot) with door-card modes. Update CHANGELOG.md, whose text still describes an archive tile/icon.",
+            "status": "pending"
+          }
+        ]
       }
     ]
   }

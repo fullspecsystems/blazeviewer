@@ -1,243 +1,309 @@
 # Task 105 — The door card: one coherent element, not three fighting mechanisms
 
-**Status:** planned — rev3 (2026-07-17, owner-designed; 2 of 4 open questions resolved; not yet Codex-reviewed)
-**Proposed task id:** 105 (supersedes task 104's *"design the door tile"* follow-up)
-**Depends on:** task #104 (archives as doors) — shipped through Phase 3 on `main`.
-**Scope:** `pb-app-core` (one accessor, a trivial tile) + `pb-app` (an egui card) +
-`mac/` (the same card in SwiftUI). Net **deletes** more than it adds.
+**Status:** planned — **rev4** (2026-07-17). Codex-reviewed; all six blockers verified and incorporated.
+**Task id:** 105 (`tasks.json`), depends on 104. Supersedes 104's *"design the door tile"*.
+**Depends on:** task #104 — **implemented through Phase 3, status `review`**: owner
+validation on a real folder and the two `cfg(macos)` routing arms are still outstanding.
+Not "shipped" (rev1–3 said so; wrong). Either 104's validation lands first, or 105
+absorbs it explicitly — see *Open questions*.
+**Scope:** `pb-app-core`, `pb-app` (egui), **`pb-mac-ffi` + `mac/`** (SwiftUI),
+`egui_shot`, `tasks.json`, `CHANGELOG.md`.
+
+> **rev4.** Codex reviewed rev3: *"right architecture, not implementation-ready."* Every
+> blocker was checked against the source before being written here; **all six were real**,
+> and two were things this plan's own author had left behind. The direction is unchanged —
+> typed deck item, transparent sentinel, affordance in chrome — but the plan now covers
+> overlay lifecycle, thumbnails, command gating, DPI-safe layout, and a measured
+> performance gate.
 
 ## The problem, and why it kept recurring
 
-Four separate defects in one evening, all found by the owner on screen:
+Four defects in one evening, all found by the owner on screen:
 
 | Symptom | "Fix" at the time |
 |---|---|
 | An FA glyph drawn for 16 px, blown up ~12× to fill a 7680-wide display | Rasterize it decode-to-fit |
-| Decode-to-fit cost a photo-sized ring slot for an *icon* | Give the affordance to the play-hint pill instead; flatten the tile |
-| The owner's artwork sat in an invented grey box | Stop matting it; keep the alpha (the scene pipeline already alpha-blends) |
-| The artwork magnified ~2.1× — "looks weird at giant sizes" | `ViewTransform::never_upscale`, a per-item scale cap |
+| Decode-to-fit cost a photo-sized ring slot for an *icon* | Give the affordance to the play pill; flatten the tile |
+| The artwork sat in an invented grey box | Stop matting it; keep the alpha |
+| The artwork magnified ~2.1× — "looks weird at giant sizes" | `ViewTransform::never_upscale` |
 | The filename is invisible unless the info line is up | *(unsolved — the trigger for this plan)* |
 
 **One root cause: a door is UI, and we have been rendering it through the photo
 pipeline.** Every fix bent something built for photographs — decode-to-fit, alpha
-blending, scale modes, the prefetch ring — into doing a widget's job. The filename was
-simply the first symptom with no available bend.
+blending, scale modes, the prefetch ring — into doing a widget's job.
 
-The codebase already draws the line in the right place: **the viewer hot path is wgpu;
-chrome is egui / SwiftUI** (Settings, About, the dialogs, the info line, the play pill,
-the scan pill). A door belongs on the chrome side. It is not a picture of anything.
+The codebase already draws the line: **viewer hot path is wgpu; chrome is egui /
+SwiftUI**. A door belongs on the chrome side. It is not a picture of anything.
 
 ## The design (owner, 2026-07-17)
 
-> *"I wouldn't make it a black tile, but just the regular letterbox — empty.
-> Transparent. Then we show a card rendered as an egui element in the middle. […] Like
-> a giant, fancy version of the play button, basically. A little card, maybe it's a
-> little bit like the scanning status pill […] basically says 'we're looking at
-> wedding-photos.zip' P to open."*
+> *"I wouldn't make it a black tile, but just the regular letterbox — empty. Transparent.
+> Then we show a card rendered as an egui element in the middle. […] Like a giant, fancy
+> version of the play button […] basically says 'we're looking at wedding-photos.zip' P to
+> open."*
 
-**The item draws nothing.** Its decoded frame is fully transparent, so the scene pass
-blends it to nothing and the normal letterbox shows through — no black tile, no special
-case in the ring, present, or nav paths.
+The item **draws nothing**; one centred card carries the artwork, the filename, and the
+`Open · P` button. Ambient and non-modal, modelled on `ScanPill` (`panels_ui.rs:282`).
 
-**One centred card carries everything**: the folder artwork, the filename at a readable
-size, and the `Open · P` button. Ambient and non-modal, modelled on `ScanPill`
-(`panels_ui.rs:282`) — a pure data snapshot out of the core, drawn by the shell.
-
-```
-        ┌─────────────────────┐
-        │      [artwork]      │
-        │  wedding-photos.zip │
-        │    [ 🗀 Open  P ]   │
-        └─────────────────────┘
-```
+> 💡 **The layout already exists.** `thumb_cell` (`panels_ui.rs:3416`) draws *"the thumb
+> fit-within a letterbox box, a type badge, and the **middle-truncated filename below**"*
+> via `middle_truncate` (`panels_ui.rs:3590`). The card is that cell, larger, with a
+> button. Reuse both rather than inventing a second truncation and a second layout — and
+> note it is also the answer to §4.
 
 ## What it deletes
 
-This is the argument for it. The card **removes** machinery rather than adding a layer:
+The argument for it — this **removes** machinery rather than adding a layer:
 
-- `play_hint_kind == 3` and `play_hint_persistent` (`app_core_impl.rs`) — the card *is*
-  the button; the pill goes back to meaning "this plays".
-- The `Icon::Archive` / `doc.zipper` cases in both pills, and the *Open* vs *Play* label
-  split.
-- `ViewTransform::never_upscale`'s **only caller** — the card draws its art at a fixed
-  512 pt, so there is no scale to cap (see §5: the right *size* replaces the clamp). ⚠
-  See *Open questions*: the field then has no user, and either the owner's "shrink to
-  fit" mode adopts it or it should be reverted.
-- The door tile's artwork decode + composite in `engine.rs`, and with it the entire
-  *"how big should the tile be"* question — which has now been answered wrong three
-  times (flat → decode-to-fit → flat → artwork).
+- `play_hint_kind == 3` + `play_hint_persistent` — the card *is* the button.
+- The `Icon::Archive` / `doc.zipper` cases and the *Open*-vs-*Play* label split.
+- The door tile's artwork decode + composite in `engine.rs`, and the whole *"how big
+  should the tile be"* question — answered wrong three times (flat → decode-to-fit → flat
+  → artwork).
+- `ViewTransform::never_upscale` — **remove it**; §5 makes the right size do the job, and
+  speculative state should not survive its only caller.
+- 🧹 **`pb_hud::icon::assets::FILE_ZIPPER` is already dead** (`pb-hud/src/icon.rs:67`) —
+  its only caller went away when the pill took over, and the const + vendored SVG were
+  left behind. Codex caught it; delete with this work.
 
 ## Design details
 
-### 1. The transparent tile
+### 1. The sentinel: 1×1 transparent, and dimensions are *omitted*
 
-`archive_placeholder` returns a fully transparent frame. `BlendState::ALPHA_BLENDING`
-over the `Color::BLACK` clear (`pb_render::gpu`) means `a = 0` leaves the letterbox
-untouched — invisible, with no change to the ring/present/nav paths and no new "an item
-with no texture" case to plumb.
+`archive_placeholder` returns a **1×1 fully transparent** RGBA frame — the cheapest
+possible ring slot. The scene pass clears to the **configured letterbox colour**
+(`gpu.rs`: `letterbox_linear(self.letterbox)` at `:2996` / `:3029`, default
+`LETTERBOX = [10,10,12,255]` at `:16`, settable via `set_letterbox`) and draws the photo
+quad with `BlendState::ALPHA_BLENDING`, so `a = 0` leaves it untouched.
+
+> ✅ Already proven: `pb-render`'s `transparent_image_blends_over_letterbox`
+> (`gpu.rs:4596`) covers exactly this.
+>
+> ⚠ rev1–3 said "the black clear". **Wrong** — the letterbox is configurable and defaults
+> to `[10,10,12]`. It is also why the grey box was so visible: the matted backdrop was
+> `[38,38,42]` against a `[10,10,12]` letterbox.
+
+1×1 is only safe because **dimensions are omitted for a door everywhere** (§6). Never
+render `1 × 1`.
 
 The **no-read guarantee is untouched**: the typed dispatch still returns above
-`source.bytes()`, which is what makes a door safe to prefetch past. It gets cheaper —
-the ring slot is now trivial.
-
-⚠ **The tile's dimensions are still read.** `DecodedImage.orig_width/height` flow into
-`PhotoMeta.w/h` and out to the info line, so a 1×1 tile would have the line announce
-`1×1` for every archive. §6 removes the need to care — a door reports its **size**, not
-its dimensions — but the two changes have to land together, or whatever size is picked
-here becomes a visible lie.
+`source.bytes()`.
 
 ### 2. The card is a `PanelFrame` member
 
-Mirror `ScanPill` exactly:
+Mirror `ScanPill`: pure semantic data, **never a cloned RGBA buffer**.
 
 ```rust
 pub struct DoorCard {
-    /// The archive's file name, e.g. `wedding-photos.zip`.
+    /// The archive's file name, e.g. `wedding-photos.zip` (full; the shell elides).
     pub name: String,
-    /// The format, from `ArchiveKind::name()` — e.g. `ZIP`, `7z`, `TAR.GZ`.
+    /// Secondary line, from `ArchiveKind::name()` — e.g. `ZIP archive`.
     pub format: String,
     /// The Open shortcut (`P`), from the live keymap — never hard-coded.
     pub shortcut: String,
 }
 ```
 
-Core exposes one accessor (`AppCore::door_card() -> Option<DoorCard>`); the shell
-snapshots it into `PanelFrame.door`, and `door_card()` in `panels_ui.rs` draws it from
-`pb-ui` atoms + the existing `draw_open_button`. No core state, no new effects.
+`AppCore::door_card() -> Option<DoorCard>`, keyed off the **presented** item (§3).
 
-### 3. The artwork reaches both shells from core
+### 3. The overlay lifecycle — the card will *not* appear on its own
 
-The asset stays in `pb-app-core/assets/` (one copy, `cfg(windows)` = manila / else
-blue). Core exposes the **decoded pixels**; each shell uploads a texture **once** and
-caches it — `pb_ui::icon` already caches rasters in the egui ctx, so the pattern exists.
-macOS gets the pixels over the bridge and builds an `Image`.
+**Blocker (verified).** The winit overlay is retained, removed when
+`overlay_panel_visible()` (`main.rs:1458`) is false, and rebuilt only when
+`overlay_dirty` (`main.rs:525`, set at `:1524`) or egui asks for a repaint. Adding a
+`PanelFrame` field does none of: keep the texture alive, dirty it when the presented item
+changes, clear it moving door → photo, or update the name while blazing consecutive
+archives.
 
-Rejected: bundling the art separately in the `.app`. Two copies of an asset that must
-not drift, for no gain.
+Each shell needs an explicit **door-card visibility + signature seam**:
 
-### 4. Click and key stay as they are
+- `overlay_panel_visible()` must be true while a door is presented — it is content, not a
+  panel (§8).
+- A signature (presented item + name) marks `overlay_dirty` on change — the same
+  rebuild-on-signature shape the subtitle-track menu already uses.
+- It must track the **actually presented item** (`displayed_item`, set in
+  `mark_resolved`), **not** the playlist cursor, or the card will name an archive the
+  screen is not showing yet.
 
-The card's button dispatches `PanelAction::PlayPause`, exactly as the pill does today —
-which already enters a door. `P` is unchanged. No new action, no new keymap entry.
+### 4. Thumbnails must not go blank
 
-### 5. Sizing: 512 pt of artwork, shrinking to fit (owner, 2026-07-17)
+**Blocker (verified).** Archive artwork currently reaches the thumb strip *through the
+decoded placeholder*. With a transparent sentinel, `thumb_cell` (`panels_ui.rs:3416`)
+gets a blank image, and its badge logic knows only video / Live Photo / animation. Same
+on macOS (`pb-mac-ffi`, `ThumbnailsPanel.swift`).
 
-The card's artwork draws at **512 pt** — not the art's full 1024, and never the
-viewport. That number is not arbitrary, and it is the whole reason this design fixes
-the crispness problem for free:
+**Draw the same cached artwork directly in the thumbnail cell**, optionally with a compact
+archive badge. **Do not** put the large artwork back into the resident ring — that is the
+mistake this plan exists to undo.
 
-| Display | 512 pt in physical px | vs the 1024 px asset |
-|---|---|---|
-| Retina / 2× | **1024** | **exactly 1:1** |
-| Windows @ 150% | 768 | a downscale — crisp |
-| 1× | 512 | a downscale — crisp |
+### 5. Sizing — the fixed 512 pt rule was wrong
 
-egui and SwiftUI both lay out in points, so the art lands at or below its native
-resolution on **every** display. It is never magnified — which is precisely what
-`never_upscale` was invented to prevent, achieved here by picking the right size
-instead of clamping a scale.
+**Blocker (verified).** rev2's "512 pt is 1:1 on retina" holds only to 200%; Windows goes
+past it. And 512 pt of art **cannot fit** the macOS minimum window —
+`.frame(minWidth: 520, minHeight: 360)` (`BlazeViewerMacApp.swift:204`) — once the name
+and button are included.
 
-**It must still shrink.** 512 pt is a *maximum*: on a small window the card scales down
-so it always fits, art and all. Nothing about a door should ever be clipped or push
-past the viewport.
+```text
+art_points = min(
+    512,                                    // the design cap
+    asset_pixels / display_scale,           // never magnify: 1024 / scale
+    available_width  - horizontal_padding,
+    available_height - text_and_button_height
+)
+```
 
-### 6. What a door reports: size, not dimensions (owner, 2026-07-17)
+- On a compact window, **shrink or omit the artwork first**; keep the name and the Open
+  control at accessible token sizes. Do **not** scale "art and all" uniformly — rev2 said
+  that, and it would produce an unreadable filename in a small window.
+- The name is **one-line middle ellipsis preserving the extension** (`middle_truncate`);
+  the full name goes to hover / accessibility.
+- Test 1×, 1.5×, 2×, >2×, plus 520×360 and a pathological filename.
 
-A door has no pixels to describe, so the readouts substitute the one fact we can know
-for free — **the file's size, from a `stat`** — and otherwise behave exactly as normal.
+### 6. What a door reports: size, not dimensions
 
-**Never probe.** Not the entry count, not whether it's password-protected, nothing that
-requires opening the archive. Owner: *"Too expensive for blazing."* That is the same
-line the decode path already holds (the typed dispatch returns above `source.bytes()`),
-extended to the readouts: **all we know about a door is its size and its extension, and
-that is all we say.**
+A door has no pixels to describe. **Never probe** — not the entry count, not whether it is
+encrypted. Owner: *"Too expensive for blazing."* All we know is its size and its
+extension, and that is all we say.
 
-- **Details panel (`Shift+I`) — ✅ already shipped** (`cf8ae8a`, `app_core_impl.rs`'s
-  `Archive` arm): size from `fs::metadata` (falling back to `size_hint` for an entry),
-  plus a `Format` row (`"7z archive"`). No EXIF, no probe. **Precise bytes**, matching
-  the panel's own convention. The stat runs once per item behind `exif_cache`, not per
-  frame.
-- **Info line (`i`) — to do**: where a photo shows `4032×3024`, a door shows a
-  **human-readable size** (`271 MB`). Everything else about the line is unchanged.
+- **Details panel (`Shift+I`) — ✅ shipped** (`cf8ae8a`): size via `fs::metadata` (or
+  `size_hint` for an entry) + a `Format` row, no EXIF, no probe, precise bytes, cached
+  behind `exif_cache` so the stat runs once per item.
+- **Info line (`i`) — to do**: **omit dimensions**; show a human-readable size instead.
+- **Copy Details** — omit dimensions there too.
 
-> 🪤 **The info line runs on the frame path — do not `stat` there.**
-> `info_line_parts` is reached from `info_line_snapshot()` while the shell builds its
-> `PanelFrame`, so a `fs::metadata` call in it would be **disk I/O on the event loop,
-> every frame** — precisely the thing the whole architecture forbids, and exactly the
-> trap the details panel avoids by caching behind `exif_cache`.
+> 🪤 **Nothing may `stat` on the frame path *or* on a blaze step.** `info_line_parts`
+> (`app_core_impl.rs:4746`) is reached from `info_line_snapshot()` while the shell builds
+> its `PanelFrame` — a `fs::metadata` there is disk I/O on the event loop **every frame**.
+> Codex extends this correctly: **a stat over SMB can block**, so it must not run per
+> *item* on the event loop either.
 >
-> The size must therefore ride **`PhotoMeta`** (`meta.rs`), which is per-item cached in
-> `meta_cache` and filled once when a decode lands (`app_core_impl.rs:6158` / `:6267` /
-> `:6426`) — the same place `w`/`h` come from. `FsSource` does **not** implement
-> `size_hint` (only the archive sources do), so the value has to come from a stat at
-> that fill point, or from teaching the scan to carry it.
+> Sources, best first: (a) teach the **scan** to carry sizes — `read_dir` yields metadata
+> essentially free on Windows, and `FsSource` does not implement `size_hint` today (only
+> the archive sources do); (b) fill asynchronously and show the size when it lands.
+> **Not** a stat at the `meta_cache` insert, which is on the event loop.
 >
-> Also note `archive::human_gb` exists but is **GB-only** (it formats the RAM budget); a
-> door needs KB/MB/GB, so it needs a general formatter rather than that one.
+> `archive::human_gb` is **GB-only** (it formats the RAM budget) — a door needs KB/MB/GB.
+
+### 7. Command matrix — photo-only commands must be gated
+
+**Blocker (verified).** With a transparent sentinel, Copy Image copies a transparent
+pixel; Compare (`compare_pin_cmd`, `app_core_impl.rs:3280`) pins a UI sentinel; OCR /
+Describe / Ask run on nothing; Zoom implies the door is content.
+
+| Command | On a door |
+|---|---|
+| Open (`P`), navigation, Copy Path, Reveal, Details, Delete the archive file | **Valid** |
+| Rotate / Save rotation | Disabled — already toasts honestly (`app_core_impl.rs:598`) |
+| Copy Image, OCR/Text, Describe/Ask, Compare | **Disabled** or an explanatory no-op |
+| Zoom | Decide (open question 2) — harmless on a 1×1, but the *card* does not zoom |
+
+Audit menu state, context menus, shortcuts, and dispatch — not just the keymap.
+
+### 8. The card's place in the overlay stack
+
+**Blocker.** A centred card can collide with the tree, inspector, info line, help, toolbar
+inset, toast, or scan pill. Define it as **content chrome**:
+
+- Above the photo canvas; **below** help, dialogs, progress, and toasts.
+- Centred in the **unobstructed content area** (minus open side panels), not blindly in
+  the window.
+- **Persistent** when panels are hidden with `Tab`, in fullscreen, and while blazing (§10).
+
+### 9. Artwork: one asset, one texture per shell
+
+Asset stays in `pb-app-core/assets/` (`cfg(windows)` = manila / else blue). Both decode,
+have alpha, are 1024×1024 sRGB WebP.
+
+- Decode **off the event loop**, or initialise before the first door is presented.
+- Cache **one egui texture**; `pb_ui::icon` already caches rasters in the egui ctx.
+- macOS: a **one-time generation + width/height + RGBA** bridge accessor cached in
+  `CoreModel`. **Do not** clone ~4 MiB through FFI per pump. *(This is why `pb-mac-ffi` is
+  in scope — rev3 omitted it.)*
+- **Artwork failure degrades to a text-and-button card**, never a hidden door.
+- Consider **lossless** WebP/PNG for the assets: they are lossy 4:2:0 today, a poor fit for
+  hard edges and fine linework, and the size cost is irrelevant for two one-time assets.
+
+### 10. Blazing — the card shows (owner, 2026-07-17)
+
+The play pill is suppressed while a nav key is held (`maybe_show_anim_hint`'s nag rule).
+The card must **not** inherit that: the sentinel draws nothing, so blazing through a folder
+of archives would show an **entirely blank screen**. Owner: *"part of the rationale for not
+showing things is to keep it fast, but without showing something it'll just look broken."*
+It is the item's content, not a nag about it — the first overlay that survives blazing,
+deliberately. See the gate below for what that costs.
+
+## Performance — the claim, corrected, and the gate
+
+rev2 claimed the card "costs nil". **Unsupported, and withdrawn** — CLAUDE.md: *performance
+claims require numbers from the benchmark corpus.* The honest statement:
+
+> No archive payload read, no image decode, and no artwork upload after init — but **one UI
+> update per newly presented archive**. While blazing consecutive doors the filename changes
+> each frame, which on Windows means text layout, allocation, a full egui offscreen render,
+> and composition of the full-window overlay. **This is the first persistent chrome proposed
+> for the blaze hot path.**
+
+**Gate before closing 105:** measure an image-only deck against a consecutive-door deck at
+the target resolution and 120 Hz; report **p50/p95/p99** CPU frame time and keypress→photon
+(never means). If full-window egui repaint is material, retain the card in a smaller overlay
+texture/quad.
 
 ## Phases
 
-**Phase 1 — core.** Transparent tile; `door_card()`; expose the art pixels; carry the
-door's size on `PhotoMeta` and swap the info line's dimensions for it (§6 — fill it at
-the `meta_cache` insert, **never** in `info_line_parts`). Tests: the tile is transparent
-and still costs no read; `door_card` is `Some` only on a door and carries the live
-shortcut; the info line reports a size for a door and dimensions for a photo; no
-`fs::metadata` on the frame path.
+**Phase 0 — tracking.** Numeric task 105 + subtasks in `tasks.json`, depending on 104.
+Resolve 104's outstanding validation (open question 3).
 
-**Phase 2 — winit/egui.** `PanelFrame.door` + `door_card()` in `panels_ui.rs`; the art
-texture uploaded once into the ctx, drawn at **512 pt, shrinking to fit** (§5). Shows
-while blazing — do *not* gate it on the pill's nag rule. Remove the pill's kind-3 path.
+**Phase 1 — core.** 1×1 transparent sentinel; `door_card()` keyed off the presented item;
+omit dimensions for doors (info line + Details + Copy Details); a size source that never
+stats on the event loop (§6); expose the artwork once. Tests: sentinel is transparent and
+still costs no read; `door_card` is `Some` only on a door and carries the live shortcut; the
+info line omits dimensions and reports a size; **no `fs::metadata` on the frame path**.
 
-**Phase 3 — macOS.** The same card in SwiftUI; art over the bridge. ⚠ Cannot be compiled
-here — `cargo check -p pb-mac-ffi` covers only the Rust half.
+**Phase 2 — winit/egui.** `PanelFrame.door`; the visibility + signature seam (§3); the card
+from `pb-ui` atoms + `middle_truncate`, sized per §5; archive thumbnails (§4); command
+gating (§7); stack placement (§8); shows while blazing (§10). Remove the pill's kind-3 path.
 
-**Phase 4 — cleanup.** Delete `play_hint_persistent`, the kind-3 arms, `Icon::Archive`
-if now unused, and resolve `never_upscale` (adopt or revert).
+**Phase 3 — macOS.** The same card in SwiftUI; the artwork bridge (§9); thumbnails; command
+gating. ⚠ **Requires a real Swift host build + a real-folder smoke test** —
+`cargo check -p pb-mac-ffi` validates only the Rust half.
 
-## Open questions — decide before building
+**Phase 4 — measurement.** The blaze gate above. Do not close 105 on an unmeasured claim.
 
-1. ~~**Does the card show while blazing?**~~ **Resolved (owner, 2026-07-17): yes.** The
-   play pill is suppressed while a nav key is held (`maybe_show_anim_hint`'s nag rule),
-   and inheriting that would be a real bug now — the tile draws nothing, so blazing
-   through a folder of archives would show an **entirely blank screen**. Owner: *"part
-   of the rationale for not showing things is to keep it fast, but without showing
-   something it'll just look broken."* This makes the card the **first** overlay that
-   survives blazing; that is deliberate, because it is the item's content, not a nag
-   about it. (Cost is nil: the card is static per item — no per-frame decode, no raster,
-   just a cached texture and two labels.)
-2. ~~**What should the info line say for a door?**~~ **Resolved (owner, 2026-07-17):**
-   the file size replaces the dimensions, human-readable; everything else behaves as
-   normal. See §6 — including the trap that it must not `stat` on the frame path. The
-   details panel already shipped and already matches (`cf8ae8a`).
-3. **`never_upscale`'s fate.** Its only caller disappears here. The owner asked whether
-   "shrink to fit" should be a real user-facing mode; if yes, this field is its engine
-   and stays. If not, revert it with this change rather than leaving a tested,
-   documented, unused feature.
-4. **Does the card *also* show the size?** The info line now carries it (§6), and the
-   card names the file. "wedding-photos.zip · 271 MB" on the card sets an expectation
-   before a 7z spends ten seconds decompressing — but it duplicates the line for anyone
-   who has `i` on. Lean: name only on the card, size on the line, since the line is where
-   facts live.
+**Phase 5 — cleanup.** Delete `play_hint_persistent`, the kind-3 arms, `never_upscale`,
+`pb_hud::icon::assets::FILE_ZIPPER` + its vendored SVG; and if `Icon::Archive` ends up
+unused, its glyph arms, gallery entry, and **both** vendored family SVGs. Update
+`CHANGELOG.md` — its current text describes an archive tile/icon.
+
+**Screenshots:** extend **`--egui-shot`** (`egui_shot.rs` — the viewer-overlay harness),
+**not** `--settings-shot` (the Settings equivalent), with door-card modes: long names,
+compact windows, several scale factors, light/dark.
+
+## Open questions
+
+1. **Does the card also show the size?** The info line carries it (§6) and the card names
+   the file. Lean: name + format on the card, size on the line — the line is where facts
+   live. (Codex's suggestion to use the otherwise-unused `DoorCard.format` as the card's
+   secondary line is adopted in §2.)
+2. **Zoom on a door** (§7) — no-op, or leave it harmless?
+3. **104's remaining validation** — finish first, or absorb into 105? 104 is `review`, not
+   done: it still wants a real-folder pass and a Mac build for the `cfg(macos)` arms.
 
 ## Risks
 
-1. **The card is built twice**, egui and SwiftUI. Inherent to native chrome and already
-   the deal `dialog.rs` + the SwiftUI panes accept; `pb-ui` makes the egui half cheap.
-   Owner: *"And then do it again in SwiftUI :P"* — accepted going in.
-2. **No golden-image coverage.** A shell-rendered card can't appear in the headless wgpu
-   render tests the way a decoded tile can. `--settings-shot`-style capture is the
-   nearest equivalent.
-3. **macOS is unverifiable from the Windows box** — same standing blind spot as the
-   `cfg(macos)` routing arms and the blue asset.
-4. **It is a rewrite of two-days-old code.** `play_hint` kind 3, the persistent flag and
-   `never_upscale` all shipped hours before this plan. They were not wasted — they are
-   what made the design problem legible — but the diff will read as churn without this
-   document.
+1. **The card is built twice**, egui + SwiftUI. Inherent to native chrome; the deal
+   `dialog.rs` and the SwiftUI panes already accept. Owner: *"And then do it again in
+   SwiftUI :P"*.
+2. **First persistent chrome in the blaze path** — hence the gate.
+3. **No golden-image coverage**: shell-rendered chrome can't ride the headless wgpu render
+   tests; `--egui-shot` is the nearest equivalent.
+4. **macOS unverifiable from the Windows box** — the standing blind spot (the `cfg(macos)`
+   arms, the blue asset).
+5. **It rewrites two-day-old code.** Owner: *"that's just iteration. Write code delete
+   repeat."* The deleted version is what made the design legible.
 
 ## Non-goals
 
-- **Per-format artwork.** One picture per platform; the card names the format in text.
-- **Making the card interactive beyond Open.** No context menu, no rename, no preview of
-  contents — entering the archive is the feature.
-- **Touching the pill for videos/animations.** It keeps its flash-and-fade behaviour;
-  only the door's kind-3 borrow goes away.
+- Per-format artwork; the card names the format in text.
+- Any interactivity beyond Open — no context menu, no content preview.
+- Touching the pill for videos/animations; only the door's kind-3 borrow goes away.
+- Probing archives for entry counts, encryption, or anything needing them opened.
