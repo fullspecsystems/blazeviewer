@@ -23,10 +23,12 @@ struct LeftPaneTabBar: View {
     let onClose: () -> Void
 
     /// Two segments fit icon+label down to ~233pt (the Inspector's 300 is for
-    /// three); below that the icons hide and the labels stay. 225 left the
-    /// glyphs kissing the pill edges at the floor (owner screenshot) — +8pt
-    /// buys the breathing room without hiding icons any earlier than needed.
-    private var compactTabs: Bool { width < 233 }
+    /// three). Below that, rather than let "Folders"/"Thumbnails" truncate to
+    /// "Thumb…", we drop the words entirely and keep just the SF Symbol — so the
+    /// pane shrinks all the way to its 120pt floor staying legible. 225 left the
+    /// glyphs kissing the pill edges (owner screenshot); +8pt is the breathing
+    /// room, and it doubles as the word-shed point.
+    private var iconOnlyTabs: Bool { width < 233 }
     private let segMargin: CGFloat = 6
     private let trackPad: CGFloat = 2
     private var segTrackHeight: CGFloat { PanelMetrics.headerHeight - 2 * segMargin }
@@ -54,10 +56,12 @@ struct LeftPaneTabBar: View {
         let selected = self.selected == index
         return Button(action: { model.showLeftTab(index) }) {
             HStack(spacing: 4) {
-                if !compactTabs {
-                    Image(systemName: icon)
+                // The icon is always present; below 233pt the word drops so it
+                // never truncates, leaving the SF Symbol alone.
+                Image(systemName: icon)
+                if !iconOnlyTabs {
+                    Text(label)
                 }
-                Text(label)
             }
             .font(.callout)
             .foregroundStyle(selected ? Color.white : Color.panelSecondary)
@@ -70,6 +74,10 @@ struct LeftPaneTabBar: View {
             .contentShape(RoundedRectangle(cornerRadius: pillRadius))
         }
         .buttonStyle(.plain)
+        // Keep the name reachable when the word is gone: VoiceOver reads it, and
+        // hovering the bare glyph shows it as a tooltip.
+        .accessibilityLabel(label)
+        .help(iconOnlyTabs ? label : "")
     }
 }
 
@@ -133,11 +141,12 @@ struct ThumbnailsPanelView: View {
         .panelBackground(opacity: model.panelOpacity)
         .overlay(alignment: .trailing) {
             // The SHARED left-pane width (both tabs, one knob — the Inspector
-            // idiom); 200pt floor for both, long folder names truncate.
+            // idiom); 120pt floor for both, where the tabs go icon-only and long
+            // folder names truncate.
             ResizeHandle(
                 model: model,
                 width: Binding(get: { model.treeWidth }, set: { model.treeWidth = $0 }),
-                minWidth: 200, maxWidth: maxWidth, sign: 1)
+                minWidth: 120, maxWidth: maxWidth, sign: 1)
         }
         .arrowCursorOnHover()
     }

@@ -21,6 +21,12 @@ with any pre-release suffix carried only by the tag.
   pairs with the `Cmd+↑` / `Alt+↑` that go back out to the enclosing folder. `P` still does
   everything it did.
 
+### Changed
+- **The side panels resize narrower now (macOS).** The folder / thumbnails pane shrinks all
+  the way to 120 pt (was 200 pt) — once it's too narrow for the "Folders" / "Thumbnails" tab
+  labels, they give way to just their icons rather than truncating. The info inspector goes a
+  touch narrower too, down to 260 pt (was 280 pt).
+
 ### Fixed
 - **Softer, tighter shadows on the floating panels and buttons (macOS).** Every floating
   surface — the welcome screen's Open buttons, the folder/thumbnails/inspector/Help panels, the

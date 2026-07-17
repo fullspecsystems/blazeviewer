@@ -84,12 +84,12 @@ struct FolderTreePanelView: View {
         }
         .frame(width: min(model.treeWidth, maxWidth))
         .panelBackground(opacity: model.panelOpacity)
-        // Drag the trailing edge to widen (280pt minimum).
+        // Drag the trailing edge to resize (120pt floor — tabs go icon-only there).
         .overlay(alignment: .trailing) {
             ResizeHandle(
                 model: model,
                 width: Binding(get: { model.treeWidth }, set: { model.treeWidth = $0 }),
-                minWidth: 200, maxWidth: maxWidth, sign: 1)
+                minWidth: 120, maxWidth: maxWidth, sign: 1)
         }
         .arrowCursorOnHover()
     }
