@@ -8319,6 +8319,51 @@ impl AppCore {
         }
     }
 
+    /// Row `row` as a **Media Foundation reader stream index** (`-1` = this row isn't
+    /// MF-located) — the Windows WASAPI route's currency, fed to the engine's
+    /// `set_track`. Populated by MF's own catalog, or — the usual `ffprobe` build,
+    /// where FFmpeg's catalog supersedes — by the FFmpeg→MF bridge
+    /// (`pb_decode::tracks::bridge_mf_audio_locators`). MF enumerates streams in a
+    /// different order than the container, which is why this can never be a row or an
+    /// FFmpeg index in disguise.
+    pub fn audio_row_mf_stream(&self, row: usize) -> i64 {
+        match self.audio_row_locator(row) {
+            Some(pb_decode::tracks::TrackLocator::MfStream(s)) => *s as i64,
+            _ => -1,
+        }
+    }
+
+    /// The picker row whose locator names MF reader stream `stream` (`-1` = none) —
+    /// how the Windows shell translates the engine's "this is what is actually
+    /// decoding" report into a row for [`set_active_audio_row`](Self::set_active_audio_row).
+    /// The winit twin of the macOS host's `reportActiveAudioStream`.
+    pub fn audio_row_for_mf_stream(&self, stream: i64) -> i64 {
+        self.audio_row_for(|loc| {
+            matches!(loc, pb_decode::tracks::TrackLocator::MfStream(s) if *s as i64 == stream)
+        })
+    }
+
+    /// The picker row whose locator names FFmpeg stream `stream` (`-1` = none) — the
+    /// same translation for the Linux engine, whose currency is container stream
+    /// indices end-to-end.
+    pub fn audio_row_for_ff_stream(&self, stream: i64) -> i64 {
+        self.audio_row_for(|loc| {
+            matches!(loc, pb_decode::tracks::TrackLocator::FfStream(i) if *i as i64 == stream)
+        })
+    }
+
+    fn audio_row_for(&self, mut hit: impl FnMut(&pb_decode::tracks::TrackLocator) -> bool) -> i64 {
+        let Some(catalog) = self.showing_catalog() else {
+            return -1;
+        };
+        catalog
+            .audio
+            .tracks
+            .iter()
+            .position(|t| catalog.locator(t.id).is_some_and(&mut hit))
+            .map_or(-1, |r| r as i64)
+    }
+
     /// The shell reports which row it is **actually playing** (`-1` = unknown/none).
     ///
     /// Called on open and after every switch — including a *refused* one, where it re-states
@@ -9703,6 +9748,37 @@ mod tests {
         );
         let t = core.toast_native.as_ref().expect("the user is told");
         assert_eq!(t.message, "Only one audio track");
+    }
+
+    /// The Windows (WASAPI/MF) currency accessors (task #99): a row resolves to its MF
+    /// reader stream, a stream resolves back to its row, and a row with no MF locator
+    /// answers `-1` — the shell's cue to refuse the switch rather than guess.
+    #[test]
+    fn mf_stream_accessors_round_trip_and_refuse_unbridged_rows() {
+        let mut core = core_with_a_native_video();
+        let mut a0 = track("AAC", "eng");
+        a0.id.local_id = 1;
+        let mut a1 = track("AC-3", "fra");
+        a1.id.local_id = 2;
+        let mut catalog = pb_decode::MediaTrackCatalog::new(
+            1,
+            pb_decode::MediaBackend::FFmpeg,
+            pb_decode::TrackSet::complete(vec![a0, a1]),
+            pb_decode::TrackSet::complete(vec![]),
+        );
+        // Row 0 was bridged to MF stream 3; row 1 has only its FFmpeg locator.
+        catalog.set_locator(1, pb_decode::tracks::TrackLocator::MfStream(3));
+        catalog.set_locator(2, pb_decode::tracks::TrackLocator::FfStream(2));
+        seed_details(&mut core, 0, Some(catalog), Some(true));
+
+        assert_eq!(core.audio_row_mf_stream(0), 3);
+        assert_eq!(core.audio_row_mf_stream(1), -1, "no MF twin → refuse");
+        assert_eq!(core.audio_row_mf_stream(9), -1, "out of range → refuse");
+
+        assert_eq!(core.audio_row_for_mf_stream(3), 0);
+        assert_eq!(core.audio_row_for_mf_stream(9), -1);
+        assert_eq!(core.audio_row_for_ff_stream(2), 1);
+        assert_eq!(core.audio_row_for_ff_stream(0), -1);
     }
 
     /// A still is not a video: the key says nothing rather than lying about a photo.

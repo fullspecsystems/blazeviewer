@@ -50,6 +50,10 @@ pub struct MfAudioDecoder {
     /// Which **audio ordinal** [`Self::stream`] is: 0 = the clip's first audio
     /// stream, 1 = its second. See [`Self::open_track`].
     track: usize,
+    /// [`Self::stream`] as a **real reader stream index** — resolved even when
+    /// `stream` holds the `FIRST_AUDIO_STREAM` constant, so callers can compare it
+    /// to `TrackLocator::MfStream` values. `None` only if resolution failed.
+    resolved_stream: Option<u32>,
     eos: bool,
 }
 
@@ -79,11 +83,12 @@ impl MfAudioDecoder {
     /// order and its locators are `TrackLocator::FfStream`. Crossing the two
     /// namespaces selects the wrong language while confidently ticking the right one.
     ///
-    /// `TrackLocator::MfStream` is the variant that *would* carry this — the seam is
-    /// there and was designed for exactly this ("an FFmpeg stream index, an MF stream
-    /// ordinal … are different namespaces"). **Nothing bridges FFmpeg's rows to MF's
-    /// ordinals yet**; until something does, the only safe callers are `None`/`Some(0)`
-    /// ("whatever plays by default") and code that got its ordinal *from MF*.
+    /// `TrackLocator::MfStream` is the variant that carries the MF-side identity — as a
+    /// **reader stream index**, not this audio ordinal — and
+    /// [`crate::tracks::bridge_mf_audio_locators`] stamps it onto the FFmpeg catalog's
+    /// audio rows so a picker row can reach [`Self::open_reader_stream`]. The only safe
+    /// callers *here* are `None`/`Some(0)` ("whatever plays by default") and code that
+    /// got its ordinal *from MF*.
     ///
     /// `None` = the first audio stream, which is what MF's `FIRST_AUDIO_STREAM` picks
     /// and therefore what has always played when nobody chose.
@@ -94,22 +99,74 @@ impl MfAudioDecoder {
     ) -> Result<MfAudioDecoder, DecodeError> {
         ensure_mf();
         unsafe {
-            let reader: IMFSourceReader = match ReaderSource::new(input)
-                .map_err(|e| DecodeError::Corrupt(format!("Media Foundation: {e}")))?
-            {
-                ReaderSource::Url(url) => MFCreateSourceReaderFromURL(&url, None),
-                ReaderSource::Stream(bs) => MFCreateSourceReaderFromByteStream(&bs, None),
-            }
-            .map_err(|e| DecodeError::Corrupt(format!("Media Foundation: {e}")))?;
-
+            let reader = open_reader(input)?;
             // Resolve the ordinal to a real reader stream. Ordinal 0 stays on the
             // `FIRST_AUDIO_STREAM` constant it has always used — same call, same
             // behaviour, so the default path can't regress on a file whose streams
-            // enumerate in some order we didn't expect.
-            let (audio, ordinal) = match track {
-                None | Some(0) => (MF_SOURCE_READER_FIRST_AUDIO_STREAM.0 as u32, 0),
-                Some(n) => (nth_audio_stream(&reader, n)?, n),
+            // enumerate in some order we didn't expect. The *resolved* index rides
+            // along purely for reporting ([`Self::reader_stream`]); selection never
+            // depends on it.
+            let (audio, ordinal, resolved) = match track {
+                None | Some(0) => (
+                    MF_SOURCE_READER_FIRST_AUDIO_STREAM.0 as u32,
+                    0,
+                    nth_audio_stream(&reader, 0).ok(),
+                ),
+                Some(n) => {
+                    let s = nth_audio_stream(&reader, n)?;
+                    (s, n, Some(s))
+                }
             };
+            Self::open_on(reader, sample_rate, audio, ordinal, resolved)
+        }
+    }
+
+    /// Open the audio stream at **reader stream index** `stream` — the currency of
+    /// [`crate::tracks::TrackLocator::MfStream`], i.e. the same numbering
+    /// `mf_tracks` enumerates and the FFmpeg→MF bridge
+    /// ([`crate::tracks::bridge_mf_audio_locators`]) copies onto the runtime
+    /// catalog's audio rows. `Err` if `stream` doesn't exist or isn't audio —
+    /// refusing beats silently decoding a stream the user didn't pick.
+    pub fn open_reader_stream(
+        input: &VideoInput,
+        sample_rate: u32,
+        stream: u32,
+    ) -> Result<MfAudioDecoder, DecodeError> {
+        ensure_mf();
+        unsafe {
+            let reader = open_reader(input)?;
+            let ty = reader
+                .GetNativeMediaType(stream, 0)
+                .map_err(|_| DecodeError::Corrupt(format!("this video has no stream {stream}")))?;
+            if ty.GetGUID(&MF_MT_MAJOR_TYPE) != Ok(MFMediaType_Audio) {
+                return Err(DecodeError::Corrupt(format!(
+                    "stream {stream} is not an audio stream"
+                )));
+            }
+            // The audio ordinal is derivable (count the audio streams below), and the
+            // `track()` report must stay honest either way.
+            let mut ordinal = 0usize;
+            for i in 0..stream {
+                if reader
+                    .GetNativeMediaType(i, 0)
+                    .is_ok_and(|t| t.GetGUID(&MF_MT_MAJOR_TYPE) == Ok(MFMediaType_Audio))
+                {
+                    ordinal += 1;
+                }
+            }
+            Self::open_on(reader, sample_rate, stream, ordinal, Some(stream))
+        }
+    }
+
+    /// The shared open body: select `audio` on `reader`, negotiate f32 output.
+    unsafe fn open_on(
+        reader: IMFSourceReader,
+        sample_rate: u32,
+        audio: u32,
+        ordinal: usize,
+        resolved: Option<u32>,
+    ) -> Result<MfAudioDecoder, DecodeError> {
+        unsafe {
             // Decode only the audio stream (leave video untouched — it's the
             // VideoSession's job; a selected-but-unread stream queues forever).
             reader
@@ -157,6 +214,7 @@ impl MfAudioDecoder {
                 },
                 stream: audio,
                 track: ordinal,
+                resolved_stream: resolved,
                 eos: false,
             })
         }
@@ -171,6 +229,14 @@ impl MfAudioDecoder {
     /// **playing** rather than what was asked for.
     pub fn track(&self) -> usize {
         self.track
+    }
+
+    /// The **reader stream index** being decoded — the `TrackLocator::MfStream`
+    /// currency, comparable to the track catalog's locators (task #99). Resolved even
+    /// for a default open (which selects via the `FIRST_AUDIO_STREAM` constant);
+    /// `None` only if that resolution failed, which no real container has produced.
+    pub fn reader_stream(&self) -> Option<u32> {
+        self.resolved_stream
     }
 
     /// Pull the next decoded chunk as interleaved f32 samples. `Ok(None)` = the
@@ -226,6 +292,19 @@ impl MfAudioDecoder {
         }
         self.eos = false;
         Ok(())
+    }
+}
+
+/// A source reader over `input` (URL for a path, byte stream for in-RAM bytes).
+unsafe fn open_reader(input: &VideoInput) -> Result<IMFSourceReader, DecodeError> {
+    unsafe {
+        match ReaderSource::new(input)
+            .map_err(|e| DecodeError::Corrupt(format!("Media Foundation: {e}")))?
+        {
+            ReaderSource::Url(url) => MFCreateSourceReaderFromURL(&url, None),
+            ReaderSource::Stream(bs) => MFCreateSourceReaderFromByteStream(&bs, None),
+        }
+        .map_err(|e| DecodeError::Corrupt(format!("Media Foundation: {e}")))
     }
 }
 
@@ -392,6 +471,84 @@ mod tests {
         let input = VideoInput::Path(fixture("multitrack.mp4"));
         let d = MfAudioDecoder::open(&input, 48_000).expect("open default");
         assert_eq!(d.track(), 0);
+        // ...and it still reports the *real* reader stream index it resolved to, the
+        // `MfStream` currency the shell compares against the catalog's locators.
+        assert_eq!(
+            d.reader_stream(),
+            MfAudioDecoder::open_track(&input, 48_000, Some(0))
+                .expect("open ordinal 0")
+                .reader_stream(),
+            "a default open and an explicit ordinal-0 open are the same stream"
+        );
+    }
+
+    /// `open_reader_stream` — the track-switch entry (task #99): a reader stream index
+    /// (the `TrackLocator::MfStream` currency) opens exactly that stream. Cross-checked
+    /// against `open_track`'s ordinals via the decoded tone, and pinned to decode
+    /// *different* streams for the two indices.
+    #[test]
+    fn open_reader_stream_opens_the_stream_the_locator_names() {
+        let input = VideoInput::Path(fixture("multitrack.mp4"));
+        // The two audio ordinals' real reader stream indices, from the ordinal path.
+        let s0 = MfAudioDecoder::open_track(&input, 48_000, Some(0))
+            .expect("ordinal 0")
+            .reader_stream()
+            .expect("ordinal 0 resolves");
+        let s1 = MfAudioDecoder::open_track(&input, 48_000, Some(1))
+            .expect("ordinal 1")
+            .reader_stream()
+            .expect("ordinal 1 resolves");
+        assert_ne!(s0, s1);
+
+        let decode = |stream: u32| {
+            let mut d = MfAudioDecoder::open_reader_stream(&input, 48_000, stream)
+                .expect("open by reader stream");
+            assert_eq!(d.reader_stream(), Some(stream));
+            let ch = d.format().channels as usize;
+            let mut out = Vec::new();
+            for _ in 0..500 {
+                match d.next_chunk().expect("decode") {
+                    Some(c) => out.extend(c),
+                    None => break,
+                }
+            }
+            (ch, out)
+        };
+        let (ch0, first) = decode(s0);
+        let (ch1, second) = decode(s1);
+        assert!(!first.is_empty() && !second.is_empty(), "both decode");
+        let (a, b) = (zero_crossings(&first, ch0), zero_crossings(&second, ch1));
+        assert!(
+            (a as f64) < (b as f64) * 0.75,
+            "the two reader streams must decode different tracks — {a} vs {b} crossings"
+        );
+    }
+
+    /// A reader stream that isn't audio (the fixture's video stream) is refused, not
+    /// silently swapped for something else; so is a stream index past the table.
+    #[test]
+    fn open_reader_stream_refuses_non_audio_streams() {
+        let input = VideoInput::Path(fixture("multitrack.mp4"));
+        // The fixture has 3 streams (2 audio + 1 video); find the video one.
+        let audio: Vec<u32> = (0..2)
+            .map(|n| {
+                MfAudioDecoder::open_track(&input, 48_000, Some(n))
+                    .expect("ordinal opens")
+                    .reader_stream()
+                    .expect("resolves")
+            })
+            .collect();
+        let video = (0..3u32)
+            .find(|s| !audio.contains(s))
+            .expect("video stream");
+        let Err(e) = MfAudioDecoder::open_reader_stream(&input, 48_000, video) else {
+            panic!("a video stream must not open as audio");
+        };
+        assert!(
+            format!("{e}").contains("not an audio stream"),
+            "unexpected error: {e}"
+        );
+        assert!(MfAudioDecoder::open_reader_stream(&input, 48_000, 99).is_err());
     }
 
     /// Diagnostic: what does MF actually enumerate, and does `FIRST_AUDIO_STREAM` agree
