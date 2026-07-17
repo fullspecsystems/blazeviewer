@@ -9,7 +9,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use pb_decode::{decode_named_bytes, DecodeError, DecodedImage, FitBox, PixelFormat};
 use pb_render::{Rotation, ScaleMode};
@@ -509,10 +509,26 @@ pub fn decode_item_cancellable(
         // A new kind gets a compile error here rather than a silent full read.
         crate::video::LibraryItemKind::Image => {}
     }
+    // PB_PERF (#106.2): split the two costs a decode actually pays — reading the encoded
+    // bytes (for a ZIP over SMB, a fresh 39 MB network read; the byte cache (#106.1) will
+    // target exactly this) versus decoding them. The 7 s first-photo is one of these; this
+    // says which. Gated, so it prints nothing in a normal run.
+    let perf = crate::perf::env_enabled();
+    let t_read = perf.then(Instant::now);
     let bytes = source
         .bytes(item)
         .map_err(|e| DecodeError::Corrupt(format!("read error: {e}")))?;
+    let read_ms = t_read.map(|t| t.elapsed());
+    let t_dec = perf.then(Instant::now);
     let mut img = decode_named_bytes(source.name(item), &bytes, fit, allow_preview)?;
+    if let (Some(r), Some(t)) = (read_ms, t_dec) {
+        eprintln!(
+            "[perf] item {item}: read {} KB in {} ms, decode in {} ms",
+            bytes.len() / 1024,
+            r.as_millis(),
+            t.elapsed().as_millis()
+        );
+    }
     // Cheap header sniff so the viewer knows an on-demand animation is available
     // (the ▶ P hint / `P` to play). Off the keypress path — this runs in the decode
     // worker (or the sync first-paint), never on the event loop. The pixels stay the
@@ -571,16 +587,18 @@ const DOOR_ART: &[u8] = include_bytes!("../assets/folder-zip-blue.webp");
 /// One image serves every archive kind, so the WebP decode runs exactly once. `None` if
 /// it can't be decoded — the card degrades to text and a button rather than vanishing.
 ///
-/// **Cropped to its content.** The asset is a 1024² square whose folder occupies only
-/// ~814×780 of it — roughly 105 px of transparent margin a side, 135 at the bottom. Handed
-/// out uncropped, that margin *is* invisible layout: the card's own padding lands outside
-/// it, so the folder floats in a sea of space no one asked for and no constant explains
+/// **Cropped to its content.** The asset is a 1024² square with generous whitespace the
+/// owner left for the drop shadow; the folder itself is only ~814×780 of it. Handed out
+/// uncropped, that margin *is* invisible layout: the card's own padding lands outside it,
+/// so the folder floats in a sea of space no one asked for and no constant explains
 /// (owner, 2026-07-17: "way too much margin between the folder graphic and the filename").
 /// Cropping here means a shell's padding means what it says — and it fixes both shells at
 /// once, rather than each guessing the same magic inset.
 ///
-/// The bounds keep **any** non-zero alpha, so the drop shadow survives; only dead space
-/// goes.
+/// The crop keeps every pixel of real shadow (see [`INK_ALPHA`] — the threshold is the
+/// whole trick) and stays centred on the folder, never on the ink. Result: 894×860, i.e.
+/// the folder went from 80% of the frame's width to **91%**, which is 14% more folder at
+/// the same size cap and most of the vertical air gone.
 pub fn door_artwork() -> Option<&'static DecodedImage> {
     use std::sync::OnceLock;
     static ART: OnceLock<Option<DecodedImage>> = OnceLock::new();
@@ -591,17 +609,34 @@ pub fn door_artwork() -> Option<&'static DecodedImage> {
     .as_ref()
 }
 
+/// The alpha a pixel needs before it counts as **ink**.
+///
+/// 🪤 Not `1`, and this is load-bearing: the asset is **lossy** WebP, and its alpha channel
+/// carries a 1–3/255 haze over the *entire* square. At `>= 1` the ink box is the whole
+/// 1023×1024 image, so the crop below found "already tight" and returned `None` — it did
+/// **nothing**, silently, for as long as it has existed. That invisible ~1% haze is what
+/// kept ~10% of dead margin a side in the artwork, which is why the folder looked small
+/// inside its box and why the card's own padding never meant what it said.
+///
+/// `4` is the smallest value that clears the haze (measured, `examples/door_bbox.rs`: the
+/// box collapses from 1017×1020 at `>= 2` to 863×822 at `>= 4`, and barely moves after),
+/// so every pixel of *real* shadow survives. Re-run that example if the asset is ever
+/// re-exported — and note a **lossless** export would make this whole problem go away.
+const INK_ALPHA: u8 = 4;
+
 /// Crop `img` to its content, **centred on the solid subject**.
 ///
-/// Two bounding boxes, deliberately: the *ink* (any alpha — the folder plus its soft drop
-/// shadow) and the *subject* (near-opaque — the folder alone). Cropping to the ink box
-/// alone looks wrong, and subtly: the shadow is cast to one side, so that box is
-/// off-centre about the folder (92 px of shadow left, 56 right) and a perfectly centred
-/// box then renders a visibly off-centre folder — which is exactly what the owner saw
-/// ("the image doesn't even appear centered").
+/// Two bounding boxes, deliberately: the *ink* (the folder plus its soft drop shadow — see
+/// [`INK_ALPHA`]) and the *subject* (near-opaque — the folder alone). Cropping to the ink
+/// box alone looks wrong, and subtly: the shadow is cast down and to one side, so that box
+/// is off-centre about the folder and a perfectly centred box then renders a visibly
+/// off-centre folder — which is exactly what the owner saw ("the image doesn't even appear
+/// centered"), and warned about again when this crop was fixed.
 ///
 /// So the crop keeps every pixel of ink but sits **symmetric about the subject's centre**:
-/// the folder lands dead centre, and the shadow survives in whatever room that leaves.
+/// the folder lands dead centre, and the shadow survives in whatever room that leaves. The
+/// mirror is why a one-sided shadow still costs margin on both sides — that is the price of
+/// centring the folder, and it is the right trade.
 ///
 /// `None` if the image is fully transparent, or already tight.
 fn crop_to_content(img: &DecodedImage) -> Option<DecodedImage> {
@@ -620,7 +655,7 @@ fn crop_to_content(img: &DecodedImage) -> Option<DecodedImage> {
         }
         (x0 <= x1 && y0 <= y1).then_some((x0, y0, x1, y1))
     };
-    let (ix0, iy0, ix1, iy1) = bbox(1)?; // ink: folder + shadow
+    let (ix0, iy0, ix1, iy1) = bbox(INK_ALPHA)?; // ink: folder + shadow
     let (sx0, sy0, sx1, sy1) = bbox(200).unwrap_or((ix0, iy0, ix1, iy1)); // subject: the folder
 
     // Half-extents that reach every ink pixel from the subject's centre, mirrored so the
@@ -1412,6 +1447,57 @@ mod tests {
                 "{name}: expected an alpha channel so the card blends onto its background"
             );
         }
+    }
+
+    /// The crop **runs**, and the folder stays centred while it does.
+    ///
+    /// Both halves are regressions that already happened. It silently did nothing for as
+    /// long as it existed — the asset's lossy-WebP alpha haze made the ink box the whole
+    /// square, so it decided "already tight" and returned `None`, and the shells laid out
+    /// ~10% of dead margin a side as if it were design. And the fix for *that* has its own
+    /// trap, which the owner named: crop to the ink alone and the one-sided shadow shoves
+    /// the folder visibly off-centre. So assert the outcome, not the threshold.
+    #[test]
+    fn the_artwork_is_cropped_to_its_content_with_the_folder_still_centred() {
+        let art = door_artwork().expect("artwork decodes");
+        let full = decode_named_bytes("door.webp", DOOR_ART, None, false).expect("decodes");
+        assert!(
+            art.width < full.width && art.height < full.height,
+            "the crop must actually crop ({}×{} vs {}×{}) — a no-op here is invisible \
+             everywhere else",
+            art.width,
+            art.height,
+            full.width,
+            full.height
+        );
+
+        // The near-opaque subject: the folder, without its shadow.
+        let (w, h) = (art.width as usize, art.height as usize);
+        let (mut x0, mut y0, mut x1, mut y1) = (w, h, 0usize, 0usize);
+        for y in 0..h {
+            for x in 0..w {
+                if art.pixels[(y * w + x) * 4 + 3] > 200 {
+                    x0 = x0.min(x);
+                    y0 = y0.min(y);
+                    x1 = x1.max(x);
+                    y1 = y1.max(y);
+                }
+            }
+        }
+        let (left, right) = (x0 as i64, (w - 1 - x1) as i64);
+        let (top, bottom) = (y0 as i64, (h - 1 - y1) as i64);
+        assert!(
+            (left - right).abs() <= 2 && (top - bottom).abs() <= 2,
+            "the folder must sit dead centre in what we hand the shells \
+             (l{left} r{right} t{top} b{bottom})"
+        );
+        // The whole point: the shells' size cap sizes the *frame*, but what the eye
+        // measures is the folder inside it. It was 80% of the frame; anything near that
+        // again means the crop regressed.
+        assert!(
+            (x1 - x0 + 1) * 100 / w >= 88,
+            "the folder should fill the frame it's given, not float in it"
+        );
     }
 
     /// One decode for the process: `door_artwork` hands every shell the same buffer, so

@@ -101,6 +101,12 @@ struct BlazeViewerMacApp: App {
         // builds it. On proceed, CoreModel.init feeds the same argv through
         // `apply_launch_args` for the session overrides.
         Launch.act(on: Launch.preflight())
+        // `--pb-door-shot <dir>`: render the door card to PNGs and exit — before the
+        // window, deliberately. It shot from `onAppear` at first, and hung forever on a
+        // Mac whose console was at the login window: no session, no scene, no `onAppear`.
+        // The whole point of the harness is to see the card where the screen can't be
+        // captured, so it must not need a screen to run.
+        DoorShot.runIfRequested(artwork: CoreModel.loadDoorArtwork())
         _model = State(initialValue: CoreModel())
     }
 
@@ -166,6 +172,21 @@ struct ContentView: View {
         return max(120, min(full, infoLineFrame.minY - 2 * edge))
     }
 
+    /// The area the door card lays itself out in: the whole window minus the edge insets.
+    ///
+    /// Deliberately **not** the space between open side panels. Centring in that gap makes
+    /// the card drift toward whichever panel is narrower (owner, 2026-07-17: with a wide
+    /// Details panel it "just mostly looks off"), a space-between feel where the eye expects
+    /// dead-centre. So the card is always centred in the window, and if a wide panel on a
+    /// narrow window ever overlaps it, the panel simply draws on top (the card sits below
+    /// every panel in the stack) — a rare, graceful collision the owner prefers to a
+    /// permanently off-centre card.
+    private var doorCardArea: CGSize {
+        CGSize(
+            width: max(0, contentSize.width - 2 * edge),
+            height: max(0, contentSize.height - 2 * edge))
+    }
+
     /// The toast sits `edge` above the info line (or `edge` off the bottom when it's hidden),
     /// so the toast→line and line→bottom gaps match.
     private var toastBottomInset: CGFloat {
@@ -227,6 +248,23 @@ struct ContentView: View {
             .overlay(alignment: .center) {
                 if model.openPanelVisible && !model.helpVisible {
                     EmptyStateView(model: model)
+                        .transition(.opacity)
+                }
+            }
+            // The archive door card (task #105) is **content chrome**: it stands in for the
+            // photo that isn't there (a door's frame is a 1×1 transparent sentinel), so it
+            // draws here — above the empty canvas, below every real panel, which then
+            // overlaps it exactly as it would overlap a photo. Centred in the *unobstructed*
+            // area: an open side pane shifts it rather than sitting on top of it.
+            //
+            // No fade timer and no hover-to-hold, unlike the play hint it replaced for
+            // archives: the card is the item's content, not a nag about it, so it stays for
+            // as long as the door is on screen — including while blazing, where hiding it
+            // would leave an entirely blank screen.
+            .overlay {
+                if model.doorVisible {
+                    DoorCardView(model: model, available: doorCardArea)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
                         .transition(.opacity)
                 }
             }

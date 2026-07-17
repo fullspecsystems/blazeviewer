@@ -821,6 +821,9 @@ impl App {
             full_requested_at: HashMap::new(),
             live_motion_cache: HashMap::new(),
             metrics,
+            // Latency timers for "feeling fast" (open→first, open→cached, resize); gated by
+            // PB_PERF, live to stderr. Mirrors `AppCore::headless`.
+            perf: pb_app_core::perf::Perf::new(pb_app_core::perf::env_enabled()),
             // A launch straight onto an archive (the resolve_playlist
             // safety-net path) starts unscoped, like apply_archive stamps.
             archive_scope: source.container().is_some().then(|| ArchiveScope {
@@ -839,6 +842,7 @@ impl App {
             compare_pin_id: None,
             compare_carry: None,
             epoch: 1,
+            content_gen: 1,
             root,
             scan_root,
             recursive,

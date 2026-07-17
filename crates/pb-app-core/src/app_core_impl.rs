@@ -57,6 +57,13 @@ fn pb_trace() -> bool {
     *ON.get_or_init(|| std::env::var_os("PB_TRACE").is_some())
 }
 
+/// `PB_PERF=1` → live one-shot latency lines to stderr (open→first-photo, open→all-cached,
+/// resize→on-screen). Shell-agnostic (works on the macOS host too, read via a captured
+/// stderr), unlike the winit-only `--metrics` summary. Zero cost when off (see [`perf`]).
+pub(crate) fn perf_on() -> bool {
+    crate::perf::env_enabled()
+}
+
 impl AppCore {
     /// A **headless** `AppCore`: an empty photo source, a 1-worker no-op decode pool, no
     /// renderer / HUD / window, default keymap + settings. This is the construction seam the
@@ -145,6 +152,7 @@ impl AppCore {
             full_requested_at: std::collections::HashMap::new(),
             live_motion_cache: std::collections::HashMap::new(),
             metrics: crate::metrics::StageTimes::default(),
+            perf: crate::perf::Perf::new(perf_on()),
             source,
             archive_scope: None,
             playlist: Playlist::new(0, 0),
@@ -158,6 +166,7 @@ impl AppCore {
             compare_pin_id: None,
             compare_carry: None,
             epoch: 1,
+            content_gen: 1,
             root: PathBuf::new(),
             scan_root: None,
             recursive: false,
@@ -345,7 +354,7 @@ impl AppCore {
             || self
                 .targets
                 .iter()
-                .any(|&t| self.ring.slot_for(t).is_none() && !self.failed.contains(&t))
+                .any(|&t| self.display_slot(t).is_none() && !self.failed.contains(&t))
     }
 
     /// Dispatch a one-shot [`Action`] — the single entry point shared by the keyboard
@@ -626,7 +635,8 @@ impl AppCore {
                 self.failed.remove(&item);
                 self.preview_resident.remove(&item);
                 self.upgrade_done.remove(&item);
-                self.invalidate_geometry();
+                // A saved rotation rewrites the file's pixels-as-displayed → content change.
+                self.invalidate_content();
                 self.load_current_sync();
                 self.target_item = self.playlist.current();
                 self.request_prefetch();
@@ -671,7 +681,8 @@ impl AppCore {
                         // scrolled off (or is no longer in the deck), the cache drop above is
                         // enough — it re-decodes reverted next time it's shown.
                         if idx == self.displayed_item {
-                            self.invalidate_geometry();
+                            // The reverted orientation rewrote the file's pixels → content change.
+                            self.invalidate_content();
                             self.load_current_sync();
                             self.target_item = self.playlist.current();
                             self.request_prefetch();
@@ -1202,6 +1213,10 @@ impl AppCore {
     /// A finite **explicit list** has no directory walk, so it resolves inline and installs now.
     pub fn open_plan(&mut self, source: pb_core::open::Source, cursor: pb_core::open::Cursor) {
         use pb_core::open::Source;
+        // Perf (PB_PERF): start the open→first-photo clock now, *before* the archive/scan
+        // worker — that wait (central-directory read, a networked ZIP, a big scan) is part of
+        // what the user feels, so metric 1 has to include it.
+        self.perf.open_begin(self.now);
         // Any explicit open breaks an Open-Parent climb — the next ⌘↑ restarts from the
         // current folder. `open_parent_cmd` re-sets the anchor *after* it calls through here.
         self.climb_anchor = None;
@@ -2933,7 +2948,7 @@ impl AppCore {
         // Keep every undo entry (all path-keyed, deck-independent) so the delete that emptied the
         // deck — and any rotation recorded before it — stay undoable; the restore rebuilds a
         // one-photo deck.
-        self.invalidate_geometry();
+        self.invalidate_content();
         self.displayed_item = None;
         self.target_item = None;
         self.clear_compare_pin();
@@ -3004,6 +3019,10 @@ impl AppCore {
         }
         self.playlist = Playlist::new(self.source.len(), crate::engine::fresh_shuffle_seed())
             .with_cursor(start);
+        // Perf (PB_PERF): the deck size is the open→all-cached target. Doors decode to a flat
+        // tile (never read), so a folder of only doors "caches" the instant they present —
+        // that's fine, the metric is about photos and a door isn't one.
+        self.perf.deck_ready(self.source.len());
         // Re-resolve the compare pin by identity against the new source: it survives a
         // same-deck rebuild (delete-advance, recursive toggle — same paths, new
         // indices); a genuinely new deck can't match, so the pin clears silently. The
@@ -3056,7 +3075,8 @@ impl AppCore {
         // for its ring-size estimate, so clear the stale metadata only afterward. Nothing is
         // presented yet (`displayed_item = None`), so readiness holds the old deck's frame
         // (kept by the renderer) with the loading pie until the first new frame lands.
-        self.invalidate_geometry();
+        // A new deck reassigns every index → content change (purges retained Originals, #106.7).
+        self.invalidate_content();
         // Drop the old deck's metadata (a genuinely new frame is incoming) and mark it
         // un-presented at this epoch: `displayed_item` still names the logical current index,
         // but `presented_epoch = None` makes `target_caught_up` false, so `drain_results`
@@ -5075,6 +5095,9 @@ impl AppCore {
             self.video_geometry_stale = true;
             return;
         }
+        // Perf (PB_PERF): a Fit↔1:1 / settled-resize re-decode of the current photo begins
+        // here — start the resize→on-screen clock; the next present of this item stops it.
+        self.perf.resize_begin(self.now);
         // No synchronous decode on the event loop (task #18 finding #5). `invalidate_geometry`
         // just bumped the epoch, so `target_caught_up` is now false for the current item even
         // though its index is unchanged: the async prefetch re-decodes it at the new fit and
@@ -5143,13 +5166,14 @@ impl AppCore {
             }
         }
         let fit = self.decode_fit();
-        // Drop tier bookkeeping for items no longer resident (evicted).
+        let dk = self.display_kind();
+        // Drop tier bookkeeping for items no longer resident (evicted) in the display rep.
         self.preview_resident
-            .retain(|i| self.ring.slot_for(*i).is_some());
+            .retain(|i| self.ring.slot_for_rep(*i, dk).is_some());
         self.upgrade_done
-            .retain(|i| self.ring.slot_for(*i).is_some());
+            .retain(|i| self.ring.slot_for_rep(*i, dk).is_some());
         self.full_requested_at
-            .retain(|i, _| self.ring.slot_for(*i).is_some());
+            .retain(|i, _| self.ring.slot_for_rep(*i, dk).is_some());
         // Items decoded but not yet uploaded must not be re-requested (the pool no
         // longer tracks them, so it would decode them again).
         let pending: HashSet<usize> = self.pending_uploads.iter().map(|o| o.key.item).collect();
@@ -5178,7 +5202,7 @@ impl AppCore {
             if self.failed.contains(&t) || pending.contains(&t) {
                 continue;
             }
-            let resident = self.ring.slot_for(t).is_some();
+            let resident = self.ring.slot_for_rep(t, dk).is_some();
             let is_prev = resident && self.preview_resident.contains(&t);
             if resident && !is_prev {
                 continue; // already full
@@ -5230,6 +5254,35 @@ impl AppCore {
         }
     }
 
+    /// The ring [`Representation`] the current scale mode's decode produces: a
+    /// viewport-sized `Fit` (Fit mode) or the full-resolution `Original` (Fill /
+    /// Original — those decode at native size, geometry-independent). The parked
+    /// full-res tier (#106.7) later requests `Original` explicitly even in Fit mode;
+    /// this is only the *display* mode's own decode.
+    pub fn display_rep(&self) -> pb_core::Representation {
+        match self.decode_fit() {
+            Some(_) => pb_core::Representation::Fit {
+                geometry_epoch: self.epoch,
+            },
+            None => pb_core::Representation::Original,
+        }
+    }
+
+    /// The representation kind the current scale mode displays from — the key for every
+    /// "is `item` resident / which slot do I rebind" query on the display path.
+    pub fn display_kind(&self) -> pb_core::RepKind {
+        self.display_rep().kind()
+    }
+
+    /// The resident ring slot to display `item` from in the current scale mode: its slot in
+    /// the display [`Representation`] (`Fit` in Fit mode, `Original` in Fill/Original). The
+    /// rebind hit-test — `Some` means "present without decoding." Distinct from the parked
+    /// full-res `Original` slot (#106.7), which the display path rebinds only after a Fit↔1:1
+    /// toggle flips the display kind.
+    pub fn display_slot(&self, item: usize) -> Option<usize> {
+        self.ring.slot_for_rep(item, self.display_kind())
+    }
+
     /// Estimated bytes for one resident ring slot at the current scale mode: the
     /// decode-target box for bounded modes (Fit, and Fill later), or the current
     /// photo's true full-res size for Original. Sizes the ring so VRAM stays in
@@ -5262,7 +5315,7 @@ impl AppCore {
             return None;
         }
         let d = self.displayed_item?;
-        (self.ring.slot_for(d).is_some()
+        (self.display_slot(d).is_some()
             && self.preview_resident.contains(&d)
             && !self.upgrade_done.contains(&d))
         .then_some(d)
@@ -5290,7 +5343,7 @@ impl AppCore {
         .into_iter()
         .filter(|&i| {
             Some(i) != sharpen
-                && self.ring.slot_for(i).is_some()
+                && self.display_slot(i).is_some()
                 && self.preview_resident.contains(&i)
                 && !self.upgrade_done.contains(&i)
                 && !self.is_raw_item(i)
@@ -5988,6 +6041,21 @@ impl AppCore {
     fn mark_resolved(&mut self, item: usize) {
         self.displayed_item = Some(item);
         self.presented_epoch = Some(self.epoch);
+        // Perf (PB_PERF): the current photo just went on screen — close out whichever
+        // episode was waiting on it (open→first-photo, or a resize→on-screen).
+        if let Some((ep, d)) = self.perf.presented(self.now) {
+            eprintln!("[perf] {}: {} ms", ep.label(), d.as_millis());
+            self.metrics.record(ep.label(), d);
+        }
+    }
+
+    /// Perf (PB_PERF): note that `item` reached full residency, and report open→all-cached
+    /// the moment the last one lands. A no-op when `PB_PERF` is unset.
+    fn perf_note_full(&mut self, item: usize) {
+        if let Some((n, d)) = self.perf.full_resident(item, self.now) {
+            eprintln!("[perf] open->all-cached ({n} photos): {} ms", d.as_millis());
+            self.metrics.record("open->all-cached", d);
+        }
     }
 
     /// Whether the on-screen frame is the current target **at the current fit** — i.e.
@@ -6023,7 +6091,7 @@ impl AppCore {
             self.present_failed(item);
             return true;
         }
-        if let Some(slot) = self.ring.slot_for(item) {
+        if let Some(slot) = self.display_slot(item) {
             self.present_item(item, slot);
             true
         } else {
@@ -6038,6 +6106,9 @@ impl AppCore {
     /// next tick (so the target never waits behind neighbors), keeping their pool
     /// byte-budget reservation as backpressure.
     pub fn drain_results(&mut self) {
+        // The representation kind the display path rebinds from this epoch (#106.7): every
+        // "is item resident / which slot" query below is against the display rep.
+        let dk = self.display_kind();
         // Gather everything ready plus last tick's leftovers, dropping stale /
         // duplicate / errored results so only live decoded images remain.
         let mut ready: Vec<Outcome> = std::mem::take(&mut self.pending_uploads);
@@ -6070,7 +6141,7 @@ impl AppCore {
                 return false; // stale geometry
             }
             let item = o.key.item;
-            let resident = self.ring.slot_for(item).is_some();
+            let resident = self.ring.slot_for_rep(item, dk).is_some();
             if let Err(ref e) = o.result {
                 if resident {
                     // A full-upgrade decode failed, but the resident preview is fine
@@ -6133,12 +6204,14 @@ impl AppCore {
             // in-place upgrade (the retain above kept only real fulls; preview-only
             // upgrade results were already marked `upgrade_done` and dropped).
             let upgrade =
-                self.preview_resident.contains(&item) && self.ring.slot_for(item).is_some();
+                self.preview_resident.contains(&item) && self.ring.slot_for_rep(item, dk).is_some();
             if uploads >= UPLOADS_PER_TICK {
                 // Carry still-wanted leftovers to the next tick (in priority order);
                 // drop now-obsolete ones so they don't pin pool byte-budget while
                 // the loop idles (work_pending wouldn't keep polling for them).
-                if self.targets.contains(&item) && (upgrade || self.ring.slot_for(item).is_none()) {
+                if self.targets.contains(&item)
+                    && (upgrade || self.ring.slot_for_rep(item, dk).is_none())
+                {
                     leftover.push(outcome);
                 }
                 continue;
@@ -6148,8 +6221,16 @@ impl AppCore {
                 self.meta_cache.insert(item, m);
             }
             let item_bytes = img.pixels.len() as u64;
+            // The representation + content generation this decode belongs to (#106.7). Stale
+            // (old-geometry / old-content) outcomes were already filtered above, so the current
+            // display rep is correct for every survivor here.
+            let rep = self.display_rep();
+            let cg = self.content_gen;
             if upgrade {
-                let slot = self.ring.slot_for(item).expect("resident as preview");
+                let slot = self
+                    .ring
+                    .slot_for_rep(item, dk)
+                    .expect("resident as preview");
                 if let Some(a) = self.renderer.as_mut() {
                     let t0 = Instant::now();
                     a.upload_slot(
@@ -6163,12 +6244,13 @@ impl AppCore {
                     );
                     self.metrics.record("upload", t0.elapsed());
                 }
-                self.ring.set_slot_bytes(item, item_bytes);
+                self.ring.set_slot_bytes(item, rep.kind(), item_bytes);
                 self.preview_resident.remove(&item);
-                // Real end-to-end sharpen latency for the ON-SCREEN photo (what the
-                // user actually waits on): full requested → full on screen. Ahead-ring
-                // fulls land late by design (low priority), so they'd skew this — only
-                // record the displayed one.
+                self.perf_note_full(item); // preview upgraded to full → one more cached
+                                           // Real end-to-end sharpen latency for the ON-SCREEN photo (what the
+                                           // user actually waits on): full requested → full on screen. Ahead-ring
+                                           // fulls land late by design (low priority), so they'd skew this — only
+                                           // record the displayed one.
                 let t0 = self.full_requested_at.remove(&item);
                 if self.displayed_item == Some(item) {
                     if let Some(t0) = t0 {
@@ -6192,7 +6274,7 @@ impl AppCore {
             }
             if let Some(res) = self
                 .ring
-                .reserve_bytes(item, self.epoch, item_bytes, &self.targets)
+                .reserve_bytes(item, cg, rep, item_bytes, &self.targets)
             {
                 if let Some(a) = self.renderer.as_mut() {
                     let t0 = Instant::now();
@@ -6207,11 +6289,12 @@ impl AppCore {
                     );
                     self.metrics.record("upload", t0.elapsed());
                 }
-                self.ring.mark_resident(item, res.slot, self.epoch);
+                self.ring.mark_resident(item, res.slot, cg, rep);
                 if img.is_preview {
                     self.preview_resident.insert(item);
                 } else {
                     self.preview_resident.remove(&item);
+                    self.perf_note_full(item); // a fresh full landed directly (no preview step)
                 }
                 uploads += 1;
                 // Present the target when it lands — including a *re-present of the same
@@ -6312,6 +6395,17 @@ impl AppCore {
         self.behind = behind;
         // Drop decodes staged for the old geometry; they free their pool budget.
         self.pending_uploads.clear();
+    }
+
+    /// A **content** change (as opposed to a bare geometry change): the pixels behind one or
+    /// more indices changed — a deck rebuild (indices reassigned), source replacement, a saved
+    /// EXIF rotation, delete/undo, or teardown. Bumps `content_gen` (purging every retained
+    /// full-resolution `Original`, #106.7 §2) and then invalidates geometry as usual. Use this
+    /// — not bare `invalidate_geometry` — anywhere index `N` may now name different pixels; a
+    /// resize / scale toggle keeps `content_gen` so a retained Original survives it.
+    pub fn invalidate_content(&mut self) {
+        self.content_gen = self.content_gen.wrapping_add(1);
+        self.invalidate_geometry();
     }
 
     /// Start / stop the slideshow (task #23, the `S` key + View ▸ Slideshow). Starting
@@ -9399,7 +9493,7 @@ impl AppCore {
         let Some(item) = self.displayed_item else {
             return;
         };
-        if let Some(slot) = self.ring.slot_for(item) {
+        if let Some(slot) = self.display_slot(item) {
             self.present_item(item, slot);
         } else {
             self.load_current_sync();
@@ -13738,6 +13832,71 @@ mod tests {
         );
     }
 
+    // ── #106.7 §2: content_gen is split from the geometry epoch ──
+
+    #[test]
+    fn bare_geometry_invalidation_keeps_the_content_generation() {
+        // A resize / fit-toggle bumps only the geometry epoch; the content generation is
+        // unchanged, so a retained full-res Original decoded for the same pixels survives it.
+        let mut core = test_core();
+        let (e0, c0) = (core.epoch, core.content_gen);
+        core.invalidate_geometry();
+        assert_eq!(core.epoch, e0.wrapping_add(1), "geometry epoch advances");
+        assert_eq!(
+            core.content_gen, c0,
+            "content generation is unchanged by a resize"
+        );
+    }
+
+    #[test]
+    fn scale_mode_change_is_geometry_only_not_content() {
+        // Fit↔1:1 is the central #106.7 toggle: it must NOT purge retained Originals.
+        let mut core = test_core();
+        let c0 = core.content_gen;
+        let e0 = core.epoch;
+        core.set_scale_mode(ScaleMode::Original);
+        assert_eq!(core.content_gen, c0, "a scale-mode change is geometry-only");
+        assert_eq!(
+            core.epoch,
+            e0.wrapping_add(1),
+            "…but still bumps the geometry epoch"
+        );
+    }
+
+    #[test]
+    fn invalidate_content_bumps_both_generations() {
+        let mut core = test_core();
+        let (e0, c0) = (core.epoch, core.content_gen);
+        core.invalidate_content();
+        assert_eq!(
+            core.content_gen,
+            c0.wrapping_add(1),
+            "content generation advances"
+        );
+        assert_eq!(
+            core.epoch,
+            e0.wrapping_add(1),
+            "a content change also invalidates geometry"
+        );
+    }
+
+    #[test]
+    fn a_new_deck_advances_the_content_generation() {
+        // A deck rebuild reassigns every index — index N now names different pixels, so the
+        // content generation must advance (this is what purges retained Originals).
+        let mut core = test_core();
+        let c0 = core.content_gen;
+        let root = PathBuf::from("photos");
+        let src: Arc<dyn ItemSource> =
+            Arc::new(FsSource::new(vec![root.join("a.jpg"), root.join("b.jpg")]));
+        core.rebuild_playlist(src, root, None, false, 0);
+        assert_eq!(
+            core.content_gen,
+            c0.wrapping_add(1),
+            "a new deck is a content change"
+        );
+    }
+
     #[test]
     fn rebuild_playlist_clears_metadata_and_marks_nothing_presented() {
         use crate::meta::PhotoMeta;
@@ -13802,10 +13961,7 @@ mod tests {
         core.pending_uploads
             .push(Outcome::synthetic(0, core.epoch, Ok(poster)));
         core.drain_results();
-        assert!(
-            core.ring.slot_for(0).is_some(),
-            "the poster became resident"
-        );
+        assert!(core.display_slot(0).is_some(), "the poster became resident");
         assert_eq!(
             core.presented_epoch,
             Some(core.epoch),
@@ -14440,6 +14596,56 @@ mod tests {
         );
         core.displayed_item = None;
         assert!(core.door_card().is_none(), "nothing presented, no card");
+    }
+
+    /// The perf timers (PB_PERF, task perf) are wired to the right choke points — not just
+    /// the pure `Perf` logic (covered in `perf.rs`), but that the *hooks fire from the real
+    /// methods*: `mark_resolved` (via `present_item`) closes the open→first-photo and
+    /// resize→on-screen episodes, `rebuild_playlist` sets the all-cached target, and
+    /// `perf_note_full` reports it. The GUI can't run headless, so this drives the core
+    /// directly and reads the episodes back out of the `--metrics` recorder.
+    #[test]
+    fn perf_hooks_fire_from_the_real_present_and_resize_paths() {
+        let dir = std::env::temp_dir().join("pb_perf_wiring");
+        let mut core = test_core();
+        core.perf = crate::perf::Perf::new(true);
+        core.metrics = crate::metrics::StageTimes::enabled();
+
+        // An open starts the clock (open_plan does this), then the deck installs (rebuild
+        // calls deck_ready). Order matters: open_begin resets the all-cached target, so it
+        // must precede the rebuild — exactly the real order (open_plan → … → rebuild).
+        core.perf.open_begin(core.now);
+        let src: Arc<dyn ItemSource> =
+            Arc::new(FsSource::new(vec![dir.join("a.jpg"), dir.join("b.jpg")]));
+        core.rebuild_playlist(src, dir.clone(), Some(dir), false, 0);
+
+        let has = |c: &AppCore, stage: &str| c.metrics.summary().iter().any(|r| r.0 == stage);
+
+        // First present of the current photo closes metric 1. `present_item` calls
+        // `mark_resolved` even with no renderer, so the hook runs headless.
+        core.present_item(0, 0);
+        assert!(
+            has(&core, "open->first-photo"),
+            "presenting the first photo must record open->first-photo"
+        );
+
+        // A scale-mode switch begins a resize episode (refresh_after_geometry_change), and
+        // the next present closes it — the exact Fit↔1:1 path the owner asked to measure.
+        core.set_scale_mode(ScaleMode::Original);
+        core.present_item(0, 0);
+        assert!(
+            has(&core, "resize->on-screen"),
+            "a scale-mode switch then present must record resize->on-screen"
+        );
+
+        // The all-cached target is the deck size (2); reporting it once the last full lands.
+        core.perf_note_full(0);
+        assert!(!has(&core, "open->all-cached"), "one of two isn't all");
+        core.perf_note_full(1);
+        assert!(
+            has(&core, "open->all-cached"),
+            "the last full landing must record open->all-cached"
+        );
     }
 
     /// A door reports its **size** where a photo reports dimensions — its frame is a 1×1

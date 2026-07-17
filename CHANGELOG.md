@@ -17,13 +17,23 @@ with any pre-release suffix carried only by the tag.
   refused with a message while the current sound keeps playing. This brings Windows and
   Linux up to par with the Mac.
 - **Archives show up while you browse, and `P` opens them.** A `.zip`, `.7z`, `.rar`, `.cbz`,
-  `.cbr` or `.tar.*` sitting in a folder is no longer invisible: it appears as a tile with an
-  archive icon, and pressing `P` on it opens the archive as its own deck, exactly as if you had
-  picked it from Open File. `Alt+Up` takes you back out to the folder, so you can go straight
-  into the next one. Encrypted archives ask for the password the same way they always have.
-  A folder that holds nothing but archives now opens instead of reporting no images.
-  Browsing past an archive never opens or unpacks it — only pressing `P` does. Archives show a
-  zippered folder, and a button on screen tells you `P` opens it.
+  `.cbr` or `.tar.*` sitting in a folder is no longer invisible: it shows a card in the middle
+  of the screen — a zippered folder, the file's name, and an **Open** button — and pressing `P`
+  opens the archive as its own deck, exactly as if you had picked it from Open File. `Alt+Up`
+  takes you back out to the folder, so you can go straight into the next one. Encrypted archives
+  ask for the password the same way they always have. A folder that holds nothing but archives
+  now opens instead of reporting no images. Browsing past an archive never opens or unpacks it —
+  only pressing `P` does.
+- **`Cmd+↓` / `Alt+↓` open, the way Finder does.** Both now do whatever `P` does — go into an
+  archive, play a video or an animation — so the chord your fingers already know works here, and
+  pairs with the `Cmd+↑` / `Alt+↑` that go back out to the enclosing folder. `P` still does
+  everything it did.
+
+### Changed
+- **The side panels resize narrower now (macOS).** The folder / thumbnails pane shrinks all
+  the way to 120 pt (was 200 pt) — once it's too narrow for the "Folders" / "Thumbnails" tab
+  labels, they give way to just their icons rather than truncating. The info inspector goes a
+  touch narrower too, down to 260 pt (was 280 pt).
 
 ### Fixed
 - **Movies are no longer silent on Windows.** Films with Dolby (AC-3, E-AC-3) or DTS
@@ -31,6 +41,14 @@ with any pre-release suffix carried only by the tag.
   The app now decodes them itself, so nearly any film plays with sound. This also picks
   the film's intended default track (the one the disc authored as default) instead of
   whichever track happened to be listed first.
+- **Faster video seeking on Windows.** Tapping the arrow keys to jump forward a couple of
+  seconds — especially over a network share — used to take about a second because the app
+  rebuilt its whole reader for every jump. A small forward jump now continues from where it
+  already is, so it lands in about a seventh of the time.
+- **Softer, tighter shadows on the floating panels and buttons (macOS).** Every floating
+  surface — the welcome screen's Open buttons, the folder/thumbnails/inspector/Help panels, the
+  pills, and the new archive card — shared one drop shadow that was invisible in dark mode but a
+  large, hazy halo in light mode. It's now a subtle, tight lift in both themes.
 - **Video playback is smooth again (macOS).** MKV and WebM files now play through the same
   renderer as everything else, instead of a path that quietly dropped a few frames every
   second on high-refresh displays. Audio-track switching (`A` / **Playback ▸ Audio**), the

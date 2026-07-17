@@ -129,6 +129,19 @@ final class CoreModel {
     @ObservationIgnored private var playHintHovered = false
     @ObservationIgnored private var playHintFadeTask: Task<Void, Never>?
 
+    /// The archive **door card** (task #105): an archive on disk is a typed deck item whose
+    /// frame is a 1×1 transparent sentinel — it draws nothing — so this card is its entire
+    /// on-screen presence. Refreshed every pump (three small strings, only while a door is
+    /// up); `doorVisible` is the gate everything else hangs off.
+    ///
+    /// It has no play hint and no fade: unlike the pill, the card is the item's *content*,
+    /// not a nag about it, so it stays put — including while blazing, where suppressing it
+    /// would leave an entirely blank screen.
+    private(set) var doorVisible = false
+    private(set) var doorName = ""
+    private(set) var doorFormat = ""
+    private(set) var doorShortcut = ""
+
     // MARK: - Native rich panels (task #54, mac-first) — the first is Help
 
     /// Whether the native SwiftUI Help panel should show, and its sections — refreshed
@@ -175,6 +188,11 @@ final class CoreModel {
     /// generation they were built from (pull-once, plan §8). Bounded: pruned
     /// around the most recent pull; emptied when the tab closes.
     private var thumbImages: [Int: (gen: UInt64, image: NSImage)] = [:]
+    /// The door artwork (task #105), built on first use and kept for the process — see
+    /// `doorArtwork()`. Unlike `thumbImages` there is nothing to key it by and nothing to
+    /// evict: one static asset serves every archive kind, card and strip cell alike.
+    @ObservationIgnored private var doorArtLoaded = false
+    @ObservationIgnored private var doorArtImage: NSImage?
     /// User-resizable panel widths (drag the inner edge). The defaults are the minimums;
     /// session-persistent (survive close/reopen) — disk persistence is a later slice.
     /// ONE width for the whole left pane, whichever tab shows (the Inspector
@@ -327,8 +345,8 @@ final class CoreModel {
             guard let host = self.hostWindow, event.window === host else {
                 return event
             }
+            let f = event.modifierFlags
             if event.type == .keyDown {
-                let f = event.modifierFlags
                 self.core.key_down(
                     name,
                     f.contains(.control),
@@ -346,7 +364,16 @@ final class CoreModel {
             // cover — notably the slideshow interval (`[` / `]`), which only toasts. Discrete
             // presses only (skip OS auto-repeat) to stay off any held-key fast path.
             if event.type == .keyDown, !event.isARepeat { self.syncToolbar() }
-            return event.modifierFlags.contains(.command) ? event : nil
+            // ⌘ chords are passed on rather than eaten, or the menu's own ⌘O / ⌘Q / ⌘, would
+            // never fire — *unless* the keymap binds this one. ⌘↓ (Open, the Finder chord —
+            // task #105) is bound here and in no menu, so forwarding it would act AND then
+            // let AppKit answer the unmatched key equivalent with a beep. Ask the core
+            // rather than naming chords here: the keymap is where bindings live, and it's
+            // user-editable.
+            guard f.contains(.command) else { return nil }
+            let mine = self.core.key_is_bound(
+                name, f.contains(.control), f.contains(.shift), f.contains(.option), true)
+            return mine ? nil : event
         }
 
         // The focus-loss release net: held keys are cleared so nothing keeps blazing —
@@ -963,6 +990,54 @@ final class CoreModel {
         return image
     }
 
+    /// The door artwork — the zippered folder the card draws, and the strip's archive
+    /// cells with it. Blue here to sit with Finder (Windows ships the manila one for
+    /// Explorer); the choice is the core's, and this side just draws what it's handed.
+    ///
+    /// **Pulled once per process, never per pump.** It's a static asset: Rust decodes it
+    /// once (`engine::door_artwork`), this hands over ~2.5 MiB of straight-alpha RGBA8
+    /// exactly one time, and the `NSImage` lives as long as the app. A folder of forty
+    /// doors transfers nothing after the first. `nil` if the asset can't be decoded — the
+    /// card then degrades to text and a button rather than the door vanishing.
+    ///
+    /// Cropped to its content by the core, so the card's padding means what it says.
+    func doorArtwork() -> NSImage? {
+        // `loaded`, not `image != nil`: a failed decode must be remembered too, or every
+        // frame retries it.
+        if doorArtLoaded { return doorArtImage }
+        doorArtLoaded = true
+        doorArtImage = CoreModel.loadDoorArtwork()
+        return doorArtImage
+    }
+
+    /// The artwork pull itself — `static`, so it needs no model. `--pb-door-shot` runs
+    /// before there is one (it shoots the card without a core at all), and this is the one
+    /// piece of it that must be the app's real asset rather than a stand-in: a stand-in
+    /// would look fine while the bridge was broken.
+    static func loadDoorArtwork() -> NSImage? {
+        let w = Int(door_art_width())
+        let h = Int(door_art_height())
+        guard w > 0, h > 0 else { return nil }
+        let rgba = door_art_rgba()
+        guard rgba.len() == w * h * 4 else { return nil }
+        let data = Data(bytes: UnsafeRawPointer(rgba.as_ptr()), count: rgba.len())
+        guard let provider = CGDataProvider(data: data as CFData),
+              let cg = CGImage(
+                  width: w, height: h,
+                  bitsPerComponent: 8, bitsPerPixel: 32, bytesPerRow: w * 4,
+                  space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                  // Straight alpha, like `thumbImage` — not the subtitle overlay's
+                  // premultiplied pixels. Read the wrong way, the folder's drop shadow
+                  // halos.
+                  bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.last.rawValue),
+                  provider: provider, decode: nil, shouldInterpolate: true,
+                  intent: .defaultIntent)
+        else { return nil }
+        // Sized in **pixels**: the views cap the drawn size at this asset's native points
+        // for the display's scale, so it is never magnified.
+        return NSImage(cgImage: cg, size: NSSize(width: w, height: h))
+    }
+
     /// Pull the subtitle overlay if it changed (task #90). Runs every tick, so the fast
     /// path — a cue that's still on screen — must be a single `u64` read and two compares.
     ///
@@ -1006,6 +1081,10 @@ final class CoreModel {
 
     func thumbName(_ i: Int) -> String { core.thumb_name(UInt(i)).toString() }
     func thumbBadge(_ i: Int) -> Int { Int(core.thumb_badge(UInt(i))) }
+    /// Whether the cell is an archive door — it draws the folder artwork instead of a
+    /// thumbnail, which it has none of (task #105). Typed off the path: the strip never
+    /// opens an archive to fill a cell.
+    func thumbArchive(_ i: Int) -> Bool { core.thumb_archive(UInt(i)) }
     func thumbRotation(_ i: Int) -> Int { Int(core.thumb_rotation(UInt(i))) }
     func thumbFailed(_ i: Int) -> Bool { core.thumb_failed(UInt(i)) }
 
@@ -1776,6 +1855,25 @@ final class CoreModel {
                 playHintSeq = phSeq
                 showPlayHint()
             }
+        }
+        // The archive door card. Pulled here rather than on a `PanelsChanged` marker
+        // because it tracks the item **actually on screen** — which lands from the decode
+        // pool, on no marker at all — and blazing a folder of archives has to re-name the
+        // card each time one settles. Compare-then-assign: an unchanged door must not
+        // re-render every tick at 120 Hz.
+        let door = core.door_card()
+        if door.visible {
+            let name = door.name.toString()
+            let format = door.format.toString()
+            let shortcut = door.shortcut.toString()
+            if name != doorName { doorName = name }
+            if format != doorFormat { doorFormat = format }
+            if shortcut != doorShortcut { doorShortcut = shortcut }
+        }
+        if door.visible != doorVisible {
+            // Fades in with the same chrome animation as the panels — but the card is
+            // content, so it must be up the moment the door is: no reveal delay, no timer.
+            withAnimation(Layout.chromeFade) { doorVisible = door.visible }
         }
         // Keep the toolbar's Play-Animation button in step with motion state the discrete
         // input paths miss: a new item reached under hold-to-blaze, or playback finishing on

@@ -306,10 +306,6 @@ pub struct PanelFrame {
     /// The archive **door card** (task #105), when a door is presented. A door's frame is a
     /// 1×1 transparent sentinel, so this is the entire on-screen presence of an archive.
     pub door: Option<pb_app_core::app_core::DoorCard>,
-    /// Whether the left pane is occupied — by the tree **or** its other tab, the thumbnail
-    /// strip. The door card centres itself in what's left, and `tree.is_some()` alone would
-    /// miss the strip.
-    pub left_pane: bool,
     pub dark: bool,
     /// The panel surface alpha (0–255), from Settings ▸ Appearance ▸ *Info panel opacity*
     /// (`info_opacity` — the old HUD opacity). The winit shell has no separate `panel_opacity`
@@ -398,7 +394,6 @@ impl PanelFrame {
             // Shell-owned (fade timing); the shell sets this in `render_overlay_frame`.
             play_hint: None,
             door: core.door_card(),
-            left_pane: core.tree_panel_visible() || core.thumbs_visible(),
             dark: core.hud_dark,
             panel_alpha: opacity_to_alpha(core.settings.info_opacity),
             // Shell-owned (menu-bar visibility lives in the shell); set in render_overlay_frame.
@@ -454,21 +449,14 @@ pub fn build(ctx: &egui::Context, frame: &PanelFrame, actions: &mut Vec<PanelAct
     // The archive door card (task #105) is **content chrome**: it stands in for the photo
     // that isn't there, so it draws first — above the (empty) canvas, below every real
     // panel, which then overlaps it exactly as it would overlap a photo. Centred in the
-    // *unobstructed* area: an open side pane shifts it rather than sitting on top of it.
+    // **whole window** (minus the top toolbar inset), never in the space between open side
+    // panels: centring in that gap drifts the card toward the narrower panel, which reads as
+    // off (owner, 2026-07-17). If a wide panel on a narrow window ever overlaps it, the panel
+    // draws on top — a rare, graceful collision, preferred to a permanently off-centre card.
     if let Some(card) = &frame.door {
-        let left = if frame.left_pane {
-            screen.left() + EDGE + frame.pane_width
-        } else {
-            screen.left()
-        };
-        let right = if frame.inspector.is_some() {
-            screen.right() - EDGE - frame.pane_width
-        } else {
-            screen.right()
-        };
         let content = egui::Rect::from_min_max(
-            egui::pos2(left, screen.top() + frame.top_inset),
-            egui::pos2(right.max(left + 1.0), screen.bottom()),
+            egui::pos2(screen.left(), screen.top() + frame.top_inset),
+            screen.right_bottom(),
         );
         door_card(ctx, &p, alpha, content, card, actions);
     }
@@ -1654,9 +1642,14 @@ fn door_card(
     card: &pb_app_core::app_core::DoorCard,
     actions: &mut Vec<PanelAction>,
 ) {
-    /// The design cap for the artwork's **width**, in points — the folder itself, since the
-    /// asset is cropped to its content.
-    const DOOR_ART_PT: f32 = 148.0;
+    /// The design cap for the artwork's **width**, in points.
+    ///
+    /// It sizes the *frame*; what the eye measures is the folder inside it, which is 91% of
+    /// that (`engine::door_artwork` crops to the shadow, and the shadow is what's left). Own
+    /// the two together: 162 pt of frame ≈ 148 pt of folder — 25% more than this drew before
+    /// the crop was fixed, which is the size the owner asked for (2026-07-17). Keep it in
+    /// step with the SwiftUI card's `artCap`.
+    const DOOR_ART_PT: f32 = 162.0;
     /// The card **adapts** to its filename between these bounds. Most archive names are
     /// short, and a card sized for the worst case is a slab of empty space; but an
     /// unbounded one becomes a banner that collides with the tree and Inspector on a narrow
