@@ -1309,7 +1309,7 @@
         "id": 105,
         "title": "The door card: render archives as chrome, not through the photo pipeline",
         "description": "An archive door is UI, not image content, and rendering it through the photo pipeline caused four defects in a row (a 16px glyph upscaled 12x; a decode-to-fit tile costing a photo-sized ring slot; an invented grey backdrop; artwork magnified 2.1x) plus a filename with nowhere to live. Replace the artwork tile with a 1x1 transparent sentinel and render one centred card (artwork + filename + Open) in egui/SwiftUI. Plan: .taskmaster/plans/105-the-door-card.md (rev4, Codex-reviewed). Net deletes more than it adds: play_hint kind 3, play_hint_persistent, never_upscale, and the dead pb-hud FILE_ZIPPER all go.",
-        "status": "pending",
+        "status": "in-progress",
         "priority": "medium",
         "dependencies": [
           104
@@ -1319,19 +1319,19 @@
             "id": 1,
             "title": "Core: sentinel, door_card(), omit dimensions, non-blocking size",
             "description": "1x1 transparent sentinel; door_card() keyed off the PRESENTED item (not the playlist cursor); omit dimensions for doors in the info line, Details and Copy Details; a size source that never stats on the event loop or a blaze step (prefer teaching the scan to carry sizes - read_dir gives metadata nearly free on Windows and FsSource has no size_hint today; a stat over SMB can block). Tests include: no fs::metadata on the frame path.",
-            "status": "pending"
+            "status": "done"
           },
           {
             "id": 2,
             "title": "winit/egui: the card, its lifecycle, thumbnails, command gating",
             "description": "PanelFrame.door + the visibility/signature seam (the retained overlay will NOT show the card on its own: overlay_panel_visible gates it and overlay_dirty gates rebuilds). Card from pb-ui atoms + middle_truncate, sized per the plan's formula (the fixed 512pt rule was wrong: it breaks past 200% scaling and cannot fit the 520x360 macOS minimum). Archive thumbnails, or the strip goes blank. Command gating (Copy Image / OCR / Describe / Compare). Shows while blazing.",
-            "status": "pending"
+            "status": "done"
           },
           {
             "id": 3,
             "title": "macOS: the same card in SwiftUI + a one-time artwork bridge",
-            "description": "SwiftUI card, thumbnails, command gating. Artwork via a one-time generation+dims+RGBA accessor cached in CoreModel - never clone ~4MiB through FFI per pump. Requires a real Swift host build and a real-folder smoke test; cargo check -p pb-mac-ffi only validates the Rust half.",
-            "status": "pending"
+            "description": "SwiftUI card, thumbnails, command gating. Artwork via a one-time generation+dims+RGBA accessor cached in CoreModel - never clone ~4MiB through FFI per pump. Requires a real Swift host build and a real-folder smoke test; cargo check -p pb-mac-ffi only validates the Rust half. STATUS (2026-07-17): built. FFI seam (DoorCardFfi + door_art_* free fns + thumb_archive), CoreModel pump + one-time NSImage, DoorCardView, the overlay slot, and archive thumb cells all land; pb-mac-ffi tests cover the seam. Verified visually via the new --pb-door-shot <dir> harness (ImageRenderer, no window/core needed - it runs in App.init because onAppear never fires on a Mac at the login window): short/long-name/no-art/min-window/tiny x light+dark all correct. STILL NEEDS the owner real-folder smoke test on a live window - screen capture and Accessibility are unavailable to the agent, so the pump->doorVisible->overlay path is unverified on screen.",
+            "status": "review"
           },
           {
             "id": 4,

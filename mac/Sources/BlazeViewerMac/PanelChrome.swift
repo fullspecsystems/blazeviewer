@@ -35,6 +35,14 @@ enum PanelMetrics {
 
     /// The title / content leading inset — the roomier side; not part of the concentric math.
     static let headerLeadingInset: CGFloat = 14
+
+    /// The one floating-shadow for every panel/pill/card (`panelBackground`). A black shadow
+    /// is near-invisible over a dark photo but a prominent blur over a light one, so this is
+    /// tuned for the light-mode case where it actually shows: a tight radius and a low
+    /// opacity that lifts the surface without the "massive halo" a big radius produced.
+    static let shadowRadius: CGFloat = 7
+    static let shadowOpacity: Double = 0.16
+    static let shadowY: CGFloat = 2
 }
 
 /// Reads the window's **corner-adaptive safe-area inset** — the macOS 26 `NSView.LayoutRegion`
@@ -143,7 +151,18 @@ extension View {
                 RoundedRectangle(cornerRadius: cornerRadius)
                     .strokeBorder(.separator, lineWidth: 0.5)
             )
-            .shadow(radius: 18, y: 5)
+            // One soft lift for every floating surface. Kept deliberately subtle: a black
+            // shadow is invisible in dark mode (dark-on-dark) but a big blurred halo in
+            // light mode, so an oversized radius reads fine in one theme and wrong in the
+            // other. `radius: 18` did exactly that — the owner caught a "massive" halo
+            // around the welcome buttons and the door card in light mode (2026-07-17). A
+            // tight radius with a controlled, low opacity lifts the panel off the photo
+            // without shouting, in both themes. One knob: `PanelMetrics.shadow*`.
+            .shadow(
+                color: .black.opacity(PanelMetrics.shadowOpacity),
+                radius: PanelMetrics.shadowRadius,
+                y: PanelMetrics.shadowY
+            )
     }
 }
 

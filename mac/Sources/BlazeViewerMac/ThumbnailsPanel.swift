@@ -294,7 +294,18 @@ struct ThumbCell: View {
     private var cellImage: some View {
         // `dirty` participates so a freshly landed thumb invalidates this view.
         let _ = dirty
-        if let image = model.thumbImage(index) {
+        // An archive door has no thumbnail to decode — its frame is a 1×1 transparent
+        // sentinel (task #105), so the pixel path below would draw an empty cell. Draw the
+        // same artwork the door card uses, from the one image cached for the process. The
+        // archive itself is never touched: the strip has no more right to decompress one
+        // than the prefetch ring does.
+        if model.thumbArchive(index), let art = model.doorArtwork() {
+            Image(nsImage: art)
+                .resizable()
+                .interpolation(.high)
+                .aspectRatio(contentMode: .fit)
+                .frame(width: boxWidth, height: boxHeight)
+        } else if let image = model.thumbImage(index) {
             let quarter = model.thumbRotation(index)
             Image(nsImage: image)
                 .resizable()

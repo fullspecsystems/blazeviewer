@@ -72,13 +72,28 @@ enum Launch {
     /// `ProcessInfo` directly, so stripping here breaks nothing.
     private static let hostDevFlags: Set<String> = ["--pb-f-smoke"]
 
+    /// Host-only dev flags that take a **value** — the value is stripped with the flag, or
+    /// the shared parser reads it as a path to open and (if it doesn't exist yet, which is
+    /// the normal case for an output directory) exits on a usage error before the flag's
+    /// feature ever runs.
+    private static let hostDevFlagsWithValue: Set<String> = ["--pb-door-shot"]
+
     /// The full argv, argv[0] included — clap consumes the first element as the program
     /// name, so this must NEVER be `dropFirst()`'d (it would eat the first real flag or
     /// path — the P0 the plan calls out). Host dev flags are stripped (above); the
     /// `-psn_…` process-serial argument older LaunchServices launches inject is too.
     static func argvVec() -> RustVec<RustString> {
         let vec = RustVec<RustString>()
+        var skipValue = false
         for (i, a) in ProcessInfo.processInfo.arguments.enumerated() {
+            if i > 0 && skipValue {
+                skipValue = false
+                continue
+            }
+            if i > 0 && hostDevFlagsWithValue.contains(a) {
+                skipValue = true
+                continue
+            }
             if i > 0 && (hostDevFlags.contains(a) || a.hasPrefix("-psn_")) { continue }
             vec.push(value: RustString(a))
         }

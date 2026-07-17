@@ -14,10 +14,19 @@ with any pre-release suffix carried only by the tag.
   picked it from Open File. `Alt+Up` takes you back out to the folder, so you can go straight
   into the next one. Encrypted archives ask for the password the same way they always have.
   A folder that holds nothing but archives now opens instead of reporting no images.
-  Browsing past an archive never opens or unpacks it — only pressing `P` does. Archives show a
-  zippered folder, and a button on screen tells you `P` opens it.
+  Browsing past an archive never opens or unpacks it — only pressing `P` does. An archive shows
+  a card in the middle of the screen — a zippered folder, the file's name, and an **Open**
+  button — so it's clear what you're looking at and how to go in.
+- **`Cmd+↓` / `Alt+↓` open, the way Finder does.** Both now do whatever `P` does — go into an
+  archive, play a video or an animation — so the chord your fingers already know works here, and
+  pairs with the `Cmd+↑` / `Alt+↑` that go back out to the enclosing folder. `P` still does
+  everything it did.
 
 ### Fixed
+- **Softer, tighter shadows on the floating panels and buttons (macOS).** Every floating
+  surface — the welcome screen's Open buttons, the folder/thumbnails/inspector/Help panels, the
+  pills, and the new archive card — shared one drop shadow that was invisible in dark mode but a
+  large, hazy halo in light mode. It's now a subtle, tight lift in both themes.
 - **Video playback is smooth again (macOS).** MKV and WebM files now play through the same
   renderer as everything else, instead of a path that quietly dropped a few frames every
   second on high-refresh displays. Audio-track switching (`A` / **Playback ▸ Audio**), the
