@@ -1627,19 +1627,25 @@ fn open_button(
 }
 
 /// The **door card** (task #105): an archive's whole on-screen presence — the folder
-/// artwork, its name, its format, and the `Open` button — centred in the content area.
+/// artwork, its name, and the `Open` button — centred in the content area.
 ///
-/// A door's decoded frame is a 1×1 transparent sentinel, so without this the viewer sees
-/// an empty letterbox. It is *content chrome*: ambient and non-modal like `ScanPill`, but
-/// unlike the play hint it never fades and it survives blazing — suppressing it would show
-/// a blank screen, which reads as broken rather than fast.
+/// A door's decoded frame is a 1×1 transparent sentinel, so without this the viewer sees an
+/// empty letterbox. It is *content chrome*: ambient and non-modal, but unlike the play hint
+/// it never fades and it survives blazing — suppressing it would show a blank screen, which
+/// reads as broken rather than fast.
+///
+/// **Built on the panel primitives, not hand-rolled** (owner, 2026-07-17: *"a bordered card
+/// with a header section using a separator just like the Keyboard Shortcuts panel"*). Same
+/// [`sdf_panel`] frame, same [`panel_header`] type via [`TITLE_SIZE`], same [`groove`]
+/// separator — so it is a sibling of Help and the Inspector rather than a lookalike that
+/// drifts. It takes no ✕: a door isn't dismissible, you navigate off it.
 ///
 /// **Sizing (plan 105 §5).** The artwork is capped at `DOOR_ART_PT` *and* at its native
-/// resolution for this display (`asset_px / pixels_per_point`), so it is never magnified —
-/// on a 2× display 512 pt lands exactly 1:1 against the 1024 px asset, and past 2× the
-/// native cap takes over. It then shrinks to whatever the window allows; on a cramped
-/// window (the macOS minimum is 520×360) the **art gives way first** and the name and
-/// button keep their readable sizes, rather than scaling the text into illegibility.
+/// resolution for this display (`asset_px / pixels_per_point`), so it is never magnified,
+/// then shrinks to whatever the window allows. On a cramped window (the macOS minimum is
+/// 520×360) the **art gives way first** and the name and button keep their readable sizes.
+/// The asset arrives cropped to its content (`engine::door_artwork`), so the insets here
+/// mean what they say.
 fn door_card(
     ctx: &egui::Context,
     p: &Palette,
@@ -1648,70 +1654,110 @@ fn door_card(
     card: &pb_app_core::app_core::DoorCard,
     actions: &mut Vec<PanelAction>,
 ) {
-    /// The design cap for the artwork's edge, in points.
-    const DOOR_ART_PT: f32 = 512.0;
-    /// Breathing room inside the card, and between its rows.
-    const PAD: f32 = 20.0;
+    /// The design cap for the artwork's **width**, in points — the folder itself, since the
+    /// asset is cropped to its content.
+    const DOOR_ART_PT: f32 = 148.0;
+    /// The card **adapts** to its filename between these bounds. Most archive names are
+    /// short, and a card sized for the worst case is a slab of empty space; but an
+    /// unbounded one becomes a banner that collides with the tree and Inspector on a narrow
+    /// window (owner, 2026-07-17). Past `DOOR_W_MAX` — or past whatever the window allows —
+    /// the name middle-elides instead of widening it further.
+    const DOOR_W_MIN: f32 = 216.0;
+    const DOOR_W_MAX: f32 = 340.0;
+    /// Inset around the body (art / name / button) — the **same** on every side, so the
+    /// card's padding reads as one value rather than four guesses.
+    const BODY_PAD: f32 = 16.0;
+    /// Between the body's rows — one value, so the art→name and name→button gaps match.
     const GAP: f32 = 12.0;
 
     let art = door_art_texture(ctx);
-    let name_font = FontId::new(17.0, FontFamily::Name(pb_ui::SEMIBOLD.into()));
-    let fmt_font = FontId::new(12.5, FontFamily::Proportional);
+    let name_font = FontId::new(15.0, FontFamily::Proportional);
+    let title_font = FontId::new(TITLE_SIZE, FontFamily::Name(pb_ui::SEMIBOLD.into()));
 
-    // Rows that must stay legible no matter how small the window gets.
-    let name_h = ctx.fonts(|f| f.row_height(&name_font));
-    let fmt_h = ctx.fonts(|f| f.row_height(&fmt_font));
-    let text_and_button = name_h + GAP + fmt_h + GAP + OPEN_BTN_H;
+    // Width follows the name, clamped: never narrower than the art + button need, never
+    // wider than a card should be, and never wider than the room it sits in.
+    let text_w = |s: &str, f: &FontId| -> f32 {
+        ctx.fonts(|fonts| {
+            fonts
+                .layout_no_wrap(s.to_string(), f.clone(), p.text)
+                .size()
+                .x
+        })
+    };
 
     // Never magnify: cap at the design size *and* at the asset's native size for this
-    // display's scale. Then fit the window, art first.
+    // display's scale, then fit the window (art first). `EDGE` keeps the card off the
+    // viewport's edges.
+    let room = content.shrink(EDGE);
+    let door_w = (text_w(&card.name, &name_font) + 2.0 * BODY_PAD)
+        .max(text_w(&card.format, &title_font) + 2.0 * HEADER_PAD_H)
+        .clamp(DOOR_W_MIN, DOOR_W_MAX)
+        .min(room.width().max(DOOR_W_MIN));
+    let aspect = art.map_or(1.0, |(_, w, h)| w as f32 / h.max(1) as f32);
     let native_pt = art
         .map(|(_, w, _)| w as f32 / ctx.pixels_per_point())
         .unwrap_or(DOOR_ART_PT);
+    let name_h = ctx.fonts(|f| f.row_height(&name_font));
+    let chrome_h = HEADER_H + 1.0 + 2.0 * BODY_PAD + name_h + GAP + OPEN_BTN_H + GAP;
     let art_pt = DOOR_ART_PT
         .min(native_pt)
-        .min(content.width() - 2.0 * PAD)
-        .min(content.height() - 2.0 * PAD - text_and_button - GAP)
+        .min(door_w - 2.0 * BODY_PAD)
+        .min((room.height() - chrome_h).max(0.0) * aspect)
         .max(0.0);
+    let art_size = egui::vec2(art_pt, art_pt / aspect);
 
-    egui::Area::new(egui::Id::new("pb_door_card"))
-        .fixed_pos(content.center())
-        .pivot(egui::Align2::CENTER_CENTER)
-        .order(egui::Order::Middle)
-        .show(ctx, |ui| {
-            let fill = Color32::from_rgba_unmultiplied(
-                p.control.r(),
-                p.control.g(),
-                p.control.b(),
-                base_alpha,
+    let offset = content.center() - ctx.screen_rect().center();
+    sdf_panel(
+        ctx,
+        p,
+        base_alpha,
+        "pb_door_card",
+        Align2::CENTER_CENTER,
+        offset,
+        room.height().max(120.0),
+        PANEL_RADIUS,
+        egui::Margin::ZERO,
+        1.0,
+        |ui| {
+            ui.set_width(door_w);
+            ui.set_max_width(door_w);
+            ui.spacing_mut().item_spacing.y = 0.0;
+
+            // The header: the panel type, centred (the card has no ✕ to balance against),
+            // then the same groove every panel puts under its header.
+            let (rect, _) = ui.allocate_exact_size(
+                egui::vec2(ui.available_width(), HEADER_H),
+                egui::Sense::hover(),
             );
+            let g = galley(
+                ui,
+                &card.format,
+                FontId::new(TITLE_SIZE, FontFamily::Name(pb_ui::SEMIBOLD.into())),
+                p.text,
+                f32::INFINITY,
+            );
+            paint_vtext(ui, rect.center().x - g.size().x / 2.0, rect.center().y, &g);
+            groove(ui, p);
+
             egui::Frame::none()
-                .fill(fill)
-                .rounding(Rounding::same(pb_ui::RADIUS_CARD))
-                .inner_margin(PAD)
+                .inner_margin(egui::Margin::same(BODY_PAD))
                 .show(ui, |ui| {
                     ui.vertical_centered(|ui| {
                         // The art is the first thing to go on a cramped window.
                         if art_pt > 32.0 {
                             if let Some((tex, _, _)) = art {
                                 ui.add(
-                                    egui::Image::new((tex, egui::vec2(art_pt, art_pt)))
-                                        .fit_to_exact_size(egui::vec2(art_pt, art_pt)),
+                                    egui::Image::new((tex, art_size)).fit_to_exact_size(art_size),
                                 );
                                 ui.add_space(GAP);
                             }
                         }
                         // Middle-elided so a long name keeps its extension — the same rule
                         // the thumb strip's cells use.
-                        let avail = (content.width() - 2.0 * PAD).max(80.0);
+                        let avail = (door_w - 2.0 * BODY_PAD).max(80.0);
                         let name =
                             middle_truncate(ui, &card.name, name_font.clone(), p.text, avail);
                         ui.label(name);
-                        ui.label(
-                            RichText::new(&card.format)
-                                .font(fmt_font)
-                                .color(p.text_secondary),
-                        );
                         ui.add_space(GAP);
 
                         let w = open_button_width(ui, "Open", &card.shortcut);
@@ -1740,7 +1786,8 @@ fn door_card(
                         }
                     });
                 });
-        });
+        },
+    );
 }
 
 /// The door artwork as an egui texture — uploaded **once** per context.
@@ -4056,6 +4103,8 @@ mod tests {
         let a = door_art_texture(&ctx).expect("the artwork decodes and uploads");
         let b = door_art_texture(&ctx).expect("cached");
         assert_eq!(a.0, b.0, "one texture, cached in the ctx");
-        assert_eq!((a.1, a.2), (1024, 1024), "the asset's native size");
+        // Identify it by what it is, not a size that moves with the asset or the crop.
+        let art = pb_app_core::engine::door_artwork().expect("artwork decodes");
+        assert_eq!((a.1, a.2), (art.width, art.height));
     }
 }

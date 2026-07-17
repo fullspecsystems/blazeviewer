@@ -570,11 +570,88 @@ const DOOR_ART: &[u8] = include_bytes!("../assets/folder-zip-blue.webp");
 ///
 /// One image serves every archive kind, so the WebP decode runs exactly once. `None` if
 /// it can't be decoded — the card degrades to text and a button rather than vanishing.
+///
+/// **Cropped to its content.** The asset is a 1024² square whose folder occupies only
+/// ~814×780 of it — roughly 105 px of transparent margin a side, 135 at the bottom. Handed
+/// out uncropped, that margin *is* invisible layout: the card's own padding lands outside
+/// it, so the folder floats in a sea of space no one asked for and no constant explains
+/// (owner, 2026-07-17: "way too much margin between the folder graphic and the filename").
+/// Cropping here means a shell's padding means what it says — and it fixes both shells at
+/// once, rather than each guessing the same magic inset.
+///
+/// The bounds keep **any** non-zero alpha, so the drop shadow survives; only dead space
+/// goes.
 pub fn door_artwork() -> Option<&'static DecodedImage> {
     use std::sync::OnceLock;
     static ART: OnceLock<Option<DecodedImage>> = OnceLock::new();
-    ART.get_or_init(|| decode_named_bytes("door.webp", DOOR_ART, None, false).ok())
-        .as_ref()
+    ART.get_or_init(|| {
+        let art = decode_named_bytes("door.webp", DOOR_ART, None, false).ok()?;
+        Some(crop_to_content(&art).unwrap_or(art))
+    })
+    .as_ref()
+}
+
+/// Crop `img` to its content, **centred on the solid subject**.
+///
+/// Two bounding boxes, deliberately: the *ink* (any alpha — the folder plus its soft drop
+/// shadow) and the *subject* (near-opaque — the folder alone). Cropping to the ink box
+/// alone looks wrong, and subtly: the shadow is cast to one side, so that box is
+/// off-centre about the folder (92 px of shadow left, 56 right) and a perfectly centred
+/// box then renders a visibly off-centre folder — which is exactly what the owner saw
+/// ("the image doesn't even appear centered").
+///
+/// So the crop keeps every pixel of ink but sits **symmetric about the subject's centre**:
+/// the folder lands dead centre, and the shadow survives in whatever room that leaves.
+///
+/// `None` if the image is fully transparent, or already tight.
+fn crop_to_content(img: &DecodedImage) -> Option<DecodedImage> {
+    let (w, h) = (img.width as usize, img.height as usize);
+    let bbox = |min_alpha: u8| -> Option<(usize, usize, usize, usize)> {
+        let (mut x0, mut y0, mut x1, mut y1) = (w, h, 0usize, 0usize);
+        for y in 0..h {
+            for x in 0..w {
+                if img.pixels[(y * w + x) * 4 + 3] >= min_alpha {
+                    x0 = x0.min(x);
+                    y0 = y0.min(y);
+                    x1 = x1.max(x);
+                    y1 = y1.max(y);
+                }
+            }
+        }
+        (x0 <= x1 && y0 <= y1).then_some((x0, y0, x1, y1))
+    };
+    let (ix0, iy0, ix1, iy1) = bbox(1)?; // ink: folder + shadow
+    let (sx0, sy0, sx1, sy1) = bbox(200).unwrap_or((ix0, iy0, ix1, iy1)); // subject: the folder
+
+    // Half-extents that reach every ink pixel from the subject's centre, mirrored so the
+    // subject stays centred. Integer centres via doubled coordinates (no half-pixel drift).
+    let (cx2, cy2) = (sx0 + sx1, sy0 + sy1);
+    let half_x = (cx2 / 2 - ix0).max(ix1 - cx2.div_ceil(2));
+    let half_y = (cy2 / 2 - iy0).max(iy1 - cy2.div_ceil(2));
+    let x0 = (cx2 / 2).saturating_sub(half_x);
+    let y0 = (cy2 / 2).saturating_sub(half_y);
+    let x1 = (cx2.div_ceil(2) + half_x).min(w - 1);
+    let y1 = (cy2.div_ceil(2) + half_y).min(h - 1);
+    if x0 > x1 || y0 > y1 {
+        return None;
+    }
+    let (cw, ch) = (x1 - x0 + 1, y1 - y0 + 1);
+    if cw == w && ch == h {
+        return None; // already tight
+    }
+    let mut pixels = Vec::with_capacity(cw * ch * 4);
+    for y in y0..=y1 {
+        let row = (y * w + x0) * 4;
+        pixels.extend_from_slice(&img.pixels[row..row + cw * 4]);
+    }
+    Some(DecodedImage {
+        width: cw as u32,
+        height: ch as u32,
+        orig_width: cw as u32,
+        orig_height: ch as u32,
+        pixels,
+        ..img.clone()
+    })
 }
 
 /// The frame an archive **door** presents: a 1×1 **fully transparent** sentinel.

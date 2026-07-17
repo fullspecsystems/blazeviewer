@@ -6868,7 +6868,7 @@ impl AppCore {
                 .and_then(|p| p.file_name())
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_else(|| self.source.name(item).to_string()),
-            format: format!("{} archive", kind.name()),
+            format: format!("{} Archive", kind.name()),
             shortcut: self.shortcut_for(Action::PlayPause),
         })
     }
@@ -14285,7 +14285,7 @@ mod tests {
 
         let card = core.door_card().expect("a door presents a card");
         assert_eq!(card.name, "album.zip", "the file name, not the full path");
-        assert_eq!(card.format, "ZIP archive");
+        assert_eq!(card.format, "ZIP Archive", "Title Case, like every heading");
         assert!(
             !card.shortcut.is_empty(),
             "from the live keymap, not hard-coded"

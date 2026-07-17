@@ -123,7 +123,8 @@ pub struct DoorCard {
     /// to fit (middle ellipsis, keeping the extension) and keeps the whole thing for
     /// hover / accessibility.
     pub name: String,
-    /// The secondary line, e.g. `ZIP archive` — from `ArchiveKind::name()`.
+    /// The card's heading, e.g. `ZIP Archive` — from `ArchiveKind::name()`. Title Case,
+    /// like every other heading in the chrome.
     pub format: String,
     /// The Open shortcut, from the live keymap. Never hard-code `P`: it is rebindable.
     pub shortcut: String,

@@ -704,6 +704,38 @@ fn sample_frame(dark: bool, tab: InspectorTab, welcome: bool) -> PanelFrame {
     // Dev toggle: isolate the folder tree (drop the other panels) so its overflow / clipping
     // can be eyeballed without the inspector, scan pill, and menu preview crowding it.
     let tree_only = std::env::var("PB_SHOT_TREE_ONLY").is_ok();
+    // Dev toggle: the archive door card alone (task #105), over an empty letterbox — what a
+    // door actually looks like, since its frame is a transparent sentinel. `PB_SHOT_DOOR=long`
+    // uses a pathological filename to check the middle-elision.
+    let door_only = std::env::var("PB_SHOT_DOOR").ok();
+    if let Some(mode) = &door_only {
+        return PanelFrame {
+            help: None,
+            inspector: None,
+            tree: None,
+            info: None,
+            scan: None,
+            welcome: None,
+            play_hint: None,
+            door: Some(pb_app_core::app_core::DoorCard {
+                name: if mode == "long" {
+                    "a-really-quite-unreasonably-long-archive-name-from-2019.tar.zst".into()
+                } else {
+                    "album.zip".into()
+                },
+                format: "ZIP Archive".into(),
+                shortcut: "P".into(),
+            }),
+            left_pane: false,
+            dark,
+            panel_alpha: 242,
+            top_inset: 0.0,
+            tree_fade: 1.0,
+            inspector_fade: 1.0,
+            pane_width: 280.0,
+            inspector_width: 320.0,
+        };
+    }
     PanelFrame {
         help: (!tree_only).then_some(help),
         inspector: (!tree_only).then_some(inspector),
