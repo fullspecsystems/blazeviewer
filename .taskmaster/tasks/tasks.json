@@ -1384,6 +1384,12 @@
             "title": "Preview-first for big JPEGs via the embedded EXIF thumbnail",
             "description": "The real fix for the 7s first-photo over SMB. Large JPEGs embed a small thumbnail near the file start (owner test file: JPEGInterchangeFormat 240, len 22467 = 22KB). We already have pb_decode::exif_thumbnail but only use it for the thumbs strip; the main viewer decodes the full JPEG and shows nothing until done. Read just the first ~128KB of the entry, pull the embedded thumb, show it in ~100ms (blurry, fit-to-screen), then read the full entry in the background and upgrade to sharp (the preview-first model RAW/HEIC already use). Needs (a) a partial entry read - bytes() reads the whole entry today; (b) a JPEG preview-first path in decode. Turns 7s of placeholder into instant-preview->sharpen.",
             "status": "pending"
+          },
+          {
+            "id": 6,
+            "title": "Resize: jump to true 1:1 SIZE instantly (upscale the fit texture), then sharpen",
+            "description": "Owner-observed two-stage Fit->1:1: (1) a small grow to an intermediate size, (2) ~1s spinner, (3) a jump to true pixel-1:1. Cause: in Fit mode finalize (common.rs:84) downscales the texture to the fit box (true res kept only as orig_width/orig_height), and ViewTransform base_scale for Original is 1.0 = draw the bound texture at 1:1 of ITS dims (view.rs:110). So the toggle shows the low-res fit texture at 1:1-of-reduced-dims (near fit size, wrong) until the full-res re-decode lands and present_slot re-places at the true dims (the big jump). Fix: on the toggle, place the quad at the TRUE size using orig_width/orig_height and let the GPU upscale the fit texture - so you jump to the correct SIZE instantly (soft), then only sharpness improves when the full decode arrives. One soft->sharp transition, no intermediate size step. The resize twin of #106.5 (EXIF preview-first); pairs with #106.1 (byte cache) so the sharpen is not gated on an SMB re-read.",
+            "status": "pending"
           }
         ]
       }
