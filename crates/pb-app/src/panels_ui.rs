@@ -1698,21 +1698,39 @@ fn door_card(
         .map(|(_, w, _)| w as f32 / ctx.pixels_per_point())
         .unwrap_or(DOOR_ART_PT);
     let name_h = ctx.fonts(|f| f.row_height(&name_font));
-    let chrome_h = HEADER_H + 1.0 + 2.0 * BODY_PAD + name_h + GAP + OPEN_BTN_H + GAP;
+    // Everything but the artwork and its gap. `card_h` below adds those back, so the fit
+    // and the placement can never disagree about the card's height.
+    let chrome_h = HEADER_H + 1.0 /* the groove */ + 2.0 * BODY_PAD + name_h + GAP + OPEN_BTN_H;
     let art_pt = DOOR_ART_PT
         .min(native_pt)
         .min(door_w - 2.0 * BODY_PAD)
-        .min((room.height() - chrome_h).max(0.0) * aspect)
+        .min((room.height() - chrome_h - GAP).max(0.0) * aspect)
         .max(0.0);
     let art_size = egui::vec2(art_pt, art_pt / aspect);
+    let show_art = art_pt > 32.0;
 
-    let offset = content.center() - ctx.screen_rect().center();
+    // Place it from a size we **computed**, not one egui measured last time.
+    //
+    // `sdf_panel`'s Window is auto-sized, and an anchored auto-sized Window is positioned
+    // from the rect egui cached on its previous run (this file says so a few lines down:
+    // "egui's auto-sized Window caches its rect and updates it a frame late"). Every other
+    // panel is immune because its width is a constant — this card's width follows the
+    // filename, so a `CENTER_CENTER` anchor centred each door using the *previous* door's
+    // width. And because the retained overlay only rebuilds when the shell dirties it,
+    // egui's settle frame never came: the error persisted for the whole door, cleared on
+    // the next one, and re-appeared on the one after that (owner, 2026-07-17).
+    //
+    // Anchoring the **top-left** to a position we derive from `door_w`/`card_h` removes the
+    // dependency entirely: no cached size, nothing to settle, correct on the first frame.
+    let card_h = chrome_h + if show_art { art_size.y + GAP } else { 0.0 };
+    let top_left = content.center() - egui::vec2(door_w, card_h) / 2.0;
+    let offset = top_left - ctx.screen_rect().left_top();
     sdf_panel(
         ctx,
         p,
         base_alpha,
         "pb_door_card",
-        Align2::CENTER_CENTER,
+        Align2::LEFT_TOP,
         offset,
         room.height().max(120.0),
         PANEL_RADIUS,
@@ -1744,7 +1762,7 @@ fn door_card(
                 .show(ui, |ui| {
                     ui.vertical_centered(|ui| {
                         // The art is the first thing to go on a cramped window.
-                        if art_pt > 32.0 {
+                        if show_art {
                             if let Some((tex, _, _)) = art {
                                 ui.add(
                                     egui::Image::new((tex, art_size)).fit_to_exact_size(art_size),
@@ -4106,5 +4124,64 @@ mod tests {
         // Identify it by what it is, not a size that moves with the asset or the crop.
         let art = pb_app_core::engine::door_artwork().expect("artwork decodes");
         assert_eq!((a.1, a.2), (art.width, art.height));
+    }
+
+    /// **Regression: the card centred itself using the *previous* door's width.**
+    ///
+    /// `sdf_panel`'s Window is auto-sized, and an anchored auto-sized Window is placed from
+    /// the rect egui cached on its last run. Every other panel has a constant width so it
+    /// settles once and never drifts; this card's width follows the filename, so each size
+    /// change centred with the stale one — and since the retained overlay only rebuilds when
+    /// the shell dirties it, egui's settle frame never arrived. A long name was off-centre,
+    /// the next door was off-centre too, the third was fine (owner, 2026-07-17).
+    ///
+    /// Simulates that exactly: build a narrow card and a wide one **in the same context**,
+    /// back to back, and require each to be centred on its own first frame. Against the old
+    /// `CENTER_CENTER` anchoring the second assert fails, because the wide card is placed
+    /// with the narrow one's width.
+    #[test]
+    fn a_door_card_centres_on_its_first_frame_at_any_width() {
+        let ctx = egui::Context::default();
+        pb_ui::install_fonts(&ctx);
+
+        let card_rect = |name: &str| -> egui::Rect {
+            let card = pb_app_core::app_core::DoorCard {
+                name: name.to_string(),
+                format: "ZIP Archive".into(),
+                shortcut: "P".into(),
+            };
+            let mut actions = Vec::new();
+            let _ = ctx.run(Default::default(), |ctx| {
+                let p = Palette::new(true);
+                door_card(ctx, &p, 242, ctx.screen_rect(), &card, &mut actions);
+            });
+            // The window's own rect. Deliberately **not** a shape's clip rect: the SDF
+            // shadow paints into an expanded, deliberately off-centre clip, so reading that
+            // reports a centred card as 62 px out — which cost me a while.
+            ctx.memory(|m| m.area_rect(egui::Id::new("pb_door_card")))
+                .expect("the card painted")
+        };
+
+        let screen_cx = ctx.screen_rect().center().x;
+        let narrow = card_rect("a.zip");
+        assert!(
+            (narrow.center().x - screen_cx).abs() < 2.0,
+            "narrow card off-centre by {}",
+            narrow.center().x - screen_cx
+        );
+
+        // The size changes here. This is the frame that used to be wrong.
+        let wide = card_rect("a-really-quite-unreasonably-long-archive-name-2019.tar.zst");
+        assert!(
+            wide.width() > narrow.width(),
+            "the long name should widen the card ({} vs {})",
+            wide.width(),
+            narrow.width()
+        );
+        assert!(
+            (wide.center().x - screen_cx).abs() < 2.0,
+            "wide card off-centre by {} — placed with the previous card's width",
+            wide.center().x - screen_cx
+        );
     }
 }
