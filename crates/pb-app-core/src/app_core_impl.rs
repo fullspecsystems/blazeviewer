@@ -5260,10 +5260,14 @@ impl AppCore {
         // sequential window's *other* representation resident — the full-res Original while
         // displaying Fit, or the Fit while displaying Original — so a Fit↔1:1 toggle / zoom on
         // those photos is an instant rebind, not a re-decode. Radius from `full_res_radius`;
-        // order is current → compare-pin → sequential neighbours (§ pin). Queued BELOW every
-        // display want, so a blaze never waits on it and it decodes in the pool's spare
-        // capacity. Excludes video / archive doors / SVG / RAW and anything past the gigapixel
-        // ceiling (§8/§9). While a key is held this whole tier is empty (blazing stays lean).
+        // order is current → compare-pin → sequential neighbours (§ pin). Excludes video /
+        // archive doors / SVG / RAW and anything past the gigapixel ceiling (§8/§9). While a key
+        // is held this whole tier is empty (blazing stays lean). Collected here but appended
+        // **below the thumb fills** (§5): a full-res Original decode is ~400 ms, and priority is
+        // list position, so keeping it under the thumb strip is what stops a few big originals
+        // from starving the visible thumbnails (owner-reported). With the strip closed there are
+        // no thumb jobs, so it still decodes right after the fulls — the toggle stays fast.
+        let mut parked: Vec<Job> = Vec::new();
         if self.held_nav().is_none() {
             let (other_kind, other_fit) = match dk {
                 pb_core::RepKind::Fit => (pb_core::RepKind::Original, None),
@@ -5282,7 +5286,7 @@ impl AppCore {
                     {
                         continue;
                     }
-                    jobs.push(Job::display(it, other_fit, false));
+                    parked.push(Job::display(it, other_fit, false));
                 }
             }
         }
@@ -5308,6 +5312,9 @@ impl AppCore {
                 }
             }
         }
+        // Parked full-res originals go LAST — below the display ladder and the thumb fills — so
+        // they only ever decode in the pool's genuinely spare capacity (#106.7 §5).
+        jobs.append(&mut parked);
         self.pool.set_targets(self.epoch, &self.source, &jobs);
     }
 
