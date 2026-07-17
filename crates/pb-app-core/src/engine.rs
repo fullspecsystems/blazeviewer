@@ -9,7 +9,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use pb_decode::{decode_named_bytes, DecodeError, DecodedImage, FitBox, PixelFormat};
 use pb_render::{Rotation, ScaleMode};
@@ -509,10 +509,26 @@ pub fn decode_item_cancellable(
         // A new kind gets a compile error here rather than a silent full read.
         crate::video::LibraryItemKind::Image => {}
     }
+    // PB_PERF (#106.2): split the two costs a decode actually pays — reading the encoded
+    // bytes (for a ZIP over SMB, a fresh 39 MB network read; the byte cache (#106.1) will
+    // target exactly this) versus decoding them. The 7 s first-photo is one of these; this
+    // says which. Gated, so it prints nothing in a normal run.
+    let perf = crate::perf::env_enabled();
+    let t_read = perf.then(Instant::now);
     let bytes = source
         .bytes(item)
         .map_err(|e| DecodeError::Corrupt(format!("read error: {e}")))?;
+    let read_ms = t_read.map(|t| t.elapsed());
+    let t_dec = perf.then(Instant::now);
     let mut img = decode_named_bytes(source.name(item), &bytes, fit, allow_preview)?;
+    if let (Some(r), Some(t)) = (read_ms, t_dec) {
+        eprintln!(
+            "[perf] item {item}: read {} KB in {} ms, decode in {} ms",
+            bytes.len() / 1024,
+            r.as_millis(),
+            t.elapsed().as_millis()
+        );
+    }
     // Cheap header sniff so the viewer knows an on-demand animation is available
     // (the ▶ P hint / `P` to play). Off the keypress path — this runs in the decode
     // worker (or the sync first-paint), never on the event loop. The pixels stay the

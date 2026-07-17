@@ -23,6 +23,14 @@
 use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
+/// Whether `PB_PERF` is set — the single, cached env read shared by the `AppCore`
+/// constructor and the decode-path phase logging (`engine.rs`), which is a free function
+/// with no `Perf` to consult. Zero cost after the first call.
+pub fn env_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("PB_PERF").is_some())
+}
+
 /// Which episode a `presented` call completed, for the caller to label the line.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Episode {
@@ -217,7 +225,8 @@ mod tests {
         let base = Instant::now();
         let mut p = Perf::new(true);
         p.open_begin(base);
-        p.presented(at(base, 300)).expect("first photo consumes the open");
+        p.presented(at(base, 300))
+            .expect("first photo consumes the open");
         // A resize later begins its own clock.
         p.resize_begin(at(base, 5000));
         let (ep, d) = p.presented(at(base, 7100)).expect("resize");

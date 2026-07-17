@@ -61,8 +61,7 @@ fn pb_trace() -> bool {
 /// resize→on-screen). Shell-agnostic (works on the macOS host too, read via a captured
 /// stderr), unlike the winit-only `--metrics` summary. Zero cost when off (see [`perf`]).
 pub(crate) fn perf_on() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var_os("PB_PERF").is_some())
+    crate::perf::env_enabled()
 }
 
 impl AppCore {
@@ -6201,10 +6200,10 @@ impl AppCore {
                 self.ring.set_slot_bytes(item, item_bytes);
                 self.preview_resident.remove(&item);
                 self.perf_note_full(item); // preview upgraded to full → one more cached
-                // Real end-to-end sharpen latency for the ON-SCREEN photo (what the
-                // user actually waits on): full requested → full on screen. Ahead-ring
-                // fulls land late by design (low priority), so they'd skew this — only
-                // record the displayed one.
+                                           // Real end-to-end sharpen latency for the ON-SCREEN photo (what the
+                                           // user actually waits on): full requested → full on screen. Ahead-ring
+                                           // fulls land late by design (low priority), so they'd skew this — only
+                                           // record the displayed one.
                 let t0 = self.full_requested_at.remove(&item);
                 if self.displayed_item == Some(item) {
                     if let Some(t0) = t0 {

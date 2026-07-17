@@ -633,6 +633,30 @@ pub fn load_archive(
     password: Option<String>,
     progress: &pb_source::OpenProgress,
 ) -> Result<Resolved, crate::archive::ArchiveOpenError> {
+    // PB_PERF (#106.2): time the open itself — for a ZIP this is the central-directory read
+    // (small; the entry data is NOT read here), so if it's a big share of the 7 s first-photo
+    // the sync-on-the-event-loop open is the stall to chase, not the first entry's read.
+    let t0 = crate::perf::env_enabled().then(std::time::Instant::now);
+    let result = load_archive_impl(path, kind, password, progress);
+    if let Some(t) = t0 {
+        let outcome = match &result {
+            Ok(r) => format!("{} entries", r.source.len()),
+            Err(e) => format!("{e:?}"),
+        };
+        eprintln!(
+            "[perf] archive open ({kind:?}) in {} ms -> {outcome}",
+            t.elapsed().as_millis()
+        );
+    }
+    result
+}
+
+fn load_archive_impl(
+    path: &Path,
+    kind: ArchiveKind,
+    password: Option<String>,
+    progress: &pb_source::OpenProgress,
+) -> Result<Resolved, crate::archive::ArchiveOpenError> {
     match kind {
         ArchiveKind::Zip => {
             let has_password = password.is_some();
