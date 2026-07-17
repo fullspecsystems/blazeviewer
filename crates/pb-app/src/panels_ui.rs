@@ -1750,22 +1750,28 @@ fn door_card(
 /// forty doors uploads nothing after the first. `None` if the art can't be decoded — the
 /// card then degrades to text and a button rather than vanishing.
 fn door_art_texture(ctx: &egui::Context) -> Option<(egui::TextureId, u32, u32)> {
-    use std::sync::OnceLock;
-    static DIMS: OnceLock<Option<(u32, u32)>> = OnceLock::new();
-    let (w, h) =
-        (*DIMS.get_or_init(|| pb_app_core::engine::door_artwork().map(|a| (a.width, a.height))))?;
-    let id = ctx.data_mut(|d| {
-        d.get_temp_mut_or_insert_with(egui::Id::new("pb_door_art"), || {
-            let art = pb_app_core::engine::door_artwork().expect("dims implied a decode");
+    let art = pb_app_core::engine::door_artwork()?;
+    let id = egui::Id::new("pb_door_art");
+
+    // Read → load → insert, each as its own context access. **Never** call `load_texture`
+    // inside `data_mut`: `data_mut` holds a write lock on the whole `Context`, and
+    // `load_texture` re-enters it to reach the texture manager. egui's lock is not
+    // reentrant, so that deadlocks the event loop the instant the first door renders —
+    // which is exactly what it did (owner: "the app freezes and effectively crashes").
+    // `pb_ui::icon::texture` had this right all along; this is the same shape.
+    let handle = match ctx.data(|d| d.get_temp::<egui::TextureHandle>(id)) {
+        Some(h) => h,
+        None => {
             let img = egui::ColorImage::from_rgba_unmultiplied(
                 [art.width as usize, art.height as usize],
                 &art.pixels,
             );
-            ctx.load_texture("pb_door_art", img, egui::TextureOptions::LINEAR)
-        })
-        .id()
-    });
-    Some((id, w, h))
+            let h = ctx.load_texture("pb_door_art", img, egui::TextureOptions::LINEAR);
+            ctx.data_mut(|d| d.insert_temp(id, h.clone()));
+            h
+        }
+    };
+    Some((handle.id(), art.width, art.height))
 }
 
 /// The play hint: a `[icon] Play [P]` button (the welcome button design, translucent so it
@@ -4033,5 +4039,23 @@ mod tests {
             (got - want_right).abs() < 2.0,
             "narrow line bounced: right edge {got}, expected {want_right}"
         );
+    }
+
+    /// **Regression: this deadlocked the app.** The door artwork's texture cache called
+    /// `ctx.load_texture` from inside `ctx.data_mut`, which re-enters the Context's
+    /// non-reentrant lock — so the event loop froze the instant the first door rendered
+    /// (owner: "the app freezes and effectively crashes"). Every existing door test was
+    /// core-side with no egui context, so nothing caught it.
+    ///
+    /// A revival hangs rather than fails, which is ugly but unmissable — and far better
+    /// than shipping the freeze again.
+    #[test]
+    fn door_art_texture_does_not_deadlock_the_context() {
+        let ctx = egui::Context::default();
+        // First call: decodes + uploads. Second: must hit the cache, not re-upload.
+        let a = door_art_texture(&ctx).expect("the artwork decodes and uploads");
+        let b = door_art_texture(&ctx).expect("cached");
+        assert_eq!(a.0, b.0, "one texture, cached in the ctx");
+        assert_eq!((a.1, a.2), (1024, 1024), "the asset's native size");
     }
 }
