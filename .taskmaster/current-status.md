@@ -31,6 +31,12 @@ output. Verify SwiftUI via the offscreen `--pb-door-shot <dir>` `ImageRenderer` 
 
 **Prime directive: the app must FEEL fast. We measure, not guess.**
 
+> **📋 THE EXECUTION BLUEPRINT: `.taskmaster/plans/106-performance-archive-zoom.md` (rev2,
+> Codex-reviewed).** Read it first — it has the full design, the Codex (gpt-5.6 xhigh) findings
+> folded in (typed representation, content-gen fencing, synchronous re-present, real eviction,
+> scheduler isolation), the decided answers, and the acceptance-test list. The summary below is
+> the orientation; the plan is authoritative. **Owner: start a fresh context to execute.**
+
 ## The measured baseline (owner ran `PB_PERF=1` on an SMB `album.zip`, 8 × ~36 MP JPEGs)
 
 | metric | time |
