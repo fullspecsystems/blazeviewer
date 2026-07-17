@@ -8,6 +8,20 @@ with any pre-release suffix carried only by the tag.
 ## [Unreleased]
 
 ### Added
+- **Switching between fit-to-screen and 1:1 is instant now.** When you stop on a photo, the
+  app keeps its full resolution ready in the background, so toggling to actual pixels (and
+  back) is immediate instead of pausing to re-decode each time — the same when you land on the
+  next photo. How many nearby photos are kept ready is a new setting (default: the current one
+  plus its immediate neighbours); a slower or lower-memory machine can dial it down. Videos,
+  archives, vector art and enormous gigapixel images are left out (there's no meaningful "1:1"
+  to hold), so they never balloon memory.
+- **Big photos show instantly instead of a black screen.** Opening a large JPEG — especially
+  over a network share — used to sit on black for several seconds while the whole file loaded.
+  Now the photo's own embedded thumbnail appears right away (blurry but there), the loading
+  dial keeps spinning so you know the sharp version is still coming, and it snaps into full
+  detail the moment it finishes. Opening a folder's Thumbnails panel also shows the photos
+  you've already seen immediately and fills in the rest as it goes.
+
 - **Pick a video's audio track on Windows and Linux.** Films with several audio tracks
   (other languages, commentaries) can now switch between them mid-playback: the new
   **Playback ▸ Audio Track** menu lists every track with a check on the one playing, and
