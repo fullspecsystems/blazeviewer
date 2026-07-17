@@ -9,14 +9,13 @@ with any pre-release suffix carried only by the tag.
 
 ### Added
 - **Archives show up while you browse, and `P` opens them.** A `.zip`, `.7z`, `.rar`, `.cbz`,
-  `.cbr` or `.tar.*` sitting in a folder is no longer invisible: it appears as a tile with an
-  archive icon, and pressing `P` on it opens the archive as its own deck, exactly as if you had
-  picked it from Open File. `Alt+Up` takes you back out to the folder, so you can go straight
-  into the next one. Encrypted archives ask for the password the same way they always have.
-  A folder that holds nothing but archives now opens instead of reporting no images.
-  Browsing past an archive never opens or unpacks it — only pressing `P` does. An archive shows
-  a card in the middle of the screen — a zippered folder, the file's name, and an **Open**
-  button — so it's clear what you're looking at and how to go in.
+  `.cbr` or `.tar.*` sitting in a folder is no longer invisible: it shows a card in the middle
+  of the screen — a zippered folder, the file's name, and an **Open** button — and pressing `P`
+  opens the archive as its own deck, exactly as if you had picked it from Open File. `Alt+Up`
+  takes you back out to the folder, so you can go straight into the next one. Encrypted archives
+  ask for the password the same way they always have. A folder that holds nothing but archives
+  now opens instead of reporting no images. Browsing past an archive never opens or unpacks it —
+  only pressing `P` does.
 - **`Cmd+↓` / `Alt+↓` open, the way Finder does.** Both now do whatever `P` does — go into an
   archive, play a video or an animation — so the chord your fingers already know works here, and
   pairs with the `Cmd+↑` / `Alt+↑` that go back out to the enclosing folder. `P` still does

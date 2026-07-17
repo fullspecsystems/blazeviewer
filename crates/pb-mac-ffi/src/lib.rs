@@ -5628,13 +5628,35 @@ mod tests {
             "retry shows the error"
         );
 
-        // Submit → Checking + BeginArchiveOpen (intercepted; the bogus path errors out,
-        // which closes the prompt and reports).
+        // Submit → Checking now, then BeginArchiveOpen (intercepted onto this crate's
+        // worker during the drain — `next_effect` calls `begin_archive_open`).
         h.password_submitted("hunter2".to_string());
         let effects = drain(&mut h);
         assert!(effects
             .iter()
             .any(|e| matches!(e, ffi::CoreEffectFfi::SetDialogChecking)));
+
+        // A 7z opens on a worker thread (`ArchiveKind::background_open`), so the failure —
+        // the bogus path can't be opened — lands via `poll_archive_load` on a later tick,
+        // not inline (this is why the old drain-only assertion broke once 7z went async in
+        // #102). Pump `tick()` until the load clears; bounded so a genuine hang fails the
+        // test instead of blocking CI. The worker errors on a missing file almost at once,
+        // so this is one or two iterations in practice.
+        let mut effects = Vec::new();
+        let mut settled = false;
+        for _ in 0..400 {
+            if h.archive_load.is_none() {
+                settled = true;
+                break;
+            }
+            h.tick();
+            effects.extend(drain(&mut h));
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(
+            settled,
+            "the worker never reported — the archive load is stuck"
+        );
         assert!(has_close(&effects));
         assert!(effects
             .iter()

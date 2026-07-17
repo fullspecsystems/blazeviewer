@@ -1342,8 +1342,8 @@
           {
             "id": 5,
             "title": "Cleanup + docs",
-            "description": "Delete play_hint_persistent, the kind-3 arms, never_upscale, and the already-dead pb_hud::icon::assets::FILE_ZIPPER + its vendored SVG; drop Icon::Archive (glyph arms, gallery entry, both vendored family SVGs) if it ends up unused. Extend --egui-shot (the viewer-overlay harness, NOT --settings-shot) with door-card modes. Update CHANGELOG.md, whose text still describes an archive tile/icon.",
-            "status": "pending"
+            "description": "Delete play_hint_persistent, the kind-3 arms, never_upscale, and the already-dead pb_hud::icon::assets::FILE_ZIPPER + its vendored SVG; drop Icon::Archive (glyph arms, gallery entry, both vendored family SVGs) if it ends up unused. Extend --egui-shot (the viewer-overlay harness, NOT --settings-shot) with door-card modes. Update CHANGELOG.md, whose text still describes an archive tile/icon. DONE (2026-07-17): play_hint_persistent, never_upscale, the kind-3 arms, and pb_hud FILE_ZIPPER were already removed in the earlier winit door-card commits (play_hint_kind is now 0/1/2, no door arm). Icon::Archive is KEPT — still used by the egui door card Open button + gallery. egui_shot already carries a door mode; the macOS shell gained --pb-door-shot (offscreen ImageRenderer harness). CHANGELOG updated: the stale tile/icon wording now reads card.",
+            "status": "done"
           }
         ]
       }
