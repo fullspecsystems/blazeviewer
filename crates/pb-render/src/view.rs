@@ -68,16 +68,6 @@ pub struct ViewTransform {
     pub zoom: f32,
     /// Pan offset from centered, in screen pixels (clamped to image bounds).
     pub pan: [f32; 2],
-    /// Cap the **base** scale at 1× — shrink to fit a small window, but never grow
-    /// past the image's native size. Zoom still works on top; this only bounds the
-    /// mode's starting scale.
-    ///
-    /// A property of the *picture*, not a preference: it exists for images that are
-    /// artwork rather than photographs, where filling a 6K display just magnifies the
-    /// pixels (the archive "door", task #104). Deliberately orthogonal to
-    /// [`ScaleMode`] so it never fights the mode the viewer chose — the core sets it
-    /// per item.
-    pub never_upscale: bool,
 }
 
 impl Default for ViewTransform {
@@ -87,7 +77,6 @@ impl Default for ViewTransform {
             rotation: Rotation::R0,
             zoom: 1.0,
             pan: [0.0, 0.0],
-            never_upscale: false,
         }
     }
 }
@@ -115,16 +104,10 @@ impl ViewTransform {
 
     /// The base (zoom = 1) scale for the current mode.
     fn base_scale(&self, rw: f32, rh: f32, sw: f32, sh: f32) -> f32 {
-        let s = match self.mode {
+        match self.mode {
             ScaleMode::Fit => (sw / rw).min(sh / rh),
             ScaleMode::Fill => (sw / rw).max(sh / rh),
             ScaleMode::Original => 1.0,
-        };
-        // Artwork shrinks to fit, but never magnifies — see `never_upscale`.
-        if self.never_upscale {
-            s.min(1.0)
-        } else {
-            s
         }
     }
 
@@ -452,38 +435,5 @@ mod tests {
             v.pannable_axes(2560, 1440, 2560, 1440)[0],
             "a real zoom is horizontally pannable"
         );
-    }
-
-    /// `never_upscale` caps the base scale at 1× — artwork shrinks into a small
-    /// window but never magnifies to fill a big one.
-    #[test]
-    fn never_upscale_shrinks_but_does_not_magnify() {
-        let mut v = ViewTransform {
-            never_upscale: true,
-            ..Default::default()
-        };
-
-        // A 1024² icon on a 7680×2160 display: Fit would blow it up ~2.1×.
-        let (w, h) = v.displayed_size(1024, 1024, 7680, 2160);
-        assert!(approx(w, 1024.0) && approx(h, 1024.0), "capped at native");
-
-        // Smaller than the image → it still shrinks to fit.
-        let (w, h) = v.displayed_size(1024, 1024, 512, 512);
-        assert!(approx(w, 512.0) && approx(h, 512.0), "shrinks to fit");
-
-        // Zoom still works on top of the capped base.
-        v.zoom = 2.0;
-        let (w, _) = v.displayed_size(1024, 1024, 7680, 2160);
-        assert!(approx(w, 2048.0), "zoom multiplies the capped base");
-    }
-
-    /// Off by default, and orthogonal to the mode — a photo is untouched.
-    #[test]
-    fn never_upscale_is_off_by_default_and_leaves_photos_alone() {
-        let v = ViewTransform::default();
-        assert!(!v.never_upscale);
-        // A small photo still fills the screen in Fit, as it always has.
-        let (w, h) = v.displayed_size(1024, 1024, 7680, 2160);
-        assert!(approx(w, 2160.0) && approx(h, 2160.0), "Fit still upscales");
     }
 }

@@ -532,6 +532,10 @@ struct App {
     /// GTK-style (Alt+F / F10 / arrows / Enter / Esc) — see `menu::menu_nav_key`.
     #[cfg(all(unix, not(target_os = "macos")))]
     menu_nav: menu::MenuNav,
+    /// The presented archive door's item, or `None` — the signature that dirties the retained
+    /// overlay when the door changes (task #105). `Some(None)` can't occur: `door_presented`
+    /// implies a `displayed_item`.
+    door_sig: Option<Option<usize>>,
     /// The last `play_hint_seq` the shell flashed, so a bump (a fresh motion item) re-arms the
     /// hint. Play-hint fade timing is shell-owned (the `native_play` seam): the core signals
     /// *when* + *what*, the shell renders + fades the egui pill.
@@ -966,6 +970,7 @@ impl App {
             left_pane_edge: None,
             inspector_edge: None,
             overlay_dirty: false,
+            door_sig: None,
             overlay_active: false,
             #[cfg(all(unix, not(target_os = "macos")))]
             menu_nav: menu::MenuNav::default(),
@@ -1472,6 +1477,11 @@ impl App {
             || self.core.open_panel_visible()
             // The play hint is interactive (hover pins it, click plays) while it's shown.
             || self.play_hint_shown.is_some()
+            // An archive door's card (task #105) is the *only* thing on screen for that
+            // item — its frame is a transparent sentinel — so the overlay must stay alive
+            // and composited while one is presented, or the viewer sees an empty
+            // letterbox. It is also interactive (its Open button).
+            || self.core.door_presented()
             // The info line's playback bar (a live video) is a scrubber — route pointer
             // events so clicks/drags on it reach egui (it only consumes events over the pill).
             || self.video_bar_interactive()
@@ -2965,11 +2975,6 @@ impl App {
         if kind != 0 {
             self.play_hint_kind = kind;
         }
-        // An archive door's pill is an affordance, not a reminder: the core marks it
-        // persistent and we never start the hold countdown, so it sits there for as long as
-        // the door is displayed. It still fades on `kind == 0` below — navigating off the
-        // door clears it like anything else.
-        let persistent = self.core.play_hint_persistent();
         if self.play_hint_hovered && kind != 0 {
             // Hover pins it fully open and restarts the hold clock (so un-hover resumes the
             // countdown from now).
@@ -2978,8 +2983,7 @@ impl App {
         } else if kind == 0 && self.play_hint_fade_out.is_none() {
             // The item stopped being a motion item (played / advanced) → fade out.
             self.play_hint_fade_out = Some(now);
-        } else if !persistent
-            && self.play_hint_fade_out.is_none()
+        } else if self.play_hint_fade_out.is_none()
             && now.duration_since(shown) >= PLAY_HINT_FADE_IN + PLAY_HINT_HOLD
         {
             // The hold elapsed → auto fade out.
@@ -3008,12 +3012,7 @@ impl App {
         const ANIM_FRAME: Duration = Duration::from_millis(16);
         self.play_hint_wake = if self.play_hint_fade_out.is_some() {
             Some(now + ANIM_FRAME)
-        } else if (self.play_hint_hovered || persistent) && kind != 0 {
-            // Nothing left to animate: hover-pinned or a door's persistent pill just sits
-            // there until an event re-ticks it. A wake here would be worse than useless —
-            // the hold-expiry below is in the *past* once the hold elapses, so scheduling it
-            // for a pill that never fades would fire, change nothing, and reschedule the same
-            // past instant, spinning the event loop for as long as the door is on screen.
+        } else if self.play_hint_hovered && kind != 0 {
             None
         } else if now.duration_since(shown) < PLAY_HINT_FADE_IN {
             Some(now + ANIM_FRAME)
@@ -4149,6 +4148,24 @@ impl ApplicationHandler for App {
         // stash this frame's pill for `render_overlay_frame` and dirty the overlay while it
         // animates.
         self.play_hint_frame = self.tick_play_hint(now);
+
+        // The archive door card (task #105). The overlay is retained and only rebuilt when
+        // it is dirty, so adding the card to `PanelFrame` would never make it appear, change
+        // as you cross to the next archive, or clear on the way back to a photo. Signature =
+        // the **presented** door's item (never the playlist cursor, which runs ahead of the
+        // screen); a change on either edge — photo→door, door→door, door→photo — rebuilds.
+        // Allocation-free: `door_presented` exists so this per-frame poll costs nothing.
+        let door_sig = self
+            .core
+            .door_presented()
+            .then_some(self.core.displayed_item);
+        if door_sig != self.door_sig {
+            self.door_sig = door_sig;
+            self.overlay_dirty = true;
+            if let Some(w) = self.window.as_ref() {
+                w.request_redraw();
+            }
+        }
 
         // Hand the tick's subtitle overlay to the wgpu presenter (task #90.5). A cue change
         // needs no redraw request of its own: the only state this does anything in is a

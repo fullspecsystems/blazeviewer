@@ -266,9 +266,8 @@ pub struct WelcomePanel {
 /// reusing the welcome button design. The shell owns the flash/fade timing (`alpha`).
 #[derive(Clone)]
 pub struct PlayHintFrame {
-    /// `1` = Live Photo (livephoto glyph), `2` = animation (play ▶), `3` = archive door
-    /// (zip glyph — the button reads *Open*, and the shell holds it open instead of fading;
-    /// see `AppCore::play_hint_persistent`).
+    /// `1` = Live Photo (livephoto glyph), `2` = animation (play ▶). An archive door has
+    /// no pill: its whole affordance is the door card (task #105).
     pub kind: u8,
     /// The keyboard shortcut hint for play/pause (e.g. `P`).
     pub shortcut: String,
@@ -304,6 +303,13 @@ pub struct PanelFrame {
     /// The play hint (motion items). Shell-owned (flash/fade timing lives in the shell), so
     /// `snapshot` leaves it `None` and the shell fills it in `render_overlay_frame`.
     pub play_hint: Option<PlayHintFrame>,
+    /// The archive **door card** (task #105), when a door is presented. A door's frame is a
+    /// 1×1 transparent sentinel, so this is the entire on-screen presence of an archive.
+    pub door: Option<pb_app_core::app_core::DoorCard>,
+    /// Whether the left pane is occupied — by the tree **or** its other tab, the thumbnail
+    /// strip. The door card centres itself in what's left, and `tree.is_some()` alone would
+    /// miss the strip.
+    pub left_pane: bool,
     pub dark: bool,
     /// The panel surface alpha (0–255), from Settings ▸ Appearance ▸ *Info panel opacity*
     /// (`info_opacity` — the old HUD opacity). The winit shell has no separate `panel_opacity`
@@ -391,6 +397,8 @@ impl PanelFrame {
             welcome,
             // Shell-owned (fade timing); the shell sets this in `render_overlay_frame`.
             play_hint: None,
+            door: core.door_card(),
+            left_pane: core.tree_panel_visible() || core.thumbs_visible(),
             dark: core.hud_dark,
             panel_alpha: opacity_to_alpha(core.settings.info_opacity),
             // Shell-owned (menu-bar visibility lives in the shell); set in render_overlay_frame.
@@ -443,6 +451,27 @@ pub fn build(ctx: &egui::Context, frame: &PanelFrame, actions: &mut Vec<PanelAct
         })
     };
 
+    // The archive door card (task #105) is **content chrome**: it stands in for the photo
+    // that isn't there, so it draws first — above the (empty) canvas, below every real
+    // panel, which then overlaps it exactly as it would overlap a photo. Centred in the
+    // *unobstructed* area: an open side pane shifts it rather than sitting on top of it.
+    if let Some(card) = &frame.door {
+        let left = if frame.left_pane {
+            screen.left() + EDGE + frame.pane_width
+        } else {
+            screen.left()
+        };
+        let right = if frame.inspector.is_some() {
+            screen.right() - EDGE - frame.pane_width
+        } else {
+            screen.right()
+        };
+        let content = egui::Rect::from_min_max(
+            egui::pos2(left, screen.top() + frame.top_inset),
+            egui::pos2(right.max(left + 1.0), screen.bottom()),
+        );
+        door_card(ctx, &p, alpha, content, card, actions);
+    }
     if let Some(info) = &frame.info {
         info_line(ctx, &p, alpha, info, actions);
     }
@@ -1597,6 +1626,148 @@ fn open_button(
     resp.clicked()
 }
 
+/// The **door card** (task #105): an archive's whole on-screen presence — the folder
+/// artwork, its name, its format, and the `Open` button — centred in the content area.
+///
+/// A door's decoded frame is a 1×1 transparent sentinel, so without this the viewer sees
+/// an empty letterbox. It is *content chrome*: ambient and non-modal like `ScanPill`, but
+/// unlike the play hint it never fades and it survives blazing — suppressing it would show
+/// a blank screen, which reads as broken rather than fast.
+///
+/// **Sizing (plan 105 §5).** The artwork is capped at `DOOR_ART_PT` *and* at its native
+/// resolution for this display (`asset_px / pixels_per_point`), so it is never magnified —
+/// on a 2× display 512 pt lands exactly 1:1 against the 1024 px asset, and past 2× the
+/// native cap takes over. It then shrinks to whatever the window allows; on a cramped
+/// window (the macOS minimum is 520×360) the **art gives way first** and the name and
+/// button keep their readable sizes, rather than scaling the text into illegibility.
+fn door_card(
+    ctx: &egui::Context,
+    p: &Palette,
+    base_alpha: u8,
+    content: egui::Rect,
+    card: &pb_app_core::app_core::DoorCard,
+    actions: &mut Vec<PanelAction>,
+) {
+    /// The design cap for the artwork's edge, in points.
+    const DOOR_ART_PT: f32 = 512.0;
+    /// Breathing room inside the card, and between its rows.
+    const PAD: f32 = 20.0;
+    const GAP: f32 = 12.0;
+
+    let art = door_art_texture(ctx);
+    let name_font = FontId::new(17.0, FontFamily::Name(pb_ui::SEMIBOLD.into()));
+    let fmt_font = FontId::new(12.5, FontFamily::Proportional);
+
+    // Rows that must stay legible no matter how small the window gets.
+    let name_h = ctx.fonts(|f| f.row_height(&name_font));
+    let fmt_h = ctx.fonts(|f| f.row_height(&fmt_font));
+    let text_and_button = name_h + GAP + fmt_h + GAP + OPEN_BTN_H;
+
+    // Never magnify: cap at the design size *and* at the asset's native size for this
+    // display's scale. Then fit the window, art first.
+    let native_pt = art
+        .map(|(_, w, _)| w as f32 / ctx.pixels_per_point())
+        .unwrap_or(DOOR_ART_PT);
+    let art_pt = DOOR_ART_PT
+        .min(native_pt)
+        .min(content.width() - 2.0 * PAD)
+        .min(content.height() - 2.0 * PAD - text_and_button - GAP)
+        .max(0.0);
+
+    egui::Area::new(egui::Id::new("pb_door_card"))
+        .fixed_pos(content.center())
+        .pivot(egui::Align2::CENTER_CENTER)
+        .order(egui::Order::Middle)
+        .show(ctx, |ui| {
+            let fill = Color32::from_rgba_unmultiplied(
+                p.control.r(),
+                p.control.g(),
+                p.control.b(),
+                base_alpha,
+            );
+            egui::Frame::none()
+                .fill(fill)
+                .rounding(Rounding::same(pb_ui::RADIUS_CARD))
+                .inner_margin(PAD)
+                .show(ui, |ui| {
+                    ui.vertical_centered(|ui| {
+                        // The art is the first thing to go on a cramped window.
+                        if art_pt > 32.0 {
+                            if let Some((tex, _, _)) = art {
+                                ui.add(
+                                    egui::Image::new((tex, egui::vec2(art_pt, art_pt)))
+                                        .fit_to_exact_size(egui::vec2(art_pt, art_pt)),
+                                );
+                                ui.add_space(GAP);
+                            }
+                        }
+                        // Middle-elided so a long name keeps its extension — the same rule
+                        // the thumb strip's cells use.
+                        let avail = (content.width() - 2.0 * PAD).max(80.0);
+                        let name =
+                            middle_truncate(ui, &card.name, name_font.clone(), p.text, avail);
+                        ui.label(name);
+                        ui.label(
+                            RichText::new(&card.format)
+                                .font(fmt_font)
+                                .color(p.text_secondary),
+                        );
+                        ui.add_space(GAP);
+
+                        let w = open_button_width(ui, "Open", &card.shortcut);
+                        let (rect, resp) =
+                            ui.allocate_exact_size(egui::vec2(w, OPEN_BTN_H), egui::Sense::click());
+                        if resp.hovered() {
+                            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                        }
+                        let btn = if resp.hovered() {
+                            p.control_hover
+                        } else {
+                            p.control
+                        };
+                        draw_open_button(
+                            ui,
+                            rect,
+                            p,
+                            Icon::Archive,
+                            "Open",
+                            &card.shortcut,
+                            Color32::from_rgba_unmultiplied(btn.r(), btn.g(), btn.b(), 255),
+                            1.0,
+                        );
+                        if resp.clicked() {
+                            actions.push(PanelAction::PlayPause);
+                        }
+                    });
+                });
+        });
+}
+
+/// The door artwork as an egui texture — uploaded **once** per context.
+///
+/// The pixels come from `pb_app_core::engine::door_artwork` (one decode for the process);
+/// this caches the upload in egui's own texture manager, keyed by name, so a folder of
+/// forty doors uploads nothing after the first. `None` if the art can't be decoded — the
+/// card then degrades to text and a button rather than vanishing.
+fn door_art_texture(ctx: &egui::Context) -> Option<(egui::TextureId, u32, u32)> {
+    use std::sync::OnceLock;
+    static DIMS: OnceLock<Option<(u32, u32)>> = OnceLock::new();
+    let (w, h) =
+        (*DIMS.get_or_init(|| pb_app_core::engine::door_artwork().map(|a| (a.width, a.height))))?;
+    let id = ctx.data_mut(|d| {
+        d.get_temp_mut_or_insert_with(egui::Id::new("pb_door_art"), || {
+            let art = pb_app_core::engine::door_artwork().expect("dims implied a decode");
+            let img = egui::ColorImage::from_rgba_unmultiplied(
+                [art.width as usize, art.height as usize],
+                &art.pixels,
+            );
+            ctx.load_texture("pb_door_art", img, egui::TextureOptions::LINEAR)
+        })
+        .id()
+    });
+    Some((id, w, h))
+}
+
 /// The play hint: a `[icon] Play [P]` button (the welcome button design, translucent so it
 /// reads over a photo), bottom-center **above the info line**, at the shell-computed fade
 /// `alpha`. Reports hover (to pin the fade) and a click (to play). `info_h` is the info line's
@@ -1616,12 +1787,10 @@ fn play_hint_panel(
     } else {
         EDGE
     };
-    // An archive door says *Open*, not Play: `P` enters it rather than playing anything,
-    // and "Play holiday.7z" would be nonsense. Same pill, same shortcut, same click.
-    let (icon, label) = match frame.kind {
-        1 => (Icon::LivePhoto, "Play"),
-        3 => (Icon::Archive, "Open"),
-        _ => (Icon::Play, "Play"),
+    let (icon, label) = if frame.kind == 1 {
+        (Icon::LivePhoto, "Play")
+    } else {
+        (Icon::Play, "Play")
     };
     egui::Area::new(egui::Id::new("pb_play_hint"))
         .anchor(Align2::CENTER_BOTTOM, egui::vec2(0.0, -bottom))
@@ -3455,7 +3624,15 @@ fn thumb_cell(
         egui::vec2(box_width, box_height),
     );
 
-    if let Some(e) = core.thumbs.cache.get(i) {
+    // An archive door has no thumbnail to decode — its frame is a 1×1 transparent
+    // sentinel (task #105), so the normal path below would draw an empty cell. Draw the
+    // same artwork the door card uses, from the shell's one cached texture; the strip
+    // never sees the ring, so this costs nothing but a draw call.
+    if core.item_archive_kind(i).is_some() {
+        if let Some((tex, w, h)) = door_art_texture(ui.ctx()) {
+            draw_thumb_image(ui, box_rect, tex, w, h, 0);
+        }
+    } else if let Some(e) = core.thumbs.cache.get(i) {
         let key = (i, e.gen);
         keep.insert(key);
         let tex_id = state

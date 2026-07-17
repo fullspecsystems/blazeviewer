@@ -61,10 +61,6 @@ pub mod assets {
     pub const CARET_UP: &str = include_str!("../icons/caret-up.svg");
     /// Down caret — the folder tree's clickable "n more below" paging marker.
     pub const CARET_DOWN: &str = include_str!("../icons/caret-down.svg");
-    /// Zipped file — the archive "door" tile a `.zip`/`.7z`/`.cbz`/… displays in
-    /// the deck (task #104). One glyph for every format: the tile already names
-    /// the format, so the icon only has to say "a container you can enter".
-    pub const FILE_ZIPPER: &str = include_str!("../icons/file-zipper.svg");
     // Status icons for the dialogs (lock/warning/trash) now live in the `pb-ui` icon
     // system (white-rasterized + tinted), not here — this set is only the HUD toasts.
 }

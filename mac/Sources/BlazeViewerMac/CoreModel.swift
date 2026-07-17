@@ -1338,14 +1338,9 @@ final class CoreModel {
         schedulePlayHintFade()
     }
 
-    /// Auto-hide after 3s — but only if the pointer isn't holding it open, and never for a
-    /// hint the core marks **persistent** (an archive door, task #104): that pill is the
-    /// affordance rather than a reminder, so it stays until the item stops being a door,
-    /// which arrives as kind 0 and hides it the normal way.
+    /// Auto-hide after 3s — but only if the pointer isn't holding it open.
     private func schedulePlayHintFade() {
         playHintFadeTask?.cancel()
-        playHintFadeTask = nil
-        if core.play_hint_persistent() { return }
         playHintFadeTask = Task { @MainActor [weak self] in
             try? await Task.sleep(for: .seconds(3))
             guard let self, !Task.isCancelled, !self.playHintHovered else { return }

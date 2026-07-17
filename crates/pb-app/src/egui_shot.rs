@@ -301,6 +301,8 @@ async fn run(out: &Path, dark: bool, tab: InspectorTab, welcome: bool) -> Result
         scan: None,
         welcome: None,
         play_hint: None,
+        door: None,
+        left_pane: false,
         dark,
         panel_alpha: 242,
         top_inset: frame.top_inset,
@@ -504,6 +506,8 @@ fn sample_frame(dark: bool, tab: InspectorTab, welcome: bool) -> PanelFrame {
                 folder_key: "\u{21e7}O".into(),
             }),
             play_hint: None,
+            door: None,
+            left_pane: false,
             dark,
             panel_alpha: 242,
             top_inset: 0.0,
@@ -732,6 +736,9 @@ fn sample_frame(dark: bool, tab: InspectorTab, welcome: bool) -> PanelFrame {
             shortcut: "P".into(),
             alpha: 1.0,
         }),
+        // The shot has no door mode yet (plan 105 phase 5 adds them).
+        door: None,
+        left_pane: false,
         dark,
         panel_alpha: 242, // ≈95% — the shot previews the panels near-opaque
         top_inset: 0.0,   // Linux overrides this in `run()` (menu bar reserves the top strip)

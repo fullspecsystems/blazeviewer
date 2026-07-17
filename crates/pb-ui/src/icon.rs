@@ -68,9 +68,9 @@ pub enum Icon {
     LivePhoto,
     /// Animated-image mark (GIF/APNG/… in the info readout) — a film strip.
     Film,
-    /// An archive: the "door" a `.zip`/`.7z`/`.cbz`/… shows in the deck, on the play-hint
-    /// pill that opens it (task #104; matches SF `doc.zipper`). Names the *meaning*, not the
-    /// format — one glyph covers every archive kind, since the row already names the format.
+    /// An archive: the glyph on the **door card**'s Open button (task #105) and, on macOS,
+    /// SF `doc.zipper`. Names the *meaning*, not the format — one glyph covers every archive
+    /// kind, since the card names the format in text.
     Archive,
     /// Settings ▸ General tab (matches SF `slider.horizontal.3`).
     Sliders,
