@@ -278,19 +278,24 @@ pub enum OpenError {
     /// `needed` is a lower bound (the stream stopped as soon as it tripped).
     TooLarge { needed: u64, budget: u64 },
     /// The archive is recognized but deliberately not opened: a format tier we
-    /// don't decode (RAR4, multi-volume RAR, a RAR encryption version that
-    /// isn't AES-256). Distinct from [`Corrupt`](OpenError::Corrupt) so the
-    /// user learns *what* it is rather than "may be damaged" — and distinct
-    /// from [`PasswordRequired`](OpenError::PasswordRequired), which the app
-    /// answers with a password prompt: nothing in this tier can be fixed by
-    /// typing a password, so prompting would loop. Carries the ready-to-show
-    /// line.
+    /// don't decode. Distinct from [`Corrupt`](OpenError::Corrupt) so the user
+    /// learns *what* it is rather than "may be damaged" — and distinct from
+    /// [`PasswordRequired`](OpenError::PasswordRequired), which the app answers
+    /// with a password prompt. **That is the whole rule: nothing in this tier
+    /// can be fixed by typing a password, so prompting would loop.** Carries the
+    /// ready-to-show line.
     ///
-    /// ⚠ A password-protected **RAR5** is *not* one of these. Since the
-    /// `-p`/`-hp` decryption landed it returns
-    /// [`PasswordRequired`](OpenError::PasswordRequired) and a correct password
-    /// decrypts it (see `rar_crypt.rs`) — this doc claimed the opposite until
-    /// 2026-07-16, and the old rule is still quoted in places.
+    /// 🪤 **Don't re-enumerate the tiers here.** This doc has listed formats
+    /// twice and been wrong twice within a day — it named encrypted RAR5 right
+    /// up until `-p`/`-hp` decryption landed, and RAR4 right up until RAR4
+    /// viewing landed (both 2026-07-16). The membership moves every time a
+    /// decoder ships; the *rule* doesn't. For today's list, grep the
+    /// constructors (`rar.rs` / `rar4.rs`) — currently multi-volume RAR, an
+    /// unknown RAR format version, and a non-AES-256 RAR encryption version.
+    ///
+    /// Note encrypted **RAR4** is not one of these either: it is refused per
+    /// *entry* (`rar4.rs`'s `UNAVAIL_ENCRYPTED`), so the rest of the archive
+    /// still opens and serves.
     Unsupported(String),
 }
 
