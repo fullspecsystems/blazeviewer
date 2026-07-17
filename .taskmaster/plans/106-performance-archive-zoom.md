@@ -412,4 +412,10 @@ config surface; partial reads):
 - 106.5 partial reads: `bytes_prefix(item, max)` / range read on `ItemSource`, and how the
   eager 7z/tar sources (bytes already in RAM) participate — likely a no-op prefix for them.
 - The exact VRAM default for `full_res_radius = 1` given the corrected accounting (§7) — pick a
-  conservative `RING_BUDGET_BYTES` interaction and measure.
+  conservative `RING_BUDGET_BYTES` interaction and measure. **Concrete sizing:** the target pro
+  range is 24–100 MP (61 MP A7R V ≈ 244 MB decoded, 100 MP GFX ≈ 400 MB) — all fully in scope and
+  where instant-zoom matters most, so the §9 full-res ceiling must sit *above* ~100 MP, not just
+  above 36 MP. But at 100 MP a single Original is ~400 MB, so **radius 1 = 3 × 400 MB ≈ 1.2 GB**
+  brushes the current 1.5 GB `RING_BUDGET_BYTES`. Decide: bump the budget, or let the byte-budget
+  admission (§7) naturally hold fewer than `2N+1` originals for the biggest files (current wins,
+  neighbours dropped) — the latter is probably right (graceful degradation by file size).
