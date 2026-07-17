@@ -101,28 +101,36 @@ const ENC_VERSION_AES256: u64 = 0;
 const ENC_CHECK_BYTES: usize = 12;
 
 /// User-facing refusal lines (plain copy, reused by tests).
-const MSG_RAR4: &str =
-    "This is an older RAR4 archive, which is not supported yet. Only RAR5 archives open.";
-const MSG_VOLUME: &str = "Multi-volume RAR archives are not supported yet.";
+pub(crate) const MSG_VOLUME: &str = "Multi-volume RAR archives are not supported yet.";
 
 /// Why an entry's bytes cannot be produced (per-entry honest errors).
-const UNAVAIL_STORED_SOLID: &str =
+pub(crate) const UNAVAIL_STORED_SOLID: &str =
     "this entry is stored inside a solid group, which cannot be unpacked reliably";
-const UNAVAIL_FILTER: &str =
+pub(crate) const UNAVAIL_FILTER: &str =
     "this entry (or one before it in its solid group) uses a RAR feature that is not supported yet";
-const UNAVAIL_DAMAGED: &str = "this entry is damaged (checksum mismatch)";
-const UNAVAIL_TRUNCATED: &str = "this entry is cut off (the archive ends before its data)";
+pub(crate) const UNAVAIL_DAMAGED: &str = "this entry is damaged (checksum mismatch)";
+pub(crate) const UNAVAIL_TRUNCATED: &str =
+    "this entry is cut off (the archive ends before its data)";
+
+/// Which compcol codec decodes a lazy entry's packed run. RAR5 needs the window
+/// size passed in; the `rar3` codec (RAR4/RAR3) discovers it from the stream.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RarCodec {
+    Rar5,
+    Rar3,
+}
 
 /// Where an entry's bytes come from.
-enum EntryData {
+pub(crate) enum EntryData {
     /// Non-solid: decode independently on demand (open + seek + decode).
     Lazy {
         offset: u64,
         pack: u64,
         window: usize,
         store: bool,
-        /// When encrypted (`-p`), the AES key + IV for the packed run; the run
-        /// is CBC-decrypted before it reaches the store/codec path.
+        codec: RarCodec,
+        /// When encrypted (`-p`, RAR5 only), the AES key + IV for the packed run;
+        /// the run is CBC-decrypted before it reaches the store/codec path.
         crypt: Option<RunKey>,
     },
     /// Solid-group member, decoded at open.
@@ -134,7 +142,7 @@ enum EntryData {
 /// The AES-256 key + IV that decrypt one encrypted packed run (per file — RAR5
 /// uses a fresh salt/IV for every encrypted member).
 #[derive(Clone)]
-struct RunKey {
+pub(crate) struct RunKey {
     key: [u8; 32],
     iv: [u8; SIZE_IV],
 }
@@ -152,7 +160,7 @@ struct FileEnc {
     mac_checksums: bool,
 }
 
-struct RarEntry {
+pub(crate) struct RarEntry {
     /// Normalized archive-relative name.
     name: String,
     /// Declared decompressed size.
@@ -249,6 +257,7 @@ impl RarSource {
     /// Decode a lazy (non-solid) entry: open + seek + bounded streaming decode
     /// with CRC verification. Independent per call — the decode pool reads
     /// from many workers at once.
+    #[allow(clippy::too_many_arguments)]
     fn read_lazy(
         &self,
         e: &RarEntry,
@@ -256,6 +265,7 @@ impl RarSource {
         pack: u64,
         window: usize,
         store: bool,
+        codec: RarCodec,
         crypt: Option<&RunKey>,
     ) -> io::Result<Vec<u8>> {
         if e.unpack > MAX_ENTRY_BYTES {
@@ -275,18 +285,30 @@ impl RarSource {
         })?;
         // `decode` turns the plaintext packed run (a `Read`) into the entry
         // bytes: stored runs are the bytes verbatim; compressed runs go through
-        // the RAR5 codec, both capped at the declared size so a lying stream
-        // cannot inflate past it.
+        // the codec for this archive's RAR version, both capped at the declared
+        // size so a lying stream cannot inflate past it.
         let unpack = e.unpack;
         let mut decode = |run: &mut dyn Read| -> io::Result<()> {
             if store {
                 run.take(unpack).read_to_end(&mut buf)?;
             } else {
-                let dec = compcol::rar5::Decoder::with_unpack_size_and_window(unpack, window);
-                compcol::io::DecoderReader::new(run, dec)
-                    .take(unpack)
-                    .read_to_end(&mut buf)
-                    .map_err(remap_codec_refusal)?;
+                match codec {
+                    RarCodec::Rar5 => {
+                        let dec =
+                            compcol::rar5::Decoder::with_unpack_size_and_window(unpack, window);
+                        compcol::io::DecoderReader::new(run, dec)
+                            .take(unpack)
+                            .read_to_end(&mut buf)
+                            .map_err(remap_codec_refusal)?;
+                    }
+                    RarCodec::Rar3 => {
+                        let dec = compcol::rar3::Decoder::with_unpack_size(unpack);
+                        compcol::io::DecoderReader::new(run, dec)
+                            .take(unpack)
+                            .read_to_end(&mut buf)
+                            .map_err(remap_codec_refusal)?;
+                    }
+                }
             }
             Ok(())
         };
@@ -349,8 +371,9 @@ impl ItemSource for RarSource {
                 pack,
                 window,
                 store,
+                codec,
                 crypt,
-            } => self.read_lazy(e, *offset, *pack, *window, *store, crypt.as_ref()),
+            } => self.read_lazy(e, *offset, *pack, *window, *store, *codec, crypt.as_ref()),
             EntryData::Resident(bytes) => Ok(bytes.clone()),
             EntryData::Unavailable(why) => Err(io::Error::new(io::ErrorKind::Unsupported, *why)),
         }
@@ -373,13 +396,21 @@ fn verify_crc(e: &RarEntry, bytes: &[u8]) -> Result<(), &'static str> {
 }
 
 impl RarEntry {
-    fn new(name: String, unpack: u64, crc: Option<u32>, data: EntryData) -> Self {
+    pub(crate) fn new(name: String, unpack: u64, crc: Option<u32>, data: EntryData) -> Self {
         RarEntry {
             name,
             unpack,
             crc,
             data,
         }
+    }
+
+    pub(crate) fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub(crate) fn unpack(&self) -> u64 {
+        self.unpack
     }
 }
 
@@ -631,7 +662,19 @@ fn scan_and_load<R: Read + Seek>(
         return Err(OpenError::Corrupt("not a RAR archive".into()));
     }
     if sig[6] == 0x00 {
-        return Err(OpenError::Unsupported(MSG_RAR4.into()));
+        // RAR4 (format version 29): a different container shape, our own parser
+        // in `rar4`, sharing this crate's RarEntry / ItemSource plumbing. Its
+        // codec has no tractable encryption scheme, so the password is unused
+        // (encrypted entries refuse honestly inside).
+        let _ = password;
+        return crate::rar4::scan_and_load(
+            reader,
+            file_len,
+            is_supported,
+            progress,
+            budget,
+            limits,
+        );
     }
     if sig[6] != 0x01 || got < 8 {
         return Err(OpenError::Unsupported(
@@ -884,6 +927,7 @@ fn scan_and_load<R: Read + Seek>(
                 pack: m.pack,
                 window: m.window,
                 store: m.method == 0,
+                codec: RarCodec::Rar5,
                 crypt,
             };
             upsert(&mut latest, &mut resident, m.name, m.unpack, m.crc, data);
@@ -939,7 +983,7 @@ fn scan_and_load<R: Read + Seek>(
 /// entry's `Resident` bytes drop with it, so they must leave the budget too
 /// (an append/update archive that fits after last-wins must not refuse as
 /// `TooLarge` on stale accounting).
-fn upsert(
+pub(crate) fn upsert(
     latest: &mut BTreeMap<String, (u64, Option<u32>, EntryData)>,
     resident: &mut u64,
     name: String,
@@ -957,7 +1001,10 @@ fn upsert(
 
 /// The `Resident` bytes currently held under `name`, if any — what an insert
 /// of the same name would release (the budget check subtracts it up front).
-fn resident_under(latest: &BTreeMap<String, (u64, Option<u32>, EntryData)>, name: &str) -> u64 {
+pub(crate) fn resident_under(
+    latest: &BTreeMap<String, (u64, Option<u32>, EntryData)>,
+    name: &str,
+) -> u64 {
     match latest.get(name) {
         Some((_, _, EntryData::Resident(b))) => b.len() as u64,
         _ => 0,
@@ -1224,7 +1271,7 @@ fn decode_solid_group<R: Read + Seek>(
 
 /// CRC check shared by the eager path (the lazy path goes through
 /// [`verify_crc`] on the entry).
-fn verify_crc_raw(crc: Option<u32>, bytes: &[u8]) -> Result<(), &'static str> {
+pub(crate) fn verify_crc_raw(crc: Option<u32>, bytes: &[u8]) -> Result<(), &'static str> {
     match crc {
         Some(want) if crc32fast::hash(bytes) != want => Err(UNAVAIL_DAMAGED),
         _ => Ok(()),
@@ -1236,7 +1283,7 @@ fn verify_crc_raw(crc: Option<u32>, bytes: &[u8]) -> Result<(), &'static str> {
 /// `From<Error> for io::Error` wraps everything as `Other`, but the viewer
 /// should show the honest per-entry reason, exactly like a solid group's
 /// degraded members do.
-fn remap_codec_refusal(e: io::Error) -> io::Error {
+pub(crate) fn remap_codec_refusal(e: io::Error) -> io::Error {
     let refusal = e
         .get_ref()
         .and_then(|s| s.downcast_ref::<compcol::Error>())
@@ -1296,7 +1343,7 @@ fn rar5_stream_len(data: &[u8]) -> Option<usize> {
 }
 
 /// Read as many bytes as `buf` holds, tolerating a short tail. Returns bytes read.
-fn read_fully<R: Read>(reader: &mut R, buf: &mut [u8]) -> io::Result<usize> {
+pub(crate) fn read_fully<R: Read>(reader: &mut R, buf: &mut [u8]) -> io::Result<usize> {
     let mut filled = 0;
     while filled < buf.len() {
         match reader.read(&mut buf[filled..]) {
@@ -1415,7 +1462,18 @@ mod tests {
     const ENCRYPTED: &[u8] = include_bytes!("../tests/fixtures/rar/encrypted.rar");
     const ENCRYPTED_SOLID: &[u8] = include_bytes!("../tests/fixtures/rar/encrypted_solid.rar");
     const HDR_ENCRYPTED: &[u8] = include_bytes!("../tests/fixtures/rar/hdr_encrypted.rar");
-    const RAR4: &[u8] = include_bytes!("../tests/fixtures/rar/rar4.rar");
+    // Deliberately corrupt: the RAR4 signature followed by a zero block (unrar
+    // agrees this is a corrupt main header).
+    const RAR4_CORRUPT: &[u8] = include_bytes!("../tests/fixtures/rar/rar4.rar");
+    // Real RAR4 archives (format version 29), from the WinRAR corpus. `_LZ_*`
+    // hold photo.jpg + gradient.bmp + four non-image entries; the filter/ppmd
+    // ones are single-entry.
+    const RAR4_LZ_NONSOLID: &[u8] = include_bytes!("../tests/fixtures/rar/rar4_lz_nonsolid.rar");
+    const RAR4_LZ_SOLID: &[u8] = include_bytes!("../tests/fixtures/rar/rar4_lz_solid.rar");
+    const RAR4_FILTER_DELTA: &[u8] = include_bytes!("../tests/fixtures/rar/rar4_filter_delta.rar");
+    const RAR4_PPMD: &[u8] = include_bytes!("../tests/fixtures/rar/rar4_ppmd.rar");
+    const RAR4_ENCRYPTED: &[u8] = include_bytes!("../tests/fixtures/rar/rar4_encrypted.rar");
+    const RAR4_UNICODE: &[u8] = include_bytes!("../tests/fixtures/rar/rar4_unicode.rar");
 
     fn open(bytes: &[u8], tag: &str) -> Result<RarSource, OpenError> {
         let path = fixture(tag, bytes);
@@ -1559,14 +1617,96 @@ mod tests {
         assert_eq!(src.bytes(2).unwrap(), webp_c());
     }
 
+    /// Open with an all-extensions predicate (some RAR4 fixtures index only
+    /// non-image entries — a text/PPMd payload we still want to exercise).
+    fn open_any(bytes: &[u8], tag: &str) -> Result<RarSource, OpenError> {
+        RarSource::open(fixture(tag, bytes), |_| true, None, u64::MAX, None)
+    }
+
     #[test]
-    fn rar4_is_detected_with_an_honest_message() {
-        match open(RAR4, "rar4") {
-            Err(OpenError::Unsupported(msg)) => {
-                assert!(msg.contains("RAR4"), "{msg}");
-                assert!(msg.contains("RAR5"), "tells the user what does work: {msg}");
+    fn rar4_non_solid_lists_images_sorted_and_decodes() {
+        let src = open(RAR4_LZ_NONSOLID, "r4nonsolid").expect("opens");
+        // Only the image extensions are indexed, sorted; CRC-verified on read.
+        let names: Vec<&str> = (0..src.len()).map(|i| src.name(i)).collect();
+        assert_eq!(names, vec!["gradient.bmp", "photo.jpg"]);
+        assert_eq!(src.bytes(0).unwrap().len(), 49206);
+        assert_eq!(src.bytes(1).unwrap().len(), 8198);
+    }
+
+    #[test]
+    fn rar4_solid_group_decodes_every_member() {
+        // A solid group has no per-member random access, so it decodes eagerly
+        // at open; both images come back CRC-clean.
+        let src = open(RAR4_LZ_SOLID, "r4solid").expect("opens");
+        let names: Vec<&str> = (0..src.len()).map(|i| src.name(i)).collect();
+        assert_eq!(names, vec!["gradient.bmp", "photo.jpg"]);
+        assert_eq!(src.bytes(0).unwrap().len(), 49206);
+        assert_eq!(src.bytes(1).unwrap().len(), 8198);
+    }
+
+    #[test]
+    fn rar4_delta_filtered_entry_decodes() {
+        // The in-band Delta filter (what degraded on the old RAR5 path) now
+        // reconstructs correctly for RAR4 too.
+        let src = open(RAR4_FILTER_DELTA, "r4delta").expect("opens");
+        assert_eq!(
+            (0..src.len()).map(|i| src.name(i)).collect::<Vec<_>>(),
+            vec!["gradient.bmp"]
+        );
+        assert_eq!(src.bytes(0).unwrap().len(), 49206);
+    }
+
+    #[test]
+    fn rar4_ppmd_entry_decodes() {
+        // PPMd-II is a distinct codec path inside compcol's rar3.
+        let src = open_any(RAR4_PPMD, "r4ppmd").expect("opens");
+        assert_eq!(
+            (0..src.len()).map(|i| src.name(i)).collect::<Vec<_>>(),
+            vec!["prose.txt"]
+        );
+        assert_eq!(src.bytes(0).unwrap().len(), 236737);
+    }
+
+    #[test]
+    fn rar4_unicode_names_are_preserved() {
+        let src = open_any(RAR4_UNICODE, "r4uni").expect("opens");
+        let names: Vec<&str> = (0..src.len()).map(|i| src.name(i)).collect();
+        assert!(
+            names.iter().any(|n| n.contains("日本語")),
+            "utf-8 names kept: {names:?}"
+        );
+        for i in 0..src.len() {
+            assert!(src.bytes(i).is_ok(), "{} decodes", src.name(i));
+        }
+    }
+
+    #[test]
+    fn rar4_password_protected_entries_refuse_honestly() {
+        // `-p` (data encrypted): headers parse, but RAR4's bespoke key schedule
+        // is out of scope, so each entry reports an honest refusal rather than
+        // decoding garbage.
+        let src = open_any(RAR4_ENCRYPTED, "r4enc").expect("headers are plaintext, so it opens");
+        assert!(src.len() > 0);
+        for i in 0..src.len() {
+            match src.bytes(i) {
+                Err(e) if e.kind() == io::ErrorKind::Unsupported => {
+                    assert!(e.to_string().contains("password"), "{e}");
+                }
+                other => panic!(
+                    "{}: expected an encryption refusal, got {other:?}",
+                    src.name(i)
+                ),
             }
-            other => panic!("expected Unsupported, got {:?}", other.err()),
+        }
+    }
+
+    #[test]
+    fn rar4_corrupt_header_errors_cleanly() {
+        // A signature followed by a zero block: refuse (unrar calls it corrupt
+        // too) rather than panic or serve garbage.
+        match open(RAR4_CORRUPT, "r4corrupt") {
+            Err(OpenError::Corrupt(_)) => {}
+            other => panic!("expected Corrupt, got {:?}", other.err()),
         }
     }
 
@@ -1789,18 +1929,47 @@ mod tests {
         .expect("unrar not found");
         let mut archives = 0;
         let mut entries = 0;
+        let mut refused = 0;
         for entry in std::fs::read_dir(&dir).expect("corpus dir") {
             let path = entry.unwrap().path();
             let name = path.file_name().unwrap().to_string_lossy().into_owned();
-            if !name.starts_with("rar5_") || !name.ends_with(".rar") {
+            let is_rar =
+                name.ends_with(".rar") && (name.starts_with("rar5_") || name.starts_with("rar4_"));
+            if !is_rar {
                 continue;
             }
-            // The corpus's encrypted archives (`-ptestpass` / `-hptestpass`) are
-            // now decoded too — pass the password to both us and the oracle.
-            let password = name.contains("enc").then_some("testpass");
+            // A symlink entry stores its target path as "data"; we serve those
+            // bytes but `unrar p` recreates the link and prints nothing, so the
+            // oracle can't compare. Symlinks never carry an image extension, so
+            // production (`is_img`) never indexes one — skip the archive here.
+            if name.contains("symlink") {
+                continue;
+            }
+            // Archives we intentionally cannot open, and unrar agrees are not
+            // openable as-is: RAR4 with encrypted headers (`-hp` — the header key
+            // schedule is out of scope) and a deliberately corrupt signature-only
+            // file. Assert the honest refusal instead of a byte comparison.
+            let expect_refusal = matches!(
+                name.as_str(),
+                "rar4_encrypted_headers.rar" | "rar4_signature_only.rar"
+            );
+            // RAR5 `-p`/`-hp` decode with the password; RAR4 encryption is out of
+            // scope (entries refuse per-entry), so only feed RAR5 the password.
+            let password =
+                (name.starts_with("rar5_") && name.contains("enc")).then_some("testpass");
             let src = match RarSource::open(&path, |_| true, None, u64::MAX, password) {
-                Ok(s) => s,
-                Err(e) => panic!("{name}: open failed: {e}"),
+                Ok(s) => {
+                    assert!(
+                        !expect_refusal,
+                        "{name}: expected an open refusal, but it opened"
+                    );
+                    s
+                }
+                Err(e) => {
+                    assert!(expect_refusal, "{name}: open failed: {e}");
+                    refused += 1;
+                    continue;
+                }
             };
             archives += 1;
             for i in 0..src.len() {
@@ -1820,7 +1989,9 @@ mod tests {
                     args.push(format!("-p{pw}"));
                 }
                 args.push(path.to_str().unwrap().to_string());
-                args.push(entry_name.clone());
+                // We normalize entry names to `/`; unrar on Windows matches its
+                // `p` argument with backslashes.
+                args.push(entry_name.replace('/', "\\"));
                 let out = Command::new(&unrar)
                     .args(&args)
                     .output()
@@ -1833,7 +2004,10 @@ mod tests {
                 entries += 1;
             }
         }
-        eprintln!("[rar corpus] {archives} archives, {entries} entries byte-identical to unrar");
-        assert!(archives > 0, "corpus dir had no rar5 archives");
+        eprintln!(
+            "[rar corpus] {archives} archives ({entries} entries byte-identical to unrar), \
+             {refused} refused as expected"
+        );
+        assert!(archives > 0, "corpus dir had no rar archives");
     }
 }

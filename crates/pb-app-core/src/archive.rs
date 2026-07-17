@@ -213,9 +213,9 @@ pub enum ArchiveOpenError {
     PasswordRequired,
     /// Opened fine but holds no supported images.
     Empty,
-    /// Recognized but deliberately not opened (RAR4, multi-volume RAR, an
-    /// unsupported RAR encryption version). Carries the ready-to-show line —
-    /// distinct from [`PasswordRequired`](ArchiveOpenError::PasswordRequired),
+    /// Recognized but deliberately not opened (multi-volume RAR, encrypted RAR4
+    /// headers, an unsupported RAR encryption version). Carries the ready-to-show
+    /// line — distinct from [`PasswordRequired`](ArchiveOpenError::PasswordRequired),
     /// which the password prompt *can* answer.
     Unsupported(String),
     /// An I/O error opening or reading the file.

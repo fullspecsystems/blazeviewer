@@ -38,4 +38,11 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "rar4_open"
+path = "fuzz_targets/rar4_open.rs"
+test = false
+doc = false
+bench = false
+
 [workspace]

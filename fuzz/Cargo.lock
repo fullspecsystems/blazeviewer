@@ -245,7 +245,7 @@ checksum = "3d7b894f5411737b7867f4827955924d7c254fc9f4d91a6aad6b097804b1018b"
 [[package]]
 name = "compcol"
 version = "0.6.8"
-source = "git+https://github.com/jdlien/compcol?rev=5c47b0ecf123cfb5976ab3d5c53a17fb936bb1d2#5c47b0ecf123cfb5976ab3d5c53a17fb936bb1d2"
+source = "git+https://github.com/jdlien/compcol?rev=da98ff60899065d4005d4e137b5a556d04299731#da98ff60899065d4005d4e137b5a556d04299731"
 
 [[package]]
 name = "const-oid"
@@ -1048,7 +1048,7 @@ version = "0.16.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ca93e534d1142d1d0dcca6d25fe302508a5dfb40b302802904577725ea0b695b"
 dependencies = [
- "sha2",
+ "sha2 0.11.0",
 ]
 
 [[package]]
@@ -1157,13 +1157,17 @@ dependencies = [
 name = "pb-source"
 version = "0.1.0"
 dependencies = [
+ "aes 0.9.1",
  "bzip2",
+ "cbc",
  "compcol",
  "crc32fast",
  "flate2",
+ "hmac",
  "lzma-rust2",
  "ruzstd",
  "sevenz-rust2",
+ "sha2 0.10.9",
  "tar",
  "zip",
 ]
@@ -1478,7 +1482,7 @@ dependencies = [
  "js-sys",
  "lzma-rust2",
  "ppmd-rust",
- "sha2",
+ "sha2 0.11.0",
  "wasm-bindgen",
 ]
 
@@ -1487,6 +1491,17 @@ name = "sha1"
 version = "0.10.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a978451301f4db1d02937a4ab3ccce137717b81826e79b7d49ffe3244a13c3b8"
+dependencies = [
+ "cfg-if",
+ "cpufeatures 0.2.17",
+ "digest 0.10.7",
+]
+
+[[package]]
+name = "sha2"
+version = "0.10.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a7507d819769d01a365ab707794a4084392c824f54a7a6a7862f8c3d0892b283"
 dependencies = [
  "cfg-if",
  "cpufeatures 0.2.17",

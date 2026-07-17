@@ -54,6 +54,7 @@ use zip::ZipArchive;
 
 mod kind;
 mod rar;
+mod rar4;
 mod rar_crypt;
 mod tar_source;
 
@@ -61,6 +62,8 @@ pub use kind::{archive_kind, ArchiveKind};
 #[cfg(feature = "fuzz-internals")]
 pub use rar::fuzz as rar_fuzz;
 pub use rar::RarSource;
+#[cfg(feature = "fuzz-internals")]
+pub use rar4::fuzz as rar4_fuzz;
 #[cfg(feature = "fuzz-internals")]
 pub use tar_source::fuzz;
 pub use tar_source::TarSource;
