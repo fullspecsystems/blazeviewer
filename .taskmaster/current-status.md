@@ -39,14 +39,20 @@ produce zero scan items, so there was nothing to navigate.
 
 ## 1. Command gating on a door — the live thread (owner discussion 2026-07-17)
 
-**The real bug, confirmed:** `copy_image` (`app_core_impl.rs:5395`) guards only on
-`displayed_item`, then calls `decode_item` — which on a door returns the 1×1 sentinel. So
-**`Ctrl+C` on a door silently copies a 1×1 transparent pixel and toasts success.** Confident
-and invisible; this is Codex's blocker 4 and it's real.
+**The real bug, confirmed — but smaller than first reported.** `copy_image`
+(`app_core_impl.rs:5395`) guards only on `displayed_item`, then calls `decode_item` — which
+on a door returns the 1×1 sentinel. **The file half already works:** `source.path(item)` on a
+door is a real path, so the `CF_HDROP` / `.fileURL` representation IS already offered and you
+can already paste the archive into Explorer. The defect is only that **a 1×1 transparent
+pixel rides along** as the image representation (paste into Photoshop → junk). Fix = don't
+offer an image when there isn't one (see #106 below, which subsumes this).
 
 **Already correct:** `copy_path` (`:5424`) reads `source.path(item)`, which for a door *is*
-the archive. Works today, no change. ⚠ Note there is **no "Copy Filename" command** in the
-codebase — `ids::COPY_PATH` is labelled **"Copy File Path"** and copies the full path.
+the archive. Works today, no change.
+
+**Decided, don't re-raise (owner, 2026-07-17): there is no Copy Filename command and we
+don't want one.** `ids::COPY_PATH` ("Copy File Path") copies the **full path**, and the owner
+says that's the main use case and the more useful of the two. A bare-name copy is a non-goal.
 
 **The owner's model:** _"it can behave kinda like a scenario where nothing is open"_ — which
 maps onto machinery that already exists. `MenuState` carries per-command `_enabled` flags
@@ -56,35 +62,50 @@ already takes `displayed_item`. Gating is a flag, not new architecture.
 | | On a door |
 |---|---|
 | Open (`P`), navigation, Copy File Path, Reveal, Details, Delete | **work** — they're about the file, and a door *is* a file |
-| **Copy Image** | **disable** — there's no image |
+| **Copy** | **works, once #106 lands** — offer the file, skip the image. Don't disable it: copying the archive file is genuinely useful and already half-works |
 | Copy Text from Image (OCR), Describe / Ask | **disable** — they'd scan a transparent pixel |
 | Compare (`compare_pin_cmd`, `:3280`) | **disable** — it'd pin a sentinel |
 | Rotate / Save rotation | already toasts honestly |
 | Zoom | harmless no-op on a 1×1; leave it |
 | Copy Image Details | **works** — the Details panel already shows a door's size + format, so copying those facts is consistent (its own doc says the name means "the facts the panel shows", not "EXIF") |
 
-## 2. "Copy" should be multi-representation — a SEPARATE task (owner's insight, 2026-07-17)
+## 2. #106 — "Copy" copies whatever makes sense (owner's insight, 2026-07-17)
 
 I argued Copy Image shouldn't double as copy-the-file because you couldn't tell which you
-got. **The owner is right that this is wrong:** _"on the mac, don't you kind of get both?"_
+got. **The owner is right that that's wrong:** _"on the mac, don't you kind of get both?"_
+Both platforms' clipboards are multi-representation, so you offer both and the **target**
+picks — Photoshop takes the pixels, Explorer takes the file. The ambiguity doesn't exist.
 
-**Both platforms' clipboards are multi-representation.** `NSPasteboard` is built for it, and
-the Windows clipboard takes several formats on one copy — `CF_DIB` **and** `CF_HDROP`
-together. The *target* picks: Photoshop takes the pixels, Explorer takes the file. So the
-ambiguity I was worried about doesn't exist.
+**⚠ Most of this is ALREADY BUILT — check before planning it.** I over-sized this task on
+first pass. What's actually on disk today:
 
-That reframes the label, too. If `Ctrl+C` means **"copy this thing, with every
-representation that makes sense"**, it's honest for every item type with **no per-item
-relabelling** — which matters, because muda has no `menuNeedsUpdate` and a per-door relabel
-would mean a **menu rebuild per item on the blaze path** (the rebuild-on-signature pattern
-we already use for the subtitle flyout). The item wants to be **"Copy"** (Finder's word),
-not "Copy Image": a photo offers pixels + file, a door offers the file, a video offers the
-file.
+- **The two-format copy ships.** `clipboard.rs`'s module doc already argues exactly this
+  rationale. Windows writes **CF_DIBV5 + CF_HDROP** together (`win::set`, `path: Option`);
+  macOS writes **`.tiff` + `.fileURL`** on one `NSPasteboardItem` (`CoreModel.swift:3216`).
+- **The label is half-converged.** macOS's menu bar **already says "Copy"**
+  (`MenuBar.swift:293`). Only `menu.rs:1269` (Windows) and `CoreModel.swift:1111` (the macOS
+  *context* menu) still say "Copy Image".
+- **A door already copies its file.** `source.path(item)` is a real path, so CF_HDROP /
+  `.fileURL` is already offered. You can paste an archive into Explorer **today**.
 
-**Why it's separate from #105:** it touches clipboard code on both shells and improves
-*photos* (copy the `.jpg` straight into Explorer or an email). It's a feature on its own
-merits, not a door special case. **File it, don't smuggle it in.** Until it lands, gate per
-the table above.
+**So the real remaining work is small:**
+
+1. **Label:** "Copy Image" → **"Copy"** in the two places above (Finder's word; honest for
+   every item kind).
+2. **Don't offer an image when there isn't one:** on a door, skip the decode and emit
+   file-only — a `ClipboardPayload::File { path }` arm. Windows drops the DIB from
+   `win::set`; macOS's `if let tiff` is *already* conditional, so it just skips.
+3. **⚠ Linux is the wrinkle:** arboard has no file-list support, so `set_image_and_file`
+   there **already ignores the path** and copies pixels only. A file-only payload would land
+   **nothing** — fall back to the path as text, which is what "copy" can honestly mean when
+   the platform won't take a file.
+
+**Why "Copy", not per-item labels:** muda has no `menuNeedsUpdate`, so a per-item relabel
+means a **menu rebuild per item on the blaze path** (the rebuild-on-signature pattern we use
+for the subtitle flyout). One generic label needs no rebuild and is never a lie.
+
+**Keep it a separate commit from #105** (it touches both shells and improves photos too),
+but it's an afternoon, not a clipboard rewrite.
 
 ## 3. macOS: the same card in SwiftUI (105.3)
 
