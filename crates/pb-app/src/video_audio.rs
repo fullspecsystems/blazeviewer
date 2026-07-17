@@ -46,6 +46,19 @@ mod imp {
         pub fn sample(&self) -> Option<AudioClockSample> {
             None
         }
+        /// No backend, no switch: completes immediately as refused.
+        pub fn set_track(&self, _ff: i64, _mf: i64) -> u64 {
+            0
+        }
+        pub fn switch_result(&self, _seq: u64) -> Option<bool> {
+            Some(false)
+        }
+        pub fn active_ff_stream(&self) -> i64 {
+            -1
+        }
+        pub fn active_mf_stream(&self) -> i64 {
+            -1
+        }
     }
 }
 
@@ -54,7 +67,7 @@ mod imp {
     use super::*;
     use std::io::Write;
     use std::process::{Child, Command, Stdio};
-    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, Ordering};
     use std::sync::mpsc::{Receiver, Sender, TryRecvError};
     use std::sync::Arc;
     use std::time::Duration;
@@ -79,10 +92,11 @@ mod imp {
     /// it, so a 2-hour clip stays constant-memory.
     pub struct VideoAudio {
         session_id: VideoSessionId,
-        rate: u32,
         ctl: Sender<Ctl>,
         shared: Arc<Shared>,
         feeder: Option<std::thread::JoinHandle<()>>,
+        /// Sequence numbers for [`Self::set_track`] asks (the feeder echoes them back).
+        switch_seq: AtomicU64,
     }
 
     struct Shared {
@@ -90,17 +104,31 @@ mod imp {
         frames_written: AtomicU64,
         /// Media position (µs) of the write counter's zero.
         anchor_us: AtomicU64,
+        /// The playing track's sample rate — the clock's divisor. A track switch
+        /// (task #99) can change it, which is why it lives here and not on the handle.
+        rate: AtomicU32,
         paused: AtomicBool,
         muted: AtomicBool,
         /// The decoder drained — the tail is in the pipe/device queue.
         ended: AtomicBool,
         failed: AtomicBool,
+        /// The **FFmpeg stream index** actually decoding (`-1` = unknown) — the
+        /// `TrackLocator::FfStream` currency, for the picker's tick (task #99).
+        active_track: AtomicI64,
+        /// Last completed `SetTrack` sequence + outcome (see the Windows engine's twin).
+        switch_done: AtomicU64,
+        switch_ok: AtomicBool,
     }
 
     enum Ctl {
         Pause,
         Resume,
         Seek(Duration),
+        /// Switch to FFmpeg audio stream `stream` (task #99), completing `seq`.
+        SetTrack {
+            stream: usize,
+            seq: u64,
+        },
         Stop,
     }
 
@@ -124,24 +152,29 @@ mod imp {
             let shared = Arc::new(Shared {
                 frames_written: AtomicU64::new(0),
                 anchor_us: AtomicU64::new(0),
+                rate: AtomicU32::new(rate),
                 paused: AtomicBool::new(true),
                 muted: AtomicBool::new(muted),
                 ended: AtomicBool::new(false),
                 failed: AtomicBool::new(false),
+                active_track: AtomicI64::new(decoder.stream_index() as i64),
+                switch_done: AtomicU64::new(0),
+                switch_ok: AtomicBool::new(false),
             });
             // Freeze immediately: opened-paused is the contract.
             signal(&child, libc::SIGSTOP);
             let (ctl_tx, ctl_rx) = std::sync::mpsc::channel();
             let feeder = std::thread::spawn({
                 let shared = shared.clone();
-                move || feeder_loop(decoder, child, rate, channels, shared, ctl_rx)
+                let input = input.clone();
+                move || feeder_loop(decoder, child, input, rate, channels, shared, ctl_rx)
             });
             Some(VideoAudio {
                 session_id,
-                rate,
                 ctl: ctl_tx,
                 shared,
                 feeder: Some(feeder),
+                switch_seq: AtomicU64::new(0),
             })
         }
 
@@ -161,6 +194,44 @@ mod imp {
             let _ = self.ctl.send(Ctl::Seek(position));
         }
 
+        /// Switch to **FFmpeg audio stream** `ff` (task #99) — the
+        /// `TrackLocator::FfStream` currency, straight from
+        /// `AppCore::audio_row_ff_stream` (this backend is FFmpeg end-to-end).
+        /// `_mf` exists for signature parity with the Windows engine, which
+        /// speaks two currencies; there is no MF here. Poll the returned sequence
+        /// with [`Self::switch_result`]; a refused switch leaves the current
+        /// track playing.
+        pub fn set_track(&self, ff: i64, _mf: i64) -> u64 {
+            let seq = self.switch_seq.fetch_add(1, Ordering::Relaxed) + 1;
+            let _ = self.ctl.send(Ctl::SetTrack {
+                stream: ff.max(0) as usize,
+                seq,
+            });
+            seq
+        }
+
+        /// The outcome of switch `seq` (`None` = still in flight). A failed backend
+        /// answers `false` rather than pending forever — the session treats `Failed`
+        /// as terminal, so there is nothing a switch could recover.
+        pub fn switch_result(&self, seq: u64) -> Option<bool> {
+            if self.shared.switch_done.load(Ordering::Acquire) >= seq {
+                return Some(self.shared.switch_ok.load(Ordering::Acquire));
+            }
+            self.shared.failed.load(Ordering::Relaxed).then_some(false)
+        }
+
+        /// The FFmpeg stream index actually decoding (`-1` = unknown) — reported to
+        /// the core via `audio_row_for_ff_stream` so the picker ticks what is really
+        /// playing.
+        pub fn active_ff_stream(&self) -> i64 {
+            self.shared.active_track.load(Ordering::Acquire)
+        }
+
+        /// This backend never decodes via Media Foundation.
+        pub fn active_mf_stream(&self) -> i64 {
+            -1
+        }
+
         /// One clock sample: anchor + written-frames time, minus the queue
         /// estimate (never below the anchor — right after a seek nothing of the
         /// new position has actually played yet).
@@ -176,8 +247,9 @@ mod imp {
                 AudioClockState::Playing
             };
             let anchor = Duration::from_micros(s.anchor_us.load(Ordering::Relaxed));
+            let rate = s.rate.load(Ordering::Relaxed);
             let written = Duration::from_secs_f64(
-                s.frames_written.load(Ordering::Relaxed) as f64 / self.rate.max(1) as f64,
+                s.frames_written.load(Ordering::Relaxed) as f64 / rate.max(1) as f64,
             );
             let position = anchor + written.saturating_sub(QUEUE_ESTIMATE.min(written));
             Some(AudioClockSample {
@@ -201,12 +273,15 @@ mod imp {
     /// The feeder: pull ~50 ms PCM chunks, apply mute, pipe to pw-cat (blocking
     /// writes = pacing), polling the control channel between chunks. Owns the
     /// decoder and the child; a seek repositions the decoder and **respawns**
-    /// pw-cat (dropping the old child flushes its queued audio instantly).
+    /// pw-cat (dropping the old child flushes its queued audio instantly); a track
+    /// switch (task #99) additionally replaces the decoder — `input` is held for
+    /// exactly that reopen.
     fn feeder_loop(
         mut decoder: FfAudioDecoder,
         mut child: Child,
-        rate: u32,
-        channels: u16,
+        input: VideoInput,
+        mut rate: u32,
+        mut channels: u16,
         shared: Arc<Shared>,
         ctl: Receiver<Ctl>,
     ) {
@@ -276,6 +351,72 @@ mod imp {
                     {
                         shared.failed.store(true, Ordering::Relaxed);
                     }
+                    continue;
+                }
+                Some(Ctl::SetTrack { stream, seq }) => {
+                    // The audio track switch (task #99): build the ENTIRE new pipeline
+                    // — decoder, seek, sink — before touching the old one, so a failed
+                    // switch costs the choice, never the sound. Note `open_track` with
+                    // a stale/non-audio index falls back to the policy and still
+                    // succeeds; `active_track` below reports what actually plays.
+                    let target = {
+                        let anchor =
+                            Duration::from_micros(shared.anchor_us.load(Ordering::Relaxed));
+                        let written = Duration::from_secs_f64(
+                            shared.frames_written.load(Ordering::Relaxed) as f64
+                                / rate.max(1) as f64,
+                        );
+                        anchor + written
+                    };
+                    let next = FfAudioDecoder::open_track(&input, u16::MAX, Some(stream))
+                        .ok()
+                        .and_then(|mut d| d.seek(target).ok().map(|_| d))
+                        .and_then(|mut d| {
+                            let landing = d.read(1).unwrap_or_default();
+                            let sink = spawn_pw_cat(d.rate(), d.channels())?;
+                            Some((d, landing, sink))
+                        });
+                    let ok = match next {
+                        Some((d, landing, mut sink)) => {
+                            // The new pipeline is whole — now retire the old one.
+                            let _ = stdin.take();
+                            signal(&child, libc::SIGCONT);
+                            let _ = child.kill();
+                            let _ = child.wait();
+                            stdin = sink.stdin.take();
+                            child = sink;
+                            if shared.paused.load(Ordering::Relaxed) {
+                                signal(&child, libc::SIGSTOP);
+                            }
+                            decoder = d;
+                            rate = decoder.rate();
+                            channels = decoder.channels();
+                            let anchor = decoder.position();
+                            shared.rate.store(rate.max(1), Ordering::Relaxed);
+                            shared
+                                .anchor_us
+                                .store(anchor.as_micros() as u64, Ordering::Relaxed);
+                            shared.frames_written.store(0, Ordering::Relaxed);
+                            shared.ended.store(false, Ordering::Relaxed);
+                            shared
+                                .active_track
+                                .store(decoder.stream_index() as i64, Ordering::Relaxed);
+                            if !landing.is_empty()
+                                && write_chunk(&mut stdin, &landing, &shared, channels).is_err()
+                            {
+                                shared.failed.store(true, Ordering::Relaxed);
+                            }
+                            true
+                        }
+                        None => {
+                            eprintln!(
+                                "video audio: track switch failed, keeping the current track"
+                            );
+                            false
+                        }
+                    };
+                    shared.switch_ok.store(ok, Ordering::Release);
+                    shared.switch_done.store(seq, Ordering::Release);
                     continue;
                 }
                 None => {}
@@ -412,6 +553,34 @@ mod imp {
         pub fn sample(&self) -> Option<AudioClockSample> {
             self.0.sample()
         }
+
+        /// Switch to the audio stream a picker row named — `ff` (FFmpeg index) and
+        /// `mf` (MF reader stream) are its two possible currencies, `-1` = not
+        /// located in that one (task #99). The engine serves whichever its decoders
+        /// can, FFmpeg first. Poll the returned sequence with
+        /// [`Self::switch_result`]; a refused switch leaves the current track
+        /// playing.
+        pub fn set_track(&self, ff: i64, mf: i64) -> u64 {
+            self.0.set_track(ff, mf)
+        }
+
+        /// The outcome of switch `seq` (`None` = still in flight).
+        pub fn switch_result(&self, seq: u64) -> Option<bool> {
+            self.0.switch_result(seq)
+        }
+
+        /// The FFmpeg stream index actually decoding (`-1` = the active decoder
+        /// isn't FFmpeg) — the picker's tick resolves through
+        /// `audio_row_for_ff_stream`.
+        pub fn active_ff_stream(&self) -> i64 {
+            self.0.active_ff_stream()
+        }
+
+        /// The MF reader stream index actually decoding (`-1` = the active decoder
+        /// isn't MF) — resolved through `audio_row_for_mf_stream`.
+        pub fn active_mf_stream(&self) -> i64 {
+            self.0.active_mf_stream()
+        }
     }
 }
 
@@ -455,6 +624,82 @@ mod tests {
             );
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
+    }
+
+    /// Audio track switching end to end (task #99): open the multitrack fixture
+    /// **muted**, switch to its second MF audio stream, and require a *confirmed*
+    /// outcome — then ask for a stream that doesn't exist and require a confirmed
+    /// refusal with the previous track still active. Skips gracefully on a host with
+    /// no audio endpoint (the engine reports `Failed`; RDP/headless).
+    #[test]
+    fn video_audio_switches_tracks_and_refuses_bogus_streams() {
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../pb-decode/tests/fixtures/video/multitrack.mp4");
+        let input = VideoInput::Path(fixture);
+        let audio = VideoAudio::open(&input, VideoSessionId(3), true).expect("engine spawns");
+        let t0 = std::time::Instant::now();
+        loop {
+            match audio.sample().map(|s| s.state) {
+                Some(AudioClockState::Paused) => break,
+                Some(AudioClockState::Failed) => {
+                    eprintln!("no audio endpoint on this host — skipping the switch test");
+                    return;
+                }
+                _ => {}
+            }
+            assert!(
+                t0.elapsed() < std::time::Duration::from_secs(10),
+                "never became ready"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+
+        // The engine reports its playing stream in ONE of the two currencies,
+        // whichever decoder opened (FFmpeg under `ffprobe`, MF otherwise).
+        assert!(
+            audio.active_ff_stream() >= 0 || audio.active_mf_stream() >= 0,
+            "the default open reports its stream"
+        );
+        // A specific track addressed in the MF currency (computable in every build
+        // config): MF's audio ordinal 0 is the fixture's `fra` track.
+        let s0 = pb_decode::MfAudioDecoder::open_track(&input, 48_000, Some(0))
+            .expect("ordinal 0 opens")
+            .reader_stream()
+            .expect("ordinal 0 resolves") as i64;
+
+        let wait = |seq: u64| {
+            let t0 = std::time::Instant::now();
+            loop {
+                if let Some(ok) = audio.switch_result(seq) {
+                    return ok;
+                }
+                assert!(
+                    t0.elapsed() < std::time::Duration::from_secs(10),
+                    "a switch must complete"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+        };
+
+        assert!(
+            wait(audio.set_track(-1, s0)),
+            "switching to a real AAC stream must be confirmed"
+        );
+        assert_eq!(
+            audio.active_mf_stream(),
+            s0,
+            "the engine reports the new stream (MF currency — the ask carried no other)"
+        );
+
+        assert!(
+            !wait(audio.set_track(-1, 99)),
+            "a stream the file hasn't got must be refused, not half-taken"
+        );
+        assert_eq!(
+            audio.active_mf_stream(),
+            s0,
+            "a refused switch leaves the previous track active"
+        );
     }
 
     /// Opt-in real-playback check (needs an audio endpoint + makes sound):
