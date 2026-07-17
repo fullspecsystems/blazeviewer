@@ -66,14 +66,27 @@ pub type DecodeFn = dyn Fn(
     + Sync;
 
 /// Identifies a unit of decode work: which item, for which consumer, at which
-/// geometry epoch. The epoch rides back on the [`Outcome`] so the main thread
-/// can discard a result decoded for a stale geometry (after a resize / fit
-/// toggle); the purpose routes the result to its consumer (ring vs thumb cache).
+/// geometry epoch, in which representation. The epoch rides back on the [`Outcome`]
+/// so the main thread can discard a result decoded for a stale geometry (after a
+/// resize / fit toggle); the purpose routes the result to its consumer (ring vs
+/// thumb cache); the `rep_kind` (#106.7 §5) keeps a full-res `Original` want and a
+/// decode-to-`Fit` want for the *same* item from deduping each other away — the
+/// parked full-res tier requests the Original alongside the on-screen Fit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct DecodeKey {
     pub item: usize,
     pub epoch: u64,
     pub purpose: Purpose,
+    pub rep_kind: pb_core::RepKind,
+}
+
+/// The representation a decode produces: a decode-to-fit target (`fit = Some`) is a
+/// `Fit` texture; a full-resolution decode (`fit = None`) is an `Original`.
+fn rep_kind_of(fit: &Option<FitBox>) -> pb_core::RepKind {
+    match fit {
+        Some(_) => pb_core::RepKind::Fit,
+        None => pb_core::RepKind::Original,
+    }
 }
 
 /// One prioritized want (the `set_targets` element): highest priority first in
@@ -125,12 +138,18 @@ impl Outcome {
     /// A result that did **not** come from the decode pool — the macOS shell's archive-video
     /// poster (generated via `AVAssetImageGenerator`), fed into the resident ring through the
     /// normal `drain_results` upload path. Carries no pool byte-budget.
-    pub fn synthetic(item: usize, epoch: u64, result: Result<DecodedImage, DecodeError>) -> Self {
+    pub fn synthetic(
+        item: usize,
+        epoch: u64,
+        rep_kind: pb_core::RepKind,
+        result: Result<DecodedImage, DecodeError>,
+    ) -> Self {
         Outcome {
             key: DecodeKey {
                 item,
                 epoch,
                 purpose: Purpose::Display,
+                rep_kind,
             },
             result,
             _budget: None,
@@ -180,9 +199,10 @@ struct Job {
 
 struct Inner {
     queue: Vec<Job>,
-    /// (item, purpose) -> cancel flag, for every queued OR in-flight job (the
-    /// dedup set). Purpose-keyed so consumers can't cancel each other (task #83).
-    tracked: HashMap<(usize, Purpose), Arc<AtomicBool>>,
+    /// (item, purpose, rep_kind) -> cancel flag, for every queued OR in-flight job
+    /// (the dedup set). Purpose-keyed so consumers can't cancel each other (task #83);
+    /// rep_kind-keyed so a Fit and an Original want for the same item coexist (#106.7).
+    tracked: HashMap<(usize, Purpose, pb_core::RepKind), Arc<AtomicBool>>,
     /// Decoded-but-not-yet-drained bytes (the backpressure counter).
     inflight_bytes: usize,
     /// Thumb-purpose jobs currently decoding (the occupancy guard's counter).
@@ -269,10 +289,10 @@ impl DecodePool {
             inner.epoch = epoch;
         }
 
-        let wanted: HashMap<(usize, Purpose), u32> = prioritized
+        let wanted: HashMap<(usize, Purpose, pb_core::RepKind), u32> = prioritized
             .iter()
             .enumerate()
-            .map(|(i, w)| ((w.item, w.purpose), i as u32))
+            .map(|(i, w)| ((w.item, w.purpose, rep_kind_of(&w.fit)), i as u32))
             .collect();
 
         // Cancel anything no longer wanted; drop those still queued.
@@ -283,11 +303,11 @@ impl DecodePool {
         }
         inner
             .queue
-            .retain(|j| wanted.contains_key(&(j.key.item, j.key.purpose)));
-        let live: std::collections::HashSet<(usize, Purpose)> = inner
+            .retain(|j| wanted.contains_key(&(j.key.item, j.key.purpose, j.key.rep_kind)));
+        let live: std::collections::HashSet<(usize, Purpose, pb_core::RepKind)> = inner
             .queue
             .iter()
-            .map(|j| (j.key.item, j.key.purpose))
+            .map(|j| (j.key.item, j.key.purpose, j.key.rep_kind))
             .collect();
         inner.tracked.retain(|key, flag| {
             wanted.contains_key(key) && (live.contains(key) || !flag.load(Ordering::Acquire))
@@ -295,14 +315,14 @@ impl DecodePool {
 
         // Re-prioritize jobs still queued.
         for job in inner.queue.iter_mut() {
-            if let Some(&prio) = wanted.get(&(job.key.item, job.key.purpose)) {
+            if let Some(&prio) = wanted.get(&(job.key.item, job.key.purpose, job.key.rep_kind)) {
                 job.prio = prio;
             }
         }
 
         // Enqueue newly-wanted items (dedup against queued + in-flight).
         for w in prioritized {
-            let key = (w.item, w.purpose);
+            let key = (w.item, w.purpose, rep_kind_of(&w.fit));
             if inner.tracked.contains_key(&key) {
                 continue;
             }
@@ -314,6 +334,7 @@ impl DecodePool {
                     item: w.item,
                     epoch,
                     purpose: w.purpose,
+                    rep_kind: rep_kind_of(&w.fit),
                 },
                 source: source.clone(),
                 fit: w.fit,
@@ -431,7 +452,7 @@ fn release_thumb_slot(inner: &mut Inner, is_thumb: bool) {
 /// an epoch change while this one was cancelled mid-decode) must keep its own
 /// entry so it can still be deduped and cancelled.
 fn untrack(inner: &mut Inner, job: &Job) {
-    let key = (job.key.item, job.key.purpose);
+    let key = (job.key.item, job.key.purpose, job.key.rep_kind);
     if inner
         .tracked
         .get(&key)
@@ -541,6 +562,7 @@ mod tests {
                 item: 5,
                 epoch: 0,
                 purpose: Purpose::Display,
+                rep_kind: pb_core::RepKind::Original,
             },
             source: source(),
             fit: None,
@@ -548,14 +570,15 @@ mod tests {
             prio: 0,
             cancel: flag.clone(),
         };
+        let k = (5, Purpose::Display, pb_core::RepKind::Original);
         // A fresh job (re-requested after an epoch change) now owns item 5.
-        inner.tracked.insert((5, Purpose::Display), new.clone());
+        inner.tracked.insert(k, new.clone());
         // The old, cancelled job finishing must NOT drop the new job's entry.
         untrack(&mut inner, &job(&old));
-        assert!(inner.tracked.contains_key(&(5, Purpose::Display)));
+        assert!(inner.tracked.contains_key(&k));
         // The owning job removes its own entry.
         untrack(&mut inner, &job(&new));
-        assert!(!inner.tracked.contains_key(&(5, Purpose::Display)));
+        assert!(!inner.tracked.contains_key(&k));
     }
 
     #[test]

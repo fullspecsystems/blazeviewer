@@ -53,6 +53,15 @@ pub const UPLOADS_PER_TICK: usize = 2;
 /// bounded. On a 7680 fullscreen the byte-budgeted capacity (~12–32) binds first.
 pub const MAX_FULL_RING: usize = 24;
 
+/// Gigapixel safety ceiling for the parked full-res tier (#106.7 §9): never *request* or
+/// retain a full-resolution `Original` whose true pixel count exceeds this — the item stays
+/// fit-only (a screen can't show more than the downscaled view anyway, and 1:1 of a gigapixel
+/// is a meaningless crop). Sits **above** the 24–100 MP pro range (an A7R V is 61 MP, a GFX
+/// 100 MP) so instant-zoom covers the files where it matters, and well below a true gigapixel
+/// whose RGBA8 decode buffer would be multiple GB. Bounds the retained texture *and* the
+/// transient decode buffer.
+pub const FULL_RES_MAX_PIXELS: u64 = 200_000_000;
+
 /// Hold-to-zoom curve: the e-folding zoom rate (per second) ramps from a gentle
 /// start (fine tuning) to a fast max over `ZOOM_RAMP_SECS`, along the
 /// **quadratic ease-in** [`hold_ramp`] so a brief tap barely moves — the fine

@@ -2147,10 +2147,12 @@ impl AppCore {
                         peak: 1.0,
                         animated: None,
                     };
+                    let rep_kind = self.display_kind();
                     self.pending_uploads
                         .push(crate::decode_pool::Outcome::synthetic(
                             item,
                             self.epoch,
+                            rep_kind,
                             Ok(img),
                         ));
                     // A click is a discrete pointer action, not the keypress
@@ -4143,10 +4145,12 @@ impl AppCore {
             peak: 1.0,
             animated: None,
         };
+        let rep_kind = self.display_kind();
         self.pending_uploads
             .push(crate::decode_pool::Outcome::synthetic(
                 item,
                 self.epoch,
+                rep_kind,
                 Ok(img),
             ));
     }
@@ -5078,12 +5082,29 @@ impl AppCore {
         self.view.zoom = 1.0;
         self.view.pan = [0.0, 0.0];
         self.push_view();
-        if changed {
-            self.invalidate_geometry();
-            self.refresh_after_geometry_change();
-        } else {
+        if !changed {
             self.draw();
+            return;
         }
+        // #106.7 — the instant Fit↔1:1: if the current photo is already resident in the NEW
+        // mode's display representation (the parked full-res tier pre-decoded its Original), a
+        // mode toggle is a pure REBIND — no epoch bump, no re-decode, no ring rebuild. Both
+        // reps stay resident (the ring is untouched), so toggling straight back is instant too.
+        // `display_slot` reads the just-updated mode. Falls through to the async re-decode only
+        // when the other rep isn't held (radius 0, a just-blazed-to photo, an excluded item).
+        if let Some(item) = self.displayed_item {
+            if self.target_item == Some(item) {
+                if let Some(slot) = self.display_slot(item) {
+                    self.present_item(item, slot);
+                    // Re-warm: the parked tier now wants the *previous* display rep held for
+                    // this window (so toggling back stays instant), plus fulls in the new mode.
+                    self.request_prefetch();
+                    return;
+                }
+            }
+        }
+        self.invalidate_geometry();
+        self.refresh_after_geometry_change();
     }
 
     /// Re-decode the display for a settled geometry change (resize / scale-mode) —
@@ -5185,8 +5206,14 @@ impl AppCore {
         self.full_requested_at
             .retain(|i, _| self.ring.slot_for_rep(*i, dk).is_some());
         // Items decoded but not yet uploaded must not be re-requested (the pool no
-        // longer tracks them, so it would decode them again).
-        let pending: HashSet<usize> = self.pending_uploads.iter().map(|o| o.key.item).collect();
+        // longer tracks them, so it would decode them again). Rep-aware (#106.7): an item's
+        // Original being in-flight must not block a request for its Fit, and vice-versa.
+        let pending_reps: HashSet<(usize, pb_core::RepKind)> = self
+            .pending_uploads
+            .iter()
+            .map(|o| (o.key.item, o.key.rep_kind))
+            .collect();
+        let pending_items: HashSet<usize> = pending_reps.iter().map(|&(i, _)| i).collect();
         let sharpen = self.sharpen_now();
         let ring: HashSet<usize> = self.prefetch_fulls().into_iter().collect();
         // Stamp when each full was first requested, for the `sharpen` latency metric.
@@ -5209,7 +5236,7 @@ impl AppCore {
         let (mut head, mut previews, mut fulls): (Vec<Job>, Vec<Job>, Vec<Job>) =
             (Vec::new(), Vec::new(), Vec::new());
         for &t in &self.targets {
-            if self.failed.contains(&t) || pending.contains(&t) {
+            if self.failed.contains(&t) || pending_reps.contains(&(t, dk)) {
                 continue;
             }
             let resident = self.ring.slot_for_rep(t, dk).is_some();
@@ -5229,6 +5256,36 @@ impl AppCore {
         let mut jobs = head;
         jobs.append(&mut previews);
         jobs.append(&mut fulls);
+        // Parked full-res tier (#106.7): when PARKED (no nav key held), keep a small
+        // sequential window's *other* representation resident — the full-res Original while
+        // displaying Fit, or the Fit while displaying Original — so a Fit↔1:1 toggle / zoom on
+        // those photos is an instant rebind, not a re-decode. Radius from `full_res_radius`;
+        // order is current → compare-pin → sequential neighbours (§ pin). Queued BELOW every
+        // display want, so a blaze never waits on it and it decodes in the pool's spare
+        // capacity. Excludes video / archive doors / SVG / RAW and anything past the gigapixel
+        // ceiling (§8/§9). While a key is held this whole tier is empty (blazing stays lean).
+        if self.held_nav().is_none() {
+            let (other_kind, other_fit) = match dk {
+                pb_core::RepKind::Fit => (pb_core::RepKind::Original, None),
+                pb_core::RepKind::Original => (pb_core::RepKind::Fit, self.fit),
+            };
+            // Only run when the other rep is a genuinely different decode: in Fit mode the
+            // Original always is; in Original/Fill mode the Fit only differs when there is a
+            // fit box (a bare full-res viewport would collapse both to the same decode).
+            if matches!(dk, pb_core::RepKind::Fit) || self.fit.is_some() {
+                let radius = self.full_res_radius();
+                for it in self.full_res_window(radius) {
+                    if self.failed.contains(&it)
+                        || pending_reps.contains(&(it, other_kind))
+                        || self.ring.is_tracked_rep(it, other_kind)
+                        || !self.full_res_eligible(it)
+                    {
+                        continue;
+                    }
+                    jobs.push(Job::display(it, other_fit, false));
+                }
+            }
+        }
         // Thumbnails fills (task #83): appended BELOW every display want (the
         // merged-scheduler order), only while the strip is visible and the user
         // is parked — an expensive cold fill must never race a blaze. T0 capture
@@ -5243,7 +5300,7 @@ impl AppCore {
                 ) {
                     if self.failed.contains(&it)
                         || self.thumbs.failed.contains(&it)
-                        || pending.contains(&it)
+                        || pending_items.contains(&it)
                     {
                         continue;
                     }
@@ -5282,6 +5339,19 @@ impl AppCore {
     /// "is `item` resident / which slot do I rebind" query on the display path.
     pub fn display_kind(&self) -> pb_core::RepKind {
         self.display_rep().kind()
+    }
+
+    /// Build the full [`Representation`] for a decode outcome's `kind` at the current epoch:
+    /// a `Fit` carries the geometry epoch (so a stale-geometry completion is rejected), an
+    /// `Original` is geometry-independent. The parked full-res tier (#106.7) produces
+    /// `Original` outcomes even while the display rep is `Fit`.
+    pub fn rep_of(&self, kind: pb_core::RepKind) -> pb_core::Representation {
+        match kind {
+            pb_core::RepKind::Fit => pb_core::Representation::Fit {
+                geometry_epoch: self.epoch,
+            },
+            pb_core::RepKind::Original => pb_core::Representation::Original,
+        }
     }
 
     /// The resident ring slot to display `item` from in the current scale mode: its slot in
@@ -5372,6 +5442,71 @@ impl AppCore {
             .and_then(|e| e.to_str())
             .map(|e| pb_decode::is_raw_extension(&e.to_ascii_lowercase()))
             .unwrap_or(false)
+    }
+
+    /// The parked full-res radius in effect — the setting, clamped to the hard cap.
+    pub fn full_res_radius(&self) -> usize {
+        self.settings
+            .full_res_radius
+            .min(settings::FULL_RES_RADIUS_MAX) as usize
+    }
+
+    /// The sequential window whose *other* representation the parked full-res tier holds
+    /// (#106.7): **current → compare-pin → ±`radius` neighbours**. The pin rides at priority 2
+    /// (a promised instant rebind that may be a distant item), then the sequential neighbours
+    /// outward. De-duplicated, order preserved.
+    pub fn full_res_window(&self, radius: usize) -> Vec<usize> {
+        let Some(cur) = self.playlist.current() else {
+            return Vec::new();
+        };
+        let len = self.source.len();
+        let mut out = Vec::new();
+        let push = |v: &mut Vec<usize>, i: usize| {
+            if i < len && !v.contains(&i) {
+                v.push(i);
+            }
+        };
+        push(&mut out, cur);
+        if let Some(pin) = self.compare_pin {
+            push(&mut out, pin);
+        }
+        for d in 1..=radius {
+            push(&mut out, cur + d);
+            if cur >= d {
+                push(&mut out, cur - d);
+            }
+        }
+        out
+    }
+
+    /// Whether `item` may be held at full resolution by the parked tier (#106.7 §8/§9). Only a
+    /// real still image has a geometry-independent "original": excludes videos and archive
+    /// doors (no still full-res), SVG (rasterised per-viewport — no fixed original satisfies an
+    /// arbitrary fit), RAW (a slow, uncancellable demosaic — like the ahead-ring), and anything
+    /// past the gigapixel ceiling (kept fit-only, since 1:1 of a gigapixel is a meaningless crop
+    /// and its RGBA8 decode buffer would be multiple GB). The ceiling reads the true resolution
+    /// from `meta_cache`; an item not yet metadata-known is admitted and re-checked once known.
+    pub fn full_res_eligible(&self, item: usize) -> bool {
+        if !matches!(
+            crate::video::item_kind(self.source.as_ref(), item),
+            crate::video::LibraryItemKind::Image
+        ) {
+            return false; // video or archive door
+        }
+        let ext = Path::new(self.source.name(item))
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e.to_ascii_lowercase());
+        if ext.as_deref() == Some("svg") || self.is_raw_item(item) {
+            return false;
+        }
+        // Gigapixel ceiling: never request/retain an original past the pixel cap.
+        if let Some(m) = self.meta_cache.get(&item) {
+            if (m.w as u64) * (m.h as u64) > FULL_RES_MAX_PIXELS {
+                return false;
+            }
+        }
+        true
     }
 
     /// All items we currently want decoded to full (sharpen + ahead-ring), for the
@@ -6151,12 +6286,20 @@ impl AppCore {
                 return false; // stale geometry
             }
             let item = o.key.item;
-            let resident = self.ring.slot_for_rep(item, dk).is_some();
+            let rk = o.key.rep_kind;
+            // Residency is per-representation (#106.7): a Fit and an Original of the same
+            // item are independent slots.
+            let resident = self.ring.slot_for_rep(item, rk).is_some();
             if let Err(ref e) = o.result {
                 if resident {
                     // A full-upgrade decode failed, but the resident preview is fine
                     // — keep it and stop retrying the upgrade.
                     self.upgrade_done.insert(item);
+                    return false;
+                }
+                // A parked Original decode failing is not the display photo failing — the
+                // Fit is unaffected. Only a *display-rep* decode failure marks the item bad.
+                if rk != dk {
                     return false;
                 }
                 eprintln!("decode failed for item {item}: {e}");
@@ -6169,12 +6312,16 @@ impl AppCore {
                 return false;
             }
             if resident {
-                // Already resident. The only outcome we still want is a *full*
-                // decode upgrading a resident preview (uploaded in place below). A
-                // preview-only upgrade result (e.g. RAW whose only image is its
-                // preview) is marked done here so the idle pass stops retrying —
-                // otherwise the upgrade loops forever, re-decoding every tick. Any
-                // other already-resident duplicate is dropped.
+                // An Original is full-res only (never a preview), so an already-resident
+                // Original outcome is a pure duplicate — drop it.
+                if rk == pb_core::RepKind::Original {
+                    return false;
+                }
+                // Fit already resident. The only outcome we still want is a *full* decode
+                // upgrading a resident preview (uploaded in place below). A preview-only
+                // upgrade result (e.g. RAW whose only image is its preview) is marked done
+                // here so the idle pass stops retrying — otherwise the upgrade loops
+                // forever. Any other already-resident duplicate is dropped.
                 let is_prev = self.preview_resident.contains(&item);
                 let img = o.result.as_ref().expect("Err handled above");
                 if is_prev && img.is_preview {
@@ -6207,20 +6354,25 @@ impl AppCore {
         let mut leftover = Vec::new();
         for outcome in ready {
             let item = outcome.key.item;
+            // The representation this decode belongs to (#106.7): its own Fit/Original slot.
+            // A parked Original lands here while the display rep is Fit — it reserves its own
+            // slot and is NOT presented (only `rk == dk` outcomes present).
+            let rk = outcome.key.rep_kind;
             let Ok(ref img) = outcome.result else {
                 continue; // errors were already filtered out above
             };
-            // A full decode for an item already resident as a preview is its
-            // in-place upgrade (the retain above kept only real fulls; preview-only
-            // upgrade results were already marked `upgrade_done` and dropped).
+            // A full decode for an item already resident as a preview is its in-place upgrade
+            // (the retain above kept only real fulls; preview-only upgrade results were already
+            // marked `upgrade_done` and dropped). Originals never have a preview, so this is
+            // false for them — they take the reserve path.
             let upgrade =
-                self.preview_resident.contains(&item) && self.ring.slot_for_rep(item, dk).is_some();
+                self.preview_resident.contains(&item) && self.ring.slot_for_rep(item, rk).is_some();
             if uploads >= UPLOADS_PER_TICK {
                 // Carry still-wanted leftovers to the next tick (in priority order);
                 // drop now-obsolete ones so they don't pin pool byte-budget while
                 // the loop idles (work_pending wouldn't keep polling for them).
                 if self.targets.contains(&item)
-                    && (upgrade || self.ring.slot_for_rep(item, dk).is_none())
+                    && (upgrade || self.ring.slot_for_rep(item, rk).is_none())
                 {
                     leftover.push(outcome);
                 }
@@ -6231,15 +6383,12 @@ impl AppCore {
                 self.meta_cache.insert(item, m);
             }
             let item_bytes = img.pixels.len() as u64;
-            // The representation + content generation this decode belongs to (#106.7). Stale
-            // (old-geometry / old-content) outcomes were already filtered above, so the current
-            // display rep is correct for every survivor here.
-            let rep = self.display_rep();
+            let rep = self.rep_of(rk);
             let cg = self.content_gen;
             if upgrade {
                 let slot = self
                     .ring
-                    .slot_for_rep(item, dk)
+                    .slot_for_rep(item, rk)
                     .expect("resident as preview");
                 if let Some(a) = self.renderer.as_mut() {
                     let t0 = Instant::now();
@@ -6300,18 +6449,23 @@ impl AppCore {
                     self.metrics.record("upload", t0.elapsed());
                 }
                 self.ring.mark_resident(item, res.slot, cg, rep);
-                if img.is_preview {
-                    self.preview_resident.insert(item);
-                } else {
-                    self.preview_resident.remove(&item);
-                    self.perf_note_full(item); // a fresh full landed directly (no preview step)
+                // `preview_resident` and the cache metrics track the DISPLAY texture only; a
+                // parked Original (rk != dk) is held silently and must not touch either.
+                if rk == dk {
+                    if img.is_preview {
+                        self.preview_resident.insert(item);
+                    } else {
+                        self.preview_resident.remove(&item);
+                        self.perf_note_full(item); // a fresh full landed directly (no preview step)
+                    }
                 }
                 uploads += 1;
-                // Present the target when it lands — including a *re-present of the same
-                // item* after a geometry change (epoch bumped ⇒ `target_caught_up` is false
-                // even though the index matches), so a resize / scale-mode / rebuild swaps
-                // the held stale-scale frame for the fresh one (task #18 finding #5).
-                if self.target_item == Some(item) && !self.target_caught_up() {
+                // Present the target when it lands in the DISPLAY rep — including a *re-present
+                // of the same item* after a geometry change (epoch bumped ⇒ `target_caught_up`
+                // is false even though the index matches), so a resize / scale-mode / rebuild
+                // swaps the held stale-scale frame for the fresh one (task #18 finding #5). A
+                // parked Original (rk != dk) is held, never presented.
+                if rk == dk && self.target_item == Some(item) && !self.target_caught_up() {
                     self.present_item(item, res.slot);
                 }
             }
@@ -14075,6 +14229,171 @@ mod tests {
         );
     }
 
+    // ── #106.7: parked full-res tier + instant Fit↔1:1 rebind ──
+
+    fn photos_named(names: &[&str]) -> Arc<dyn ItemSource> {
+        Arc::new(FsSource::new(
+            names
+                .iter()
+                .map(|n| PathBuf::from(format!("p/{n}")))
+                .collect(),
+        ))
+    }
+
+    fn meta_dims(rel: &str, w: u32, h: u32) -> crate::meta::PhotoMeta {
+        crate::meta::PhotoMeta {
+            rel: rel.into(),
+            w,
+            h,
+            size: None,
+            codec: "JPEG",
+            animated: None,
+        }
+    }
+
+    #[test]
+    fn full_res_window_is_current_then_pin_then_neighbours() {
+        let mut core = test_core();
+        core.source = photos_named(&["a", "b", "c", "d", "e", "f", "g", "h", "i", "j"]);
+        core.playlist = Playlist::new(10, 0).with_cursor(5); // current = 5
+        core.compare_pin = Some(9); // a distant pin rides at priority 2
+        assert_eq!(
+            core.full_res_window(0),
+            vec![5, 9],
+            "radius 0 = current + pin"
+        );
+        assert_eq!(
+            core.full_res_window(1),
+            vec![5, 9, 6, 4],
+            "current → pin → +1 → -1"
+        );
+        assert_eq!(core.full_res_window(2), vec![5, 9, 6, 4, 7, 3]);
+    }
+
+    #[test]
+    fn full_res_window_dedupes_and_clamps_at_the_ends() {
+        let mut core = test_core();
+        core.source = photos_named(&["a", "b", "c"]);
+        core.playlist = Playlist::new(3, 0).with_cursor(0); // current = 0 (no -1 neighbour)
+        core.compare_pin = Some(1); // pin coincides with the +1 neighbour → deduped
+        assert_eq!(
+            core.full_res_window(1),
+            vec![0, 1],
+            "no wrap below 0; pin==+1 deduped"
+        );
+    }
+
+    #[test]
+    fn full_res_eligible_excludes_video_svg_and_gigapixel() {
+        let mut core = test_core();
+        core.source = photos_named(&["a.jpg", "vector.svg", "big.jpg", "clip.mkv"]);
+        // A normal-size JPEG is eligible.
+        core.meta_cache.insert(0, meta_dims("a.jpg", 8000, 6000)); // 48 MP
+        assert!(core.full_res_eligible(0));
+        // SVG rasterises per-viewport — never a fixed original.
+        assert!(!core.full_res_eligible(1));
+        // A gigapixel image stays fit-only (600 MP > the 200 MP ceiling).
+        core.meta_cache
+            .insert(2, meta_dims("big.jpg", 30000, 20000));
+        assert!(!core.full_res_eligible(2));
+        // A video has no still full-res.
+        assert!(!core.full_res_eligible(3));
+    }
+
+    #[test]
+    fn full_res_radius_is_clamped_to_the_cap() {
+        let mut core = test_core();
+        core.settings.full_res_radius = 250; // absurd
+        assert_eq!(
+            core.full_res_radius(),
+            settings::FULL_RES_RADIUS_MAX as usize
+        );
+        core.settings.full_res_radius = 0;
+        assert_eq!(core.full_res_radius(), 0);
+    }
+
+    /// Populate the ring so `item` is resident in `rep` at the core's current content gen.
+    fn make_resident(
+        core: &mut AppCore,
+        item: usize,
+        rep: pb_core::Representation,
+        keep: &[usize],
+    ) {
+        let cg = core.content_gen;
+        let res = core
+            .ring
+            .reserve_bytes(item, cg, rep, 64, keep)
+            .expect("a free slot");
+        assert!(core.ring.mark_resident(item, res.slot, cg, rep));
+    }
+
+    #[test]
+    fn scale_toggle_rebinds_a_held_original_without_a_re_decode() {
+        let mut core = test_core();
+        core.source = photos_named(&["a.jpg"]);
+        core.playlist = Playlist::new(1, 0);
+        core.ring = ResidentRing::new(4);
+        core.fit = Some(FitBox {
+            max_width: 100,
+            max_height: 100,
+        });
+        core.view.mode = ScaleMode::Fit; // display rep = Fit (fit is Some)
+                                         // The current photo is resident as BOTH its Fit (on screen) and its Original (the
+                                         // parked tier pre-decoded it) — the state a Fit↔1:1 toggle must exploit.
+        let fit_rep = core.rep_of(pb_core::RepKind::Fit);
+        make_resident(&mut core, 0, fit_rep, &[0]);
+        make_resident(&mut core, 0, pb_core::Representation::Original, &[0]);
+        core.target_item = Some(0);
+        core.mark_resolved(0);
+        assert!(core.target_caught_up());
+        let e0 = core.epoch;
+
+        core.set_scale_mode(ScaleMode::Original);
+
+        assert_eq!(
+            core.epoch, e0,
+            "toggling to a HELD representation must NOT bump the geometry epoch (no re-decode)"
+        );
+        assert_eq!(core.display_kind(), pb_core::RepKind::Original);
+        assert!(
+            core.target_caught_up(),
+            "the held Original was rebound — nothing is pending, no re-decode"
+        );
+        // The Fit is still resident, so toggling straight back is instant too.
+        assert!(
+            core.ring.slot_for(0).is_some(),
+            "the Fit slot survived the toggle"
+        );
+    }
+
+    #[test]
+    fn scale_toggle_falls_back_to_re_decode_when_the_other_rep_is_not_held() {
+        let mut core = test_core();
+        core.source = photos_named(&["a.jpg"]);
+        core.playlist = Playlist::new(1, 0);
+        core.ring = ResidentRing::new(4);
+        core.fit = Some(FitBox {
+            max_width: 100,
+            max_height: 100,
+        });
+        core.view.mode = ScaleMode::Fit;
+        // Only the Fit is resident — no parked Original for the toggle to rebind.
+        let fit_rep = core.rep_of(pb_core::RepKind::Fit);
+        make_resident(&mut core, 0, fit_rep, &[0]);
+        core.target_item = Some(0);
+        core.mark_resolved(0);
+        let e0 = core.epoch;
+
+        core.set_scale_mode(ScaleMode::Original);
+
+        assert_eq!(
+            core.epoch,
+            e0.wrapping_add(1),
+            "no held Original → fall back to the async re-decode (epoch bumps)"
+        );
+        assert!(core.target_pending(), "the re-decode is pending");
+    }
+
     #[test]
     fn rebuild_playlist_clears_metadata_and_marks_nothing_presented() {
         use crate::meta::PhotoMeta;
@@ -14136,8 +14455,12 @@ mod tests {
             peak: 1.0,
             animated: None,
         };
-        core.pending_uploads
-            .push(Outcome::synthetic(0, core.epoch, Ok(poster)));
+        core.pending_uploads.push(Outcome::synthetic(
+            0,
+            core.epoch,
+            pb_core::RepKind::Original,
+            Ok(poster),
+        ));
         core.drain_results();
         assert!(core.display_slot(0).is_some(), "the poster became resident");
         assert_eq!(
@@ -14496,7 +14819,12 @@ mod tests {
             peak: 1.0,
             animated: None,
         };
-        core.thumbs_capture(Outcome::synthetic(2, core.epoch, Ok(img)));
+        core.thumbs_capture(Outcome::synthetic(
+            2,
+            core.epoch,
+            pb_core::RepKind::Fit,
+            Ok(img),
+        ));
         assert!(
             core.thumbs.working(),
             "derive in flight keeps the pump awake"
@@ -14597,7 +14925,12 @@ mod tests {
                 c
             });
             core.toggle_thumbnails();
-            core.thumbs_capture(Outcome::synthetic(i, core.epoch, Ok(img)));
+            core.thumbs_capture(Outcome::synthetic(
+                i,
+                core.epoch,
+                pb_core::RepKind::Fit,
+                Ok(img),
+            ));
             for _ in 0..200 {
                 if core.thumbs.poll(0) {
                     break;
