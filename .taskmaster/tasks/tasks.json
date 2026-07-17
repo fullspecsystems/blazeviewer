@@ -1351,7 +1351,7 @@
         "id": 106,
         "title": "Performance: fast archive opens, instant resize, instant thumbnails",
         "description": "Measured baseline (2026-07-17, PB_PERF on an SMB album.zip of 8 ~36MP JPEGs): open->first-photo 7068ms, open->all-cached 8302ms, resize Fit<->1:1 711-993ms. The first photo is ~85% of the whole open (all 7 remaining cache in +1.2s), so metric 1 is a large SERIAL/fixed cost, not per-photo throughput. Instrumentation lives in pb_app_core::perf (PB_PERF env; folded into --metrics). Prime directive: the app must FEEL fast.",
-        "status": "pending",
+        "status": "in-progress",
         "priority": "high",
         "dependencies": [],
         "subtasks": [
@@ -1365,7 +1365,7 @@
             "id": 2,
             "title": "Break down the 7s open->first-photo (it is NOT a full unzip)",
             "description": "CORRECTION: a ZIP is already lazy - open reads only the central directory + a local header per entry (ZipSource::open), then bytes(i) inflates ONE entry on demand. It is 7z that is eager (whole archive -> RAM on open, because solid). So the 7s is NOT unzip-everything; it is ~all the 39MB single-entry read over SMB + ~0.3s decode. Sub-instrument metric 1 into phases (open-cmd -> worker/central-dir done -> first bytes() read -> first decode -> present) to confirm the read dominates. NB a ZIP is not background_open (kind.rs:50) so open runs sync on the event loop; verify that is not itself a stall.",
-            "status": "pending"
+            "status": "in-progress"
           },
           {
             "id": 3,
