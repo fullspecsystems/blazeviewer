@@ -1,6 +1,6 @@
 # Task 105 — The door card: one coherent element, not three fighting mechanisms
 
-**Status:** planned — rev2 (2026-07-17, owner-designed + sized; not yet Codex-reviewed)
+**Status:** planned — rev3 (2026-07-17, owner-designed; 2 of 4 open questions resolved; not yet Codex-reviewed)
 **Proposed task id:** 105 (supersedes task 104's *"design the door tile"* follow-up)
 **Depends on:** task #104 (archives as doors) — shipped through Phase 3 on `main`.
 **Scope:** `pb-app-core` (one accessor, a trivial tile) + `pb-app` (an egui card) +
@@ -80,9 +80,11 @@ The **no-read guarantee is untouched**: the typed dispatch still returns above
 `source.bytes()`, which is what makes a door safe to prefetch past. It gets cheaper —
 the ring slot is now trivial.
 
-⚠ **Size it deliberately, not at 1×1.** `DecodedImage.orig_width/height` feed the info
-line's dimensions readout, so a 1×1 tile would have the info line announce `1×1` for
-every archive. See *Open questions*.
+⚠ **The tile's dimensions are still read.** `DecodedImage.orig_width/height` flow into
+`PhotoMeta.w/h` and out to the info line, so a 1×1 tile would have the line announce
+`1×1` for every archive. §6 removes the need to care — a door reports its **size**, not
+its dimensions — but the two changes have to land together, or whatever size is picked
+here becomes a visible lie.
 
 ### 2. The card is a `PanelFrame` member
 
@@ -139,11 +141,48 @@ instead of clamping a scale.
 so it always fits, art and all. Nothing about a door should ever be clipped or push
 past the viewport.
 
+### 6. What a door reports: size, not dimensions (owner, 2026-07-17)
+
+A door has no pixels to describe, so the readouts substitute the one fact we can know
+for free — **the file's size, from a `stat`** — and otherwise behave exactly as normal.
+
+**Never probe.** Not the entry count, not whether it's password-protected, nothing that
+requires opening the archive. Owner: *"Too expensive for blazing."* That is the same
+line the decode path already holds (the typed dispatch returns above `source.bytes()`),
+extended to the readouts: **all we know about a door is its size and its extension, and
+that is all we say.**
+
+- **Details panel (`Shift+I`) — ✅ already shipped** (`cf8ae8a`, `app_core_impl.rs`'s
+  `Archive` arm): size from `fs::metadata` (falling back to `size_hint` for an entry),
+  plus a `Format` row (`"7z archive"`). No EXIF, no probe. **Precise bytes**, matching
+  the panel's own convention. The stat runs once per item behind `exif_cache`, not per
+  frame.
+- **Info line (`i`) — to do**: where a photo shows `4032×3024`, a door shows a
+  **human-readable size** (`271 MB`). Everything else about the line is unchanged.
+
+> 🪤 **The info line runs on the frame path — do not `stat` there.**
+> `info_line_parts` is reached from `info_line_snapshot()` while the shell builds its
+> `PanelFrame`, so a `fs::metadata` call in it would be **disk I/O on the event loop,
+> every frame** — precisely the thing the whole architecture forbids, and exactly the
+> trap the details panel avoids by caching behind `exif_cache`.
+>
+> The size must therefore ride **`PhotoMeta`** (`meta.rs`), which is per-item cached in
+> `meta_cache` and filled once when a decode lands (`app_core_impl.rs:6158` / `:6267` /
+> `:6426`) — the same place `w`/`h` come from. `FsSource` does **not** implement
+> `size_hint` (only the archive sources do), so the value has to come from a stat at
+> that fill point, or from teaching the scan to carry it.
+>
+> Also note `archive::human_gb` exists but is **GB-only** (it formats the RAM budget); a
+> door needs KB/MB/GB, so it needs a general formatter rather than that one.
+
 ## Phases
 
-**Phase 1 — core.** Transparent tile; `door_card()`; expose the art pixels. Tests: the
-tile is transparent and still costs no read; `door_card` is `Some` only on a door and
-carries the live shortcut.
+**Phase 1 — core.** Transparent tile; `door_card()`; expose the art pixels; carry the
+door's size on `PhotoMeta` and swap the info line's dimensions for it (§6 — fill it at
+the `meta_cache` insert, **never** in `info_line_parts`). Tests: the tile is transparent
+and still costs no read; `door_card` is `Some` only on a door and carries the live
+shortcut; the info line reports a size for a door and dimensions for a photo; no
+`fs::metadata` on the frame path.
 
 **Phase 2 — winit/egui.** `PanelFrame.door` + `door_card()` in `panels_ui.rs`; the art
 texture uploaded once into the ctx, drawn at **512 pt, shrinking to fit** (§5). Shows
@@ -166,18 +205,19 @@ if now unused, and resolve `never_upscale` (adopt or revert).
    survives blazing; that is deliberate, because it is the item's content, not a nag
    about it. (Cost is nil: the card is static per item — no per-frame decode, no raster,
    just a cached texture and two labels.)
-2. **What should the info line say for a door?** It reads dimensions off the decoded
-   frame, which is now a lie whatever size we pick. Options: special-case doors to show
-   file size + format (the panel already does this — `app_core_impl.rs`'s `Archive` arm
-   reads a stat), or suppress the dimensions row. Related: the card and the info line
-   would both name the file — is that redundant, or is the info line's the one to drop?
+2. ~~**What should the info line say for a door?**~~ **Resolved (owner, 2026-07-17):**
+   the file size replaces the dimensions, human-readable; everything else behaves as
+   normal. See §6 — including the trap that it must not `stat` on the frame path. The
+   details panel already shipped and already matches (`cf8ae8a`).
 3. **`never_upscale`'s fate.** Its only caller disappears here. The owner asked whether
    "shrink to fit" should be a real user-facing mode; if yes, this field is its engine
    and stays. If not, revert it with this change rather than leaving a tested,
    documented, unused feature.
-4. **Does the card need the archive's file size?** "wedding-photos.zip · 271 MB" sets an
-   expectation before a 7z spends ten seconds decompressing. Cheap (a stat, already done
-   for the panel) — but it is another row.
+4. **Does the card *also* show the size?** The info line now carries it (§6), and the
+   card names the file. "wedding-photos.zip · 271 MB" on the card sets an expectation
+   before a 7z spends ten seconds decompressing — but it duplicates the line for anyone
+   who has `i` on. Lean: name only on the card, size on the line, since the line is where
+   facts live.
 
 ## Risks
 
