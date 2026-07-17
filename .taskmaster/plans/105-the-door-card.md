@@ -1,6 +1,6 @@
 # Task 105 — The door card: one coherent element, not three fighting mechanisms
 
-**Status:** planned — rev1 (2026-07-17, owner-designed; not yet Codex-reviewed)
+**Status:** planned — rev2 (2026-07-17, owner-designed + sized; not yet Codex-reviewed)
 **Proposed task id:** 105 (supersedes task 104's *"design the door tile"* follow-up)
 **Depends on:** task #104 (archives as doors) — shipped through Phase 3 on `main`.
 **Scope:** `pb-app-core` (one accessor, a trivial tile) + `pb-app` (an egui card) +
@@ -59,9 +59,10 @@ This is the argument for it. The card **removes** machinery rather than adding a
   the button; the pill goes back to meaning "this plays".
 - The `Icon::Archive` / `doc.zipper` cases in both pills, and the *Open* vs *Play* label
   split.
-- `ViewTransform::never_upscale`'s **only caller** — the card sizes itself, so there is
-  no scale to cap. ⚠ See *Open questions*: the field then has no user, and either the
-  owner's "shrink to fit" mode adopts it or it should be reverted.
+- `ViewTransform::never_upscale`'s **only caller** — the card draws its art at a fixed
+  512 pt, so there is no scale to cap (see §5: the right *size* replaces the clamp). ⚠
+  See *Open questions*: the field then has no user, and either the owner's "shrink to
+  fit" mode adopts it or it should be reverted.
 - The door tile's artwork decode + composite in `engine.rs`, and with it the entire
   *"how big should the tile be"* question — which has now been answered wrong three
   times (flat → decode-to-fit → flat → artwork).
@@ -124,7 +125,8 @@ tile is transparent and still costs no read; `door_card` is `Some` only on a doo
 carries the live shortcut.
 
 **Phase 2 — winit/egui.** `PanelFrame.door` + `door_card()` in `panels_ui.rs`; the art
-texture uploaded once into the ctx. Remove the pill's kind-3 path.
+texture uploaded once into the ctx, drawn at **512 pt, shrinking to fit** (§5). Shows
+while blazing — do *not* gate it on the pill's nag rule. Remove the pill's kind-3 path.
 
 **Phase 3 — macOS.** The same card in SwiftUI; art over the bridge. ⚠ Cannot be compiled
 here — `cargo check -p pb-mac-ffi` covers only the Rust half.
@@ -132,13 +134,38 @@ here — `cargo check -p pb-mac-ffi` covers only the Rust half.
 **Phase 4 — cleanup.** Delete `play_hint_persistent`, the kind-3 arms, `Icon::Archive`
 if now unused, and resolve `never_upscale` (adopt or revert).
 
+### 5. Sizing: 512 pt of artwork, shrinking to fit (owner, 2026-07-17)
+
+The card's artwork draws at **512 pt** — not the art's full 1024, and never the
+viewport. That number is not arbitrary, and it is the whole reason this design fixes
+the crispness problem for free:
+
+| Display | 512 pt in physical px | vs the 1024 px asset |
+|---|---|---|
+| Retina / 2× | **1024** | **exactly 1:1** |
+| Windows @ 150% | 768 | a downscale — crisp |
+| 1× | 512 | a downscale — crisp |
+
+egui and SwiftUI both lay out in points, so the art lands at or below its native
+resolution on **every** display. It is never magnified — which is precisely what
+`never_upscale` was invented to prevent, achieved here by picking the right size
+instead of clamping a scale.
+
+**It must still shrink.** 512 pt is a *maximum*: on a small window the card scales down
+so it always fits, art and all. Nothing about a door should ever be clipped or push
+past the viewport.
+
 ## Open questions — decide before building
 
-1. **Does the card show while blazing?** The play pill is suppressed while a nav key is
-   held (`maybe_show_anim_hint`'s nag rule). If the card inherits that, **holding space
-   through a folder of archives shows an entirely blank screen** — the tile draws
-   nothing now. It almost certainly must show while blazing, which makes it the *first*
-   overlay that does. Recommendation: show it; it is content, not a nag.
+1. ~~**Does the card show while blazing?**~~ **Resolved (owner, 2026-07-17): yes.** The
+   play pill is suppressed while a nav key is held (`maybe_show_anim_hint`'s nag rule),
+   and inheriting that would be a real bug now — the tile draws nothing, so blazing
+   through a folder of archives would show an **entirely blank screen**. Owner: *"part
+   of the rationale for not showing things is to keep it fast, but without showing
+   something it'll just look broken."* This makes the card the **first** overlay that
+   survives blazing; that is deliberate, because it is the item's content, not a nag
+   about it. (Cost is nil: the card is static per item — no per-frame decode, no raster,
+   just a cached texture and two labels.)
 2. **What should the info line say for a door?** It reads dimensions off the decoded
    frame, which is now a lie whatever size we pick. Options: special-case doors to show
    file size + format (the panel already does this — `app_core_impl.rs`'s `Archive` arm
