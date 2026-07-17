@@ -109,11 +109,25 @@ pub const FRAME_STEP_REPEAT: Duration = Duration::from_millis(70);
 pub const VIDEO_SEEK_REPEAT: Duration = Duration::from_millis(200);
 
 /// How long a seek run must go without a NEW seek intent before its landed
-/// position commits the ONE platform audio seek (+ resume) — plan 1D. Must
-/// exceed [`VIDEO_SEEK_REPEAT`] so a held key or a scrubber drag never restarts
-/// audio for intermediate targets; small enough that a single tap's audio dip
-/// stays a beat, not a pause.
+/// position commits the ONE platform audio seek (+ resume) — plan 1D. The
+/// **fallback** window: it must exceed [`VIDEO_SEEK_REPEAT`] so that when the
+/// held-key signal is somehow missed, a held key or a scrubber drag still never
+/// restarts audio for intermediate targets.
+///
+/// The common case doesn't wait this long: [`VIDEO_SEEK_AUDIO_QUIET`] commits far
+/// sooner once the seek **key is released** (a discrete tap). Measured: with the
+/// flat 250 ms, a single `+2 s` tap left audio ~172 ms behind the picture; keying
+/// off the release drops that to the ~10 ms WASAPI reseek.
 pub const VIDEO_SEEK_AUDIO_SETTLE: Duration = Duration::from_millis(250);
+
+/// The **fast** audio-commit window for a discrete tap: once the seek key is no
+/// longer held, only this much quiet (no new intent) is needed before the audio
+/// seek commits — enough to coalesce a rapid tap-tap burst, but far below
+/// [`VIDEO_SEEK_AUDIO_SETTLE`] so a single tap's audio lands with the picture
+/// rather than a fifth of a second behind it. Held scrubbing keeps the key down,
+/// so this never applies mid-scrub; the cheap ~10 ms reseek (measured) is what
+/// makes committing this eagerly safe.
+pub const VIDEO_SEEK_AUDIO_QUIET: Duration = Duration::from_millis(60);
 
 /// How long the info line stays flashed as the video seek/step OSD when the `i`
 /// toggle is off (each further seek re-arms it). Replaces the `m:ss / m:ss` toast

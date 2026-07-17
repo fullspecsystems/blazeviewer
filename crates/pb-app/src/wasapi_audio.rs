@@ -691,18 +691,35 @@ fn run_engine(
                     }
                     Ok(Cmd::SetMuted(m)) => muted = m,
                     Ok(Cmd::Seek(pos)) => {
+                        // Wall time of the reseek — the term that stacks on the core's
+                        // settle residual (PB_AV_SYNC) to make the felt A/V gap. The
+                        // decoder seek is where SMB shows up (FfAudioDecoder does an
+                        // avformat_seek_file + decode-forward to the target).
+                        let t0 = trace_on().then(std::time::Instant::now);
                         let was_playing = playing;
                         if playing {
                             let _ = sink.client.Stop();
                             playing = false;
                         }
                         let _ = sink.client.Reset(); // flush the queued buffer (needs Stopped)
+                        let t_seek = trace_on().then(std::time::Instant::now);
                         engine.reseek(pos)?;
+                        let seek_wall = t_seek.map(|t| t.elapsed());
                         engine.fill(&sink, muted)?; // preroll at the new position
                         shared.set_position(pos);
                         if was_playing {
                             sink.client.Start().map_err(w)?;
                             playing = true;
+                        }
+                        if let Some(t0) = t0 {
+                            atrace(|| {
+                                format!(
+                                    "reseek to {:.2}s: decoder seek {:?}, total (stop+reset+seek+preroll) {:?}",
+                                    pos.as_secs_f64(),
+                                    seek_wall.unwrap_or_default(),
+                                    t0.elapsed(),
+                                )
+                            });
                         }
                     }
                     // The audio track switch (task #99). The open can block for

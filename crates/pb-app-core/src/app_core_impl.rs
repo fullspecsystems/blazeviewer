@@ -7354,6 +7354,7 @@ impl AppCore {
                     scrub_audio_paused: false,
                     pending_audio_commit: None,
                     last_seek_intent: None,
+                    dbg_seek_land_at: None,
                     resume_to,
                 },
             ));
@@ -7827,6 +7828,12 @@ impl AppCore {
         // Inline the field borrow (not the helper) so `v` borrows only `self.video`,
         // leaving `self.now`/`self.effects`/`self.source` usable below.
         let now = self.now;
+        // Is the keyboard seek key released? `video_seek_last` is set on every held
+        // repeat and cleared the tick a horizontal-seek key lifts (`apply_view_holds`,
+        // which runs AFTER this in the tick — so this reads last tick's state, ~8 ms
+        // stale, which is fine). Drives the adaptive audio-commit below. Captured here
+        // because `v` borrows `self.video` exclusively.
+        let seek_key_released = self.video_seek_last.is_none();
         let Some(v) = self
             .video
             .as_mut()
@@ -7890,15 +7897,41 @@ impl AppCore {
         // VIDEO_SEEK_AUDIO_SETTLE — producing exactly ONE audio seek per run.
         if let Some(pos) = update.seek_landed {
             v.pending_audio_commit = Some(pos);
+            // The picture is now at the target; stamp it so the audio commit below
+            // can report how long after that it fired (the A/V-gap settle residual).
+            v.dbg_seek_land_at = Some(now);
         }
-        let settled = v
-            .last_seek_intent
-            .is_none_or(|t| now.saturating_duration_since(t) >= VIDEO_SEEK_AUDIO_SETTLE);
+        // Adaptive settle (task #4 follow-up): a discrete tap commits its audio seek
+        // fast — once the seek key is released and a brief quiet has passed — instead
+        // of always waiting out the full window. Held scrubbing keeps the key down, so
+        // it only ever clears the full-window fallback (which its 200 ms repeats keep
+        // resetting until release), never the fast path. The full window also covers
+        // any input that doesn't drive `video_seek_last` (a scrubber drag), where
+        // `seek_key_released` reads true — but there the frequent drag intents keep
+        // resetting even the short quiet, so it still coalesces.
+        let elapsed = |win: Duration| {
+            v.last_seek_intent
+                .is_none_or(|t| now.saturating_duration_since(t) >= win)
+        };
+        let settled = elapsed(VIDEO_SEEK_AUDIO_SETTLE)
+            || (seek_key_released && elapsed(VIDEO_SEEK_AUDIO_QUIET));
         let commit = if settled {
             v.pending_audio_commit.take()
         } else {
             None
         };
+        // A/V-gap measurement (PB_AV_SYNC): capture the delays now, while `v` is
+        // borrowed and BEFORE `resume_with_commit` below clears `last_seek_intent`.
+        // The land delay is the settle residual the user perceives as "audio catching
+        // up"; the WASAPI reseek (PB_AUDIO_TRACE) stacks on top.
+        let dbg_av_delays = commit.map(|_| {
+            (
+                v.dbg_seek_land_at
+                    .take()
+                    .map(|l| now.saturating_duration_since(l)),
+                v.last_seek_intent.map(|t| now.saturating_duration_since(t)),
+            )
+        });
         let resume_with_commit = if commit.is_some() {
             let was_scrub_paused = v.scrub_audio_paused;
             v.scrub_audio_paused = false;
@@ -7941,6 +7974,16 @@ impl AppCore {
         // order) if the clip plays on. Emitted before the state bridge below so
         // audio can never resume at a pre-seek position.
         if let Some(pos) = commit {
+            if let (Some((land_delay, intent_delay)), true) =
+                (dbg_av_delays, std::env::var_os("PB_AV_SYNC").is_some())
+            {
+                eprintln!(
+                    "[pb-avsync] audio seek committed to {:.2}s — {:?} after the picture landed, {:?} after the last seek input",
+                    pos.as_secs_f64(),
+                    land_delay,
+                    intent_delay,
+                );
+            }
             self.effects
                 .push(contract::CoreEffect::SeekVideoAudio { position: pos });
             if resume_with_commit {
@@ -12551,6 +12594,12 @@ mod tests {
         };
 
         core.effects.clear();
+        // Model the seek key being HELD for the whole run — the real held-key path
+        // sets `video_seek_last` each repeat (`apply_view_holds`), and the adaptive
+        // audio commit keys off it: while the key is down, only the full settle window
+        // applies, so intermediate targets never commit (below). A bare `video_seek`
+        // wouldn't set it, so set it explicitly to model the hold.
+        core.video_seek_last = Some(core.now);
         // Held repeat: two forward seeks 200 ms apart, each landing quickly.
         core.video_seek(false);
         let gen1 = last_seek_gen(&io);
@@ -12618,6 +12667,92 @@ mod tests {
         core.now += Duration::from_millis(100);
         core.poll_video();
         assert_eq!((seeks(&core), resumes(&core)), (1, 1));
+    }
+
+    /// Task #4 follow-up: a DISCRETE tap — the seek key already released — commits its
+    /// audio seek after the short [`VIDEO_SEEK_AUDIO_QUIET`], NOT the full settle
+    /// window, so audio lands with the picture instead of ~172 ms behind it (measured).
+    /// The held run above proves the slow path still coalesces; this proves a tap is
+    /// fast, and the two differ only by whether the key is down.
+    #[test]
+    fn a_released_tap_commits_audio_after_the_short_quiet() {
+        use crate::video::{
+            SeekGeneration, VideoProducerEvent, VideoProducerMsg, VideoSessionId, VideoSessionState,
+        };
+        use crate::video_session::{ActiveVideo, VideoSession};
+        use pb_decode::video::VideoColorInfo;
+
+        let mut core = test_core();
+        let sid = VideoSessionId(9);
+        let (session, io) = VideoSession::new(sid, 4);
+        core.video = Some(ActiveVideoBackend::Session(ActiveVideo::new(session, 0)));
+        let frame = |pts_ms: u64, generation: SeekGeneration| pb_decode::VideoFrame {
+            session_id: sid,
+            seek_generation: generation,
+            pts: Duration::from_millis(pts_ms),
+            width: 1,
+            height: 1,
+            format: pb_decode::PixelFormat::Rgba8,
+            pixels: vec![0; 4],
+            color: VideoColorInfo::srgb(),
+        };
+        io.events
+            .send(VideoProducerEvent::Opened {
+                session_id: sid,
+                duration: Some(Duration::from_secs(60)),
+                width: 1,
+                height: 1,
+                has_audio: false,
+                frame_bytes: 4,
+            })
+            .unwrap();
+        io.events
+            .send(VideoProducerEvent::Frame(frame(0, SeekGeneration::FIRST)))
+            .unwrap();
+        io.events
+            .send(VideoProducerEvent::Frame(frame(33, SeekGeneration::FIRST)))
+            .unwrap();
+        core.poll_video();
+        assert_eq!(
+            core.video.as_ref().unwrap().state(),
+            VideoSessionState::Playing
+        );
+
+        core.effects.clear();
+        // The key is UP (a single tap already released) — the release signal.
+        core.video_seek_last = None;
+        core.video_seek(false);
+        let generation = {
+            let mut g = None;
+            while let Ok(msg) = io.msgs.try_recv() {
+                if let VideoProducerMsg::SeekTo { generation, .. } = msg {
+                    g = Some(generation);
+                }
+            }
+            g.expect("a SeekTo reached the producer")
+        };
+        // Two frames satisfy preroll (PREROLL_FRAMES) so the seek lands, as the held
+        // test does; the landing anchors at the first frame's pts (2000).
+        io.events
+            .send(VideoProducerEvent::Frame(frame(2000, generation)))
+            .unwrap();
+        io.events
+            .send(VideoProducerEvent::Frame(frame(2033, generation)))
+            .unwrap();
+
+        // Just past the short quiet — and well below the full settle window.
+        assert!(VIDEO_SEEK_AUDIO_QUIET < VIDEO_SEEK_AUDIO_SETTLE);
+        core.now += VIDEO_SEEK_AUDIO_QUIET + Duration::from_millis(1);
+        core.poll_video();
+        let seeks = core
+            .effects
+            .iter()
+            .filter(|e| matches!(e, contract::CoreEffect::SeekVideoAudio { position } if *position == Duration::from_millis(2000)))
+            .count();
+        assert_eq!(
+            seeks, 1,
+            "a released tap commits after the short quiet, not the full window"
+        );
     }
 
     /// Task #94.2: leaving a video far enough into a long-enough clip remembers a

@@ -179,6 +179,10 @@ pub struct ActiveVideo {
     /// intent has arrived for the settle window, which coalesces held-key
     /// repeats and scrubber drags into one audio seek.
     pub last_seek_intent: Option<Instant>,
+    /// Diagnostic only (`PB_AV_SYNC`): when the latest seek landed a frame, so the
+    /// audio commit can report how far behind the picture it fired — the A/V-gap
+    /// measurement (task #4 follow-up). Never read outside the trace.
+    pub dbg_seek_land_at: Option<Instant>,
     /// A one-shot resume position to seek to as soon as the fresh session can
     /// accept a seek (task #94.2): set at start from the RAM-only resume map,
     /// consumed by `poll_video` once the session leaves `Opening`. The poster is
@@ -200,6 +204,7 @@ impl ActiveVideo {
             scrub_audio_paused: false,
             pending_audio_commit: None,
             last_seek_intent: None,
+            dbg_seek_land_at: None,
             resume_to: None,
         }
     }
