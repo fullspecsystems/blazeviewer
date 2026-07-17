@@ -5989,6 +5989,15 @@ impl AppCore {
     fn mark_resolved(&mut self, item: usize) {
         self.displayed_item = Some(item);
         self.presented_epoch = Some(self.epoch);
+        // An archive door is artwork, not a photograph: shrink it into a small window,
+        // but never magnify it to fill a 6K display (owner, 2026-07-17 — "this icon
+        // looks weird at giant sizes"). Set per item and orthogonal to `mode`, so the
+        // viewer's scale-mode choice survives crossing a door.
+        let never_upscale = self.item_archive_kind(item).is_some();
+        if self.view.never_upscale != never_upscale {
+            self.view.never_upscale = never_upscale;
+            self.push_view();
+        }
     }
 
     /// Whether the on-screen frame is the current target **at the current fit** — i.e.

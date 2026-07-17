@@ -556,41 +556,33 @@ const DOOR_ART: &[u8] = include_bytes!("../assets/folder-zip-yellow.webp");
 #[cfg(not(windows))]
 const DOOR_ART: &[u8] = include_bytes!("../assets/folder-zip-blue.webp");
 
-/// The finished door tile — artwork composited onto the backdrop — built once for the
-/// process as `(pixels, w, h)`.
+/// The door tile — the artwork, decoded once for the process, alpha intact.
 ///
 /// Every door in every folder shows the same picture (only `codec` differs), so the
-/// WebP decode and the composite each run exactly once and each call just clones the
-/// buffer. Never per frame: this is decode-worker work.
+/// WebP decode runs exactly once and each call clones the buffer. Never per frame:
+/// this is decode-worker work.
+///
+/// **Its transparency is kept, not composited away.** The scene pipeline draws the
+/// photo quad with `BlendState::ALPHA_BLENDING` over a `Color::BLACK` clear
+/// (`pb_render::gpu`), so a transparent image already blends onto the letterbox like
+/// any other — exactly what a PNG or SVG with alpha does today. This briefly matted the
+/// art onto a dark-grey backdrop "so the ring only ever sees opaque frames", which was
+/// a rule nobody had written down and simply painted a grey box around the folder
+/// (owner spotted it on screen, 2026-07-17).
 ///
 /// `None` if the art can't be decoded, which degrades to a flat tile rather than
 /// failing the decode — a door with no picture is still a door, and the pill still
 /// says it opens.
-fn door_tile() -> Option<&'static (Vec<u8>, u32, u32)> {
+fn door_tile() -> Option<&'static DecodedImage> {
     use std::sync::OnceLock;
-    static TILE: OnceLock<Option<(Vec<u8>, u32, u32)>> = OnceLock::new();
-    TILE.get_or_init(|| {
-        let art = decode_named_bytes("door.webp", DOOR_ART, None, false).ok()?;
-        let mut pixels: Vec<u8> = DOOR_BG.repeat((art.width * art.height) as usize);
-        // Straight-alpha source over an opaque backdrop: only the colour channels
-        // blend, and the result stays opaque.
-        for (dst, src) in pixels.chunks_exact_mut(4).zip(art.pixels.chunks_exact(4)) {
-            let a = src[3] as u32;
-            if a == 0 {
-                continue;
-            }
-            for c in 0..3 {
-                dst[c] = ((src[c] as u32 * a + dst[c] as u32 * (255 - a)) / 255) as u8;
-            }
-        }
-        Some((pixels, art.width, art.height))
-    })
-    .as_ref()
+    static TILE: OnceLock<Option<DecodedImage>> = OnceLock::new();
+    TILE.get_or_init(|| decode_named_bytes("door.webp", DOOR_ART, None, false).ok())
+        .as_ref()
 }
 
-/// The door tile's backdrop: a touch lighter than the video tile, because a door is a
-/// place you can go rather than a frame that failed to decode.
-const DOOR_BG: [u8; 4] = [38, 38, 42, 255];
+/// The fallback tile when the artwork can't be decoded: a near-black frame, like the
+/// video placeholder's.
+const DOOR_BG: [u8; 4] = [24, 24, 26, 255];
 
 /// The tile an archive **door** displays (task #104): the folder artwork on a flat
 /// backdrop, with `codec` naming the format. Returned by [`decode_item_cancellable`]
@@ -605,23 +597,22 @@ const DOOR_BG: [u8; 4] = [38, 38, 42, 255];
 /// it is drawn to be seen large. See `AppCore::play_hint_kind` (`3`) /
 /// `play_hint_persistent`.
 ///
-/// The art is composited onto an **opaque** backdrop rather than shipped with its
-/// alpha: every other decoded image reaches the ring opaque, and relying on the
-/// present path to blend a transparent frame would be a new assumption for one item
-/// type. The drop shadow disappearing against the dark backdrop is accepted (owner).
+/// The art keeps its **alpha** and blends onto the black letterbox like any other
+/// transparent image (see [`door_tile`]). The drop shadow all but disappearing against
+/// black is accepted (owner).
 ///
-/// **Scaling: it is just an image.** No per-item rule — the door rides whatever
-/// `ScaleMode` the viewer is already in, like a photo (owner, 2026-07-17: *"I don't
-/// think it's wrong to just have it match the display mode the user is already in.
-/// It's not super crisp on a 6k monitor, but it's just an icon (albeit a very big
-/// one)"*). Worth knowing that `Fit` genuinely **upscales** — `view::base_scale` is
-/// `(sw/rw).min(sh/rh)` with no clamp to 1, and `pb_render::fit_rect`'s "we do not
-/// upscale" doc describes a function that is not on the live path — so 1024 px art
-/// shows at ~2.1× on a 7680×2160 display. Accepted; a 2048 px export would land at
-/// ~1.05× and is a drop-in swap if it ever grates.
+/// **Scaling: capped at native.** `ScaleMode::Fit` genuinely upscales
+/// (`view::base_scale` is `(sw/rw).min(sh/rh)` with no clamp to 1 —
+/// `pb_render::fit_rect`'s "we do not upscale" doc describes a function that is not on
+/// the live path), which blew the art up ~2.1× on a 7680×2160 display and, per the
+/// owner, "looks weird at giant sizes". A door is an **icon**, not a photo: it shrinks
+/// to fit a small window but never grows past native. That is
+/// `ViewTransform::never_upscale`, set per item in `AppCore::mark_resolved` — a
+/// property of the picture, deliberately *not* a mode, so it never fights the scale
+/// mode the viewer chose.
 pub fn archive_placeholder(kind: pb_source::ArchiveKind) -> DecodedImage {
     let (pixels, w, h) = match door_tile() {
-        Some((px, w, h)) => (px.clone(), *w, *h),
+        Some(art) => (art.pixels.clone(), art.width, art.height),
         // The art failed to decode: a flat tile still reads as an item, and the pill
         // still says `P` opens it.
         None => (DOOR_BG.repeat(320 * 240), 320, 240),
@@ -1258,7 +1249,7 @@ mod tests {
         // artwork is re-exported.
         assert_eq!(
             (img.width, img.height),
-            door_tile().map_or((320, 240), |(_, w, h)| (*w, *h))
+            door_tile().map_or((320, 240), |a| (a.width, a.height))
         );
     }
 
@@ -1323,24 +1314,24 @@ mod tests {
         );
     }
 
-    /// The tile carries the owner's folder artwork, composited **opaque** onto the
-    /// backdrop. Both halves matter: a silent failure to decode the WebP would leave a
-    /// flat tile that still passes every other test here, and shipping the art's alpha
-    /// through would ask the present path to blend a transparent frame — a new
-    /// assumption no other item type makes.
+    /// The tile carries the artwork **with its alpha intact**, so it blends onto the
+    /// black letterbox like any other transparent image instead of sitting in a grey
+    /// box. Both halves matter: a silent decode failure would leave a flat tile that
+    /// passes every other test here, and re-matting the art onto a backdrop is the
+    /// exact regression the owner caught on screen (2026-07-17).
     #[test]
-    fn the_door_tile_carries_the_folder_artwork() {
+    fn the_door_tile_carries_the_folder_artwork_with_its_alpha() {
         let img = archive_placeholder(pb_source::ArchiveKind::Zip);
-        let lit = img.pixels.chunks_exact(4).filter(|p| *p != DOOR_BG).count();
-        assert!(
-            lit > 10_000,
-            "only {lit} pixels differ from the backdrop — the artwork did not decode"
-        );
-        assert!(
-            img.pixels.chunks_exact(4).all(|p| p[3] == 255),
-            "the tile is opaque: the art is composited, not passed through with alpha"
-        );
         assert!(img.is_well_formed(), "pixels match the tile's geometry");
+
+        let clear = img.pixels.chunks_exact(4).filter(|p| p[3] == 0).count();
+        assert!(
+            clear > 10_000,
+            "only {clear} fully transparent pixels — the art was matted onto a backdrop \
+             instead of blending onto the letterbox"
+        );
+        let solid = img.pixels.chunks_exact(4).filter(|p| p[3] == 255).count();
+        assert!(solid > 10_000, "the folder itself is opaque ({solid} px)");
     }
 
     /// **Both** artworks decode, on every platform — not just the one this build ships.
