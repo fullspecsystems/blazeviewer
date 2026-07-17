@@ -50,6 +50,7 @@ use windows::Win32::Media::Audio::{
     MMDeviceEnumerator, AUDCLNT_BUFFERFLAGS_SILENT, AUDCLNT_SHAREMODE_SHARED,
     AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM, AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
     AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY, WAVEFORMATEX, WAVEFORMATEXTENSIBLE,
+    WAVEFORMATEXTENSIBLE_0,
 };
 use windows::Win32::Media::KernelStreaming::WAVE_FORMAT_EXTENSIBLE;
 use windows::Win32::Media::Multimedia::{KSDATAFORMAT_SUBTYPE_IEEE_FLOAT, WAVE_FORMAT_IEEE_FLOAT};
@@ -57,6 +58,20 @@ use windows::Win32::System::Com::{
     CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_ALL, COINIT_MULTITHREADED,
 };
 use windows::Win32::System::Threading::{CreateEventW, WaitForSingleObject};
+
+/// `PB_AUDIO_TRACE=1` — one-line diagnostics for the render engine: decoder
+/// choice, sink mode, underruns, switch commits. A native audio pipeline is
+/// otherwise invisible to everything but a listener.
+fn trace_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("PB_AUDIO_TRACE").is_ok_and(|v| v != "0"))
+}
+
+fn atrace(msg: impl FnOnce() -> String) {
+    if trace_on() {
+        eprintln!("[pb-audio] {}", msg());
+    }
+}
 
 // ── The lock-free clock the event loop samples ──────────────────────────────
 
@@ -306,6 +321,33 @@ impl AudioDecoder {
             AudioDecoder::Ff(d) => (d.stream_index() as i64, -1),
         }
     }
+
+    /// The emitted layout's speaker mask (WAVE bit values), where the container
+    /// declared one — what the direct sink's `WAVEFORMATEXTENSIBLE` carries so
+    /// >2-channel audio is unambiguous to the OS converter.
+    fn layout_mask(&self) -> Option<u64> {
+        match self {
+            AudioDecoder::Mf(_) => None, // MF's native types expose no mask (measured)
+            #[cfg(feature = "ffprobe")]
+            AudioDecoder::Ff(d) => d.layout_mask(),
+        }
+    }
+}
+
+/// Carries a freshly opened decoder from the switch worker back to the engine
+/// thread. Soundness mirrors `mf_poster::retire_reader`: both threads are
+/// MTA-initialized and MF source readers are free-threaded, so the cross-thread
+/// move is within the COM rules; the FFmpeg decoder is `Send` in its own right.
+struct SendDecoder(AudioDecoder);
+unsafe impl Send for SendDecoder {}
+
+/// An off-thread track-switch open in flight (task #99). The open can block for
+/// seconds on a network share, so the engine keeps rendering the current track
+/// and commits when this resolves — against a *fresh* playhead, so the master
+/// clock (which the video follows) never jumps back by the open's duration.
+struct PendingOpen {
+    rx: Receiver<Result<SendDecoder, String>>,
+    seq: u64,
 }
 
 /// Open the clip's **default** audio: FFmpeg first (it decodes the film codecs MF
@@ -392,10 +434,22 @@ struct Sink {
 }
 
 impl Sink {
-    /// Build a sink for a source of `rate`/`channels`: the direct path first,
-    /// the mix-format fallback if the device refuses.
-    unsafe fn build(device: &IMMDevice, rate: u32, channels: u16) -> Result<Sink, String> {
-        match Self::build_direct(device, rate, channels) {
+    /// Build a sink for a source of `rate`/`channels` (+ its speaker `mask`, if
+    /// declared): the direct path first, the mix-format fallback if the device
+    /// refuses.
+    unsafe fn build(
+        device: &IMMDevice,
+        rate: u32,
+        channels: u16,
+        mask: Option<u64>,
+    ) -> Result<Sink, String> {
+        // `PB_AUDIO_MIX_SINK=1` — diagnostic lever: skip the direct path entirely,
+        // so a suspected OS-converter problem can be A/B'd in one relaunch.
+        if std::env::var("PB_AUDIO_MIX_SINK").is_ok_and(|v| v != "0") {
+            atrace(|| "PB_AUDIO_MIX_SINK set: forcing the mix-format sink".into());
+            return Self::build_mix(device);
+        }
+        match Self::build_direct(device, rate, channels, mask) {
             Ok(sink) => Ok(sink),
             Err(e) => {
                 eprintln!("video audio: source-format sink refused ({e}); using the mix format");
@@ -407,7 +461,19 @@ impl Sink {
     /// The direct path: our own f32 format at the source rate/channel count,
     /// with the OS audio engine converting to the device (sample-rate converter
     /// + channel matrix — a proper center-aware downmix on stereo devices).
-    unsafe fn build_direct(device: &IMMDevice, rate: u32, channels: u16) -> Result<Sink, String> {
+    ///
+    /// Anything past stereo goes as **`WAVEFORMATEXTENSIBLE` with a speaker
+    /// mask** — a bare `WAVEFORMATEX` is ambiguous about which speaker each
+    /// channel is, and the converter's guess is exactly the kind of subtle wrong
+    /// that reads as glitchy/garbled multichannel (owner-hit 2026-07-17). The
+    /// mask is the container's own where declared (FFmpeg's native-order bits
+    /// are WAVE bits), else the standard layout for the count.
+    unsafe fn build_direct(
+        device: &IMMDevice,
+        rate: u32,
+        channels: u16,
+        mask: Option<u64>,
+    ) -> Result<Sink, String> {
         if rate == 0 || channels == 0 {
             return Err("zero source format".into());
         }
@@ -415,29 +481,43 @@ impl Sink {
             .Activate(CLSCTX_ALL, None)
             .map_err(ws("Activate(IAudioClient)"))?;
         let block_align = channels as u32 * 4;
-        let wf = WAVEFORMATEX {
-            wFormatTag: WAVE_FORMAT_IEEE_FLOAT as u16,
-            nChannels: channels,
-            nSamplesPerSec: rate,
-            nAvgBytesPerSec: rate * block_align,
-            nBlockAlign: block_align as u16,
-            wBitsPerSample: 32,
-            cbSize: 0,
+        let fmt = DeviceFormat {
+            channels,
+            sample_rate: rate,
+            kind: SampleKind::F32,
         };
         let flags = AUDCLNT_STREAMFLAGS_EVENTCALLBACK
             | AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM
             | AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY;
-        Self::finish(
-            client,
-            flags,
-            &wf,
-            DeviceFormat {
-                channels,
-                sample_rate: rate,
-                kind: SampleKind::F32,
+        if channels <= 2 {
+            let wf = WAVEFORMATEX {
+                wFormatTag: WAVE_FORMAT_IEEE_FLOAT as u16,
+                nChannels: channels,
+                nSamplesPerSec: rate,
+                nAvgBytesPerSec: rate * block_align,
+                nBlockAlign: block_align as u16,
+                wBitsPerSample: 32,
+                cbSize: 0,
+            };
+            return Self::finish(client, flags, std::ptr::addr_of!(wf), fmt, true);
+        }
+        let ext = WAVEFORMATEXTENSIBLE {
+            Format: WAVEFORMATEX {
+                wFormatTag: WAVE_FORMAT_EXTENSIBLE as u16,
+                nChannels: channels,
+                nSamplesPerSec: rate,
+                nAvgBytesPerSec: rate * block_align,
+                nBlockAlign: block_align as u16,
+                wBitsPerSample: 32,
+                cbSize: 22, // sizeof(WAVEFORMATEXTENSIBLE) - sizeof(WAVEFORMATEX)
             },
-            true,
-        )
+            Samples: WAVEFORMATEXTENSIBLE_0 {
+                wValidBitsPerSample: 32,
+            },
+            dwChannelMask: mask.unwrap_or_else(|| default_speaker_mask(channels)) as u32,
+            SubFormat: KSDATAFORMAT_SUBTYPE_IEEE_FLOAT,
+        };
+        Self::finish(client, flags, std::ptr::addr_of!(ext.Format), fmt, true)
     }
 
     /// The fallback: the device mix format, channels mapped by us (as this
@@ -456,7 +536,7 @@ impl Sink {
         Self::finish(
             client,
             AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
-            &*mix_ptr,
+            mix_ptr,
             fmt,
             false,
         )
@@ -465,7 +545,7 @@ impl Sink {
     unsafe fn finish(
         client: IAudioClient,
         flags: u32,
-        wf: &WAVEFORMATEX,
+        wf: *const WAVEFORMATEX,
         fmt: DeviceFormat,
         direct: bool,
     ) -> Result<Sink, String> {
@@ -493,6 +573,23 @@ impl Sink {
     unsafe fn close(self) {
         let _ = self.client.Stop();
         let _ = CloseHandle(self.event);
+    }
+}
+
+/// The standard speaker layout for a channel count (WAVE mask bits), used when
+/// the container declared none. Side-vs-back surround ambiguity is harmless —
+/// either way the surrounds land on surround speakers.
+fn default_speaker_mask(channels: u16) -> u64 {
+    match channels {
+        1 => 0x4,   // FC
+        2 => 0x3,   // FL FR
+        3 => 0x7,   // FL FR FC
+        4 => 0x33,  // quad
+        5 => 0x37,  // 5.0
+        6 => 0x3F,  // 5.1
+        7 => 0x13F, // 6.1
+        8 => 0x63F, // 7.1
+        _ => (1 << channels.min(18)) - 1,
     }
 }
 
@@ -533,7 +630,27 @@ fn run_engine(
         shared.set_active(decoder.active());
 
         // 3. A sink in the decoder's own format (mix-format fallback inside).
-        let mut sink = Sink::build(&device, decoder.rate(), decoder.channels())?;
+        let mut sink = Sink::build(
+            &device,
+            decoder.rate(),
+            decoder.channels(),
+            decoder.layout_mask(),
+        )?;
+        atrace(|| {
+            let (ff, mf) = decoder.active();
+            format!(
+                "open: decoder={} ff={ff} mf={mf} {} Hz {} ch mask={:#x?} sink={}",
+                match &decoder {
+                    AudioDecoder::Mf(_) => "MF",
+                    #[cfg(feature = "ffprobe")]
+                    AudioDecoder::Ff(_) => "FFmpeg",
+                },
+                decoder.rate(),
+                decoder.channels(),
+                decoder.layout_mask(),
+                if sink.direct { "direct" } else { "mix" },
+            )
+        });
 
         let mut engine = Engine {
             src_channels: decoder.channels() as usize,
@@ -543,6 +660,7 @@ fn run_engine(
             base_position: Duration::ZERO,
             frames_since_base: 0,
             eos: false,
+            underruns: 0,
         };
 
         // 4. Preroll one full buffer while stopped, then report Paused (ready).
@@ -552,6 +670,7 @@ fn run_engine(
 
         // 5. Command + render loop.
         let mut playing = false;
+        let mut pending_open: Option<PendingOpen> = None;
         loop {
             // Drain commands (a disconnect = teardown).
             loop {
@@ -586,52 +705,78 @@ fn run_engine(
                             playing = true;
                         }
                     }
-                    // The audio track switch (task #99): the Seek dance, plus swapping
-                    // the decoder (and, if the source format changed, the sink). The
-                    // ENTIRE new pipeline is built before playback is touched — a
-                    // failed switch costs the user the choice, never the sound.
+                    // The audio track switch (task #99). The open can block for
+                    // SECONDS on a network share (avformat open + stream info), so
+                    // it runs on a scratch thread while the CURRENT track keeps
+                    // rendering — blocking here drained the buffer (audible glitch)
+                    // AND froze the master clock the video follows (owner-hit:
+                    // jerky playback after every switch). The commit below re-aims
+                    // at a FRESH playhead for the same reason.
                     Ok(Cmd::SetTrack { ff, mf, seq }) => {
-                        let target = engine.playhead(&sink);
-                        let prepared = open_track_decoder(input, mf_rate, ff, mf)
-                            .and_then(|mut next| next.seek(target).map(|()| next))
-                            .and_then(|next| {
-                                let fmt_changed = (next.rate(), next.channels())
-                                    != (engine.decoder.rate(), engine.decoder.channels());
-                                // The direct sink speaks the old track's format; a
-                                // format change needs a new one. The mix-format
-                                // fallback adapts (its channel map reads
-                                // `src_channels`) — except for the sample rate,
-                                // which only the MF decoder pins to the mix rate.
-                                let new_sink = if fmt_changed && sink.direct {
-                                    Some(Sink::build(&device, next.rate(), next.channels())?)
-                                } else {
-                                    None
-                                };
-                                Ok((next, new_sink))
+                        // Supersede an older in-flight open: the shell only ever
+                        // tracks its newest ask. Dropping the receiver makes the
+                        // worker's send fail; its decoder drops on its own thread.
+                        if let Some(old) = pending_open.take() {
+                            shared.switch_ok.store(false, Ordering::Release);
+                            shared.switch_done.store(old.seq, Ordering::Release);
+                        }
+                        atrace(|| format!("switch asked: ff={ff} mf={mf} (seq {seq})"));
+                        let (tx, rx) = std::sync::mpsc::channel();
+                        let worker_input = input.clone();
+                        let spawned = std::thread::Builder::new()
+                            .name("pb-audio-switch".into())
+                            .spawn(move || {
+                                // MTA for the MF-fallback open; the decoder is
+                                // carried back under the retire_reader rules.
+                                let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+                                let _ = tx.send(
+                                    open_track_decoder(&worker_input, mf_rate, ff, mf)
+                                        .map(SendDecoder),
+                                );
+                                CoUninitialize();
                             });
-                        let ok = match prepared {
-                            Ok((next, new_sink)) => {
-                                let was_playing = playing;
-                                if playing {
-                                    let _ = sink.client.Stop();
-                                    playing = false;
-                                }
-                                if let Some(fresh) = new_sink {
-                                    let old = std::mem::replace(&mut sink, fresh);
-                                    old.close();
-                                } else {
-                                    let _ = sink.client.Reset();
-                                }
-                                engine.swap_decoder(next, target);
-                                engine.fill(&sink, muted)?; // preroll the new track
-                                shared.set_position(target);
-                                shared.set_active(engine.decoder.active());
-                                if was_playing {
-                                    sink.client.Start().map_err(w)?;
-                                    playing = true;
-                                }
-                                true
+                        match spawned {
+                            Ok(_) => pending_open = Some(PendingOpen { rx, seq }),
+                            Err(e) => {
+                                eprintln!("audio track switch failed to start: {e}");
+                                shared.switch_ok.store(false, Ordering::Release);
+                                shared.switch_done.store(seq, Ordering::Release);
                             }
+                        }
+                    }
+                    Err(TryRecvError::Empty) => break,
+                    Err(TryRecvError::Disconnected) => {
+                        sink.close();
+                        return Ok(());
+                    }
+                }
+            }
+
+            // A finished off-thread switch open? Commit it — against the playhead
+            // as it is NOW, not as it was when the switch was asked.
+            if let Some(p) = &pending_open {
+                match p.rx.try_recv() {
+                    Ok(result) => {
+                        let seq = p.seq;
+                        pending_open = None;
+                        let ok = match result {
+                            Ok(SendDecoder(next)) => match commit_switch(
+                                &device,
+                                next,
+                                &mut sink,
+                                &mut engine,
+                                &mut playing,
+                                muted,
+                                shared,
+                            ) {
+                                Ok(()) => true,
+                                Err(e) => {
+                                    eprintln!(
+                                        "audio track switch failed, keeping the current track: {e}"
+                                    );
+                                    false
+                                }
+                            },
                             Err(e) => {
                                 eprintln!(
                                     "audio track switch failed, keeping the current track: {e}"
@@ -639,13 +784,16 @@ fn run_engine(
                                 false
                             }
                         };
+                        atrace(|| format!("switch seq {seq}: ok={ok}"));
                         shared.switch_ok.store(ok, Ordering::Release);
                         shared.switch_done.store(seq, Ordering::Release);
                     }
-                    Err(TryRecvError::Empty) => break,
+                    Err(TryRecvError::Empty) => {}
                     Err(TryRecvError::Disconnected) => {
-                        sink.close();
-                        return Ok(());
+                        let seq = p.seq;
+                        pending_open = None;
+                        shared.switch_ok.store(false, Ordering::Release);
+                        shared.switch_done.store(seq, Ordering::Release);
                     }
                 }
             }
@@ -661,6 +809,68 @@ fn run_engine(
     }
 }
 
+/// Commit a switch whose decoder finished opening off-thread: seek it to the
+/// **current** playhead (the old track kept playing during the open), rebuild
+/// the sink if the source format changed — built *before* anything old is torn
+/// down — then swap, preroll, and restart. `Err` = the switch is refused and the
+/// old track plays on untouched (except a `fill` failure after the swap, which
+/// is a device-level fault the next loop iteration surfaces anyway).
+unsafe fn commit_switch(
+    device: &IMMDevice,
+    mut next: AudioDecoder,
+    sink: &mut Sink,
+    engine: &mut Engine,
+    playing: &mut bool,
+    muted: bool,
+    shared: &Arc<Shared>,
+) -> Result<(), String> {
+    let target = engine.playhead(sink);
+    next.seek(target)?;
+    let fmt_changed =
+        (next.rate(), next.channels()) != (engine.decoder.rate(), engine.decoder.channels());
+    // The direct sink speaks the old track's format; a format change needs a new
+    // one. The mix-format fallback adapts (its channel map reads `src_channels`).
+    let new_sink = if fmt_changed && sink.direct {
+        Some(Sink::build(
+            device,
+            next.rate(),
+            next.channels(),
+            next.layout_mask(),
+        )?)
+    } else {
+        None
+    };
+    let was_playing = *playing;
+    if *playing {
+        let _ = sink.client.Stop();
+        *playing = false;
+    }
+    if let Some(fresh) = new_sink {
+        let old = std::mem::replace(sink, fresh);
+        old.close();
+    } else {
+        let _ = sink.client.Reset();
+    }
+    engine.swap_decoder(next, target);
+    engine.fill(sink, muted)?; // preroll the new track at the playhead
+    shared.set_position(target);
+    shared.set_active(engine.decoder.active());
+    atrace(|| {
+        let (ff, mf) = engine.decoder.active();
+        format!(
+            "switch committed at {target:?}: ff={ff} mf={mf} {} Hz {} ch sink={}",
+            engine.decoder.rate(),
+            engine.decoder.channels(),
+            if sink.direct { "direct" } else { "mix" },
+        )
+    });
+    if was_playing {
+        sink.client.Start().map_err(w)?;
+        *playing = true;
+    }
+    Ok(())
+}
+
 /// The per-buffer render state. Owns the decoder so a track switch can swap it;
 /// the sink is passed in because a switch can swap *that* too.
 struct Engine {
@@ -674,6 +884,9 @@ struct Engine {
     /// Frames written to the endpoint since `base_position`.
     frames_since_base: u64,
     eos: bool,
+    /// Fills that came up short of the available space with the decoder still
+    /// live — the decoder not keeping real-time. Diagnostic (`PB_AUDIO_TRACE`).
+    underruns: u64,
 }
 
 impl Engine {
@@ -723,6 +936,13 @@ impl Engine {
         // Zero any remainder (EOS/underrun) so the endpoint never repeats stale data.
         if produced < avail {
             zero_frames(sink, ptr, produced, avail - produced);
+            if !self.eos {
+                self.underruns += 1;
+                let n = self.underruns;
+                if n == 1 || n.is_multiple_of(50) {
+                    atrace(|| format!("underrun #{n}: decoder produced {produced}/{avail} frames"));
+                }
+            }
         }
         let flags = if muted {
             AUDCLNT_BUFFERFLAGS_SILENT.0 as u32

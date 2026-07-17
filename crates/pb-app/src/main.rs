@@ -581,8 +581,10 @@ struct App {
     /// switch** (#99 — audio may fail while the old track plays on, and a toast naming
     /// a track over unchanged audio teaches the user to distrust every toast).
     pending_audio_switch: Option<(u64, usize)>,
-    /// The active-audio picker row last reported to the core (`-1` = none) — dedupes
-    /// the per-sample-tick report, since the engine's answer rarely changes.
+    /// The active-audio picker row last seen (`-1` = none) — **trace-only** change
+    /// detection (`PB_AUDIO_TRACE`). The report itself is NOT deduped on this: the
+    /// core's stored id is generation-scoped and a re-probe invalidates it without
+    /// the row number moving, so a dedupe froze the tick out (owner-hit 2026-07-17).
     audio_row_reported: i64,
 }
 
@@ -611,8 +613,11 @@ struct AudioMenuSig {
     item: Option<usize>,
     video_item: bool,
     tracks_known: bool,
-    /// The active track's `local_id` (the shell-reported tick).
-    active: Option<u64>,
+    /// The active track's **(catalog generation, local_id)** — the shell-reported
+    /// tick. The generation matters: a re-probe mints new ids with the same
+    /// local_id, and a sig keyed on local_id alone missed the stale→fresh flip,
+    /// leaving the flyout drawn from the stale (tickless) state.
+    active: Option<(u64, u64)>,
 }
 
 /// A deferred dialog open (see [`App::pending_dialog`]). Carries only what the opener
@@ -2468,7 +2473,10 @@ impl App {
             item: self.core.displayed_item,
             video_item: self.core.displayed_is_video(),
             tracks_known: self.core.audio_tracks_known(),
-            active: self.core.audio_active.map(|id| id.local_id),
+            active: self
+                .core
+                .audio_active
+                .map(|id| (id.catalog_generation, id.local_id)),
         };
         if self.audio_menu_sig == Some(sig) {
             return;
@@ -4246,15 +4254,23 @@ impl ApplicationHandler for App {
                     .pending_audio_switch
                     .and_then(|(seq, row)| va.switch_result(seq).map(|ok| (row, ok)));
                 // The engine reports its playing stream in whichever currency its
-                // decoder speaks; resolve through the matching accessor.
-                let active_row = match va.active_ff_stream() {
-                    ff if ff >= 0 => self.core.audio_row_for_ff_stream(ff),
-                    _ => self.core.audio_row_for_mf_stream(va.active_mf_stream()),
+                // decoder speaks; resolve through the matching accessor. Reported
+                // EVERY sample tick, never deduped: the stored id is generation-
+                // scoped, and a re-probe mints a new generation — a dedupe on the
+                // row number froze the tick out permanently after one (owner-hit).
+                let (ff, mf) = (va.active_ff_stream(), va.active_mf_stream());
+                let active_row = if ff >= 0 {
+                    self.core.audio_row_for_ff_stream(ff)
+                } else {
+                    self.core.audio_row_for_mf_stream(mf)
                 };
                 if active_row != self.audio_row_reported {
                     self.audio_row_reported = active_row;
-                    self.core.set_active_audio_row(active_row);
+                    if std::env::var("PB_AUDIO_TRACE").is_ok() {
+                        eprintln!("[pb-audio] shell: active row -> {active_row} (ff={ff} mf={mf})");
+                    }
                 }
+                self.core.set_active_audio_row(active_row);
                 if let Some((row, ok)) = switch {
                     self.pending_audio_switch = None;
                     self.core.audio_track_switched(row, ok);
