@@ -126,6 +126,11 @@ pub struct WindowGeometry {
     pub h: u32,
 }
 
+/// Upper bound for [`Settings::full_res_radius`] (#106.7). Radius 1 already brushes the
+/// ring's VRAM budget at 100 MP (3 × ~400 MB ≈ 1.2 GB), so the knob is deliberately small —
+/// the byte budget is the real gate, this just caps how many originals are *requested*.
+pub const FULL_RES_RADIUS_MAX: u8 = 3;
+
 /// All persisted preferences. `#[serde(default)]` makes any missing key fall back to
 /// [`Settings::default`], so partial / older files (e.g. one that only set
 /// `fullscreen`) load cleanly, and unknown keys are ignored — forward/backward
@@ -153,6 +158,12 @@ pub struct Settings {
     pub scroll_action: ScrollAction,
     /// Default scale mode for a freshly shown photo.
     pub scale_mode: ScaleModePref,
+    /// How many neighbours (each side) around the parked photo keep their **full
+    /// resolution** resident so a Fit↔1:1 toggle / zoom is an instant rebind instead
+    /// of a re-decode (#106.7). `0` = the current photo only; `1` = ±1 (default). Capped
+    /// at [`FULL_RES_RADIUS_MAX`]; a slow / low-VRAM box can dial it to 0. Bounded by the
+    /// ring's VRAM budget regardless — this only caps how many originals are *requested*.
+    pub full_res_radius: u8,
     /// Light/dark preference (task #46): System follows the OS; Light/Dark pin it.
     pub appearance_mode: AppearanceMode,
     /// Where the chrome accent comes from: `System` (follow the OS accent), `Custom`
@@ -306,9 +317,10 @@ impl Default for Settings {
             hold_delay_ms: 250,  // tap→repeat handoff; 200 made accidental blazing too easy
             scroll_action: ScrollAction::Pan, // scroll pans; Ctrl+scroll zooms
             scale_mode: ScaleModePref::Fit,
+            full_res_radius: 1, // ±1 neighbour held at full-res for instant zoom (#106.7)
             appearance_mode: AppearanceMode::System, // follow the OS light/dark theme
-            accent_source: AccentSource::System,     // follow the OS accent (brand fallback)
-            accent_custom: [0x00, 0x78, 0xd4],       // Windows accent blue — a good neutral
+            accent_source: AccentSource::System, // follow the OS accent (brand fallback)
+            accent_custom: [0x00, 0x78, 0xd4], // Windows accent blue — a good neutral
             // starting point when you switch to Custom
             info_line_align: InfoLineAlign::Center, // bottom-center, stacks with the toast
             show_image_info: false,                 // off until opted in (unchanged launch)
