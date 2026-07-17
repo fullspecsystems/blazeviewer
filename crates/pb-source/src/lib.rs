@@ -180,13 +180,38 @@ pub trait ItemSource: Send + Sync {
 pub struct FsSource {
     paths: Vec<PathBuf>,
     names: Vec<String>,
+    /// Byte size, resolved at construction for **archives only** — see
+    /// [`size_hint`](FsSource::size_hint). `None` for everything else.
+    sizes: Vec<Option<u64>>,
 }
 
 impl FsSource {
     /// Wrap an already-scanned, already-ordered list of image paths.
     pub fn new(paths: Vec<PathBuf>) -> Self {
         let names = paths.iter().map(|p| display_name(p)).collect();
-        Self { paths, names }
+        // Archives display their **file size** where a photo shows its dimensions (task
+        // #104: a door has no pixels to describe), and the readout is built on the
+        // frame path — so the stat has to happen here, not there.
+        //
+        // This is the right home for it: the app builds an `FsSource` on the **scan
+        // worker thread**, precisely so the O(N) name pass never touches the event
+        // loop. A stat can block for milliseconds on an SMB share; doing it per frame,
+        // or even once per item as a door is reached, would hitch the viewer.
+        //
+        // **Archives only.** Stat-ing every photo would add N round-trips to every
+        // scan — brutal on a network share, for a number no photo ever displays.
+        let sizes = paths
+            .iter()
+            .map(|p| {
+                kind::archive_kind(p)?;
+                std::fs::metadata(p).ok().map(|m| m.len())
+            })
+            .collect();
+        Self {
+            paths,
+            names,
+            sizes,
+        }
     }
 }
 
@@ -197,6 +222,14 @@ impl ItemSource for FsSource {
 
     fn name(&self, i: usize) -> &str {
         self.names.get(i).map(String::as_str).unwrap_or("")
+    }
+
+    /// An **archive's** byte size, resolved once on the scan worker (see
+    /// [`FsSource::new`]) so the readouts can show it without touching the disk.
+    /// `None` for a photo or a video: nothing displays their size from here, and
+    /// stat-ing them all would make every scan pay for it.
+    fn size_hint(&self, i: usize) -> Option<u64> {
+        self.sizes.get(i).copied().flatten()
     }
 
     fn path(&self, i: usize) -> Option<&Path> {
@@ -2030,5 +2063,41 @@ mod tests {
             "out-of-range is empty, not a panic"
         );
         let _ = std::fs::remove_file(&z);
+    }
+
+    /// `FsSource` resolves an **archive's** size at construction (on the scan worker) so
+    /// the readouts can show it without touching the disk on the frame path — and does
+    /// **not** stat photos, which would add a round-trip per image to every scan for a
+    /// number nothing displays.
+    #[test]
+    fn fs_source_sizes_archives_only() {
+        let dir = temp_path("fs_sizes", "d");
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let zip = dir.join("album.zip");
+        let jpg = dir.join("photo.jpg");
+        std::fs::write(&zip, vec![0u8; 1234]).expect("seed zip");
+        std::fs::write(&jpg, vec![0u8; 99]).expect("seed jpg");
+
+        let src = FsSource::new(vec![zip, jpg]);
+        assert_eq!(
+            src.size_hint(0),
+            Some(1234),
+            "the archive's size is resolved"
+        );
+        assert_eq!(src.size_hint(1), None, "a photo is never stat'd");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A missing or unreadable archive must not panic the scan worker — it just has no
+    /// size, and the readout omits it.
+    #[test]
+    fn fs_source_size_is_none_for_a_missing_archive() {
+        let src = FsSource::new(vec![PathBuf::from(
+            r"C:\definitely
+ot\here.zip",
+        )]);
+        assert_eq!(src.size_hint(0), None);
+        assert_eq!(src.size_hint(99), None, "out of range is None, not a panic");
     }
 }

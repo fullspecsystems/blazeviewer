@@ -4767,7 +4767,15 @@ impl AppCore {
             parts.push(name);
         }
         if self.settings.info_show_resolution {
-            parts.push(format!("{}×{}", meta.w, meta.h));
+            // An archive door has no pixels to report — its frame is a 1×1 transparent
+            // sentinel (task #105), so `w`/`h` would read `1 × 1`. Its size is the fact
+            // that matters, and it rides `PhotoMeta` from `ItemSource::size_hint`
+            // (resolved on the scan worker) precisely because this runs on the frame
+            // path and may never touch the disk.
+            match meta.size {
+                Some(bytes) => parts.push(crate::meta::human_bytes(bytes)),
+                None => parts.push(format!("{}×{}", meta.w, meta.h)),
+            }
         }
         parts
     }
@@ -6862,6 +6870,32 @@ impl AppCore {
             crate::video::item_kind(self.source.as_ref(), item),
             crate::video::LibraryItemKind::Video(_)
         )
+    }
+
+    /// The **door card** to draw over the letterbox, or `None` when the presented item
+    /// isn't a door (task #105).
+    ///
+    /// A door's frame is a 1×1 transparent sentinel — it draws nothing — so this card is
+    /// the entire on-screen presence of an archive: its artwork, its name, and the key
+    /// that opens it. The shells snapshot it into their panel frame and render it as
+    /// chrome, which is what a door is.
+    ///
+    /// Keyed off `displayed_item` — the item **actually on screen** — never the playlist
+    /// cursor, or the card would name an archive the viewer isn't looking at yet. Pure:
+    /// no I/O, safe on the frame path.
+    pub fn door_card(&self) -> Option<crate::app_core::DoorCard> {
+        let item = self.displayed_item?;
+        let kind = self.item_archive_kind(item)?;
+        Some(crate::app_core::DoorCard {
+            name: self
+                .source
+                .path(item)
+                .and_then(|p| p.file_name())
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| self.source.name(item).to_string()),
+            format: format!("{} archive", kind.name()),
+            shortcut: self.shortcut_for(Action::PlayPause),
+        })
     }
 
     /// The format of item `item` if it is an archive **door** (task #104), else
@@ -10057,6 +10091,7 @@ mod tests {
             rel: String::new(),
             w: 1,
             h: 1,
+            size: None,
             codec: "PNG",
             animated: None,
         };
@@ -10092,6 +10127,7 @@ mod tests {
             rel: "folder/photo.jpg".to_string(),
             w: 4032,
             h: 3024,
+            size: None,
             codec: "JPEG",
             animated: None,
         });
@@ -10156,6 +10192,7 @@ mod tests {
             rel: "a.jpg".to_string(),
             w: 100,
             h: 100,
+            size: None,
             codec: "JPEG",
             animated: None,
         });
@@ -10603,6 +10640,7 @@ mod tests {
             rel: "a.jpg".to_string(),
             w: 100,
             h: 100,
+            size: None,
             codec: "JPEG",
             animated: None,
         });
@@ -11414,6 +11452,7 @@ mod tests {
             rel: String::new(),
             w,
             h,
+            size: None,
             codec: "PNG",
             animated: None,
         };
@@ -11453,6 +11492,7 @@ mod tests {
             rel: String::new(),
             w,
             h,
+            size: None,
             codec: "PNG",
             animated: None,
         };
@@ -11891,6 +11931,7 @@ mod tests {
                 rel: "movie.mkv".into(),
                 w: 1920,
                 h: 1080,
+                size: None,
                 codec: "MKV",
                 animated: None,
             },
@@ -11926,6 +11967,7 @@ mod tests {
             rel: "clip.mkv".into(),
             w: 64,
             h: 64,
+            size: None,
             codec: "MKV",
             animated: None,
         });
@@ -12111,6 +12153,7 @@ mod tests {
             rel: "clip.mp4".into(),
             w: 64,
             h: 64,
+            size: None,
             codec: "MP4",
             animated: None,
         });
@@ -12166,6 +12209,7 @@ mod tests {
             rel: "clip.mp4".into(),
             w: 64,
             h: 64,
+            size: None,
             codec: "MP4",
             animated: None,
         });
@@ -12703,6 +12747,7 @@ mod tests {
             rel: "clip.mp4".into(),
             w: 64,
             h: 64,
+            size: None,
             codec: "MP4",
             animated: None,
         });
@@ -12757,6 +12802,7 @@ mod tests {
             rel: "clip.mp4".into(),
             w: 64,
             h: 64,
+            size: None,
             codec: "MP4",
             animated: None,
         });
@@ -13574,6 +13620,7 @@ mod tests {
             rel: "a.jpg".into(),
             w: 100,
             h: 80,
+            size: None,
             codec: "PNG",
             animated: None,
         });
@@ -13593,6 +13640,7 @@ mod tests {
             rel: "old.jpg".into(),
             w: 100,
             h: 80,
+            size: None,
             codec: "PNG",
             animated: None,
         });
@@ -14250,6 +14298,75 @@ mod tests {
                 .any(|e| matches!(e, contract::CoreEffect::BeginArchiveOpen { .. })),
             "a nested .zip entry must not open"
         );
+    }
+
+    /// The card is a door's entire on-screen presence (its frame draws nothing), so it
+    /// must carry the name, the format, and the **live** shortcut — and appear only for
+    /// a door.
+    #[test]
+    fn door_card_describes_the_presented_door_only() {
+        let dir = std::env::temp_dir().join("pb_door_card");
+        let mut core = core_on_a_door(&dir);
+
+        let card = core.door_card().expect("a door presents a card");
+        assert_eq!(card.name, "album.zip", "the file name, not the full path");
+        assert_eq!(card.format, "ZIP archive");
+        assert!(
+            !card.shortcut.is_empty(),
+            "from the live keymap, not hard-coded"
+        );
+
+        // A photo has no card — otherwise it would float over the picture.
+        core.displayed_item = Some(0);
+        assert!(core.door_card().is_none());
+    }
+
+    /// Keyed off the item **on screen**, never the playlist cursor: naming an archive the
+    /// viewer is not looking at yet would be worse than naming none.
+    #[test]
+    fn door_card_follows_the_presented_item_not_the_cursor() {
+        let dir = std::env::temp_dir().join("pb_door_card_cursor");
+        let mut core = core_on_a_door(&dir);
+        core.target_item = Some(0); // the cursor moved to the photo…
+        assert!(
+            core.door_card().is_some(),
+            "…but the door is still on screen, so its card stays"
+        );
+        core.displayed_item = None;
+        assert!(core.door_card().is_none(), "nothing presented, no card");
+    }
+
+    /// A door reports its **size** where a photo reports dimensions — its frame is a 1×1
+    /// sentinel, so `1 × 1` would be the alternative. The size rides `PhotoMeta` from the
+    /// scan worker precisely because this runs on the frame path.
+    #[test]
+    fn the_info_line_reports_a_size_for_a_door_and_dimensions_for_a_photo() {
+        let core = test_core();
+        let door = crate::meta::PhotoMeta {
+            rel: "album.zip".to_string(),
+            w: 1,
+            h: 1,
+            size: Some(271_000_000),
+            codec: "ZIP",
+            animated: None,
+        };
+        let parts = core.info_line_parts(&door);
+        assert!(parts.contains(&"271 MB".to_string()), "{parts:?}");
+        assert!(
+            !parts.iter().any(|p| p.contains('×')),
+            "never print 1 × 1: {parts:?}"
+        );
+
+        let photo = crate::meta::PhotoMeta {
+            rel: "a.jpg".to_string(),
+            w: 4032,
+            h: 3024,
+            size: None,
+            codec: "JPEG",
+            animated: None,
+        };
+        let parts = core.info_line_parts(&photo);
+        assert!(parts.contains(&"4032×3024".to_string()), "{parts:?}");
     }
 
     /// The door's pill is its whole affordance, so it must arm on settling and — unlike an

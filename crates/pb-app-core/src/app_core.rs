@@ -103,6 +103,32 @@ pub struct DeleteRetry {
     pub tries_left: u32,
 }
 
+/// What the shells draw over the letterbox when an **archive door** is presented
+/// (task #105) — its artwork, its name, and the key that opens it.
+///
+/// A door's frame is a 1×1 transparent sentinel, so this card is an archive's entire
+/// on-screen presence: it is chrome, not a picture, and rendering it through the photo
+/// pipeline is what produced a 12× upscaled glyph, a photo-sized ring slot for an icon,
+/// an invented grey backdrop, and a 2.1× magnification, in that order.
+///
+/// **Semantic fields only.** The artwork is *not* here — it would mean cloning ~4 MiB per
+/// snapshot, and per FFI pump on macOS. Each shell uploads
+/// [`engine::door_artwork`](crate::engine::door_artwork) into one cached texture instead.
+///
+/// Mirrors `ScanPill`: a pure snapshot the shell copies out of the core, borrowing
+/// nothing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DoorCard {
+    /// The archive's file name, e.g. `wedding-photos.zip`. **Full** — the shell elides it
+    /// to fit (middle ellipsis, keeping the extension) and keeps the whole thing for
+    /// hover / accessibility.
+    pub name: String,
+    /// The secondary line, e.g. `ZIP archive` — from `ArchiveKind::name()`.
+    pub format: String,
+    /// The Open shortcut, from the live keymap. Never hard-code `P`: it is rebindable.
+    pub shortcut: String,
+}
+
 /// One item's memoized Details data (task #98).
 ///
 /// Replaces the old `(u64, Vec<(String, String)>)` tuple. Two reasons, beyond the
