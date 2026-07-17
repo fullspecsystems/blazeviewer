@@ -143,6 +143,10 @@ pub struct FfAudioDecoder {
     /// (AVAudioEngine; the MKV-5.1 crash). Native when uncapped (PipeWire
     /// downmixes itself).
     out_channels: u16,
+    /// The **speaker mask** of the emitted layout (WAVE/`KSAUDIO_SPEAKER` bit
+    /// values — FFmpeg's native order uses the same ones), or `None` when the
+    /// container never said. `Some(0x3)` when folded to stereo.
+    layout_mask: Option<u64>,
     /// Stream time base (num, den) for PTS↔Duration.
     time_base: (i32, i32),
     /// First-frame PTS (stream units) — the session-relative zero.
@@ -201,7 +205,7 @@ impl FfAudioDecoder {
         track: Option<usize>,
     ) -> Result<FfAudioDecoder, String> {
         let mut opened = FfInput::open(input, None)?;
-        let (index, rate, channels, time_base, start_time) = {
+        let (index, rate, channels, native_mask, time_base, start_time) = {
             let ctx = opened.ctx();
             // The user's pick, but only if it really is an audio stream in *this* container.
             let chosen = track.filter(|i| {
@@ -222,11 +226,20 @@ impl FfAudioDecoder {
                 .find(|s| s.index() == index)
                 .ok_or("selected audio stream vanished")?;
             let par = stream.parameters();
-            let (rate, channels) = unsafe {
+            let (rate, channels, native_mask) = unsafe {
                 let p = par.as_ptr();
+                // FFmpeg's NATIVE channel-order mask uses the same bit values as
+                // Windows' `KSAUDIO_SPEAKER` / WAVEFORMATEXTENSIBLE masks — the
+                // fact `layout_mask` exists to carry. Any other order (unspec,
+                // custom, ambisonic) has no mask to claim.
+                let mask = ((*p).ch_layout.order
+                    == ff::ffi::AVChannelOrder::AV_CHANNEL_ORDER_NATIVE)
+                    .then(|| (*p).ch_layout.u.mask)
+                    .filter(|&m| m != 0);
                 (
                     (*p).sample_rate.max(0) as u32,
                     (*p).ch_layout.nb_channels.max(0) as u16,
+                    mask,
                 )
             };
             let tb = stream.time_base();
@@ -235,6 +248,7 @@ impl FfAudioDecoder {
                 index,
                 rate,
                 channels,
+                native_mask,
                 (tb.numerator(), tb.denominator()),
                 (st != ff::ffi::AV_NOPTS_VALUE).then_some(st),
             )
@@ -255,6 +269,13 @@ impl FfAudioDecoder {
         } else {
             channels
         };
+        // The layout of what this decoder EMITS: folded output is plain stereo;
+        // native output carries the container's own speaker mask (when it has one).
+        let layout_mask = if out_channels != channels {
+            Some(0x3) // FL | FR
+        } else {
+            native_mask
+        };
         Ok(FfAudioDecoder {
             input: opened,
             index,
@@ -262,6 +283,7 @@ impl FfAudioDecoder {
             rate,
             channels,
             out_channels,
+            layout_mask,
             time_base,
             origin: None,
             start_time,
@@ -293,6 +315,14 @@ impl FfAudioDecoder {
     /// pick, and this says which one that was.
     pub fn stream_index(&self) -> usize {
         self.index
+    }
+
+    /// The speaker mask of the emitted layout, in WAVE/`KSAUDIO_SPEAKER` bit
+    /// values (FFmpeg's native channel order uses the same bits) — what a
+    /// `WAVEFORMATEXTENSIBLE` sink declares so >2-channel audio is unambiguous.
+    /// `None` when the container never named its layout.
+    pub fn layout_mask(&self) -> Option<u64> {
+        self.layout_mask
     }
 
     /// Native sample rate — the sinks hand this to the device layer verbatim.
@@ -573,6 +603,46 @@ mod tests {
 
     fn open(name: &str) -> FfAudioDecoder {
         FfAudioDecoder::open(&VideoInput::Path(fixture(name))).expect("open audio")
+    }
+
+    /// Diagnostic (opt-in): can this build's FFmpeg decode a real clip's audio? On
+    /// Windows "this build" is the **trimmed demux tree** (task #100), whose audio
+    /// decoders were deliberately kept for channel-layout naming — this probes the
+    /// deciding fact for the movie-audio fallback (AC-3/E-AC-3/DTS, which MF refuses).
+    /// `PB_FF_AUDIO_CLIP=<path> cargo test -p pb-decode --features ffprobe --lib diag_ff_audio_decode -- --ignored --nocapture`
+    #[test]
+    #[ignore = "diagnostic — needs PB_FF_AUDIO_CLIP"]
+    fn diag_ff_audio_decode() {
+        let Ok(clip) = std::env::var("PB_FF_AUDIO_CLIP") else {
+            eprintln!("PB_FF_AUDIO_CLIP not set — skipping");
+            return;
+        };
+        let t0 = std::time::Instant::now();
+        let mut d = FfAudioDecoder::open(&VideoInput::Path(clip.clone().into())).expect("open");
+        eprintln!(
+            "{clip}\n  stream #{}, {} Hz, {} ch (open {:?})",
+            d.stream_index(),
+            d.rate(),
+            d.channels(),
+            t0.elapsed()
+        );
+        let mut total = 0usize;
+        let mut nonzero = false;
+        for _ in 0..200 {
+            let chunk = d.read(2400).expect("decode");
+            if chunk.is_empty() {
+                break;
+            }
+            nonzero |= chunk.iter().any(|s| s.abs() > 1e-6);
+            total += chunk.len();
+        }
+        eprintln!(
+            "  decoded {total} f32 samples ({:.1}s of audio), nonzero={nonzero}, wall {:?}",
+            total as f64 / (d.rate().max(1) as u64 * d.channels().max(1) as u64) as f64,
+            t0.elapsed()
+        );
+        assert!(total > 0, "must decode samples");
+        assert!(nonzero, "must decode real audio, not silence");
     }
 
     /// 0D headless audio-decode margin (plan §6.0D): how much faster than

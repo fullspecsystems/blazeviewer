@@ -595,9 +595,18 @@ cargo test                 # unit + property + golden tests
 cargo llvm-cov --workspace # coverage (target >80%)
 cargo clippy --all-targets -- -D warnings
 cargo fmt --all
-cargo run -p pb-app        # the viewer (scaffold today)
 cargo bench                # criterion microbenchmarks over the corpus
 ```
+
+**Running the viewer on Windows — use the build script, not a bare `cargo run`.**
+`pwsh scripts/build-windows.ps1 -Run` builds with the **ship feature set**
+(`libheif,dav1d,ffprobe`) and enters the VS Developer shell FFmpeg's bindgen needs.
+A plain `cargo run -p pb-app` omits `ffprobe`, so **FFmpeg isn't linked and every film
+with AC-3 / E-AC-3 / DTS audio plays SILENT** (Media Foundation can't decode them —
+`0xC00D36B4`; it is the #1 "no sound" trap). `-NoFfmpeg` drops FFmpeg for a quick
+build (films silent, no Developer shell); `-NoNative` skips every native lib. On
+macOS/Linux a bare `cargo run -p pb-app --features …` is fine — this is a Windows
+build-config footgun specifically.
 
 ## Working norms
 

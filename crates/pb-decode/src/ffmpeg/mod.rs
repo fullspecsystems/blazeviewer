@@ -44,7 +44,10 @@ pub mod pcm;
 pub mod probe;
 pub mod tracks;
 
-#[cfg(feature = "ffvideo")]
+// The audio decoder rides with `ffprobe` too (not just `ffvideo`): the Windows trimmed
+// FFmpeg kept every audio *decoder* for channel-layout naming (task #100's portfile),
+// and MF cannot decode AC-3/E-AC-3/DTS — so this is the Windows movie-audio fallback.
+#[cfg(any(feature = "ffvideo", feature = "ffprobe"))]
 pub mod audio_decoder;
 #[cfg(feature = "ffvideo")]
 pub mod demux;

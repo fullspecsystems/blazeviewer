@@ -8,6 +8,14 @@ with any pre-release suffix carried only by the tag.
 ## [Unreleased]
 
 ### Added
+- **Pick a video's audio track on Windows and Linux.** Films with several audio tracks
+  (other languages, commentaries) can now switch between them mid-playback: the new
+  **Playback ▸ Audio Track** menu lists every track with a check on the one playing, and
+  `A` / `Shift+A` cycle through them (on Linux the menu shows **Next Audio Track**, since
+  its menu bar has no submenus). The switch keeps your place in the video, and the app
+  only confirms a change that really happened: a rare track that can't be decoded is
+  refused with a message while the current sound keeps playing. This brings Windows and
+  Linux up to par with the Mac.
 - **Archives show up while you browse, and `P` opens them.** A `.zip`, `.7z`, `.rar`, `.cbz`,
   `.cbr` or `.tar.*` sitting in a folder is no longer invisible: it shows a card in the middle
   of the screen — a zippered folder, the file's name, and an **Open** button — and pressing `P`
@@ -28,6 +36,19 @@ with any pre-release suffix carried only by the tag.
   touch narrower too, down to 260 pt (was 280 pt).
 
 ### Fixed
+- **Restoring the window from minimized no longer flashes a solid color (Windows).** A minimized
+  window reports a zero-size client area, which the app was treating as a real resize: it shrank
+  the photo to a single pixel, so on restore that one pixel was stretched to fill the screen for a
+  moment before the full image reappeared. A minimize is now ignored, so restoring is instant.
+- **Movies are no longer silent on Windows.** Films with Dolby (AC-3, E-AC-3) or DTS
+  audio played without sound, because Windows has no built-in decoder for those formats.
+  The app now decodes them itself, so nearly any film plays with sound. This also picks
+  the film's intended default track (the one the disc authored as default) instead of
+  whichever track happened to be listed first.
+- **Faster video seeking on Windows.** Tapping the arrow keys to jump forward a couple of
+  seconds — especially over a network share — used to take about a second because the app
+  rebuilt its whole reader for every jump. A small forward jump now continues from where it
+  already is, so it lands in about a seventh of the time.
 - **Softer, tighter shadows on the floating panels and buttons (macOS).** Every floating
   surface — the welcome screen's Open buttons, the folder/thumbnails/inspector/Help panels, the
   pills, and the new archive card — shared one drop shadow that was invisible in dark mode but a

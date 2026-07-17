@@ -87,6 +87,20 @@ Target: `resize→on-screen` for a retained Original drops from ~400 ms to **~0 
 
 ---
 
+# ✅ SHIPPED (Windows audio + seek, this arc — merged to main 2026-07-17)
+
+The `feat/audio-track-selection` branch landed: **audio track selection + FFmpeg-first film
+audio on Windows** (MF can't decode AC-3/E-AC-3/DTS, so films were silent — the trimmed FFmpeg
+already ships the decoders at zero bundle cost; owner-confirmed clean), the **Playback ▸ Audio
+Track** flyout, `WAVEFORMATEXTENSIBLE` speaker-mask sinks, off-thread switches, and the
+**short-forward-hop for Windows seeks** (a +2 s arrow tap over SMB: ~1 s → 139 ms, owner
+prioritized). The FFmpeg→MF locator "bridge" was a mistake and is DELETED. `PB_AUDIO_TRACE=1` /
+`PB_VIDEO_DIAG=1` are the diag levers. **`scripts/build-windows.ps1` now defaults to
+`ffprobe`** (a plain `cargo run` omits FFmpeg → silent films — the trap that bit twice).
+Remaining in tasks.json: **#1** (MF poster deep-walk — Windows posters measure pure black on
+films) and **#4** (further seek wins: codec-aware in-place seek for the recreate cases, then the
+run-up convert-skip — the elephant for arbitrary/backward seeks).
+
 # ✅ SHIPPED (macOS, this arc — all on main)
 
 | commit | what |

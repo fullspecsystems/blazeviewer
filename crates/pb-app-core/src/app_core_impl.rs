@@ -1253,6 +1253,16 @@ impl AppCore {
     /// bits *around* this — the macOS EDR re-assert (after `resize`, before draw) + the redraw,
     /// gated on the same fit-change the host computes from [`fit`](Self::fit) before calling here.
     pub fn resize(&mut self, width: u32, height: u32, scale: f32) {
+        // A minimized window reports a 0×0 client area. That is not a geometry change to
+        // *react* to: clamping it to a 1×1 fit box (below) would reconfigure the swapchain and
+        // decode-to-fit at a single pixel, so on restore that 1-px frame is upscaled to a solid
+        // color until the full re-decode lands — the "flash on restore". Leave every bit of
+        // geometry untouched, so restoring to the same size is a no-op that rebinds the resident
+        // texture. (A real DPI change arrives via `ScaleFactorChanged` with the live, non-zero
+        // viewport, so this never swallows one.)
+        if width == 0 || height == 0 {
+            return;
+        }
         if (scale - self.viewport.scale_factor).abs() > f32::EPSILON {
             self.viewport.scale_factor = scale;
             self.rescale_overlays();
@@ -8503,19 +8513,41 @@ impl AppCore {
     // the shell can say what is coming out of the speakers. So the core formats the rows and
     // hands out locators; the shell acts and reports back.
 
-    /// The catalog for the video on screen, if its probe has landed.
-    fn showing_catalog(&self) -> Option<&pb_decode::MediaTrackCatalog> {
+    /// The displayed item when it is a **video** — by its own kind, or because a video
+    /// session is showing for it. The audio picker's gate (owner, 2026-07-17): the track
+    /// catalog belongs to the *item* (the details probe), so it must not require a
+    /// running session — gating on `video_showing()` made the flyout claim "No Video"
+    /// over a film sitting at its poster.
+    fn displayed_video_item(&self) -> Option<usize> {
         self.displayed_item
-            .filter(|_| self.video_showing())
+            .filter(|&i| self.item_is_video(i) || self.video_showing())
+    }
+
+    /// Is the displayed item a video (playing or not)? The shell's flyout gate.
+    pub fn displayed_is_video(&self) -> bool {
+        self.displayed_video_item().is_some()
+    }
+
+    /// Has the track probe landed for the displayed video? The audio twin of
+    /// [`subtitle_tracks_known`](Self::subtitle_tracks_known), minus its session gate.
+    pub fn audio_tracks_known(&self) -> bool {
+        self.displayed_video_item()
+            .and_then(|item| self.exif_cache.get(&item))
+            .is_some_and(|d| d.media.is_some())
+    }
+
+    /// The catalog for the displayed video, if its probe has landed.
+    fn showing_catalog(&self) -> Option<&pb_decode::MediaTrackCatalog> {
+        self.displayed_video_item()
             .and_then(|item| self.exif_cache.get(&item))
             .and_then(|d| d.media.as_ref())
     }
 
     /// The Playback ▸ Audio flyout's rows. Empty = offer nothing (no video, or the probe
-    /// hasn't landed — [`subtitle_tracks_known`](Self::subtitle_tracks_known) tells those
-    /// apart, and it answers for the whole catalog, not just subtitles).
+    /// hasn't landed — [`audio_tracks_known`](Self::audio_tracks_known) tells those
+    /// apart).
     pub fn audio_picker_rows(&mut self) -> Vec<crate::tracks::PickerRow> {
-        let Some(item) = self.displayed_item.filter(|_| self.video_showing()) else {
+        let Some(item) = self.displayed_video_item() else {
             return Vec::new();
         };
         self.ensure_exif_cached(item);
@@ -8567,6 +8599,51 @@ impl AppCore {
         }
     }
 
+    /// Row `row` as a **Media Foundation reader stream index** (`-1` = this row isn't
+    /// MF-located) — one of the two currencies the Windows WASAPI engine accepts.
+    /// Only MF's *own* catalog mints these, which on Windows means a no-`ffprobe`
+    /// build: the usual `ffprobe` build runs FFmpeg's catalog with `FfStream`
+    /// locators and the engine decodes those directly (FFmpeg-first). MF's stream
+    /// order differs from the container's, which is why an MF index can never be a
+    /// row or an FFmpeg index in disguise.
+    pub fn audio_row_mf_stream(&self, row: usize) -> i64 {
+        match self.audio_row_locator(row) {
+            Some(pb_decode::tracks::TrackLocator::MfStream(s)) => *s as i64,
+            _ => -1,
+        }
+    }
+
+    /// The picker row whose locator names MF reader stream `stream` (`-1` = none) —
+    /// how the Windows shell translates the engine's "this is what is actually
+    /// decoding" report into a row for [`set_active_audio_row`](Self::set_active_audio_row).
+    /// The winit twin of the macOS host's `reportActiveAudioStream`.
+    pub fn audio_row_for_mf_stream(&self, stream: i64) -> i64 {
+        self.audio_row_for(|loc| {
+            matches!(loc, pb_decode::tracks::TrackLocator::MfStream(s) if *s as i64 == stream)
+        })
+    }
+
+    /// The picker row whose locator names FFmpeg stream `stream` (`-1` = none) — the
+    /// same translation for the Linux engine, whose currency is container stream
+    /// indices end-to-end.
+    pub fn audio_row_for_ff_stream(&self, stream: i64) -> i64 {
+        self.audio_row_for(|loc| {
+            matches!(loc, pb_decode::tracks::TrackLocator::FfStream(i) if *i as i64 == stream)
+        })
+    }
+
+    fn audio_row_for(&self, mut hit: impl FnMut(&pb_decode::tracks::TrackLocator) -> bool) -> i64 {
+        let Some(catalog) = self.showing_catalog() else {
+            return -1;
+        };
+        catalog
+            .audio
+            .tracks
+            .iter()
+            .position(|t| catalog.locator(t.id).is_some_and(&mut hit))
+            .map_or(-1, |r| r as i64)
+    }
+
     /// The shell reports which row it is **actually playing** (`-1` = unknown/none).
     ///
     /// Called on open and after every switch — including a *refused* one, where it re-states
@@ -8587,7 +8664,7 @@ impl AppCore {
     /// shell's report, so a stale pick that quietly fell back to the policy still advances
     /// from the track you can actually hear.
     pub fn cycle_audio_track(&mut self, forward: bool) {
-        let Some(item) = self.displayed_item.filter(|_| self.video_showing()) else {
+        let Some(item) = self.displayed_video_item() else {
             return; // not a video: the key says nothing rather than lying
         };
         self.ensure_exif_cached(item);
@@ -9951,6 +10028,70 @@ mod tests {
         );
         let t = core.toast_native.as_ref().expect("the user is told");
         assert_eq!(t.message, "Only one audio track");
+    }
+
+    /// The Windows (WASAPI) currency accessors (task #99): each row resolves in
+    /// whichever currency its locator carries, a stream resolves back to its row, and a
+    /// row without a locator in the asked currency answers `-1` — the shell's cue to try
+    /// the other currency or refuse. Both currencies coexist because the engine takes
+    /// either (FFmpeg's own catalog carries `FfStream`; MF's fallback catalog `MfStream`).
+    #[test]
+    fn audio_stream_accessors_round_trip_in_both_currencies() {
+        let mut core = core_with_a_native_video();
+        let mut a0 = track("AAC", "eng");
+        a0.id.local_id = 1;
+        let mut a1 = track("AC-3", "fra");
+        a1.id.local_id = 2;
+        let mut catalog = pb_decode::MediaTrackCatalog::new(
+            1,
+            pb_decode::MediaBackend::FFmpeg,
+            pb_decode::TrackSet::complete(vec![a0, a1]),
+            pb_decode::TrackSet::complete(vec![]),
+        );
+        // Row 0 is MF-located (the fallback-catalog shape), row 1 FFmpeg-located.
+        catalog.set_locator(1, pb_decode::tracks::TrackLocator::MfStream(3));
+        catalog.set_locator(2, pb_decode::tracks::TrackLocator::FfStream(2));
+        seed_details(&mut core, 0, Some(catalog), Some(true));
+
+        assert_eq!(core.audio_row_mf_stream(0), 3);
+        assert_eq!(core.audio_row_mf_stream(1), -1, "no MF twin → refuse");
+        assert_eq!(core.audio_row_mf_stream(9), -1, "out of range → refuse");
+
+        assert_eq!(core.audio_row_for_mf_stream(3), 0);
+        assert_eq!(core.audio_row_for_mf_stream(9), -1);
+        assert_eq!(core.audio_row_for_ff_stream(2), 1);
+        assert_eq!(core.audio_row_for_ff_stream(0), -1);
+    }
+
+    /// The flyout must list tracks over the **poster** too (owner, 2026-07-17): the
+    /// catalog belongs to the item, not to a session, so a video that isn't playing
+    /// still offers its tracks — gating on `video_showing()` claimed "No Video" over
+    /// a film sitting at its poster.
+    #[test]
+    fn audio_rows_show_for_a_displayed_video_without_a_session() {
+        let mut core = test_core();
+        core.source = Arc::new(FsSource::new(vec![PathBuf::from("films/movie.mkv")]));
+        core.displayed_item = Some(0);
+        assert!(core.video.is_none(), "no session in this test");
+        let mut a0 = track("AAC", "eng");
+        a0.id.local_id = 1;
+        let mut a1 = track("AC-3", "fra");
+        a1.id.local_id = 2;
+        let catalog = pb_decode::MediaTrackCatalog::new(
+            1,
+            pb_decode::MediaBackend::FFmpeg,
+            pb_decode::TrackSet::complete(vec![a0, a1]),
+            pb_decode::TrackSet::complete(vec![]),
+        );
+        seed_details(&mut core, 0, Some(catalog), Some(true));
+
+        assert!(core.displayed_is_video());
+        assert!(core.audio_tracks_known());
+        assert_eq!(core.audio_picker_rows().len(), 2);
+        // ...and a still keeps offering nothing.
+        core.source = five_photos();
+        assert!(!core.displayed_is_video());
+        assert!(core.audio_picker_rows().is_empty());
     }
 
     /// A still is not a video: the key says nothing rather than lying about a photo.
@@ -13794,6 +13935,39 @@ mod tests {
         );
         assert!(!core.video_paused_by_resize, "one-shot");
         drop(io);
+    }
+
+    /// Minimizing reports a 0×0 client area. Treating it as a real resize clamps the fit to
+    /// 1×1, decodes the photo to one pixel, and flashes that (upscaled to a solid color) when
+    /// the window is restored. The fit must survive a 0×0 so a restore to the same size is a
+    /// no-op rebind, not a re-decode.
+    #[test]
+    fn a_minimize_to_zero_size_leaves_the_fit_untouched() {
+        let mut core = test_core();
+        core.resize(3840, 2160, 1.0);
+        let fit = core.fit;
+        assert_eq!(
+            fit,
+            Some(FitBox {
+                max_width: 3840,
+                max_height: 2160,
+            })
+        );
+
+        core.resize(0, 0, 1.0); // minimize
+        assert_eq!(core.fit, fit, "a 0×0 minimize must not clobber the fit");
+        assert_eq!(core.viewport.width, 3840, "…nor the viewport");
+        assert_eq!(core.viewport.height, 2160);
+
+        // Restore to the same size: fit is unchanged, so `resize` short-circuits and never
+        // schedules a re-decode — which is what keeps the restore instant instead of flashing.
+        core.resize_settle_at = None;
+        core.resize(3840, 2160, 1.0);
+        assert_eq!(core.fit, fit);
+        assert!(
+            core.resize_settle_at.is_none(),
+            "restore to the same size must not schedule a re-decode"
+        );
     }
 
     // ── task #18 finding #5: epoch-aware readiness / off-loop geometry re-decode ──
