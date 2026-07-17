@@ -575,6 +575,46 @@ mod tests {
         FfAudioDecoder::open(&VideoInput::Path(fixture(name))).expect("open audio")
     }
 
+    /// Diagnostic (opt-in): can this build's FFmpeg decode a real clip's audio? On
+    /// Windows "this build" is the **trimmed demux tree** (task #100), whose audio
+    /// decoders were deliberately kept for channel-layout naming — this probes the
+    /// deciding fact for the movie-audio fallback (AC-3/E-AC-3/DTS, which MF refuses).
+    /// `PB_FF_AUDIO_CLIP=<path> cargo test -p pb-decode --features ffprobe --lib diag_ff_audio_decode -- --ignored --nocapture`
+    #[test]
+    #[ignore = "diagnostic — needs PB_FF_AUDIO_CLIP"]
+    fn diag_ff_audio_decode() {
+        let Ok(clip) = std::env::var("PB_FF_AUDIO_CLIP") else {
+            eprintln!("PB_FF_AUDIO_CLIP not set — skipping");
+            return;
+        };
+        let t0 = std::time::Instant::now();
+        let mut d = FfAudioDecoder::open(&VideoInput::Path(clip.clone().into())).expect("open");
+        eprintln!(
+            "{clip}\n  stream #{}, {} Hz, {} ch (open {:?})",
+            d.stream_index(),
+            d.rate(),
+            d.channels(),
+            t0.elapsed()
+        );
+        let mut total = 0usize;
+        let mut nonzero = false;
+        for _ in 0..200 {
+            let chunk = d.read(2400).expect("decode");
+            if chunk.is_empty() {
+                break;
+            }
+            nonzero |= chunk.iter().any(|s| s.abs() > 1e-6);
+            total += chunk.len();
+        }
+        eprintln!(
+            "  decoded {total} f32 samples ({:.1}s of audio), nonzero={nonzero}, wall {:?}",
+            total as f64 / (d.rate().max(1) as u64 * d.channels().max(1) as u64) as f64,
+            t0.elapsed()
+        );
+        assert!(total > 0, "must decode samples");
+        assert!(nonzero, "must decode real audio, not silence");
+    }
+
     /// 0D headless audio-decode margin (plan §6.0D): how much faster than
     /// real-time the selected audio track (e.g. TrueHD folded to stereo) decodes
     /// off a (network) share. Drains ~30 s of media and reports the speed-up.

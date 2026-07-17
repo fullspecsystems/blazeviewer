@@ -149,7 +149,7 @@ pub use ff_live::{
 // The FFmpeg producer/poster/probe (task #84). `ff_`-prefixed everywhere so the macOS
 // dual-backend dispatcher can hold both (AVFoundation poster + FFmpeg poster) at once;
 // Linux integration routes these under its own cfg (there is no competing backend there).
-#[cfg(feature = "ffvideo")]
+#[cfg(any(feature = "ffvideo", feature = "ffprobe"))]
 pub use ffmpeg::audio_decoder::{AudioError, FfAudioDecoder};
 // The catalog-only probe comes with `ffprobe` — Windows takes it *without* the decode
 // path, because MF cannot enumerate subtitle tracks (task #100). It is the only FFmpeg
