@@ -1363,20 +1363,26 @@
           },
           {
             "id": 2,
-            "title": "Break down the 7s open->first-photo",
-            "description": "Sub-instrument metric 1 into phases: open command -> archive worker done (central-dir read / handle pool build over SMB) -> first bytes() read -> first decode -> present. The +1.2s-for-7-more-photos shape says the ~6s is fixed/serial (archive open or first cold SMB read), not per-photo. NB a ZIP is NOT background_open (kind.rs:50) so scan::open_archive runs SYNC on the event loop - a slow SMB central-dir read would freeze the loop. Find where the 6s actually goes before optimizing.",
+            "title": "Break down the 7s open->first-photo (it is NOT a full unzip)",
+            "description": "CORRECTION: a ZIP is already lazy - open reads only the central directory + a local header per entry (ZipSource::open), then bytes(i) inflates ONE entry on demand. It is 7z that is eager (whole archive -> RAM on open, because solid). So the 7s is NOT unzip-everything; it is ~all the 39MB single-entry read over SMB + ~0.3s decode. Sub-instrument metric 1 into phases (open-cmd -> worker/central-dir done -> first bytes() read -> first decode -> present) to confirm the read dominates. NB a ZIP is not background_open (kind.rs:50) so open runs sync on the event loop; verify that is not itself a stall.",
             "status": "pending"
           },
           {
             "id": 3,
-            "title": "Thumbnails: capture from the fulls we already decode, from the start",
-            "description": "thumbs_capture (app_core_impl.rs:2160) already downsamples every decoded full into the thumb store - but it's gated on thumbs.enabled (line 2161), which only flips true on the FIRST panel open (thumbs.rs:107). So browsing an archive with the panel closed throws away every thumb; opening the panel then re-decodes all N from source (re-unzip/refetch over SMB via Job::thumb). Fix: capture from the start (un-gate; spawn the derive thread eagerly or lazily on first decode) with a BOUNDED thumb LRU so a big deck's RAM stays capped. The owner's ring-reuse idea is a valid FALLBACK for items whose capture was evicted (GPU-downsample a resident texture - pixels are in VRAM, so it needs readback), but the un-gate is the 90% win with zero re-read. Measure panel-open latency before/after.",
+            "title": "Thumbnails: keep a tiny window warm when parked (bounded, off by default cost)",
+            "description": "Owner call: do NOT always-capture everything (thumbs are off by default; bad trade for never-users). Happy medium: keep capture off by default, but when PARKED (held_nav is none), derive thumbs for a tiny window - current + next 2-3 - off-thread on the existing derive thread. Those items are already decoded/resident, so it is pure downsample (tens of ms each), zero source reads. Result: opening the panel always shows the neighbors instantly + rest fill on scroll, instead of a wall of placeholders for seconds. Blaze pays nothing (parked-gate); RAM capped (handful). Today thumbs_capture (app_core_impl.rs:2160) is gated on thumbs.enabled which only flips on first panel open (thumbs.rs:107), so a browse-then-open re-reads all N from SMB via Job::thumb. The ring-reuse (GPU-downsample a resident VRAM texture) stays a fallback for evicted items.",
             "status": "pending"
           },
           {
             "id": 4,
             "title": "First-image priority / bandwidth on a slow source",
             "description": "The prefetch already ranks the on-screen photo tier-1 (request_prefetch sharpen/head), but on a slow source its full-res read competes for bandwidth with the whole window's preview reads. Explore throttling concurrent reads from an archive/slow source so the first image isn't fighting its neighbors. Separable from the byte cache; only pursue if #2 shows read-bandwidth contention (vs a fixed open cost).",
+            "status": "pending"
+          },
+          {
+            "id": 5,
+            "title": "Preview-first for big JPEGs via the embedded EXIF thumbnail",
+            "description": "The real fix for the 7s first-photo over SMB. Large JPEGs embed a small thumbnail near the file start (owner test file: JPEGInterchangeFormat 240, len 22467 = 22KB). We already have pb_decode::exif_thumbnail but only use it for the thumbs strip; the main viewer decodes the full JPEG and shows nothing until done. Read just the first ~128KB of the entry, pull the embedded thumb, show it in ~100ms (blurry, fit-to-screen), then read the full entry in the background and upgrade to sharp (the preview-first model RAW/HEIC already use). Needs (a) a partial entry read - bytes() reads the whole entry today; (b) a JPEG preview-first path in decode. Turns 7s of placeholder into instant-preview->sharpen.",
             "status": "pending"
           }
         ]
