@@ -3740,6 +3740,13 @@ impl ApplicationHandler for App {
             WindowEvent::CloseRequested => self.begin_exit(),
 
             WindowEvent::Resized(size) => {
+                // A minimize reports a 0×0 client area. It is not a resize to react to — doing so
+                // would reconfigure + re-lay-out the overlay + draw for a window nobody can see,
+                // and (see `AppCore::resize`) clamp the fit to 1×1, which flashes a solid color on
+                // restore. Ignore it; the resident texture and fit survive, so restore is instant.
+                if size.width == 0 || size.height == 0 {
+                    return;
+                }
                 // Resize + re-lay-out the egui overlay *before* `handle_resized`'s
                 // synchronous redraw, so the frame it presents composites the overlay at the
                 // new size instead of stretching the previous (old-size) texture across the

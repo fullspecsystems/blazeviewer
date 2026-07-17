@@ -28,6 +28,10 @@ with any pre-release suffix carried only by the tag.
   touch narrower too, down to 260 pt (was 280 pt).
 
 ### Fixed
+- **Restoring the window from minimized no longer flashes a solid color (Windows).** A minimized
+  window reports a zero-size client area, which the app was treating as a real resize: it shrank
+  the photo to a single pixel, so on restore that one pixel was stretched to fill the screen for a
+  moment before the full image reappeared. A minimize is now ignored, so restoring is instant.
 - **Softer, tighter shadows on the floating panels and buttons (macOS).** Every floating
   surface — the welcome screen's Open buttons, the folder/thumbnails/inspector/Help panels, the
   pills, and the new archive card — shared one drop shadow that was invisible in dark mode but a
