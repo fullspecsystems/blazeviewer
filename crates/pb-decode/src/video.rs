@@ -472,26 +472,130 @@ pub fn luma_stats_rgba8(pixels: &[u8], stride: usize) -> (f32, f32) {
     (mean as f32, var.sqrt() as f32)
 }
 
-/// Score a candidate poster frame — higher is a better poster. Combines
-/// *brightness* (must clear the black floor) with *contrast* (luma std-dev, the
-/// prior-art "interestingness" measure ffmpegthumbnailer / imagorvideo use to
-/// dodge black and flat frames). A frame below [`POSTER_LUMA_MIN`] scores near
-/// zero so a black lead-in never wins; among visible frames the one with the
-/// most detail wins, with a light bonus for brightness. Range ~0..~0.4.
-pub fn poster_frame_score(pixels: &[u8]) -> f32 {
-    let (mean, std) = luma_stats_rgba8(pixels, 8);
-    if mean < POSTER_LUMA_MIN {
-        // Rank black/fade frames strictly below any visible one, but keep them
-        // ordered by brightness so the fallback still picks the least-black.
-        return mean * 0.01;
+/// Mean absolute luma difference between **horizontally adjacent** pixels, in
+/// 0..=1 — a cheap *high-frequency detail* measure. Textured content (a real
+/// scene) has a high value; a smooth field — flat black/white **or a vignette /
+/// gradient** — has a near-zero one, even when its global [`luma_stats_rgba8`]
+/// std-dev is moderate. This is what separates a genuine poster frame from a
+/// bright title card with a subtle vignette (which global std-dev alone rewards
+/// as if it were detail). Full-resolution (every pixel) — a poster-sized frame is
+/// still microseconds — because subsampling would alias the very detail we measure.
+pub fn luma_detail_rgba8(pixels: &[u8], width: u32) -> f32 {
+    let w = width.max(1) as usize;
+    let count = pixels.len() / 4;
+    let rows = count / w;
+    if rows == 0 || w < 4 {
+        return 0.0;
     }
-    std + 0.15 * mean
+    // Sample horizontal pairs ~1/32 of the width apart (mid-frequency structure),
+    // never crossing a row, over ~64 evenly-spaced rows — a few thousand cheap
+    // comparisons regardless of resolution.
+    let span = (w / 32).max(1);
+    let row_step = (rows / 64).max(1);
+    let luma = |i: usize| {
+        let px = &pixels[i * 4..i * 4 + 4];
+        (77 * px[0] as u32 + 150 * px[1] as u32 + 29 * px[2] as u32) >> 8
+    };
+    let mut sum = 0u64;
+    let mut n = 0u64;
+    let mut y = 0;
+    while y < rows {
+        let base = y * w;
+        let mut x = 0;
+        while x + span < w {
+            sum += luma(base + x).abs_diff(luma(base + x + span)) as u64;
+            n += 1;
+            x += span;
+        }
+        y += row_step;
+    }
+    if n == 0 {
+        return 0.0;
+    }
+    (sum as f32 / n as f32) / 255.0
 }
 
-/// Score at/above which a frame is a *clearly good* poster and the walk stops
-/// early (no need to seek deeper). A detailed scene's luma std-dev is typically
-/// 0.15–0.3; a near-flat or dim frame sits well below this.
-pub const POSTER_GOOD_SCORE: f32 = 0.12;
+/// Minimum mid-frequency [`luma_detail_rgba8`] for a frame to count as *real
+/// content* rather than a smooth field. Measured split over the corpus: bright
+/// title cards with a subtle vignette sit at ~0.013–0.016, genuine scenes (even
+/// bright, colorful ones) at ~0.06–0.11 — so 0.03 separates them with ~2× margin
+/// each way and never punishes a legitimately bright, textured frame.
+pub const POSTER_DETAIL_MIN: f32 = 0.03;
+
+/// The walk's *stop* gate: a frame is a genuinely-good poster — bright enough AND
+/// textured enough — so the walk can stop here rather than seek deeper. Brightness
+/// alone is not enough (a white/near-white title card, even with a vignette that
+/// inflates its std-dev, is not a poster); real detail is required. When nothing
+/// ever clears this bar, [`poster_frame_score`] ranks the fallback.
+pub fn poster_frame_is_good(pixels: &[u8], width: u32) -> bool {
+    mean_luma_rgba8(pixels, 8) >= POSTER_LUMA_MIN
+        && luma_detail_rgba8(pixels, width) >= POSTER_DETAIL_MIN
+}
+
+/// Rank a candidate poster frame — higher is a better poster — used to pick the
+/// **fallback** when no frame clears [`poster_frame_is_good`]. **Detail-forward**:
+/// real texture dominates, so a bright but flat title card (or a vignette, whose
+/// smooth gradient inflates std-dev) never outranks a genuinely textured frame —
+/// the failure a brightness+contrast score allowed. Contrast (std) and a light
+/// brightness bonus only break ties among similarly-detailed frames. A frame below
+/// [`POSTER_LUMA_MIN`] ranks by brightness alone, strictly below any visible one,
+/// so a black-throughout clip still yields its least-black frame.
+pub fn poster_frame_score(pixels: &[u8], width: u32) -> f32 {
+    let (mean, std) = luma_stats_rgba8(pixels, 8);
+    if mean < POSTER_LUMA_MIN {
+        return mean * 0.01;
+    }
+    // Detail dominates. std is only a faint tiebreaker: a bright frame with dark
+    // regions (letterbox, a title card, a vignette) has high std but no real
+    // texture, so leaning on std would re-admit exactly what the detail gate
+    // rejects. Brightness is the faintest tiebreaker of all.
+    luma_detail_rgba8(pixels, width) + 0.1 * std + 0.03 * mean
+}
+
+// --- Deep-seek walk policy (shared by every backend's poster) --------------
+// A feature film opens black/logo/fade for its first 30–90 s, so a head-only
+// walk hands back a black frame. When the head walk finds nothing good, seek
+// past the intro. These constants are the single source of truth both the MF
+// (Windows) and FFmpeg (mac/Linux) poster backends read, so the two never drift.
+
+/// The cheap first pass: frames to decode from the *start* before deciding the
+/// opening is too dark/dull to poster. A clip that opens on content (Live Photos,
+/// home video) settles here with no seeking; a logo-on-black / fade-in falls
+/// through to the deep pass.
+pub const POSTER_HEAD_FRAMES: usize = POSTER_MAX_FRAMES;
+
+/// Only *seek* past the intro for clips at least this long — short clips are
+/// already covered by the head walk (and the cap collapses the offsets anyway).
+pub const POSTER_DEEP_MIN: Duration = Duration::from_secs(10);
+
+/// Deep-seek probe points, **shallow → deep**: where an intro-having clip is
+/// sampled after the head walk falls through. Anchored to how long real intros
+/// run (a studio-logo/fade is usually done by ~20–40 s), NOT to a fraction of the
+/// clip — so a 2-hour film is sampled at ~8 s first, not ~90 s. Each is clamped to
+/// [`poster_deep_cap`] and the walk stops at the first good frame, returning the
+/// *earliest* genuinely-visible frame.
+pub const POSTER_SEEK_OFFSETS: [Duration; 6] = [
+    Duration::from_secs(8),
+    Duration::from_secs(20),
+    Duration::from_secs(45),
+    Duration::from_secs(90),
+    Duration::from_secs(150),
+    Duration::from_secs(240),
+];
+
+/// Frames to decode-and-score at each deep seek point before moving to the next.
+pub const POSTER_BURST_FRAMES: usize = 12;
+
+/// Overall watchdog for one poster attempt — a poster is a background nicety,
+/// never worth pinning a pool worker longer than this on hostile input.
+pub const POSTER_DEADLINE: Duration = Duration::from_secs(15);
+
+/// Never sample deeper than min(half the clip, 5 min): 5 minutes is well past any
+/// title sequence; going further risks spoilers and wasted decode on a long film
+/// (owner guidance: not past ~5 min / 50%).
+pub fn poster_deep_cap(duration: Duration) -> Duration {
+    duration.mul_f64(0.5).min(Duration::from_secs(300))
+}
 
 #[cfg(test)]
 mod tests {
@@ -608,19 +712,19 @@ mod tests {
     }
 
     #[test]
-    fn poster_score_prefers_detailed_scenes_over_flat_or_black() {
+    fn poster_score_ranks_detailed_scenes_over_flat_or_black() {
         let w = 64usize;
         let h = 64usize;
+        let score = |px: &[u8]| poster_frame_score(px, w as u32);
 
-        // Black and near-black (fade) frames score essentially zero.
+        // Black and near-black (fade) frames rank essentially zero.
         let black = vec![0u8; w * h * 4];
-        assert!(poster_frame_score(&black) < 0.01);
+        assert!(score(&black) < 0.01);
         let faint: Vec<u8> = [8u8, 8, 8, 255].repeat(w * h);
-        assert!(poster_frame_score(&faint) < 0.01);
+        assert!(score(&faint) < 0.01);
 
-        // A studio-logo-on-black: a small bright patch on an otherwise black
-        // field. Mean luma stays under the floor, so it is *not* a good poster
-        // and scores near zero — the whole point of the contrast+brightness gate.
+        // A studio-logo-on-black: a small bright patch on a black field. Mean luma
+        // stays under the floor, so it ranks near zero — below any visible frame.
         let mut logo = vec![0u8; w * h * 4];
         for y in 28..34 {
             for x in 28..34 {
@@ -628,23 +732,13 @@ mod tests {
                 logo[i..i + 4].copy_from_slice(&[255, 255, 255, 255]);
             }
         }
-        assert!(
-            poster_frame_score(&logo) < POSTER_GOOD_SCORE,
-            "logo-on-black must not read as a good poster"
-        );
 
-        // A flat mid-gray frame is visible but dull (no contrast): above black,
-        // but below the good-poster bar, so the walk keeps looking.
+        // A flat mid-gray frame is visible but dull (no contrast, no detail): above
+        // black, but ranked below a detailed scene.
         let gray: Vec<u8> = [128u8, 128, 128, 255].repeat(w * h);
-        let gray_score = poster_frame_score(&gray);
-        assert!(gray_score > poster_frame_score(&black));
-        assert!(
-            gray_score < POSTER_GOOD_SCORE,
-            "flat gray is not 'good' {gray_score}"
-        );
+        assert!(score(&gray) > score(&black));
 
-        // A high-contrast, detailed frame (checkerboard) clears the good bar and
-        // outscores every frame above.
+        // A high-contrast, detailed frame (checkerboard) outranks every flat frame.
         let mut scene = vec![0u8; w * h * 4];
         for y in 0..h {
             for x in 0..w {
@@ -653,12 +747,55 @@ mod tests {
                 scene[i..i + 4].copy_from_slice(&[v, v, v, 255]);
             }
         }
-        let scene_score = poster_frame_score(&scene);
+        assert!(score(&scene) > score(&gray) && score(&scene) > score(&logo));
+    }
+
+    #[test]
+    fn poster_is_good_requires_texture_not_just_brightness() {
+        let (w, h) = (128usize, 128usize);
+
+        // A bright, smooth horizontal gradient — a white title card with a vignette:
+        // high brightness and a MODERATE std-dev (the gradient), but almost no
+        // mid-frequency detail. A std-only gate is fooled; the detail gate is not.
+        let mut vignette = vec![0u8; w * h * 4];
+        for y in 0..h {
+            for x in 0..w {
+                let v = (255 - (x * 100 / w)) as u8; // 255 → 155 across the width
+                let i = (y * w + x) * 4;
+                vignette[i..i + 4].copy_from_slice(&[v, v, v, 255]);
+            }
+        }
+        assert!(mean_luma_rgba8(&vignette, 8) > POSTER_LUMA_MIN, "it is bright");
+        let (_, vstd) = luma_stats_rgba8(&vignette, 8);
+        assert!(vstd > 0.05, "the gradient inflates std-dev like a real vignette");
         assert!(
-            scene_score >= POSTER_GOOD_SCORE,
-            "detailed scene should be 'good' {scene_score}"
+            luma_detail_rgba8(&vignette, w as u32) < POSTER_DETAIL_MIN,
+            "but a smooth gradient has little detail ({})",
+            luma_detail_rgba8(&vignette, w as u32)
         );
-        assert!(scene_score > gray_score && scene_score > poster_frame_score(&logo));
+        assert!(
+            !poster_frame_is_good(&vignette, w as u32),
+            "a bright-but-smooth title card is NOT a good poster"
+        );
+
+        // Fine stripes — real texture: detailed and bright → a good poster.
+        let mut textured = vec![0u8; w * h * 4];
+        for y in 0..h {
+            for x in 0..w {
+                let v = if (x / 4) % 2 == 0 { 200 } else { 60 };
+                let i = (y * w + x) * 4;
+                textured[i..i + 4].copy_from_slice(&[v, v, v, 255]);
+            }
+        }
+        assert!(
+            luma_detail_rgba8(&textured, w as u32) >= POSTER_DETAIL_MIN,
+            "fine stripes carry real detail ({})",
+            luma_detail_rgba8(&textured, w as u32)
+        );
+        assert!(poster_frame_is_good(&textured, w as u32), "textured content is good");
+
+        // Pure black fails the brightness floor regardless of (zero) detail.
+        assert!(!poster_frame_is_good(&vec![0u8; w * h * 4], w as u32));
     }
 
     #[test]
