@@ -135,6 +135,20 @@ pub fn is_supported_library_file(p: &Path) -> bool {
     crate::video::classify_library_file(p).is_some()
 }
 
+/// The scanner's admission test with the **Show Archives** preference applied
+/// (`settings.show_archives`, task #104): images and videos always pass; an archive
+/// "door" passes only when the user keeps archives visible. This is the one gate the
+/// deck builders + the folder-skip probe consult, so hiding archives is uniform — the
+/// playlist, `⌘←/→` folder navigation, and the tree all agree. `admits_library_file(p,
+/// true)` is exactly [`is_supported_library_file`] (archives always shown).
+pub fn admits_library_file(p: &Path, show_archives: bool) -> bool {
+    match crate::video::classify_library_file(p) {
+        None => false,
+        Some(crate::video::LibraryItemKind::Archive(_)) => show_archives,
+        Some(_) => true,
+    }
+}
+
 /// Hide Live-Photo companions from a gathered path list: a `.mov`/`.qt` whose
 /// (directory, stem) matches an image in the list is the motion half of a Live Photo
 /// (`IMG_1234.HEIC` + `IMG_1234.MOV`) — it plays via the still's `P`, so listing it
@@ -308,7 +322,12 @@ pub enum Probe {
 /// entry, so a dead share aborts within one entry's latency). Shares
 /// [`image_walker`]'s hostile-tree hardening: iterative, symlinks never
 /// followed, unreadable entries skipped rather than fatal.
-pub fn dir_has_image(dir: &Path, cancel: &AtomicBool, deadline: Instant) -> Probe {
+pub fn dir_has_image(
+    dir: &Path,
+    show_archives: bool,
+    cancel: &AtomicBool,
+    deadline: Instant,
+) -> Probe {
     for entry in image_walker(dir, true) {
         if cancel.load(Ordering::Relaxed) || Instant::now() > deadline {
             return Probe::Aborted;
@@ -316,7 +335,10 @@ pub fn dir_has_image(dir: &Path, cancel: &AtomicBool, deadline: Instant) -> Prob
         let Ok(entry) = entry else {
             continue; // permission-denied / vanished mid-walk — skip, don't abort
         };
-        if entry.file_type().is_file() && is_supported_library_file(entry.path()) {
+        // Honors Show Archives (task #104): with archives hidden, a folder of only
+        // archives reads as empty here too, so ⌘←/→ skips it instead of dead-ending
+        // on a deck that would show nothing.
+        if entry.file_type().is_file() && admits_library_file(entry.path(), show_archives) {
             return Probe::Found;
         }
     }
@@ -342,6 +364,7 @@ pub fn dir_has_image(dir: &Path, cancel: &AtomicBool, deadline: Instant) -> Prob
 pub fn collect_images(
     dir: &Path,
     recursive: bool,
+    show_archives: bool,
     progress: Option<&ScanProgress>,
     out: &mut Vec<PathBuf>,
 ) {
@@ -368,7 +391,7 @@ pub fn collect_images(
             if let Some(p) = progress {
                 p.set_current(rel_display(entry.path(), dir));
             }
-        } else if ft.is_file() && is_supported_library_file(entry.path()) {
+        } else if ft.is_file() && admits_library_file(entry.path(), show_archives) {
             if let Some(p) = progress {
                 p.incr_found();
             }
@@ -383,13 +406,14 @@ pub fn collect_images(
 /// explicit list), and whether the scan was recursive.
 pub fn resolve_source(
     source: &Source,
+    show_archives: bool,
     progress: Option<&ScanProgress>,
 ) -> (Vec<PathBuf>, PathBuf, Option<PathBuf>, bool) {
     match source {
         Source::Scan { roots, recursive } => {
             let mut paths = Vec::new();
             for r in roots {
-                collect_images(r, *recursive, progress, &mut paths);
+                collect_images(r, *recursive, show_archives, progress, &mut paths);
             }
             paths.sort_by(|a, b| ci_path_cmp(a, b));
             let root = roots.first().cloned().unwrap_or_else(|| PathBuf::from("."));
@@ -398,7 +422,7 @@ pub fn resolve_source(
         Source::Explicit(files) => {
             let paths: Vec<PathBuf> = files
                 .iter()
-                .filter(|p| is_supported_library_file(p.as_path()))
+                .filter(|p| admits_library_file(p.as_path(), show_archives))
                 .cloned()
                 .collect();
             let root = files
@@ -423,9 +447,10 @@ pub fn resolve_source(
 pub fn resolve_scan(
     source: &Source,
     cursor: &open::Cursor,
+    show_archives: bool,
     progress: Option<&ScanProgress>,
 ) -> Resolved {
-    let (paths, root, scan_root, recursive) = resolve_source(source, progress);
+    let (paths, root, scan_root, recursive) = resolve_source(source, show_archives, progress);
     // Hide Live-Photo companion .movs — except an explicitly-opened one (Cursor::At),
     // which must appear even if a same-stem still sits beside it.
     let exempt = match cursor {
@@ -520,6 +545,7 @@ impl ScanProgress {
 pub fn stream_scan(
     roots: Vec<PathBuf>,
     recursive: bool,
+    show_archives: bool,
     cursor: open::Cursor,
     root: PathBuf,
     scan_root: Option<PathBuf>,
@@ -556,7 +582,7 @@ pub fn stream_scan(
             if ft.is_dir() {
                 // Publish the directory now being walked (relative to its root) for the chip.
                 progress.set_current(rel_display(entry.path(), r));
-            } else if ft.is_file() && is_supported_library_file(entry.path()) {
+            } else if ft.is_file() && admits_library_file(entry.path(), show_archives) {
                 for p in filter.push(entry.into_path()) {
                     progress.incr_found();
                     if gated && target.as_ref() == Some(&p) {
@@ -794,9 +820,11 @@ pub fn load_seven_z(
 /// Scans and explicit lists become an [`FsSource`]; an archive opens a
 /// [`ZipSource`] (entries read into RAM on demand, never extracted to disk). On a
 /// hard archive failure it logs and falls back to an empty source.
-pub fn resolve_playlist(source: &Source, cursor: &open::Cursor) -> Resolved {
+pub fn resolve_playlist(source: &Source, cursor: &open::Cursor, show_archives: bool) -> Resolved {
     match source {
-        Source::Scan { .. } | Source::Explicit(_) => resolve_scan(source, cursor, None),
+        Source::Scan { .. } | Source::Explicit(_) => {
+            resolve_scan(source, cursor, show_archives, None)
+        }
         // The launch / picker / drop paths open archives via the async-aware
         // `App::begin_archive_open` (which surfaces failures through the egui
         // dialog), so this arm is only a safety net: log and show empty on failure.
@@ -840,6 +868,81 @@ mod archive_video_tests {
         for ext in ["txt", "exe", "pdf", ""] {
             assert!(!is_supported_archive_entry(ext), "{ext} must be excluded");
         }
+    }
+
+    /// Show Archives (task #104): the `show_archives` flag gates only the archive
+    /// "doors" — images and videos are admitted either way, junk never is, and with
+    /// the flag on `admits_library_file` is exactly `is_supported_library_file`.
+    #[test]
+    fn admits_library_file_gates_only_archive_doors() {
+        let jpg = Path::new("/p/a.jpg");
+        let mp4 = Path::new("/p/clip.mp4");
+        let zip = Path::new("/p/pack.zip");
+        let tgz = Path::new("/p/backup.tar.gz");
+        let txt = Path::new("/p/notes.txt");
+
+        // Images/videos: admitted regardless of the flag.
+        for p in [jpg, mp4] {
+            assert!(admits_library_file(p, true), "{p:?} shown");
+            assert!(
+                admits_library_file(p, false),
+                "{p:?} shown even with archives off"
+            );
+        }
+        // Archives: admitted only when show_archives is on.
+        for p in [zip, tgz] {
+            assert!(
+                admits_library_file(p, true),
+                "{p:?} is a door when archives shown"
+            );
+            assert!(
+                !admits_library_file(p, false),
+                "{p:?} hidden when archives off"
+            );
+        }
+        // Junk: never admitted.
+        assert!(!admits_library_file(txt, true));
+        assert!(!admits_library_file(txt, false));
+        // `admits(_, true)` == the archive-always base predicate.
+        for p in [jpg, mp4, zip, tgz, txt] {
+            assert_eq!(admits_library_file(p, true), is_supported_library_file(p));
+        }
+    }
+
+    /// The deck builder drops archive doors when Show Archives is off: a folder with a
+    /// photo, a video, and a `.zip` yields only the photo + video.
+    #[test]
+    fn collect_images_hides_archives_when_show_archives_is_off() {
+        let dir = std::env::temp_dir().join(format!("pb_show_arch_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for name in ["a.jpg", "clip.mp4", "pack.zip"] {
+            std::fs::write(dir.join(name), b"x").unwrap();
+        }
+
+        let mut shown = Vec::new();
+        collect_images(&dir, false, true, None, &mut shown);
+        shown.sort();
+        assert_eq!(
+            shown,
+            vec![
+                dir.join("a.jpg"),
+                dir.join("clip.mp4"),
+                dir.join("pack.zip")
+            ],
+            "with archives on, the door is listed"
+        );
+
+        let mut hidden = Vec::new();
+        collect_images(&dir, false, false, None, &mut hidden);
+        hidden.sort();
+        assert_eq!(
+            hidden,
+            vec![dir.join("a.jpg"), dir.join("clip.mp4")],
+            "with archives off, the .zip door is dropped"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The reported bug: an archive containing ONLY videos refused to open
@@ -1113,6 +1216,7 @@ mod stream_video_tests {
         stream_scan(
             vec![dir.clone()],
             true,
+            true, // show_archives
             open::Cursor::First,
             dir.clone(),
             Some(dir.clone()),
@@ -1163,6 +1267,7 @@ mod stream_video_tests {
                 recursive: true,
             },
             &open::Cursor::First,
+            true, // show_archives
             None,
         );
         let sync_paths: Vec<PathBuf> = (0..sync.source.len())
@@ -1188,6 +1293,7 @@ mod stream_video_tests {
         stream_scan(
             vec![dir.clone()],
             false,
+            true, // show_archives
             open::Cursor::At(target.clone()),
             dir.clone(),
             Some(dir.clone()),

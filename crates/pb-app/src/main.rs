@@ -629,6 +629,10 @@ enum DialogRequest {
     Simple {
         kind: dialog::DialogKind,
         message: String,
+        /// Show the "Don't show archives" opt-out checkbox (task #104) — only ever set on
+        /// the empty-archive Message dialog, so pressing `P` on an archive with no images
+        /// offers a one-click way to stop listing archives. `false` for every other dialog.
+        archive_optout: bool,
     },
     /// The archive "Opening…" determinate-progress dialog (a progress handle + redraw are
     /// wired after it opens).
@@ -1239,11 +1243,15 @@ impl App {
         let root = roots.first().cloned().unwrap_or_else(|| PathBuf::from("."));
         let scan_root = roots.first().cloned();
         let worker_progress = progress.clone();
+        // Read the live Show Archives preference (task #104) at spawn time: with it off, the
+        // walk drops archive "doors" so the deck never lists them.
+        let show_archives = self.core.settings.show_archives;
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             scan::stream_scan(
                 roots,
                 recursive,
+                show_archives,
                 cursor,
                 root,
                 scan_root,
@@ -1444,6 +1452,7 @@ impl App {
         self.pending_dialog = Some(DialogRequest::Simple {
             kind: dialog::DialogKind::Password,
             message: prompt,
+            archive_optout: false,
         });
     }
 
@@ -1452,7 +1461,11 @@ impl App {
     fn report_archive_error(&mut self, e: &archive::ArchiveOpenError) {
         let msg = e.user_message();
         eprintln!("{}: {msg}", pb_app_core::APP_NAME);
-        self.open_message(&msg);
+        // An archive with nothing viewable (task #104): offer "Don't show archives" right on
+        // the notice, so a folder full of empty/irrelevant archives is one click from staying
+        // out of the deck. Every other archive error is a plain notice.
+        let offer_optout = matches!(e, archive::ArchiveOpenError::Empty);
+        self.open_message_ex(&msg, offer_optout);
     }
 
     /// Toggle recursive scanning of the current folder (`Ctrl+R`), keeping the current photo
@@ -1493,6 +1506,63 @@ impl App {
             "Recursive folders: off"
         };
         self.core.show_toast(msg);
+    }
+
+    /// Re-scan the current folder with the live settings (recursive + Show Archives),
+    /// keeping the current photo in view — the streaming re-open `toggle_recursive` does,
+    /// minus the flag flip. Used when a preference that changes *what the walk admits*
+    /// (Show Archives, task #104) changes. A no-op for an archive/explicit deck (no scan
+    /// root to re-walk).
+    fn rescan_current_folder(&mut self) {
+        let Some(root) = self.core.scan_root.clone() else {
+            return;
+        };
+        let cursor = self
+            .core
+            .displayed_item
+            .and_then(|i| self.core.source.path(i))
+            .map(Path::to_path_buf)
+            .map(open::Cursor::At)
+            .unwrap_or(open::Cursor::First);
+        self.begin_dir_scan(
+            Source::Scan {
+                roots: vec![root],
+                recursive: self.core.recursive,
+            },
+            cursor,
+        );
+    }
+
+    /// Toggle View ▸ Show Archives (task #104): flip whether archives show as browsable
+    /// "doors" while scanning a folder, persist the preference, and re-scan the current
+    /// folder so the doors appear/disappear at once (`begin_dir_scan` reads the new value).
+    /// The checkmark tracks it via the per-tick `MenuState` diff. Also reachable from the
+    /// "no images" dialog's opt-out checkbox (`apply_hide_archives`).
+    fn toggle_show_archives(&mut self) {
+        let on = !self.core.settings.show_archives;
+        self.core.settings.show_archives = on;
+        self.core.settings.save();
+        self.rescan_current_folder();
+        self.core.show_toast(if on {
+            "Show archives: on"
+        } else {
+            "Show archives: off"
+        });
+    }
+
+    /// Apply the "Don't show archives" opt-out from the empty-archive dialog's checkbox:
+    /// set the preference to `hide` (checked = hide), persist it, and re-scan the current
+    /// folder so the change lands immediately behind the dialog. Idempotent — re-applying
+    /// the same value just re-scans harmlessly. No toast: the dialog checkbox *is* the
+    /// feedback.
+    fn apply_hide_archives(&mut self, hide: bool) {
+        let show = !hide;
+        if self.core.settings.show_archives == show {
+            return;
+        }
+        self.core.settings.show_archives = show;
+        self.core.settings.save();
+        self.rescan_current_folder();
     }
 
     // ── egui rich-panel overlay (task #54 Phase 4) ──────────────────────────────
@@ -2624,6 +2694,9 @@ impl App {
         // set here (the choke point defaults it off). It rides `MenuState` so the View ▸ Show
         // Toolbar checkmark tracks it through the same per-tick diff as every other check.
         state.show_toolbar = self.core.settings.show_toolbar;
+        // Show Archives (task #104) is a setting too, so the View ▸ Show Archives checkmark
+        // tracks it through the same per-tick MenuState diff.
+        state.show_archives = self.core.settings.show_archives;
         state
     }
 
@@ -2645,6 +2718,7 @@ impl App {
             c.fullscreen.set_checked(state.fullscreen);
             c.slideshow.set_checked(state.slideshow);
             c.toolbar.set_checked(state.show_toolbar);
+            c.show_archives.set_checked(state.show_archives);
             c.mute_live_audio.set_checked(state.mute_live_audio);
             c.subtitles.set_checked(state.subtitles);
             c.info.set_checked(state.info_basic);
@@ -2835,6 +2909,7 @@ impl App {
         match action {
             Action::DeletePermanent => self.confirm_delete_permanent(),
             Action::Recursive => self.toggle_recursive(),
+            Action::ShowArchives => self.toggle_show_archives(),
             Action::CancelScan => self.cancel_scan_command(),
             Action::Quit => self.begin_exit(),
             // Toggle the docked windowed toolbar (#61): flip + persist the setting, then
@@ -2874,6 +2949,7 @@ impl App {
         self.pending_dialog = Some(DialogRequest::Simple {
             kind,
             message: String::new(),
+            archive_optout: false,
         });
     }
 
@@ -2885,6 +2961,7 @@ impl App {
         self.pending_dialog = Some(DialogRequest::Simple {
             kind: dialog::DialogKind::Confirm,
             message: msg,
+            archive_optout: false,
         });
     }
 
@@ -2893,9 +2970,18 @@ impl App {
     /// on OK / Esc. The archive-open path (`archive::ArchiveOpenError::user_message`)
     /// calls this to surface a too-large / corrupt / password / OOM / empty failure.
     pub fn open_message(&mut self, message: &str) {
+        self.open_message_ex(message, false);
+    }
+
+    /// Like [`open_message`](Self::open_message) but with the `archive_optout` checkbox
+    /// (task #104): the empty-archive path passes `true` so the "no images" notice also
+    /// offers "Don't show archives", a one-click way to stop listing archives you keep
+    /// running into. Every other caller uses the plain `open_message`.
+    fn open_message_ex(&mut self, message: &str, archive_optout: bool) {
         self.pending_dialog = Some(DialogRequest::Simple {
             kind: dialog::DialogKind::Message,
             message: message.to_string(),
+            archive_optout,
         });
     }
 
@@ -2936,6 +3022,10 @@ impl App {
         // A live Settings edit produced by this render frame (auto-save); routed below
         // once the `d` borrow is released.
         let mut live_edit: Option<(Option<Box<settings::Settings>>, Option<Keymap>)> = None;
+        // The empty-archive dialog's "Don't show archives" checkbox toggled this frame (task
+        // #104): applied *live* (behind the dialog) once the `d` borrow is released, so it's
+        // independent of which window closes the modal or whether OK is ever clicked.
+        let mut optout_change: Option<bool> = None;
         // Disjoint fields, borrowed apart: the Settings preview needs the core's rasterizer
         // while the dialog window is borrowed mutably. Destructuring is what makes that
         // legal — `self.dialog.as_mut()` alongside `self.core.subtitles` would not be.
@@ -2954,6 +3044,7 @@ impl App {
                     d.render(core.subtitles.rasterizer_mut());
                     answer = d.take_confirm_result();
                     live_edit = d.take_settings_edit();
+                    optout_change = d.take_hide_archives_change();
                 }
                 _ => {
                     if repaint {
@@ -2962,12 +3053,24 @@ impl App {
                 }
             }
         }
+        // Apply the archive opt-out the moment its checkbox changed — before any close path,
+        // so checking the box hides archives even if the user then dismisses with Esc.
+        if let Some(hide) = optout_change {
+            self.apply_hide_archives(hide);
+        }
         // Apply + persist a live Settings edit (the auto-save path — window stays open).
         if let Some((settings, keymap)) = live_edit {
+            let prev_show_archives = self.core.settings.show_archives;
             self.route_dialog_outcome(DialogOutcome::SettingsEdited { settings, keymap });
             // The edit may have toggled the toolbar (task #61): re-reserve/free the photo's top
             // inset and re-render so the strip appears/disappears immediately (no restart).
             self.refresh_chrome_inset();
+            // A Show Archives change (task #104) re-scans the current folder so the doors
+            // appear/disappear at once — Settings behaves like the View ▸ Show Archives toggle,
+            // not like Recursive (whose Settings entry is only a default for future opens).
+            if self.core.settings.show_archives != prev_show_archives {
+                self.rescan_current_folder();
+            }
         }
         if let Some(confirmed) = answer {
             // Turn the button answer into an outcome, extracting any egui-side payload here
@@ -3470,8 +3573,12 @@ impl App {
         let refresh = self.core.refresh_hz();
         let parent = self.window.clone();
         match req {
-            DialogRequest::Simple { kind, message } => {
-                self.dialog = dialog::DialogWindow::open(
+            DialogRequest::Simple {
+                kind,
+                message,
+                archive_optout,
+            } => {
+                let mut dlg = dialog::DialogWindow::open(
                     kind,
                     event_loop,
                     refresh,
@@ -3480,6 +3587,13 @@ impl App {
                     &self.core.keymap,
                     parent.as_deref(),
                 );
+                // The empty-archive notice (task #104) grows a "Don't show archives" checkbox.
+                if archive_optout {
+                    if let Some(d) = dlg.as_mut() {
+                        d.enable_archive_optout();
+                    }
+                }
+                self.dialog = dlg;
             }
             DialogRequest::Loading { message, progress } => {
                 let mut dlg = dialog::DialogWindow::open(
@@ -3980,6 +4094,29 @@ impl ApplicationHandler for App {
                         if quit {
                             self.begin_exit();
                         }
+                    } else if self.dialog.is_some() {
+                        // A dialog is open but the main window kept keyboard focus — Windows
+                        // often refuses to move focus to a dialog spawned in response to the
+                        // very keypress that opened it (the empty-archive "no images" case:
+                        // `P` opens the door, the door is empty, the Message dialog appears
+                        // while `P`'s window stays focused). The dialog is *modal*, so no key
+                        // may fall through to the viewer — that was the reported bug, where
+                        // Enter/Space to click OK also advanced the photo. Enter/Space answer a
+                        // Message dialog (its only button is OK), the same as the focused dialog
+                        // window would; every other key is swallowed here rather than driving
+                        // navigation. (Esc is handled above; Password/Ask/Settings need typing,
+                        // which reaches them only when the dialog window actually has focus.)
+                        let is_message = self.dialog.as_ref().map(|d| d.kind())
+                            == Some(dialog::DialogKind::Message);
+                        if is_message
+                            && matches!(
+                                code,
+                                KeyCode::Enter | KeyCode::NumpadEnter | KeyCode::Space
+                            )
+                        {
+                            self.dialog = None;
+                        }
+                        // Anything else: swallow. A modal dialog never drives the viewer.
                     } else if let Some(key) = pb_key_winit::from_winit(code) {
                         // Translate to a shell-neutral `CoreEvent` and let the core resolve +
                         // route it (`handle`: repeat-gate + ⌘-no-fall-through, then one-shot →
@@ -4484,7 +4621,7 @@ fn scan_message(name: &str) -> String {
 #[cfg(test)]
 fn scan_images(dir: &Path, recursive: bool) -> Vec<PathBuf> {
     let mut paths = Vec::new();
-    scan::collect_images(dir, recursive, None, &mut paths);
+    scan::collect_images(dir, recursive, true, None, &mut paths);
     paths.sort();
     paths
 }
@@ -4890,7 +5027,7 @@ fn main() {
     let resolved = if deferred {
         Resolved::empty()
     } else {
-        scan::resolve_playlist(&plan.source, &plan.cursor)
+        scan::resolve_playlist(&plan.source, &plan.cursor, startup_settings.show_archives)
     };
 
     match &plan.source {
@@ -5038,7 +5175,7 @@ mod tests {
             PathBuf::from("/p/notes.txt"),
             PathBuf::from("/p/b.png"),
         ]);
-        let (paths, root, scan_root, recursive) = scan::resolve_source(&src, None);
+        let (paths, root, scan_root, recursive) = scan::resolve_source(&src, true, None);
         assert_eq!(
             paths,
             vec![PathBuf::from("/p/a.jpg"), PathBuf::from("/p/b.png")]
@@ -5185,7 +5322,7 @@ mod tests {
         let progress = ScanProgress::new();
         progress.request_cancel();
         let mut out = Vec::new();
-        scan::collect_images(&dir, true, Some(&progress), &mut out);
+        scan::collect_images(&dir, true, true, Some(&progress), &mut out);
         assert!(out.is_empty(), "a pre-cancelled scan collects nothing");
 
         let _ = fs::remove_dir_all(&dir);
@@ -5204,7 +5341,7 @@ mod tests {
 
         let progress = ScanProgress::new();
         let mut out = Vec::new();
-        scan::collect_images(&dir, true, Some(&progress), &mut out);
+        scan::collect_images(&dir, true, true, Some(&progress), &mut out);
 
         assert_eq!(out.len(), 3, "three supported images (the .txt is skipped)");
         assert_eq!(
@@ -5502,8 +5639,11 @@ mod tests {
         let before = snapshot_tree(&dir);
 
         // The disk-touching code the app runs while viewing a zip.
-        let resolved =
-            scan::resolve_playlist(&Source::Archive(zip_path.clone()), &open::Cursor::First);
+        let resolved = scan::resolve_playlist(
+            &Source::Archive(zip_path.clone()),
+            &open::Cursor::First,
+            true,
+        );
         assert_eq!(
             resolved.source.len(),
             4,
@@ -5606,8 +5746,11 @@ mod tests {
 
         let before = snapshot_tree(&dir);
 
-        let resolved =
-            scan::resolve_playlist(&Source::Archive(tar_path.clone()), &open::Cursor::First);
+        let resolved = scan::resolve_playlist(
+            &Source::Archive(tar_path.clone()),
+            &open::Cursor::First,
+            true,
+        );
         assert_eq!(resolved.source.len(), 3, "tar should yield three images");
         let fit = FitBox {
             max_width: 64,

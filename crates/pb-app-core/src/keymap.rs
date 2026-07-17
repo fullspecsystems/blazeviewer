@@ -237,6 +237,7 @@ pub const EDITOR_GROUPS: &[(&str, &[Action])] = &[
             Action::NextFolder,
             Action::Fullscreen,
             Action::Recursive,
+            Action::ShowArchives,
         ],
     ),
     (
@@ -633,6 +634,8 @@ fn default_bindings() -> Vec<(Action, Vec<KeyChord>)> {
             },
         ),
         one(Action::Recursive, "Ctrl+R"),
+        // Show/hide archives as folder doors (task #104) — View-menu only, no default key.
+        (Action::ShowArchives, vec![]),
         // Stop an in-flight folder scan — menu-only by default (Esc stays Quit); a user can
         // bind a key in Settings if they want one.
         (Action::CancelScan, vec![]),

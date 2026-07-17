@@ -28,6 +28,13 @@ with any pre-release suffix carried only by the tag.
   archive, play a video or an animation — so the chord your fingers already know works here, and
   pairs with the `Cmd+↑` / `Alt+↑` that go back out to the enclosing folder. `P` still does
   everything it did.
+- **Turn off archives in the deck when you don't want them.** A new **View ▸ Show Archives**
+  toggle (also in Settings, under Recursive) controls whether archives show as cards while you
+  browse a folder. It's on by default; turn it off in a folder like Downloads that's full of
+  archives you'll never flick through, and they stay out of your way. There's also a shortcut:
+  when you open an archive that has no images, the "no images" notice now offers a **Don't show
+  archives** checkbox that flips the setting right there. Opening an archive from Open File still
+  works either way — this only changes whether a folder *lists* them.
 
 ### Changed
 - **The side panels resize narrower now (macOS).** The folder / thumbnails pane shrinks all
@@ -36,6 +43,10 @@ with any pre-release suffix carried only by the tag.
   touch narrower too, down to 260 pt (was 280 pt).
 
 ### Fixed
+- **Dialogs no longer let a keypress slip through to the photo (Windows).** When a message like
+  "This archive has no images to show" appeared, pressing Enter or Space to dismiss it also
+  advanced to the next photo. The dialog is now properly modal: the key that closes it does only
+  that, and no keypress reaches the viewer while a dialog is open.
 - **Restoring the window from minimized no longer flashes a solid color (Windows).** A minimized
   window reports a zero-size client area, which the app was treating as a real resize: it shrank
   the photo to a single pixel, so on restore that one pixel was stretched to fill the screen for a

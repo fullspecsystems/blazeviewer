@@ -624,13 +624,14 @@ const SIBLING_BUDGET: Duration = Duration::from_secs(3);
 /// Resolve the Go ▸ previous/next (`step` = ∓1) target of `root` off-thread —
 /// the listing (and even the `is_dir` stat) can stall on a dead share, and the
 /// per-candidate photo probes (#49) can walk entire subtrees.
-pub(crate) fn spawn_sibling(root: PathBuf, step: i32) -> TreeIo {
+pub(crate) fn spawn_sibling(root: PathBuf, step: i32, show_archives: bool) -> TreeIo {
     let (tx, rx) = std::sync::mpsc::channel();
     let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let seen = std::sync::Arc::clone(&cancel);
     std::thread::spawn(move || {
         let deadline = Instant::now() + SIBLING_BUDGET;
-        let target = sibling_with_photos(&root, step, &seen, SIBLING_HOP_CAP, deadline);
+        let target =
+            sibling_with_photos(&root, step, show_archives, &seen, SIBLING_HOP_CAP, deadline);
         let _ = tx.send(TreeIoResult::Sibling {
             from_root: root,
             target,
@@ -653,6 +654,7 @@ pub(crate) fn spawn_sibling(root: PathBuf, step: i32) -> TreeIo {
 fn sibling_with_photos(
     root: &Path,
     step: i32,
+    show_archives: bool,
     cancel: &std::sync::atomic::AtomicBool,
     cap: usize,
     deadline: Instant,
@@ -668,7 +670,7 @@ fn sibling_with_photos(
     let mut hops = 0usize;
     while i >= 0 && (i as usize) < sibs.len() && hops < cap {
         let candidate = parent.join(&sibs[i as usize]);
-        match crate::scan::dir_has_image(&candidate, cancel, deadline) {
+        match crate::scan::dir_has_image(&candidate, show_archives, cancel, deadline) {
             crate::scan::Probe::Found => return Some(candidate),
             crate::scan::Probe::Empty => {} // skip it — keep stepping
             crate::scan::Probe::Aborted => return None,
@@ -1008,7 +1010,7 @@ mod tests {
         let live = AtomicBool::new(false);
         let far = Instant::now() + Duration::from_secs(60);
         let sib = |from: &str, step, cancel: &AtomicBool, cap| {
-            sibling_with_photos(&base.join(from), step, cancel, cap, far)
+            sibling_with_photos(&base.join(from), step, true, cancel, cap, far)
         };
         // beta is photo-less → skipped in both directions.
         assert_eq!(sib("alpha", 1, &live, 64), Some(base.join("gamma")));
@@ -1027,6 +1029,7 @@ mod tests {
             sibling_with_photos(
                 &base.join("alpha"),
                 1,
+                true,
                 &live,
                 64,
                 Instant::now() - Duration::from_secs(1)

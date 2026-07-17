@@ -122,6 +122,11 @@ pub enum Action {
     NextFolder,
     Fullscreen,
     Recursive,
+    /// Toggle whether archives (`.zip`/`.7z`/tar/rar…) show as browsable "doors" while
+    /// scanning a folder (task #104), mirroring `settings.show_archives`. Menu-only by
+    /// default (View ▸ Show Archives), unbound — like a scan preference, it re-scans the
+    /// current folder to add/remove the doors. Never affects opening an archive directly.
+    ShowArchives,
     /// Stop an in-flight folder scan, keeping whatever has streamed in so far. Only
     /// meaningful while a scan is running (the menu item disables otherwise); unbound by
     /// default — Esc stays Quit.
@@ -205,6 +210,7 @@ impl Action {
         Action::NextFolder,
         Action::Fullscreen,
         Action::Recursive,
+        Action::ShowArchives,
         Action::CancelScan,
         Action::SlideshowToggle,
         Action::SlideshowFaster,
@@ -270,6 +276,7 @@ impl Action {
             Action::NextFolder => "next_folder",
             Action::Fullscreen => "fullscreen",
             Action::Recursive => "recursive",
+            Action::ShowArchives => "show_archives",
             Action::CancelScan => "cancel_scan",
             Action::SlideshowToggle => "slideshow",
             Action::SlideshowFaster => "slideshow_faster",
@@ -359,6 +366,7 @@ impl Action {
             // borderless speed mode, deliberately distinct from the OS's native full screen.
             Action::Fullscreen => "Quick Full Screen",
             Action::Recursive => "Recursive (current folder)",
+            Action::ShowArchives => "Show archives",
             Action::CancelScan => "Stop scanning",
             Action::SlideshowToggle => "Slideshow",
             Action::SlideshowFaster => "Slideshow faster",

@@ -131,9 +131,10 @@ struct SettingsDraft {
     hold_delay_ms: u32,
     scroll_action: usize, // 0 = Pan, 1 = Zoom (what a plain scroll does)
     recursive: bool,
-    scale_mode: usize,      // 0 = Fit, 1 = Fill, 2 = Original
-    appearance: usize,      // 0 = System, 1 = Light, 2 = Dark (#46)
-    accent_source: usize,   // 0 = System, 1 = Custom, 2 = Blaze Orange (accent color)
+    show_archives: bool, // list archives as folder doors while browsing (task #104)
+    scale_mode: usize,   // 0 = Fit, 1 = Fill, 2 = Original
+    appearance: usize,   // 0 = System, 1 = Light, 2 = Dark (#46)
+    accent_source: usize, // 0 = System, 1 = Custom, 2 = Blaze Orange (accent color)
     accent_custom: [u8; 3], // sRGB bytes — the custom accent (egui `color_edit_button_srgb`)
     info_line_align: usize, // 0 = Left, 1 = Center, 2 = Right (task #54)
     // The docked windowed toolbar (task #61).
@@ -203,6 +204,7 @@ impl SettingsDraft {
             max_fps,
             hold_delay_ms: s.hold_delay_ms,
             recursive: s.recursive,
+            show_archives: s.show_archives,
             scale_mode: match s.scale_mode {
                 settings::ScaleModePref::Fit => 0,
                 settings::ScaleModePref::Fill => 1,
@@ -287,6 +289,7 @@ impl SettingsDraft {
             _ => settings::ScrollAction::Pan,
         };
         s.recursive = self.recursive;
+        s.show_archives = self.show_archives;
         s.scale_mode = match self.scale_mode {
             1 => settings::ScaleModePref::Fill,
             2 => settings::ScaleModePref::Original,
@@ -524,6 +527,14 @@ pub struct DialogWindow {
     /// draw the indeterminate progress and calls `request_cancel` from Cancel / Esc).
     /// `None` otherwise.
     scan_progress: Option<ScanProgress>,
+    /// The empty-archive notice's "Don't show archives" opt-out (task #104): `None` = no
+    /// checkbox (every dialog but the empty-archive Message), `Some(checked)` = show it with
+    /// this state. Enabled via [`enable_archive_optout`](DialogWindow::enable_archive_optout).
+    archive_optout: Option<bool>,
+    /// The last `archive_optout` value the shell observed, so
+    /// [`take_hide_archives_change`](DialogWindow::take_hide_archives_change) reports the box
+    /// only when it actually changes (the shell re-scans on each real change).
+    archive_optout_polled: bool,
 }
 
 impl DialogWindow {
@@ -736,6 +747,8 @@ impl DialogWindow {
             next_repaint: None,
             progress: None,
             scan_progress: None,
+            archive_optout: None,
+            archive_optout_polled: false,
         };
         // Prime two hidden frames: the first lets egui apply its base theme, the second
         // paints with our design-system style layered on top — so the window is already
@@ -765,6 +778,25 @@ impl DialogWindow {
     /// a button is clicked. The caller closes the dialog and acts on the result.
     pub fn take_confirm_result(&mut self) -> Option<bool> {
         self.confirm_result.take()
+    }
+
+    /// Grow the "Don't show archives" opt-out checkbox on this (Message) dialog, unchecked
+    /// (task #104). The empty-archive notice calls this so pressing `P` on an archive with
+    /// no images offers a one-click way to stop listing archives.
+    pub fn enable_archive_optout(&mut self) {
+        self.archive_optout = Some(false);
+    }
+
+    /// Report the opt-out checkbox's value **when it changed** since the last poll (`Some(v)`),
+    /// else `None`. `v == true` means "hide archives". Polled each render frame by the shell,
+    /// which applies + persists the preference and re-scans — so the effect lands live, the
+    /// moment the box is toggled, regardless of how the dialog is later closed.
+    pub fn take_hide_archives_change(&mut self) -> Option<bool> {
+        let cur = self.archive_optout?;
+        (cur != self.archive_optout_polled).then(|| {
+            self.archive_optout_polled = cur;
+            cur
+        })
     }
 
     /// Take the password the user just submitted on a [`DialogKind::Password`]
@@ -976,6 +1008,7 @@ impl DialogWindow {
             raster,
             cache: &mut self.subtitle_preview,
         };
+        let archive_optout = &mut self.archive_optout;
         let mut confirm_click: Option<bool> = None;
         let full_output = ctx.run(raw_input, |ctx| match kind {
             DialogKind::About => {
@@ -1004,7 +1037,7 @@ impl DialogWindow {
                 confirm_click = confirm_dialog(ctx, &msg);
             }
             DialogKind::Message => {
-                confirm_click = message_dialog(ctx, &msg);
+                confirm_click = message_dialog(ctx, &msg, archive_optout);
             }
             DialogKind::Password => {
                 confirm_click = password_dialog(
@@ -1439,7 +1472,11 @@ fn confirm_dialog(ctx: &egui::Context, message: &str) -> Option<bool> {
 /// warning icon + the body text, and a bottom-right OK button (default-focused).
 /// Returns `Some(true)` when OK is clicked; Esc / the close button dismiss it via the
 /// event router. Shares `DIALOG_PAD` with the confirm dialog for matching margins.
-fn message_dialog(ctx: &egui::Context, message: &str) -> Option<bool> {
+fn message_dialog(
+    ctx: &egui::Context,
+    message: &str,
+    archive_optout: &mut Option<bool>,
+) -> Option<bool> {
     let mut ok = None;
     let p = pbui::Palette::new(ctx.style().visuals.dark_mode);
     button_bar(ctx, "message_bar", |ui| {
@@ -1463,6 +1500,14 @@ fn message_dialog(ctx: &egui::Context, message: &str) -> Option<bool> {
                 pbui::icon::Tone::Warning,
                 |ui| {
                     ui.add(egui::Label::new(egui::RichText::new(message).size(MSG_SIZE)).wrap());
+                    // The empty-archive notice (task #104) grows a "Don't show archives"
+                    // opt-out here, under the message and aligned with it. Toggling it applies
+                    // live (the shell polls `take_hide_archives_change` and re-scans), so OK
+                    // just closes — the checkbox has already done its work.
+                    if let Some(checked) = archive_optout.as_mut() {
+                        ui.add_space(pbui::GAP);
+                        ui.checkbox(checked, "Don't show archives");
+                    }
                 },
             );
         });
@@ -2308,6 +2353,16 @@ fn general_tab(ui: &mut egui::Ui, p: &pbui::Palette, d: &mut SettingsDraft) {
             Some("Default for newly opened folders. The View menu toggles the current one."),
             |ui| {
                 pbui::toggle_with_label(ui, p, &mut d.recursive);
+            },
+        );
+        pbui::card_row(
+            ui,
+            p,
+            None,
+            "Show archives",
+            Some("List archives (zip, 7z, rar, tar) as files you can open while browsing. The View menu toggles it too."),
+            |ui| {
+                pbui::toggle_with_label(ui, p, &mut d.show_archives);
             },
         );
     });

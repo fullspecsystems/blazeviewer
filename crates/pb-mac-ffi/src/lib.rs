@@ -2373,6 +2373,12 @@ impl AppCoreHandle {
             self.core.displayed_item,
             self.core.compare_pin,
         );
+        // Show Archives (task #104) is a setting, defaulted off by the pure choke point, so
+        // override it here the way the winit shell does (`current_menu_state`).
+        let next = contract::MenuState {
+            show_archives: self.core.settings.show_archives,
+            ..next
+        };
         if self.last_menu_state == next {
             return;
         }
@@ -2526,6 +2532,7 @@ impl AppCoreHandle {
                 // Flow commands whose execution is shell-*Rust* (the scan worker lives in
                 // this crate) — run here; only the genuinely Swift-native flows surface.
                 C::ShellFlowAction(Action::Recursive) => self.toggle_recursive(),
+                C::ShellFlowAction(Action::ShowArchives) => self.toggle_show_archives(),
                 C::ShellFlowAction(Action::CancelScan) => self.cancel_scan_command(),
                 // NS2: the permanent-delete confirm opens Rust-side (arms the pending item
                 // + composes the question), surfacing as ShowDialog("confirm").
@@ -2646,6 +2653,42 @@ impl AppCoreHandle {
         });
     }
 
+    /// Toggle View ▸ Show Archives (task #104) — the winit shell's `toggle_show_archives`
+    /// mirrored: flip whether archives show as folder doors, persist it, and re-stream the
+    /// current folder (preserving the current photo). A no-op for a non-folder deck.
+    fn toggle_show_archives(&mut self) {
+        let on = !self.core.settings.show_archives;
+        self.core.settings.show_archives = on;
+        self.core.settings.save();
+        let Some(root) = self.core.scan_root.clone() else {
+            self.core.show_toast(if on {
+                "Show archives: on"
+            } else {
+                "Show archives: off"
+            });
+            return;
+        };
+        let cursor = self
+            .core
+            .displayed_item
+            .and_then(|i| self.core.source.path(i))
+            .map(Path::to_path_buf)
+            .map(Cursor::At)
+            .unwrap_or(Cursor::First);
+        self.begin_dir_scan(
+            Source::Scan {
+                roots: vec![root],
+                recursive: self.core.recursive,
+            },
+            cursor,
+        );
+        self.core.show_toast(if on {
+            "Show archives: on"
+        } else {
+            "Show archives: off"
+        });
+    }
+
     /// File ▸ Stop Scanning — stop the in-flight walk, **keeping what streamed in**
     /// (the winit `cancel_scan_command` mirrored). No-op when no scan is running.
     fn cancel_scan_command(&mut self) {
@@ -2675,6 +2718,8 @@ impl AppCoreHandle {
         };
         let root = roots.first().cloned().unwrap_or_else(|| PathBuf::from("."));
         let scan_root = roots.first().cloned();
+        // Live Show Archives preference (task #104): with it off, the walk drops archive doors.
+        let show_archives = self.core.settings.show_archives;
         // The scan root's display name for the Scanning dialog headline (winit's
         // `scan_display_name`).
         let name = root
@@ -2687,6 +2732,7 @@ impl AppCoreHandle {
             scan::stream_scan(
                 roots,
                 recursive,
+                show_archives,
                 cursor,
                 root,
                 scan_root,

@@ -555,6 +555,7 @@ impl AppCore {
             // persisting it, and re-reserving the photo's top inset — the core stays agnostic.
             Action::DeletePermanent
             | Action::Recursive
+            | Action::ShowArchives
             | Action::CancelScan
             | Action::Quit
             | Action::ToggleToolbar => self
@@ -1234,7 +1235,7 @@ impl AppCore {
                 });
             }
             src @ Source::Explicit(_) => {
-                let r = crate::scan::resolve_playlist(&src, &cursor);
+                let r = crate::scan::resolve_playlist(&src, &cursor, self.settings.show_archives);
                 if r.source.is_empty() {
                     eprintln!("{}: no supported images in that selection", crate::APP_NAME);
                     return;
@@ -1915,6 +1916,9 @@ impl AppCore {
             // The docked toolbar (#61) is a shell-honored setting, not derived from view state,
             // so the choke point defaults it off and the shell overrides it from `settings`.
             show_toolbar: false,
+            // Show Archives (task #104) is likewise a setting, not derived view state: default
+            // it off here and let each shell override it from `settings.show_archives`.
+            show_archives: false,
             mute_live_audio,
             subtitles,
             // Compare (task #43): both raw states cross so the derivation lives HERE,
@@ -2822,7 +2826,11 @@ impl AppCore {
         if anchor.as_os_str().is_empty() {
             return;
         }
-        self.tree_io = Some(crate::folder_tree::spawn_sibling(anchor, dir));
+        self.tree_io = Some(crate::folder_tree::spawn_sibling(
+            anchor,
+            dir,
+            self.settings.show_archives,
+        ));
     }
 
     /// The source index at the next (`dir > 0`) / previous folder **boundary** in the deck

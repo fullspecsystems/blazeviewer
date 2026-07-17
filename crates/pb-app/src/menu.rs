@@ -53,6 +53,8 @@ pub mod ids {
     pub const ZOOM_OUT: &str = "zoom_out";
     pub const FULLSCREEN: &str = "fullscreen";
     pub const RECURSIVE: &str = "recursive";
+    /// Matches `Action::ShowArchives.id()` (task #104).
+    pub const SHOW_ARCHIVES: &str = "show_archives";
     pub const SLIDESHOW: &str = "slideshow";
     pub const SLIDESHOW_FASTER: &str = "slideshow_faster";
     pub const SLIDESHOW_SLOWER: &str = "slideshow_slower";
@@ -259,6 +261,7 @@ pub enum MenuAction {
     ZoomOut,
     Fullscreen,
     Recursive,
+    ShowArchives,
     Slideshow,
     SlideshowFaster,
     SlideshowSlower,
@@ -319,6 +322,7 @@ impl MenuAction {
             MenuAction::ZoomOut => Action::ZoomOut,
             MenuAction::Fullscreen => Action::Fullscreen,
             MenuAction::Recursive => Action::Recursive,
+            MenuAction::ShowArchives => Action::ShowArchives,
             MenuAction::Slideshow => Action::SlideshowToggle,
             MenuAction::SlideshowFaster => Action::SlideshowFaster,
             MenuAction::SlideshowSlower => Action::SlideshowSlower,
@@ -380,6 +384,7 @@ pub fn action_for(id: &str) -> Option<MenuAction> {
         ZOOM_OUT => MenuAction::ZoomOut,
         FULLSCREEN => MenuAction::Fullscreen,
         RECURSIVE => MenuAction::Recursive,
+        SHOW_ARCHIVES => MenuAction::ShowArchives,
         SLIDESHOW => MenuAction::Slideshow,
         SLIDESHOW_FASTER => MenuAction::SlideshowFaster,
         SLIDESHOW_SLOWER => MenuAction::SlideshowSlower,
@@ -470,6 +475,8 @@ pub struct ViewChecks {
     pub fill: CheckMenuItem,
     pub original: CheckMenuItem,
     pub recursive: CheckMenuItem,
+    /// View ▸ Show Archives (task #104): checked while archives show as folder doors.
+    pub show_archives: CheckMenuItem,
     pub fullscreen: CheckMenuItem,
     pub slideshow: CheckMenuItem,
     /// View ▸ Show Toolbar (#61): checked while the docked windowed toolbar is on.
@@ -604,6 +611,8 @@ pub fn build_menu(keymap: &Keymap) -> BuiltMenu {
     let fill = check_item(ids::FILL, "Crop to Fill\t9");
     let original = check_item(ids::ORIGINAL, "Original 1:1\t0");
     let recursive = check_item(ids::RECURSIVE, "Recursive (This Folder)\tCtrl+R");
+    // Show archives as browsable folder doors (task #104) — unbound by default, so no hint.
+    let show_archives = check_item(ids::SHOW_ARCHIVES, "Show Archives");
     // Derive the hint from the keymap (F is the primary now, cross-platform), not a hardcoded
     // F11 — so the menu, the help overlay, and the toolbar's exit toast all advertise one key.
     let fullscreen = check_item(
@@ -630,6 +639,7 @@ pub fn build_menu(keymap: &Keymap) -> BuiltMenu {
         &sep(),
         &fullscreen,
         &recursive,
+        &show_archives,
         &slideshow,
         &item(ids::SLIDESHOW_FASTER, "Slideshow Faster\t["),
         &item(ids::SLIDESHOW_SLOWER, "Slideshow Slower\t]"),
@@ -769,6 +779,7 @@ pub fn build_menu(keymap: &Keymap) -> BuiltMenu {
             fill,
             original,
             recursive,
+            show_archives,
             fullscreen,
             slideshow,
             toolbar,
@@ -947,6 +958,12 @@ pub fn menu_bar_spec(keymap: &Keymap, s: &crate::contract::MenuState) -> Vec<Men
                     "Recursive (This Folder)\tCtrl+R",
                     true,
                     s.recursive,
+                ),
+                check(
+                    MenuAction::ShowArchives,
+                    "Show Archives",
+                    true,
+                    s.show_archives,
                 ),
                 check(MenuAction::Slideshow, "Slideshow\tS", true, s.slideshow),
                 item(MenuAction::SlideshowFaster, "Slideshow Faster\t[", true),

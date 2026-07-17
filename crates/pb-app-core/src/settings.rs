@@ -145,6 +145,16 @@ pub struct Settings {
     pub startup_mode: StartupMode,
     /// Open folders recursively by default (picker / drag-drop / association).
     pub recursive: bool,
+    /// Show archives (`.zip`/`.7z`/tar/rar…) as "doors" while browsing a folder (task
+    /// #104). Default on — an archive on disk is a browsable item you press `P` to enter.
+    /// Turn it off (View ▸ Show Archives, or the checkbox on the "no images" dialog) to
+    /// keep archives out of the deck: handy in a folder like Downloads that's full of
+    /// archives you don't want to flick through. Never affects opening an archive
+    /// explicitly (File ▸ Open) — only whether a scan lists them.
+    ///
+    /// A preference, not a viewing trace (privacy #2): it records that you'd rather not
+    /// see archives, never which folder or which archive.
+    pub show_archives: bool,
     /// Hold-to-blaze: starting advance rate in photos/sec — the ramp's floor (#19).
     pub start_speed: f32,
     /// Hold-to-blaze: seconds to ramp from `start_speed` up to the ceiling (#19).
@@ -309,6 +319,7 @@ impl Default for Settings {
             fullscreen: false,
             startup_mode: StartupMode::Remember,
             recursive: true,
+            show_archives: true, // archives are browsable doors by default (task #104)
             // A gentle floor that ramps up to the refresh ceiling, so hold-to-blaze
             // shows off its acceleration by default rather than starting at full tilt.
             start_speed: 2.0,    // photos/sec the ramp starts from (#19)

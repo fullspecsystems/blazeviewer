@@ -156,6 +156,11 @@ pub struct MenuState {
     /// View ▸ Show Toolbar — checked when the docked windowed toolbar is on (#61). A
     /// Windows/Linux-shell setting; macOS ignores it (it has a native toolbar).
     pub show_toolbar: bool,
+    /// View ▸ Show Archives — checked when archives show as "doors" while browsing a
+    /// folder (task #104), mirroring `settings.show_archives`. Always *enabled*, like Show
+    /// Toolbar: a preference the user sets whenever they like, not derived from what's on
+    /// screen. Defaulted off by the pure choke point; each shell overrides from settings.
+    pub show_archives: bool,
     /// Image ▸ Mute Live Photo Audio — checked when Live Photo audio is muted (#38).
     pub mute_live_audio: bool,
     /// View ▸ Subtitles — checked when captions are on (task #90). Always *enabled*,
