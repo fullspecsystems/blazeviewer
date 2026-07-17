@@ -8342,12 +8342,12 @@ impl AppCore {
     }
 
     /// Row `row` as a **Media Foundation reader stream index** (`-1` = this row isn't
-    /// MF-located) — the Windows WASAPI route's currency, fed to the engine's
-    /// `set_track`. Populated by MF's own catalog, or — the usual `ffprobe` build,
-    /// where FFmpeg's catalog supersedes — by the FFmpeg→MF bridge
-    /// (`pb_decode::tracks::bridge_mf_audio_locators`). MF enumerates streams in a
-    /// different order than the container, which is why this can never be a row or an
-    /// FFmpeg index in disguise.
+    /// MF-located) — one of the two currencies the Windows WASAPI engine accepts.
+    /// Only MF's *own* catalog mints these, which on Windows means a no-`ffprobe`
+    /// build: the usual `ffprobe` build runs FFmpeg's catalog with `FfStream`
+    /// locators and the engine decodes those directly (FFmpeg-first). MF's stream
+    /// order differs from the container's, which is why an MF index can never be a
+    /// row or an FFmpeg index in disguise.
     pub fn audio_row_mf_stream(&self, row: usize) -> i64 {
         match self.audio_row_locator(row) {
             Some(pb_decode::tracks::TrackLocator::MfStream(s)) => *s as i64,
@@ -9772,11 +9772,13 @@ mod tests {
         assert_eq!(t.message, "Only one audio track");
     }
 
-    /// The Windows (WASAPI/MF) currency accessors (task #99): a row resolves to its MF
-    /// reader stream, a stream resolves back to its row, and a row with no MF locator
-    /// answers `-1` — the shell's cue to refuse the switch rather than guess.
+    /// The Windows (WASAPI) currency accessors (task #99): each row resolves in
+    /// whichever currency its locator carries, a stream resolves back to its row, and a
+    /// row without a locator in the asked currency answers `-1` — the shell's cue to try
+    /// the other currency or refuse. Both currencies coexist because the engine takes
+    /// either (FFmpeg's own catalog carries `FfStream`; MF's fallback catalog `MfStream`).
     #[test]
-    fn mf_stream_accessors_round_trip_and_refuse_unbridged_rows() {
+    fn audio_stream_accessors_round_trip_in_both_currencies() {
         let mut core = core_with_a_native_video();
         let mut a0 = track("AAC", "eng");
         a0.id.local_id = 1;
@@ -9788,7 +9790,7 @@ mod tests {
             pb_decode::TrackSet::complete(vec![a0, a1]),
             pb_decode::TrackSet::complete(vec![]),
         );
-        // Row 0 was bridged to MF stream 3; row 1 has only its FFmpeg locator.
+        // Row 0 is MF-located (the fallback-catalog shape), row 1 FFmpeg-located.
         catalog.set_locator(1, pb_decode::tracks::TrackLocator::MfStream(3));
         catalog.set_locator(2, pb_decode::tracks::TrackLocator::FfStream(2));
         seed_details(&mut core, 0, Some(catalog), Some(true));

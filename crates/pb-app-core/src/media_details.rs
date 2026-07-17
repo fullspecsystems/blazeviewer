@@ -190,21 +190,17 @@ pub fn probe_job(source: &dyn ItemSource, item: usize, generation: u64) -> ItemD
         // which needs a video decoder the demuxers-only Windows FFmpeg does not have
         // (it would fail, and the supersede would silently never happen). MF already
         // gave us the facts; FFmpeg is asked for exactly the part MF cannot answer.
+        // (There is deliberately NO FFmpeg→MF locator bridge here. One existed for a
+        // day — audio rows got their FfStream locator REPLACED by the MF twin's — and
+        // it was the root of three owner-hit defects at once, because the catalog holds
+        // one locator per track and the engine decodes FFmpeg-first: the startup tick
+        // couldn't resolve, and switches were forced onto the MF decoder, which
+        // decodes film codecs badly or not at all. FFmpeg's catalog keeps FFmpeg's
+        // locators; MF's own catalog — the no-ffprobe fallback — keeps MF's.)
         #[cfg(all(windows, feature = "ffprobe"))]
         {
             let input = crate::video::VideoInput::Path(path.to_path_buf());
-            if let Ok(mut tracks) = pb_decode::ff_probe_tracks(&input, generation) {
-                // Before MF's catalog is superseded, stamp each FFmpeg audio track with
-                // its MF twin's locator (task #99): the picker's rows live on FFmpeg's
-                // catalog, but the WASAPI engine's currency is MF stream indices — and
-                // MF enumerates streams in a *different order* than the container, so
-                // the index can't cross the seam raw.
-                if let Some(mf) = media
-                    .as_ref()
-                    .filter(|c| c.backend == pb_decode::tracks::MediaBackend::MediaFoundation)
-                {
-                    pb_decode::tracks::bridge_mf_audio_locators(&mut tracks, mf);
-                }
+            if let Ok(tracks) = pb_decode::ff_probe_tracks(&input, generation) {
                 media = Some(tracks);
             }
         }
@@ -256,16 +252,9 @@ pub fn probe_job(source: &dyn ItemSource, item: usize, generation: u64) -> ItemD
             // ...and the catalog goes to FFmpeg exactly as on the filesystem path above
             // (task #100), so archive parity holds on the thing 98.7 exists to guarantee:
             // a video in a ZIP reports what the same file reports loose. Without this the
-            // two would now disagree about subtitles. Same FFmpeg→MF audio bridge too, so
-            // an archived video's audio tracks stay switchable (#99).
+            // two would now disagree about subtitles.
             #[cfg(all(windows, feature = "ffprobe"))]
-            if let Ok(mut tracks) = pb_decode::ff_probe_tracks(&input, generation) {
-                if let Some(mf) = media
-                    .as_ref()
-                    .filter(|c| c.backend == pb_decode::tracks::MediaBackend::MediaFoundation)
-                {
-                    pb_decode::tracks::bridge_mf_audio_locators(&mut tracks, mf);
-                }
+            if let Ok(tracks) = pb_decode::ff_probe_tracks(&input, generation) {
                 media = Some(tracks);
             }
         }
@@ -424,58 +413,35 @@ mod windows_ffprobe_tests {
         assert_eq!(codec, "H.264");
     }
 
-    /// The FFmpeg→MF audio bridge (task #99): the runtime (FFmpeg) catalog's audio rows
-    /// must resolve to `MfStream` locators that agree with what MF itself enumerates for
-    /// the same tracks — matched by identity, across MF's reordering. `multitrack.mp4`
-    /// is the fixture that proves it: MF enumerates its `eng`/`fra` tracks in the
-    /// opposite order to the container.
+    /// **Regression** — the runtime catalog's audio rows must keep their **FFmpeg**
+    /// locators. A one-day FFmpeg→MF "bridge" REPLACED them with MF stream indices
+    /// (the catalog holds one locator per track), which broke three things at once
+    /// on an engine that decodes FFmpeg-first: the startup tick couldn't resolve the
+    /// playing stream to a row, and every switch was forced onto the MF decoder —
+    /// crackly for the codecs it half-handles, refused for the rest (owner-hit).
     #[test]
-    fn the_ffmpeg_catalog_carries_bridged_mf_locators() {
+    fn audio_rows_keep_their_ffmpeg_locators() {
         use pb_decode::tracks::TrackLocator;
 
-        let path = fixture("multitrack.mp4");
-        let ff = probe_job(&FsSource::new(vec![path.clone()]), 0, 3)
-            .media
-            .expect("catalog");
-        assert_eq!(ff.backend, MediaBackend::FFmpeg);
-        assert_eq!(ff.audio.total, Some(2));
-
-        // MF's own word on where each language sits, from its catalog directly. The two
-        // backends report the same language in different forms ("eng" vs "en" — measured,
-        // mf_tracks fixture tests), so compare through the display resolver.
-        let mf = pb_decode::probe_video_details(&path, 3)
-            .expect("MF probe")
-            .tracks;
-        let display = |t: &pb_decode::MediaTrack| {
-            pb_decode::tracks::language_display(t.language.as_deref().unwrap_or(""))
-        };
-        let mf_stream_of = |lang: &str| -> u32 {
-            let t = mf
-                .audio
-                .tracks
-                .iter()
-                .find(|t| display(t) == lang)
-                .unwrap_or_else(|| panic!("MF enumerates a {lang} track"));
-            match mf.locator(t.id) {
-                Some(TrackLocator::MfStream(s)) => *s,
-                other => panic!("MF locator for {lang}: {other:?}"),
-            }
-        };
-
-        for track in &ff.audio.tracks {
-            let lang = display(track);
-            assert!(track.language.is_some(), "fixture tracks are tagged");
-            assert_eq!(
-                ff.locator(track.id),
-                Some(&TrackLocator::MfStream(mf_stream_of(&lang))),
-                "the {lang} row must point at MF's {lang} stream"
+        let d = probe_job(&FsSource::new(vec![fixture("multitrack.mp4")]), 0, 3);
+        let cat = d.media.expect("catalog");
+        assert_eq!(cat.backend, MediaBackend::FFmpeg);
+        assert_eq!(cat.audio.total, Some(2));
+        for track in &cat.audio.tracks {
+            assert!(
+                matches!(
+                    cat.locator(track.id),
+                    Some(&TrackLocator::FfStream(i)) if i as u64 == track.id.local_id
+                ),
+                "audio row {} must carry its FfStream locator, got {:?}",
+                track.id.local_id,
+                cat.locator(track.id)
             );
         }
     }
 
-    /// Diagnostic (opt-in): probe a real file and print its audio rows + locators — the
-    /// corpus-facing view of the FFmpeg→MF bridge, since a native menu's contents and a
-    /// catalog's locator map are otherwise invisible.
+    /// Diagnostic (opt-in): probe a real file and print its audio rows + locators —
+    /// a native menu's contents and a catalog's locator map are otherwise invisible.
     /// `PB_PROBE_FILE=<path> cargo test -p pb-app-core --features ffprobe --lib -- --ignored diag_audio_locators --nocapture`
     #[test]
     #[ignore = "diagnostic — needs PB_PROBE_FILE"]

@@ -84,11 +84,10 @@ impl MfAudioDecoder {
     /// namespaces selects the wrong language while confidently ticking the right one.
     ///
     /// `TrackLocator::MfStream` is the variant that carries the MF-side identity — as a
-    /// **reader stream index**, not this audio ordinal — and
-    /// [`crate::tracks::bridge_mf_audio_locators`] stamps it onto the FFmpeg catalog's
-    /// audio rows so a picker row can reach [`Self::open_reader_stream`]. The only safe
-    /// callers *here* are `None`/`Some(0)` ("whatever plays by default") and code that
-    /// got its ordinal *from MF*.
+    /// **reader stream index**, not this audio ordinal — minted only by MF's *own*
+    /// catalog (`mf_tracks`, the no-ffprobe fallback) and consumed by
+    /// [`Self::open_reader_stream`]. The only safe callers *here* are `None`/`Some(0)`
+    /// ("whatever plays by default") and code that got its ordinal *from MF*.
     ///
     /// `None` = the first audio stream, which is what MF's `FIRST_AUDIO_STREAM` picks
     /// and therefore what has always played when nobody chose.
@@ -123,10 +122,9 @@ impl MfAudioDecoder {
 
     /// Open the audio stream at **reader stream index** `stream` — the currency of
     /// [`crate::tracks::TrackLocator::MfStream`], i.e. the same numbering
-    /// `mf_tracks` enumerates and the FFmpeg→MF bridge
-    /// ([`crate::tracks::bridge_mf_audio_locators`]) copies onto the runtime
-    /// catalog's audio rows. `Err` if `stream` doesn't exist or isn't audio —
-    /// refusing beats silently decoding a stream the user didn't pick.
+    /// `mf_tracks` enumerates onto its own catalog's audio rows (the no-ffprobe
+    /// fallback path). `Err` if `stream` doesn't exist or isn't audio — refusing
+    /// beats silently decoding a stream the user didn't pick.
     pub fn open_reader_stream(
         input: &VideoInput,
         sample_rate: u32,
