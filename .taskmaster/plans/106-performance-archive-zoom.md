@@ -233,6 +233,43 @@ Pure `pb-core` + `pb-app-core`, no GPU where avoidable:
 - `PB_PERF`: resize→on-screen for a retained Original is **~0 ms** (rebind) vs ~400 ms; a
   first-park→full-res-ready line is emitted.
 
+### (9) Gigapixel / large-image safety ceiling (owner question, 2026-07-17)
+
+**What's already safe (VRAM/GPU):** `upload_image`'s `clamp_to_max` (`gpu.rs`) downscales any
+RGBA8 image beyond `max_texture_dimension_2d` (8192–16384) *before* creating the texture, so a
+40000-px panorama uploads as a ≤16384² texture instead of failing device validation — the
+resident texture is bounded (~1 GB worst case at 16384²). The ring's `RING_BUDGET_BYTES` = 1.5 GB
+plus the "a single over-budget image is admitted **only when nothing else is resident**" rule
+(`ring.rs:150`) means the ring never holds *many* huge images — one huge current photo evicts the
+rest, then shows alone. **This part is fine and #106.7 inherits it.**
+
+**What is NOT safe today (decode-side RAM — a pre-existing gap, not created by #106.7):**
+decode-to-fit's native scaled decode (JPEG DCT, WebP) is still a **TODO** — every format
+currently decodes to a **full-resolution RGBA8 buffer in RAM** and *then* `finalize`
+Lanczos-downscales (`common.rs:84`). There is **no `image::Limits` / max-pixel guard** on the
+decode path (only the macOS ImageIO backend has a `MAX_DIM = 100_000` sanity bound). So a true
+gigapixel image — e.g. 40000×25000 = 1 Gpx × 4 B = **4 GB** — allocates that buffer during
+decode, and an OOM there is an **uncatchable abort** (`catch_panics` can't catch an allocation
+failure). This is a latent crash risk **for any mode**, today.
+
+**#106.7's obligation — do not make it worse, and add the ceiling that should exist anyway:**
+- **A full-res retention ceiling.** Never *request or retain* an Original whose decoded size
+  exceeds a byte/pixel ceiling (e.g. cap on `orig_width·orig_height·bpp`, sized against
+  `RING_BUDGET_BYTES` and `max_texture_dimension_2d`). Above the ceiling the item stays
+  **fit-only** — shown downscaled, which is **all a screen can display anyway** (1:1 of a
+  gigapixel is a meaningless ~8 MP crop, and the on-screen texture is already `clamp_to_max`'d).
+  So "Original mode" on a gigapixel legitimately means "the clamped, screen-sized view," not a
+  4 GB buffer. The zoom-instant win simply doesn't apply to images too big to zoom into
+  meaningfully — and we don't pretend it does.
+- **A decode-side ceiling (pre-existing fix, worth doing here).** Add an `image::Limits`
+  memory bound / a max-pixel pre-check so a gigapixel decode is **refused or scaled** rather than
+  OOMing — for *all* modes, not just the parked tier. This closes the latent abort. (Longer term,
+  wiring true scaled-decode — JPEG DCT, WebP `use_scaling` — decodes small directly and removes
+  the transient buffer entirely; out of scope here, but the ceiling is the safety net until then.)
+- **Acceptance test:** a synthetic very-large image (e.g. 30000×20000) opens without OOM, shows
+  downscaled, and is **not** retained as an Original (stays fit-only); `full_res_radius` never
+  admits it into the parked window.
+
 ---
 
 ## 106.5 — Preview-first for big JPEGs via the embedded EXIF thumbnail
