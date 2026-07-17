@@ -50,7 +50,7 @@ lzma-rust2 = { version = "0.16", default-features = false, features = ["std", "x
 # This branch is still under review upstream; swap to an exact crates.io pin
 # (`compcol = "=x.y.z"`) once it merges + releases. Exact-pin either way — single
 # vendor, review the diff on every bump (zero-dep + forbid(unsafe) keeps that tractable).
-compcol = { git = "https://github.com/jdlien/compcol", rev = "9bb967bf0d64e1e76b750bee4cee5952b96a274e", default-features = false, features = ["std", "rar5", "rar3"] }
+compcol = { git = "https://github.com/jdlien/compcol", rev = "da98ff60899065d4005d4e137b5a556d04299731", default-features = false, features = ["std", "rar5", "rar3"] }
 # CRC32 of decoded RAR entries against the header CRC (neither compcol nor the
 # fstool reference verify it — silent garbage on corruption otherwise).
 # Already in-tree via flate2.
