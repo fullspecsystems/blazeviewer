@@ -36,6 +36,10 @@ with any pre-release suffix carried only by the tag.
   touch narrower too, down to 260 pt (was 280 pt).
 
 ### Fixed
+- **Restoring the window from minimized no longer flashes a solid color (Windows).** A minimized
+  window reports a zero-size client area, which the app was treating as a real resize: it shrank
+  the photo to a single pixel, so on restore that one pixel was stretched to fill the screen for a
+  moment before the full image reappeared. A minimize is now ignored, so restoring is instant.
 - **Movies are no longer silent on Windows.** Films with Dolby (AC-3, E-AC-3) or DTS
   audio played without sound, because Windows has no built-in decoder for those formats.
   The app now decodes them itself, so nearly any film plays with sound. This also picks

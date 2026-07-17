@@ -1253,6 +1253,16 @@ impl AppCore {
     /// bits *around* this — the macOS EDR re-assert (after `resize`, before draw) + the redraw,
     /// gated on the same fit-change the host computes from [`fit`](Self::fit) before calling here.
     pub fn resize(&mut self, width: u32, height: u32, scale: f32) {
+        // A minimized window reports a 0×0 client area. That is not a geometry change to
+        // *react* to: clamping it to a 1×1 fit box (below) would reconfigure the swapchain and
+        // decode-to-fit at a single pixel, so on restore that 1-px frame is upscaled to a solid
+        // color until the full re-decode lands — the "flash on restore". Leave every bit of
+        // geometry untouched, so restoring to the same size is a no-op that rebinds the resident
+        // texture. (A real DPI change arrives via `ScaleFactorChanged` with the live, non-zero
+        // viewport, so this never swallows one.)
+        if width == 0 || height == 0 {
+            return;
+        }
         if (scale - self.viewport.scale_factor).abs() > f32::EPSILON {
             self.viewport.scale_factor = scale;
             self.rescale_overlays();
@@ -13906,6 +13916,39 @@ mod tests {
         );
         assert!(!core.video_paused_by_resize, "one-shot");
         drop(io);
+    }
+
+    /// Minimizing reports a 0×0 client area. Treating it as a real resize clamps the fit to
+    /// 1×1, decodes the photo to one pixel, and flashes that (upscaled to a solid color) when
+    /// the window is restored. The fit must survive a 0×0 so a restore to the same size is a
+    /// no-op rebind, not a re-decode.
+    #[test]
+    fn a_minimize_to_zero_size_leaves_the_fit_untouched() {
+        let mut core = test_core();
+        core.resize(3840, 2160, 1.0);
+        let fit = core.fit;
+        assert_eq!(
+            fit,
+            Some(FitBox {
+                max_width: 3840,
+                max_height: 2160,
+            })
+        );
+
+        core.resize(0, 0, 1.0); // minimize
+        assert_eq!(core.fit, fit, "a 0×0 minimize must not clobber the fit");
+        assert_eq!(core.viewport.width, 3840, "…nor the viewport");
+        assert_eq!(core.viewport.height, 2160);
+
+        // Restore to the same size: fit is unchanged, so `resize` short-circuits and never
+        // schedules a re-decode — which is what keeps the restore instant instead of flashing.
+        core.resize_settle_at = None;
+        core.resize(3840, 2160, 1.0);
+        assert_eq!(core.fit, fit);
+        assert!(
+            core.resize_settle_at.is_none(),
+            "restore to the same size must not schedule a re-decode"
+        );
     }
 
     // ── task #18 finding #5: epoch-aware readiness / off-loop geometry re-decode ──
