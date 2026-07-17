@@ -92,10 +92,42 @@ FFmpeg linked → every AC-3/E-AC-3/DTS film plays SILENT.** `-NoFfmpeg` for a q
   conversion) = ~400–600 ms but it's the deferred **task 79.10 planar path**, multi-day,
   **video-color regression risk**. RECOMMENDATION: **defer** — a 10 s Shift-tap is a coarse
   deliberate jump that tolerates ~1 s; scope the good fix WITH 79.10.
-- **#1 — MF poster deep-walk** (Windows video posters measure **pure black**, luma 0.000, on
-  corpus films). Port the FFmpeg scored deep-walk (`ffmpeg/poster.rs` — seek past intro,
-  score by contrast+brightness) to `mf_poster.rs`. Owner-approved. Personal-albums use case
-  only needs the first bright frame, not deep intro-skipping.
+- **#1 — MF poster deep-walk** (Windows video posters are **pure black** — owner-reported,
+  then MEASURED luma **0.000** on Arrival / Apollo 13 / A Christmas Story via
+  `PB_VIDEO_POSTER_CLIP`). Owner-approved fix; full scope here so it survives a clear:
+
+  **Root cause.** `crates/pb-decode/src/mf_poster.rs` still runs the *original* walk:
+  sample ≤30 frames / ≤1 s of media, accept the first frame with mean luma >10%, else
+  fall back to the **last sampled** frame. A feature film is black/studio-logo/fade for its
+  first 30–90 s, so the 1 s budget exhausts inside the black lead-in and the "fallback" is
+  another black frame. Meanwhile the **macOS/FFmpeg** path (`crates/pb-decode/src/ffmpeg/poster.rs`)
+  evolved past this and is the reference to port.
+
+  **The port** (mirror `ffmpeg/poster.rs`, MF-specific where noted):
+  1. **Scored walk, best-so-far.** Score each candidate with `poster_frame_score`
+     (contrast std-dev + brightness — already platform-neutral in
+     `crates/pb-decode/src/video.rs`); keep the best frame, not the last. Stop early on a
+     frame ≥ `POSTER_GOOD_SCORE`.
+  2. **Deep seek past the intro.** If the head walk (≤30 frames from the start) finds
+     nothing good, seek to `POSTER_SEEK_OFFSETS` (8 s → 20 s → 45 s → 90 s), 12-frame
+     bursts, capped at `poster_deep_cap` = min(half the clip, 5 min); stop at the first
+     good frame. Lift `POSTER_SEEK_OFFSETS` / `POSTER_DEEP_MIN` / `poster_deep_cap` /
+     `POSTER_BURST_FRAMES` from `ffmpeg/poster.rs` **into `video.rs`** so both backends read
+     one policy (they'll drift otherwise).
+  3. **MF seek = RECREATE the reader per offset**, NOT `SetCurrentPosition` on the warm one
+     (warm HEVC reposition blocks ~1 s — spike; a fresh open is ~86 ms even over SMB;
+     `mf_poster::reopen_at` + `retire_reader` already tear old ones down off-thread). Score
+     at the already-fitted decode size (MF's processor emits fitted frames anyway).
+  4. **15 s overall deadline** + best-so-far fallback (never the last frame).
+
+  **Why the album use case is still served:** a home video/personal clip opens on content,
+  so it settles in the head walk with **no seeking** (zero added cost) — only a
+  dark/logo/fade opening pays the deep seek. That's the whole point: albums stay instant,
+  films stop being black.
+
+  **Verify:** `PB_VIDEO_POSTER_CLIP=<file>` prints codec/luma/time (already in `mf_poster.rs`
+  tests, `#[ignore]`); land a committed fixture with a >1 s black lead + a bright scene at
+  the first seek offset to lock the deep-seek in CI. Before/after luma over the corpus.
 
 # 📓 Load-bearing knowledge (don't re-derive)
 - The WASAPI reseek is **~10 ms** (FFmpeg audio seek 30–100 µs) — cheap. That's why eager
