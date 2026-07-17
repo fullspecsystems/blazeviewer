@@ -36,6 +36,12 @@ with any pre-release suffix carried only by the tag.
   touch narrower too, down to 260 pt (was 280 pt).
 
 ### Fixed
+- **Video thumbnails are no longer black or blank-white on Windows.** A film that opens on a
+  black screen, a studio logo, a fade-in, or a bright title card used to show a black or
+  washed-out thumbnail, because the app grabbed one of those first frames. It now looks for
+  real, textured content — not just "something bright" — and, when a clip opens on an intro,
+  seeks a little way past it to find a genuine scene. Home videos and photos, which open on
+  content, are unaffected and just as fast.
 - **Restoring the window from minimized no longer flashes a solid color (Windows).** A minimized
   window reports a zero-size client area, which the app was treating as a real resize: it shrank
   the photo to a single pixel, so on restore that one pixel was stretched to fill the screen for a

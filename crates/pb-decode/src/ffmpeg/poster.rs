@@ -19,46 +19,11 @@ use std::time::Duration;
 use super::convert::FrameConverter;
 use super::io::FfInput;
 use super::probe::{fit_dims, video_facts, VideoFacts};
-use crate::video::{poster_frame_score, VideoInput, POSTER_GOOD_SCORE, POSTER_MAX_FRAMES};
+use crate::video::{
+    poster_deep_cap, poster_frame_is_good, poster_frame_score, VideoInput, POSTER_BURST_FRAMES,
+    POSTER_DEADLINE, POSTER_DEEP_MIN, POSTER_HEAD_FRAMES, POSTER_SEEK_OFFSETS,
+};
 use crate::{DecodeError, DecodedImage, FitBox, PixelFormat};
-
-/// Overall watchdog for one poster attempt — a poster is a background nicety,
-/// never worth pinning a pool worker longer than this on hostile input.
-const POSTER_DEADLINE: Duration = Duration::from_secs(15);
-
-/// The cheap first pass: how many consecutive frames to decode from the *start*
-/// before deciding the opening is too dark/dull to poster. Clips that open on
-/// content (Live Photos, home video) settle here without any seeking; a feature
-/// film's logo-on-black + fade-in falls through to the deep pass.
-const POSTER_HEAD_FRAMES: usize = POSTER_MAX_FRAMES;
-
-/// Only *seek* past the intro for clips at least this long — short clips are
-/// already covered by the head walk (and the cap collapses the offsets to almost
-/// nothing anyway).
-const POSTER_DEEP_MIN: Duration = Duration::from_secs(10);
-
-/// Deep-seek probe points, **shallow → deep**: where an intro-having clip is
-/// sampled after the head walk falls through. Anchored to how long real intros
-/// actually run (a studio-logo/fade sequence is usually done by ~20–40 s), NOT to
-/// a fraction of the clip — so a 2-hour film is sampled at ~8 s first, not ~90 s.
-/// Each is clamped to [`poster_deep_cap`] and the walk stops at the first good
-/// frame, so it returns the *earliest* genuinely-visible frame.
-const POSTER_SEEK_OFFSETS: [Duration; 4] = [
-    Duration::from_secs(8),
-    Duration::from_secs(20),
-    Duration::from_secs(45),
-    Duration::from_secs(90),
-];
-
-/// Never sample deeper than this: min(half the clip, 5 min). 5 minutes is well
-/// past any title sequence; going further risks spoilers and wasted decode on a
-/// long film (owner guidance: not past ~5 min / 50 %).
-fn poster_deep_cap(duration: Duration) -> Duration {
-    duration.mul_f64(0.5).min(Duration::from_secs(300))
-}
-
-/// Frames to decode-and-score at each deep seek point before moving to the next.
-const POSTER_BURST_FRAMES: usize = 12;
 
 /// Decode the clip's first non-black frame (capped walk, last-frame fallback)
 /// at `fit`, from a path or in-RAM archive bytes. Read-only, RAM-only.
@@ -171,16 +136,22 @@ impl Best {
         }
     }
 
-    /// Offer a scored raw frame. Clones + keeps it if it beats the current best
-    /// (first max wins — deterministic, so the path and in-RAM posters stay
-    /// bit-identical). Returns `true` when this frame clears [`POSTER_GOOD_SCORE`]
-    /// — the signal that the walk has a clearly-good poster and can stop.
-    fn consider(&mut self, score: f32, frame: &ff::frame::Video) -> bool {
+    /// Offer a scored raw frame for the *fallback* ranking. Clones + keeps it if it
+    /// beats the current best (first max wins — deterministic, so the path and
+    /// in-RAM posters stay bit-identical). Used only until a good frame is found.
+    fn consider(&mut self, score: f32, frame: &ff::frame::Video) {
         if self.frame.is_none() || score > self.score {
             self.score = score;
             self.frame = Some(frame.clone());
         }
-        score >= POSTER_GOOD_SCORE
+    }
+
+    /// Take this frame as the winner outright — a genuinely-good poster the walk
+    /// stops on, so it is the result regardless of what earlier frames out-*ranked*
+    /// it (ranking only decides the all-bad fallback).
+    fn win(&mut self, frame: &ff::frame::Video) {
+        self.score = f32::INFINITY;
+        self.frame = Some(frame.clone());
     }
 }
 
@@ -222,16 +193,24 @@ impl PosterWalk<'_> {
                 // Score at the reduced WALK scale (brightness is scale-invariant,
                 // so the same frame wins) — the full-res convert happens once, on
                 // the winner only. `best` holds the raw frame for that.
-                let (pixels, _w, _h) = self.walk_conv.convert(src)?;
+                let (pixels, w, _h) = self.walk_conv.convert(src)?;
                 decoded_count += 1;
-                let score = if self.walk_conv.output_format() == PixelFormat::Rgba16F {
-                    scrgb_frame_score(&pixels)
+                // Rank by score (for the fallback); stop only on a *genuinely good*
+                // frame — bright AND textured — so a white/vignette title card never
+                // ends the walk. HDR (scene-linear fp16) keeps the simple
+                // bright/not-bright split (contrast is hard to judge pre-tone-map).
+                let (score, good) = if self.walk_conv.output_format() == PixelFormat::Rgba16F {
+                    (scrgb_frame_score(&pixels), scrgb_frame_bright_enough(&pixels))
                 } else {
-                    poster_frame_score(&pixels)
+                    (poster_frame_score(&pixels, w), poster_frame_is_good(&pixels, w))
                 };
-                if best.consider(score, src) {
+                // A good frame is the winner outright; return it, not whatever
+                // out-ranked it earlier. Otherwise rank it for the fallback.
+                if good {
+                    best.win(src);
                     return Ok(true);
                 }
+                best.consider(score, src);
             }
             if self.eof_sent {
                 break; // decoder fully drained

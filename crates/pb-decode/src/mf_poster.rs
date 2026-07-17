@@ -8,10 +8,14 @@
 //! * [`probe_video_stream`] — open the container and report what's in it (codec,
 //!   dimensions, frame rate, duration, audio presence, color). ~15–25 ms (spike-
 //!   measured); never decodes a frame, never reads the file into RAM.
-//! * [`decode_video_poster`] — decode the clip's **first non-black frame** (a capped
-//!   mean-luma walk: ≤ ~1 s of media / ≤ 30 frames, fallback = last sampled frame),
-//!   fitted to the display via the MF video processor (spike-verified: the fitted
-//!   `MF_MT_FRAME_SIZE` negotiation is honored; fallback = native size + our Lanczos).
+//! * [`decode_video_poster`] — decode a genuinely-visible poster frame (a **scored
+//!   best-so-far walk**: a head pass over the first [`POSTER_HEAD_FRAMES`] frames,
+//!   then, for a clip whose intro is black/logo/fade, a **deep seek past the intro**
+//!   at [`POSTER_SEEK_OFFSETS`] — recreating the reader per offset, since a warm HEVC
+//!   reposition blocks ~1 s while a fresh open is ~86 ms even over SMB), fitted to the
+//!   display via the MF video processor. Fallback is the best-scoring frame seen, never
+//!   the last. Mirrors the FFmpeg backend (`ffmpeg::poster`); both read one policy from
+//!   [`crate::video`].
 //!
 //! Failure is graceful and *diagnostic*: a container MF can't open reports a
 //! different error than a missing codec (`MF_E_UNSUPPORTED_BYTESTREAM_TYPE` vs
@@ -26,7 +30,7 @@
 
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use windows::Win32::Media::MediaFoundation::{
     IMFAttributes, IMFSourceReader, MFCreateAttributes, MFCreateMediaType,
@@ -45,7 +49,10 @@ use windows::Win32::System::Com::StructuredStorage::PROPVARIANT;
 use windows::Win32::System::Variant::{VT_I8, VT_UI8};
 
 use crate::mf_video::{ensure_mf, native_color, sample_to_rgba};
-use crate::video::{poster_frame_bright_enough, POSTER_MAX_FRAMES, POSTER_MAX_MEDIA};
+use crate::video::{
+    poster_deep_cap, poster_frame_is_good, poster_frame_score, POSTER_BURST_FRAMES,
+    POSTER_DEADLINE, POSTER_DEEP_MIN, POSTER_HEAD_FRAMES, POSTER_SEEK_OFFSETS,
+};
 use crate::{common, DecodeError, DecodedImage, FitBox, PixelFormat};
 
 // `VideoStreamInfo` is the platform-neutral probe result (`crate::video`); both this
@@ -131,7 +138,7 @@ pub fn decode_video_poster_input(
     ensure_mf();
     unsafe {
         let reader = open_video_reader(input)?;
-        let result = poster_inner(&reader, fit, cancel);
+        let result = poster_inner(&reader, input, fit, cancel);
         // Mid-stream reader teardown blocks ~1 s on HEVC — retire off-thread so the
         // decode worker moves on to the next item immediately.
         retire_reader(reader);
@@ -231,19 +238,55 @@ pub(crate) unsafe fn stream_info(reader: &IMFSourceReader) -> Result<VideoStream
     })
 }
 
+/// The best-scoring poster candidate seen so far, with its dimensions (a deep-seek
+/// reader could in principle negotiate a different size, so the winner carries its
+/// own dims for the final fit). Only the winning frame is kept resident.
+struct Best {
+    score: f32,
+    frame: Option<(Vec<u8>, u32, u32)>,
+}
+
+impl Best {
+    fn new() -> Self {
+        Self {
+            score: f32::NEG_INFINITY,
+            frame: None,
+        }
+    }
+
+    /// Offer a scored frame for the *fallback* ranking; keep it if it beats the
+    /// current best (first max wins — deterministic, so path and in-RAM posters
+    /// stay bit-identical). Used only until a genuinely-good frame is found.
+    fn consider(&mut self, score: f32, rgba: Vec<u8>, w: u32, h: u32) {
+        if self.frame.is_none() || score > self.score {
+            self.score = score;
+            self.frame = Some((rgba, w, h));
+        }
+    }
+
+    /// Take this frame as the winner outright — the walk found a genuinely-good
+    /// poster and stops here, so it is the result regardless of what earlier
+    /// frames out-*ranked* it (ranking only decides the all-bad fallback).
+    fn win(&mut self, rgba: Vec<u8>, w: u32, h: u32) {
+        self.score = f32::INFINITY;
+        self.frame = Some((rgba, w, h));
+    }
+}
+
 unsafe fn poster_inner(
     reader: &IMFSourceReader,
+    input: &crate::VideoInput,
     fit: Option<FitBox>,
     cancel: &AtomicBool,
 ) -> Result<DecodedImage, DecodeError> {
-    let video = MF_SOURCE_READER_FIRST_VIDEO_STREAM.0 as u32;
+    let deadline = Instant::now() + POSTER_DEADLINE;
     let info = stream_info(reader)?;
     let (disp_w, disp_h) = info.display_dims();
 
     // Ask the MF video processor for fitted output (spike-verified). If the fitted
     // negotiation is rejected, fall back to native size and downscale ourselves.
     let fitted = fit.map(|f| fit_dims(disp_w, disp_h, f));
-    let negotiated = match fitted {
+    let (w, h, stride) = match fitted {
         Some(dims) => match negotiate_rgb32(reader, Some(dims)) {
             Ok(n) => n,
             Err(_) => {
@@ -252,52 +295,29 @@ unsafe fn poster_inner(
         },
         None => negotiate_rgb32(reader, None).map_err(|e| DecodeError::Corrupt(mf_open_msg(e)))?,
     };
-    let (w, h, stride) = negotiated;
     if w == 0 || h == 0 {
         return Err(DecodeError::Corrupt("video has no frames".into()));
     }
 
-    // The mean-luma walk: accept the first bright-enough frame; keep the last
-    // sampled one as the fallback (a fully black lead longer than the cap, or a
-    // genuinely dark clip, still gets *a* poster).
-    let max_media_hns = POSTER_MAX_MEDIA.as_nanos() as i64 / 100;
-    let mut last: Option<Vec<u8>> = None;
-    for _ in 0..POSTER_MAX_FRAMES {
-        if cancel.load(Ordering::Relaxed) {
-            return Err(DecodeError::Corrupt("cancelled".into()));
-        }
-        let mut flags = 0u32;
-        let mut ts = 0i64;
-        let mut sample = None;
-        reader
-            .ReadSample(
-                video,
-                0,
-                None,
-                Some(&mut flags),
-                Some(&mut ts),
-                Some(&mut sample),
-            )
-            .map_err(|e| DecodeError::Corrupt(mf_open_msg(e)))?;
-        if flags & (MF_SOURCE_READERF_ENDOFSTREAM.0 as u32) != 0 {
-            break;
-        }
-        let Some(sample) = sample else { continue };
-        let rgba = sample_to_rgba(&sample, w, h, stride)
-            .map_err(|e| DecodeError::Corrupt(format!("Media Foundation: {e}")))?;
-        let bright = poster_frame_bright_enough(&rgba);
-        last = Some(rgba);
-        if bright || ts >= max_media_hns {
-            break;
-        }
+    let mut best = Best::new();
+    // Phase 1 — the cheap head walk from the start. A clip that opens on content
+    // settles here; a dark/logo/fade opening leaves `best` weak and falls through.
+    let good = scan(reader, (w, h, stride), POSTER_HEAD_FRAMES, &mut best, cancel, deadline)?;
+    // Phase 2 — seek past the intro (feature-film case), shallow → deep, stopping at
+    // the first good frame so the poster is as early as the intro allows.
+    if !good {
+        deep_scan(input, (w, h), info.duration, &mut best, cancel, deadline)?;
     }
-    let rgba = last.ok_or_else(|| DecodeError::Corrupt("video decoded no frames".into()))?;
+
+    let (rgba, bw, bh) = best
+        .frame
+        .ok_or_else(|| DecodeError::Corrupt("video decoded no frames".into()))?;
 
     // If the processor already scaled, this fit is a no-op; the native-size
     // fallback path pays one Lanczos here (posters are off the hot path).
     let (rgba, fw, fh) = match fit {
-        Some(f) => common::downscale_to_fit(rgba, w, h, f)?,
-        None => (rgba, w, h),
+        Some(f) => common::downscale_to_fit(rgba, bw, bh, f)?,
+        None => (rgba, bw, bh),
     };
     Ok(DecodedImage {
         width: fw,
@@ -312,6 +332,127 @@ unsafe fn poster_inner(
         peak: 1.0,
         animated: None,
     })
+}
+
+/// Decode up to `limit` frames from `reader`'s current position, scoring each into
+/// `best`. `Ok(true)` as soon as a clearly-good frame is found (caller stops),
+/// `Ok(false)` when the limit / EOF / the overall deadline is reached first. The
+/// deadline is a best-so-far fallback, not an error (a poster is a background
+/// nicety); `cancel` is (the pool retiring the job).
+unsafe fn scan(
+    reader: &IMFSourceReader,
+    size: (u32, u32, i32),
+    limit: usize,
+    best: &mut Best,
+    cancel: &AtomicBool,
+    deadline: Instant,
+) -> Result<bool, DecodeError> {
+    let (w, h, stride) = size;
+    let video = MF_SOURCE_READER_FIRST_VIDEO_STREAM.0 as u32;
+    for _ in 0..limit {
+        if cancel.load(Ordering::Relaxed) {
+            return Err(DecodeError::Corrupt("cancelled".into()));
+        }
+        if Instant::now() >= deadline {
+            return Ok(false);
+        }
+        let mut flags = 0u32;
+        let mut sample = None;
+        reader
+            .ReadSample(
+                video,
+                0,
+                None,
+                Some(&mut flags),
+                None,
+                Some(&mut sample),
+            )
+            .map_err(|e| DecodeError::Corrupt(mf_open_msg(e)))?;
+        if flags & (MF_SOURCE_READERF_ENDOFSTREAM.0 as u32) != 0 {
+            break;
+        }
+        let Some(sample) = sample else { continue };
+        let rgba = sample_to_rgba(&sample, w, h, stride)
+            .map_err(|e| DecodeError::Corrupt(format!("Media Foundation: {e}")))?;
+        // Stop on the first *genuinely good* frame — bright AND textured, so a
+        // white/vignette title card never ends the walk — and return THAT frame,
+        // not whatever out-ranked it earlier. Otherwise rank it for the fallback.
+        if poster_frame_is_good(&rgba, w) {
+            best.win(rgba, w, h);
+            return Ok(true);
+        }
+        let score = poster_frame_score(&rgba, w);
+        best.consider(score, rgba, w, h);
+    }
+    Ok(false)
+}
+
+/// Phase 2 of the walk: seek past the intro (feature-film case), shallow → deep,
+/// stopping at the first good frame. Each offset **recreates the reader positioned
+/// there** — a warm HEVC reposition blocks ~1 s (spike), a fresh open is ~86 ms even
+/// over SMB — and retires it off-thread. Returns whether a clearly-good frame landed.
+unsafe fn deep_scan(
+    input: &crate::VideoInput,
+    dims: (u32, u32),
+    duration: Option<Duration>,
+    best: &mut Best,
+    cancel: &AtomicBool,
+    deadline: Instant,
+) -> Result<bool, DecodeError> {
+    let Some(dur) = duration else {
+        return Ok(false);
+    };
+    if dur < POSTER_DEEP_MIN {
+        return Ok(false);
+    }
+    let cap = poster_deep_cap(dur);
+    let mut last = Duration::ZERO;
+    for off in POSTER_SEEK_OFFSETS {
+        let target = off.min(cap);
+        // Skip offsets the head walk already covered (~1 s) and duplicates (a short
+        // clip collapses the deeper offsets onto the cap).
+        if target <= Duration::from_secs(1) || target <= last {
+            continue;
+        }
+        last = target;
+        if cancel.load(Ordering::Relaxed) {
+            return Err(DecodeError::Corrupt("cancelled".into()));
+        }
+        if Instant::now() >= deadline {
+            return Ok(false);
+        }
+        // A seek that won't open (a bad offset) just moves to the next one.
+        let Ok((reader, w, h, stride)) = reopen_at_rgb32(input, dims, target) else {
+            continue;
+        };
+        let r = scan(&reader, (w, h, stride), POSTER_BURST_FRAMES, best, cancel, deadline);
+        retire_reader(reader);
+        if r? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// Open a fresh reader, negotiate the same fitted RGB32 output, and position it at
+/// `target` — the poster deep-seek's "recreate, don't reposition-warm" step. Mirrors
+/// the playback producer's `reopen_at` (RGB32 branch); the fresh reader's seek is the
+/// cheap ~86 ms open, not the ~1 s warm HEVC reposition.
+unsafe fn reopen_at_rgb32(
+    input: &crate::VideoInput,
+    dims: (u32, u32),
+    target: Duration,
+) -> Result<(IMFSourceReader, u32, u32, i32), DecodeError> {
+    let reader = open_video_reader(input)?;
+    let (w, h, stride) = negotiate_rgb32(&reader, Some(dims))
+        .or_else(|_| negotiate_rgb32(&reader, None))
+        .map_err(|e| DecodeError::Corrupt(mf_open_msg(e)))?;
+    let hns = (target.as_nanos() / 100) as i64;
+    let pos = propvariant_i8(hns.max(0));
+    reader
+        .SetCurrentPosition(&windows::core::GUID::zeroed(), &pos)
+        .map_err(|e| DecodeError::Corrupt(mf_open_msg(e)))?;
+    Ok((reader, w, h, stride))
 }
 
 pub(crate) unsafe fn negotiate_rgb32(
@@ -483,6 +624,31 @@ mod tests {
         );
     }
 
+    /// Phase 2 (deep seek). A 16 s clip that is black for its first 7 s — well past
+    /// the head walk (`POSTER_HEAD_FRAMES` ≈ 1 s at 30 fps) — with high-contrast
+    /// content after. The head walk finds only black, so a poster that isn't black
+    /// PROVES the deep seek ran (offset 8 s, under `poster_deep_cap(16 s)` = 8 s).
+    #[test]
+    fn poster_deep_seeks_past_a_long_black_intro() {
+        let img = decode_video_poster(
+            &fixture("deep_seek_black_lead.mp4"),
+            Some(FitBox {
+                max_width: 64,
+                max_height: 64,
+            }),
+            &AtomicBool::new(false),
+        )
+        .expect("poster");
+        assert!(img.is_well_formed());
+        // Only reachable by seeking past the 7 s black intro (the head walk sees
+        // black-only and could never produce a bright frame).
+        assert!(
+            crate::video::poster_frame_bright_enough(&img.pixels),
+            "deep seek must land on the content past the black intro (mean luma {})",
+            crate::video::mean_luma_rgba8(&img.pixels, 1),
+        );
+    }
+
     /// The archive seam: probing + poster-decoding the same fixture from in-RAM
     /// bytes (no path) must agree with the path versions — configuration-identical
     /// readers by construction.
@@ -549,8 +715,9 @@ mod tests {
             &AtomicBool::new(false),
         )
         .expect("poster");
+        let (mean, std) = crate::video::luma_stats_rgba8(&img.pixels, 8);
         eprintln!(
-            "clip: {} {}x{} {:.2}fps dur={:?} audio={} | poster {}x{} luma={:.3} probe={:?} poster={:?}",
+            "clip: {} {}x{} {:.2}fps dur={:?} audio={} | poster {}x{} mean={:.3} std={:.3} score={:.3} detail={:.3} probe={:?} poster={:?}",
             info.codec,
             info.width,
             info.height,
@@ -559,7 +726,10 @@ mod tests {
             info.has_audio,
             img.width,
             img.height,
-            crate::video::mean_luma_rgba8(&img.pixels, 8),
+            mean,
+            std,
+            crate::video::poster_frame_score(&img.pixels, img.width),
+            crate::video::luma_detail_rgba8(&img.pixels, img.width),
             t_probe,
             t0.elapsed(),
         );
