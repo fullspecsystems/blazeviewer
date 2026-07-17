@@ -1,8 +1,16 @@
 # Blaze Viewer — Current Status (session handoff)
 
-_Last updated: 2026-07-17 (rev 10). Supersedes rev 9. **Audio track selection is built for
-Windows + Linux** on branch `feat/audio-track-selection` (2 commits, pushed) — the FFmpeg→MF
-bridge rev 9 called for, plus the whole switch path._
+_Last updated: 2026-07-17 (rev 11). Supersedes rev 10. **Audio track selection AND
+FFmpeg-first audio decode are built** on branch `feat/audio-track-selection` — films get
+sound on Windows (MF can't decode AC-3/E-AC-3/DTS, `0xC00D36B4`, corpus-probed; the
+trimmed FFmpeg already ships the decoders at zero bundle cost). `90330d1`: WASAPI engine
+decodes FFmpeg-first (MF fallback), sink takes the source format + `AUTOCONVERTPCM` (OS
+SRC + center-aware downmix; mix-format fallback kept), switches carry both (ff, mf)
+currencies and rebuild the sink pipeline-first on format change. `889aaec` fixed the
+flyout (tracks over the poster; muda's auto-flipped checkmarks). **Owner audible verify
+pending** (no endpoint over RDP); needs `--features libheif,dav1d,ffprobe`. Next queued:
+the MF poster deep-walk port (task #1, owner-approved — Windows posters measure pure
+black on films)._
 
 ## What we worked on today
 
