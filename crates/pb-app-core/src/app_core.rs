@@ -383,6 +383,10 @@ pub struct AppCore {
     /// Per-stage timing (decode/upload/render); disabled unless `--metrics` is passed.
     pub metrics: StageTimes,
 
+    /// One-shot latency timers for the operations that define "feeling fast" — open→first
+    /// photo, open→all cached, and a Fit↔1:1 switch. Enabled by `PB_PERF`; live to stderr.
+    pub perf: crate::perf::Perf,
+
     // --- Nav / playlist (NS0 5.3) ---
     /// The photo source (filesystem / ZIP / 7z) behind the current playlist.
     pub source: Arc<dyn ItemSource>,

@@ -57,6 +57,14 @@ fn pb_trace() -> bool {
     *ON.get_or_init(|| std::env::var_os("PB_TRACE").is_some())
 }
 
+/// `PB_PERF=1` → live one-shot latency lines to stderr (open→first-photo, open→all-cached,
+/// resize→on-screen). Shell-agnostic (works on the macOS host too, read via a captured
+/// stderr), unlike the winit-only `--metrics` summary. Zero cost when off (see [`perf`]).
+pub(crate) fn perf_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("PB_PERF").is_some())
+}
+
 impl AppCore {
     /// A **headless** `AppCore`: an empty photo source, a 1-worker no-op decode pool, no
     /// renderer / HUD / window, default keymap + settings. This is the construction seam the
@@ -145,6 +153,7 @@ impl AppCore {
             full_requested_at: std::collections::HashMap::new(),
             live_motion_cache: std::collections::HashMap::new(),
             metrics: crate::metrics::StageTimes::default(),
+            perf: crate::perf::Perf::new(perf_on()),
             source,
             archive_scope: None,
             playlist: Playlist::new(0, 0),
@@ -1202,6 +1211,10 @@ impl AppCore {
     /// A finite **explicit list** has no directory walk, so it resolves inline and installs now.
     pub fn open_plan(&mut self, source: pb_core::open::Source, cursor: pb_core::open::Cursor) {
         use pb_core::open::Source;
+        // Perf (PB_PERF): start the open→first-photo clock now, *before* the archive/scan
+        // worker — that wait (central-directory read, a networked ZIP, a big scan) is part of
+        // what the user feels, so metric 1 has to include it.
+        self.perf.open_begin(self.now);
         // Any explicit open breaks an Open-Parent climb — the next ⌘↑ restarts from the
         // current folder. `open_parent_cmd` re-sets the anchor *after* it calls through here.
         self.climb_anchor = None;
@@ -3004,6 +3017,10 @@ impl AppCore {
         }
         self.playlist = Playlist::new(self.source.len(), crate::engine::fresh_shuffle_seed())
             .with_cursor(start);
+        // Perf (PB_PERF): the deck size is the open→all-cached target. Doors decode to a flat
+        // tile (never read), so a folder of only doors "caches" the instant they present —
+        // that's fine, the metric is about photos and a door isn't one.
+        self.perf.deck_ready(self.source.len());
         // Re-resolve the compare pin by identity against the new source: it survives a
         // same-deck rebuild (delete-advance, recursive toggle — same paths, new
         // indices); a genuinely new deck can't match, so the pin clears silently. The
@@ -5075,6 +5092,9 @@ impl AppCore {
             self.video_geometry_stale = true;
             return;
         }
+        // Perf (PB_PERF): a Fit↔1:1 / settled-resize re-decode of the current photo begins
+        // here — start the resize→on-screen clock; the next present of this item stops it.
+        self.perf.resize_begin(self.now);
         // No synchronous decode on the event loop (task #18 finding #5). `invalidate_geometry`
         // just bumped the epoch, so `target_caught_up` is now false for the current item even
         // though its index is unchanged: the async prefetch re-decodes it at the new fit and
@@ -5988,6 +6008,21 @@ impl AppCore {
     fn mark_resolved(&mut self, item: usize) {
         self.displayed_item = Some(item);
         self.presented_epoch = Some(self.epoch);
+        // Perf (PB_PERF): the current photo just went on screen — close out whichever
+        // episode was waiting on it (open→first-photo, or a resize→on-screen).
+        if let Some((ep, d)) = self.perf.presented(self.now) {
+            eprintln!("[perf] {}: {} ms", ep.label(), d.as_millis());
+            self.metrics.record(ep.label(), d);
+        }
+    }
+
+    /// Perf (PB_PERF): note that `item` reached full residency, and report open→all-cached
+    /// the moment the last one lands. A no-op when `PB_PERF` is unset.
+    fn perf_note_full(&mut self, item: usize) {
+        if let Some((n, d)) = self.perf.full_resident(item, self.now) {
+            eprintln!("[perf] open->all-cached ({n} photos): {} ms", d.as_millis());
+            self.metrics.record("open->all-cached", d);
+        }
     }
 
     /// Whether the on-screen frame is the current target **at the current fit** — i.e.
@@ -6165,6 +6200,7 @@ impl AppCore {
                 }
                 self.ring.set_slot_bytes(item, item_bytes);
                 self.preview_resident.remove(&item);
+                self.perf_note_full(item); // preview upgraded to full → one more cached
                 // Real end-to-end sharpen latency for the ON-SCREEN photo (what the
                 // user actually waits on): full requested → full on screen. Ahead-ring
                 // fulls land late by design (low priority), so they'd skew this — only
@@ -6212,6 +6248,7 @@ impl AppCore {
                     self.preview_resident.insert(item);
                 } else {
                     self.preview_resident.remove(&item);
+                    self.perf_note_full(item); // a fresh full landed directly (no preview step)
                 }
                 uploads += 1;
                 // Present the target when it lands — including a *re-present of the same
@@ -14309,6 +14346,56 @@ mod tests {
         );
         core.displayed_item = None;
         assert!(core.door_card().is_none(), "nothing presented, no card");
+    }
+
+    /// The perf timers (PB_PERF, task perf) are wired to the right choke points — not just
+    /// the pure `Perf` logic (covered in `perf.rs`), but that the *hooks fire from the real
+    /// methods*: `mark_resolved` (via `present_item`) closes the open→first-photo and
+    /// resize→on-screen episodes, `rebuild_playlist` sets the all-cached target, and
+    /// `perf_note_full` reports it. The GUI can't run headless, so this drives the core
+    /// directly and reads the episodes back out of the `--metrics` recorder.
+    #[test]
+    fn perf_hooks_fire_from_the_real_present_and_resize_paths() {
+        let dir = std::env::temp_dir().join("pb_perf_wiring");
+        let mut core = test_core();
+        core.perf = crate::perf::Perf::new(true);
+        core.metrics = crate::metrics::StageTimes::enabled();
+
+        // An open starts the clock (open_plan does this), then the deck installs (rebuild
+        // calls deck_ready). Order matters: open_begin resets the all-cached target, so it
+        // must precede the rebuild — exactly the real order (open_plan → … → rebuild).
+        core.perf.open_begin(core.now);
+        let src: Arc<dyn ItemSource> =
+            Arc::new(FsSource::new(vec![dir.join("a.jpg"), dir.join("b.jpg")]));
+        core.rebuild_playlist(src, dir.clone(), Some(dir), false, 0);
+
+        let has = |c: &AppCore, stage: &str| c.metrics.summary().iter().any(|r| r.0 == stage);
+
+        // First present of the current photo closes metric 1. `present_item` calls
+        // `mark_resolved` even with no renderer, so the hook runs headless.
+        core.present_item(0, 0);
+        assert!(
+            has(&core, "open->first-photo"),
+            "presenting the first photo must record open->first-photo"
+        );
+
+        // A scale-mode switch begins a resize episode (refresh_after_geometry_change), and
+        // the next present closes it — the exact Fit↔1:1 path the owner asked to measure.
+        core.set_scale_mode(ScaleMode::Original);
+        core.present_item(0, 0);
+        assert!(
+            has(&core, "resize->on-screen"),
+            "a scale-mode switch then present must record resize->on-screen"
+        );
+
+        // The all-cached target is the deck size (2); reporting it once the last full lands.
+        core.perf_note_full(0);
+        assert!(!has(&core, "open->all-cached"), "one of two isn't all");
+        core.perf_note_full(1);
+        assert!(
+            has(&core, "open->all-cached"),
+            "the last full landing must record open->all-cached"
+        );
     }
 
     /// A door reports its **size** where a photo reports dimensions — its frame is a 1×1
