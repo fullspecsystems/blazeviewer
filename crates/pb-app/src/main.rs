@@ -602,12 +602,14 @@ struct SubtitleMenuSig {
 }
 
 /// The inputs the Playback ▸ Audio Track flyout's rows depend on — the audio twin of
-/// [`SubtitleMenuSig`], minus `on` (audio has no off toggle: that's Mute).
+/// [`SubtitleMenuSig`], minus `on` (audio has no off toggle: that's Mute). Keyed on the
+/// displayed item *being a video*, not on a live session: the track list is a fact about
+/// the file, and it must show over the poster too (owner, 2026-07-17).
 #[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct AudioMenuSig {
     item: Option<usize>,
-    video_showing: bool,
+    video_item: bool,
     tracks_known: bool,
     /// The active track's `local_id` (the shell-reported tick).
     active: Option<u64>,
@@ -2464,8 +2466,8 @@ impl App {
         }
         let sig = AudioMenuSig {
             item: self.core.displayed_item,
-            video_showing: self.core.video_showing(),
-            tracks_known: self.core.subtitle_tracks_known(),
+            video_item: self.core.displayed_is_video(),
+            tracks_known: self.core.audio_tracks_known(),
             active: self.core.audio_active.map(|id| id.local_id),
         };
         if self.audio_menu_sig == Some(sig) {
@@ -2475,7 +2477,7 @@ impl App {
 
         let rows = menu::audio_track_rows(
             &self.core.audio_picker_rows(),
-            sig.video_showing,
+            sig.video_item,
             sig.tracks_known,
         );
         // Same `PB_SUBTITLE_TRACE=1` window the subtitle flyout gets — a native menu's
@@ -2517,8 +2519,18 @@ impl App {
         let stream = self.core.audio_row_ff_stream(row);
         let seq = match &self.video_audio {
             Some(audio) if stream >= 0 => audio.set_track(stream),
-            // No engine (silent clip / failed open) or no locator in this engine's
-            // currency: a switch that cannot happen must not pretend to be in flight.
+            // No engine: the flyout lists tracks over the poster too (they are facts
+            // about the file), but a switch needs a playing session — say that,
+            // rather than the "couldn't switch" that implies something broke.
+            None => {
+                self.core.show_toast_icon(
+                    "Play the video to switch audio tracks",
+                    pb_app_core::ToastIcon::AudioTrackFailed,
+                );
+                return;
+            }
+            // No locator in this engine's currency: a switch that cannot happen must
+            // not pretend to be in flight.
             _ => {
                 self.core.audio_track_switched(row, false);
                 return;
@@ -4151,9 +4163,12 @@ impl ApplicationHandler for App {
             } else if let Some(row) = menu::audio_track_row(ev.id.as_ref()) {
                 // A Playback ▸ Audio Track row — same shape, but the tick does NOT move
                 // here: the shell attempts the switch and the engine confirms it (#99);
-                // the flyout re-ticks when the report lands.
+                // the flyout re-ticks when the report lands. The sig reset is what undoes
+                // muda's auto-flipped checkmark on the clicked row — without it a refused
+                // switch left every clicked row checked at once (owner-hit 2026-07-17).
                 self.select_audio_track(row);
                 self.menu_state = None;
+                self.audio_menu_sig = None;
             } else if let Some(action) = menu::action_for(ev.id.as_ref()) {
                 self.dispatch_menu(action);
                 // muda auto-flips a clicked CheckMenuItem's native checkmark, which can

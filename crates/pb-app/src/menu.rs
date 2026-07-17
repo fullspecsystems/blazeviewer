@@ -199,12 +199,16 @@ pub fn subtitle_track_rows(
 /// list — that's Mute — and "no choice" already *is* one of these rows: the default the
 /// tick sits on), and therefore no separator either. The tri-state notes are the same
 /// three honest answers, and every row keeps its canonical picker index.
+///
+/// `video_item` is "the displayed item is a video" — playing or **at its poster** — not
+/// "a session is showing": the track list is a fact about the file, and hiding it until
+/// playback claimed "No Video" over an obvious film (owner, 2026-07-17).
 pub fn audio_track_rows(
     picker: &[pb_app_core::tracks::PickerRow],
-    video_showing: bool,
+    video_item: bool,
     tracks_known: bool,
 ) -> Vec<TrackRow> {
-    if !video_showing {
+    if !video_item {
         return vec![TrackRow::Note("No Video")];
     }
     let rows: Vec<TrackRow> = picker

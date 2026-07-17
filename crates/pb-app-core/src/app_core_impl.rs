@@ -8255,19 +8255,41 @@ impl AppCore {
     // the shell can say what is coming out of the speakers. So the core formats the rows and
     // hands out locators; the shell acts and reports back.
 
-    /// The catalog for the video on screen, if its probe has landed.
-    fn showing_catalog(&self) -> Option<&pb_decode::MediaTrackCatalog> {
+    /// The displayed item when it is a **video** — by its own kind, or because a video
+    /// session is showing for it. The audio picker's gate (owner, 2026-07-17): the track
+    /// catalog belongs to the *item* (the details probe), so it must not require a
+    /// running session — gating on `video_showing()` made the flyout claim "No Video"
+    /// over a film sitting at its poster.
+    fn displayed_video_item(&self) -> Option<usize> {
         self.displayed_item
-            .filter(|_| self.video_showing())
+            .filter(|&i| self.item_is_video(i) || self.video_showing())
+    }
+
+    /// Is the displayed item a video (playing or not)? The shell's flyout gate.
+    pub fn displayed_is_video(&self) -> bool {
+        self.displayed_video_item().is_some()
+    }
+
+    /// Has the track probe landed for the displayed video? The audio twin of
+    /// [`subtitle_tracks_known`](Self::subtitle_tracks_known), minus its session gate.
+    pub fn audio_tracks_known(&self) -> bool {
+        self.displayed_video_item()
+            .and_then(|item| self.exif_cache.get(&item))
+            .is_some_and(|d| d.media.is_some())
+    }
+
+    /// The catalog for the displayed video, if its probe has landed.
+    fn showing_catalog(&self) -> Option<&pb_decode::MediaTrackCatalog> {
+        self.displayed_video_item()
             .and_then(|item| self.exif_cache.get(&item))
             .and_then(|d| d.media.as_ref())
     }
 
     /// The Playback ▸ Audio flyout's rows. Empty = offer nothing (no video, or the probe
-    /// hasn't landed — [`subtitle_tracks_known`](Self::subtitle_tracks_known) tells those
-    /// apart, and it answers for the whole catalog, not just subtitles).
+    /// hasn't landed — [`audio_tracks_known`](Self::audio_tracks_known) tells those
+    /// apart).
     pub fn audio_picker_rows(&mut self) -> Vec<crate::tracks::PickerRow> {
-        let Some(item) = self.displayed_item.filter(|_| self.video_showing()) else {
+        let Some(item) = self.displayed_video_item() else {
             return Vec::new();
         };
         self.ensure_exif_cached(item);
@@ -8384,7 +8406,7 @@ impl AppCore {
     /// shell's report, so a stale pick that quietly fell back to the policy still advances
     /// from the track you can actually hear.
     pub fn cycle_audio_track(&mut self, forward: bool) {
-        let Some(item) = self.displayed_item.filter(|_| self.video_showing()) else {
+        let Some(item) = self.displayed_video_item() else {
             return; // not a video: the key says nothing rather than lying
         };
         self.ensure_exif_cached(item);
@@ -9779,6 +9801,37 @@ mod tests {
         assert_eq!(core.audio_row_for_mf_stream(9), -1);
         assert_eq!(core.audio_row_for_ff_stream(2), 1);
         assert_eq!(core.audio_row_for_ff_stream(0), -1);
+    }
+
+    /// The flyout must list tracks over the **poster** too (owner, 2026-07-17): the
+    /// catalog belongs to the item, not to a session, so a video that isn't playing
+    /// still offers its tracks — gating on `video_showing()` claimed "No Video" over
+    /// a film sitting at its poster.
+    #[test]
+    fn audio_rows_show_for_a_displayed_video_without_a_session() {
+        let mut core = test_core();
+        core.source = Arc::new(FsSource::new(vec![PathBuf::from("films/movie.mkv")]));
+        core.displayed_item = Some(0);
+        assert!(core.video.is_none(), "no session in this test");
+        let mut a0 = track("AAC", "eng");
+        a0.id.local_id = 1;
+        let mut a1 = track("AC-3", "fra");
+        a1.id.local_id = 2;
+        let catalog = pb_decode::MediaTrackCatalog::new(
+            1,
+            pb_decode::MediaBackend::FFmpeg,
+            pb_decode::TrackSet::complete(vec![a0, a1]),
+            pb_decode::TrackSet::complete(vec![]),
+        );
+        seed_details(&mut core, 0, Some(catalog), Some(true));
+
+        assert!(core.displayed_is_video());
+        assert!(core.audio_tracks_known());
+        assert_eq!(core.audio_picker_rows().len(), 2);
+        // ...and a still keeps offering nothing.
+        core.source = five_photos();
+        assert!(!core.displayed_is_video());
+        assert!(core.audio_picker_rows().is_empty());
     }
 
     /// A still is not a video: the key says nothing rather than lying about a photo.
