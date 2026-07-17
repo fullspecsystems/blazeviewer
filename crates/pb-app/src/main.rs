@@ -2513,12 +2513,13 @@ impl App {
     /// engine can't reach is refused immediately — the core toasts the failure and the
     /// tick stays on what is actually playing, never the request.
     fn select_audio_track(&mut self, row: usize) {
-        #[cfg(windows)]
-        let stream = self.core.audio_row_mf_stream(row);
-        #[cfg(not(windows))]
-        let stream = self.core.audio_row_ff_stream(row);
+        // The row's two possible currencies (task #99): the engine serves whichever
+        // its decoders can, FFmpeg first (Windows falls back to MF; Linux is FFmpeg
+        // end-to-end and ignores `mf`).
+        let ff = self.core.audio_row_ff_stream(row);
+        let mf = self.core.audio_row_mf_stream(row);
         let seq = match &self.video_audio {
-            Some(audio) if stream >= 0 => audio.set_track(stream),
+            Some(audio) if ff >= 0 || mf >= 0 => audio.set_track(ff, mf),
             // No engine: the flyout lists tracks over the poster too (they are facts
             // about the file), but a switch needs a playing session — say that,
             // rather than the "couldn't switch" that implies something broke.
@@ -2529,8 +2530,8 @@ impl App {
                 );
                 return;
             }
-            // No locator in this engine's currency: a switch that cannot happen must
-            // not pretend to be in flight.
+            // No locator in any currency: a switch that cannot happen must not
+            // pretend to be in flight.
             _ => {
                 self.core.audio_track_switched(row, false);
                 return;
@@ -4244,11 +4245,12 @@ impl ApplicationHandler for App {
                 let switch = self
                     .pending_audio_switch
                     .and_then(|(seq, row)| va.switch_result(seq).map(|ok| (row, ok)));
-                let active = va.active_stream();
-                #[cfg(windows)]
-                let active_row = self.core.audio_row_for_mf_stream(active);
-                #[cfg(not(windows))]
-                let active_row = self.core.audio_row_for_ff_stream(active);
+                // The engine reports its playing stream in whichever currency its
+                // decoder speaks; resolve through the matching accessor.
+                let active_row = match va.active_ff_stream() {
+                    ff if ff >= 0 => self.core.audio_row_for_ff_stream(ff),
+                    _ => self.core.audio_row_for_mf_stream(va.active_mf_stream()),
+                };
                 if active_row != self.audio_row_reported {
                     self.audio_row_reported = active_row;
                     self.core.set_active_audio_row(active_row);

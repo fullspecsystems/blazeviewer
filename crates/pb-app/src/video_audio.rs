@@ -47,13 +47,16 @@ mod imp {
             None
         }
         /// No backend, no switch: completes immediately as refused.
-        pub fn set_track(&self, _stream: i64) -> u64 {
+        pub fn set_track(&self, _ff: i64, _mf: i64) -> u64 {
             0
         }
         pub fn switch_result(&self, _seq: u64) -> Option<bool> {
             Some(false)
         }
-        pub fn active_stream(&self) -> i64 {
+        pub fn active_ff_stream(&self) -> i64 {
+            -1
+        }
+        pub fn active_mf_stream(&self) -> i64 {
             -1
         }
     }
@@ -191,15 +194,17 @@ mod imp {
             let _ = self.ctl.send(Ctl::Seek(position));
         }
 
-        /// Switch to **FFmpeg audio stream** `stream` (task #99) — the
+        /// Switch to **FFmpeg audio stream** `ff` (task #99) — the
         /// `TrackLocator::FfStream` currency, straight from
-        /// `AppCore::audio_row_ff_stream` (this backend is FFmpeg end-to-end, so no
-        /// bridge is involved). Poll the returned sequence with
-        /// [`Self::switch_result`]; a refused switch leaves the current track playing.
-        pub fn set_track(&self, stream: i64) -> u64 {
+        /// `AppCore::audio_row_ff_stream` (this backend is FFmpeg end-to-end).
+        /// `_mf` exists for signature parity with the Windows engine, which
+        /// speaks two currencies; there is no MF here. Poll the returned sequence
+        /// with [`Self::switch_result`]; a refused switch leaves the current
+        /// track playing.
+        pub fn set_track(&self, ff: i64, _mf: i64) -> u64 {
             let seq = self.switch_seq.fetch_add(1, Ordering::Relaxed) + 1;
             let _ = self.ctl.send(Ctl::SetTrack {
-                stream: stream.max(0) as usize,
+                stream: ff.max(0) as usize,
                 seq,
             });
             seq
@@ -218,8 +223,13 @@ mod imp {
         /// The FFmpeg stream index actually decoding (`-1` = unknown) — reported to
         /// the core via `audio_row_for_ff_stream` so the picker ticks what is really
         /// playing.
-        pub fn active_stream(&self) -> i64 {
+        pub fn active_ff_stream(&self) -> i64 {
             self.shared.active_track.load(Ordering::Acquire)
+        }
+
+        /// This backend never decodes via Media Foundation.
+        pub fn active_mf_stream(&self) -> i64 {
+            -1
         }
 
         /// One clock sample: anchor + written-frames time, minus the queue
@@ -544,12 +554,14 @@ mod imp {
             self.0.sample()
         }
 
-        /// Switch to the audio stream at **MF reader stream index** `stream` (task
-        /// #99) — the `TrackLocator::MfStream` currency, from
-        /// `AppCore::audio_row_mf_stream`. Poll the returned sequence with
-        /// [`Self::switch_result`]; a refused switch leaves the current track playing.
-        pub fn set_track(&self, stream: i64) -> u64 {
-            self.0.set_track(stream.max(0) as u32)
+        /// Switch to the audio stream a picker row named — `ff` (FFmpeg index) and
+        /// `mf` (MF reader stream) are its two possible currencies, `-1` = not
+        /// located in that one (task #99). The engine serves whichever its decoders
+        /// can, FFmpeg first. Poll the returned sequence with
+        /// [`Self::switch_result`]; a refused switch leaves the current track
+        /// playing.
+        pub fn set_track(&self, ff: i64, mf: i64) -> u64 {
+            self.0.set_track(ff, mf)
         }
 
         /// The outcome of switch `seq` (`None` = still in flight).
@@ -557,11 +569,17 @@ mod imp {
             self.0.switch_result(seq)
         }
 
-        /// The MF reader stream index actually decoding (`-1` = unknown) — reported
-        /// to the core via `audio_row_for_mf_stream` so the picker ticks what is
-        /// really playing.
-        pub fn active_stream(&self) -> i64 {
-            self.0.active_track()
+        /// The FFmpeg stream index actually decoding (`-1` = the active decoder
+        /// isn't FFmpeg) — the picker's tick resolves through
+        /// `audio_row_for_ff_stream`.
+        pub fn active_ff_stream(&self) -> i64 {
+            self.0.active_ff_stream()
+        }
+
+        /// The MF reader stream index actually decoding (`-1` = the active decoder
+        /// isn't MF) — resolved through `audio_row_for_mf_stream`.
+        pub fn active_mf_stream(&self) -> i64 {
+            self.0.active_mf_stream()
         }
     }
 }
@@ -636,15 +654,18 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
 
-        // The engine reports which stream the default open resolved to.
-        let s0 = audio.active_stream();
-        assert!(s0 >= 0, "the default open reports its stream");
-        // The clip's OTHER audio stream, in the decoder's own (MF) namespace.
-        let s1 = pb_decode::MfAudioDecoder::open_track(&input, 48_000, Some(1))
-            .expect("ordinal 1 opens")
+        // The engine reports its playing stream in ONE of the two currencies,
+        // whichever decoder opened (FFmpeg under `ffprobe`, MF otherwise).
+        assert!(
+            audio.active_ff_stream() >= 0 || audio.active_mf_stream() >= 0,
+            "the default open reports its stream"
+        );
+        // A specific track addressed in the MF currency (computable in every build
+        // config): MF's audio ordinal 0 is the fixture's `fra` track.
+        let s0 = pb_decode::MfAudioDecoder::open_track(&input, 48_000, Some(0))
+            .expect("ordinal 0 opens")
             .reader_stream()
-            .expect("ordinal 1 resolves") as i64;
-        assert_ne!(s0, s1);
+            .expect("ordinal 0 resolves") as i64;
 
         let wait = |seq: u64| {
             let t0 = std::time::Instant::now();
@@ -661,22 +682,22 @@ mod tests {
         };
 
         assert!(
-            wait(audio.set_track(s1)),
+            wait(audio.set_track(-1, s0)),
             "switching to a real AAC stream must be confirmed"
         );
         assert_eq!(
-            audio.active_stream(),
-            s1,
-            "the engine reports the new stream"
+            audio.active_mf_stream(),
+            s0,
+            "the engine reports the new stream (MF currency — the ask carried no other)"
         );
 
         assert!(
-            !wait(audio.set_track(99)),
+            !wait(audio.set_track(-1, 99)),
             "a stream the file hasn't got must be refused, not half-taken"
         );
         assert_eq!(
-            audio.active_stream(),
-            s1,
+            audio.active_mf_stream(),
+            s0,
             "a refused switch leaves the previous track active"
         );
     }

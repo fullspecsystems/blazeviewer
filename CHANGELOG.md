@@ -13,9 +13,9 @@ with any pre-release suffix carried only by the tag.
   **Playback ▸ Audio Track** menu lists every track with a check on the one playing, and
   `A` / `Shift+A` cycle through them (on Linux the menu shows **Next Audio Track**, since
   its menu bar has no submenus). The switch keeps your place in the video, and the app
-  only confirms a change that really happened: a track Windows can't decode (some
-  Dolby AC-3/E-AC-3 tracks) is refused with a message while the current sound keeps
-  playing. This brings Windows and Linux up to par with the Mac.
+  only confirms a change that really happened: a rare track that can't be decoded is
+  refused with a message while the current sound keeps playing. This brings Windows and
+  Linux up to par with the Mac.
 - **Archives show up while you browse, and `P` opens them.** A `.zip`, `.7z`, `.rar`, `.cbz`,
   `.cbr` or `.tar.*` sitting in a folder is no longer invisible: it appears as a tile with an
   archive icon, and pressing `P` on it opens the archive as its own deck, exactly as if you had
@@ -26,6 +26,11 @@ with any pre-release suffix carried only by the tag.
   zippered folder, and a button on screen tells you `P` opens it.
 
 ### Fixed
+- **Movies are no longer silent on Windows.** Films with Dolby (AC-3, E-AC-3) or DTS
+  audio played without sound, because Windows has no built-in decoder for those formats.
+  The app now decodes them itself, so nearly any film plays with sound. This also picks
+  the film's intended default track (the one the disc authored as default) instead of
+  whichever track happened to be listed first.
 - **Video playback is smooth again (macOS).** MKV and WebM files now play through the same
   renderer as everything else, instead of a path that quietly dropped a few frames every
   second on high-refresh displays. Audio-track switching (`A` / **Playback ▸ Audio**), the
