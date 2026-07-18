@@ -1,9 +1,10 @@
 # Blaze Viewer — Current Status (session handoff)
 
-_Last updated: 2026-07-17 (rev 13). **This handoff is the WINDOWS VIDEO/AUDIO track**
+_Last updated: 2026-07-18 (rev 14). **This handoff is the WINDOWS VIDEO/AUDIO track**
 (the `feat/audio-track-selection` arc, all merged to main). The macOS `#106` performance
 track and the door/Copy track run in parallel and are preserved at the bottom — don't lose
-them, but they are not this thread's job._
+them, but they are not this thread's job. **NEW this rev: a self-contained macOS handoff for
+the cross-type open-race fix (task #109) — see "📌 macOS TODO" near the bottom.**_
 
 ---
 
@@ -165,3 +166,118 @@ decode **~400 ms**/item. `PB_PERF=1` on the mac host. Shipped so far: door card 
 Door renders correctly on Windows. Owed: gate OCR/Describe/Compare **off** on a door
 (`MenuState._enabled`); #107 relabel "Copy Image"→"Copy" + emit file-only on a door; interactive
 smoke tests (`P` opens / `Alt+↑` climbs out, archive thumbnails, all-archives folder).
+
+---
+
+# 📌 macOS TODO — port the cross-type open-race fix (task #109)
+
+**For a macOS agent.** A nasty archive/folder bug was root-caused and fixed on Windows
+2026-07-18 (commit `8293a662`). The **core** half of the fix is shell-neutral, so macOS is
+already protected against the *severe* form. The **shell** half was only done in the winit
+shell (`crates/pb-app/src/main.rs`); macOS (`crates/pb-mac-ffi/src/lib.rs`) needs the mirror.
+I could not build or test `pb-mac-ffi` on Windows (it's `#![cfg(target_os = "macos")]`), so
+this is an inspection-only handoff — **build + run it on the Mac to verify.**
+
+## The symptom (so you recognize it)
+Open an archive while a folder is still loading (or click a folder in the ⇧F tree while an
+archive is opening), and you can land in a **stuck** state: the archive's **door card**
+(e.g. `album.zip`) sits **on top of a stale, unrelated photo** (often an image from a
+*different* archive). Pressing `space` **advances the filename in the title bar but the
+picture never changes** — the view is frozen. **Resizing the window recovers it.** A
+blank-deck-until-resize on archive open is the same family.
+
+## Root cause (Codex-diagnosed, verified in code)
+It is **NOT** a core↔renderer ring desync (I chased that for four wrong attempts — don't).
+It is a **race between the two independent background workers**:
+
+- `AppCore::open_plan` (`app_core_impl.rs` ~1272) emits **either** `BeginArchiveOpen` **or**
+  `BeginDirScan`, and each shell cancels only the **same** kind (separate `archive_gen` /
+  `scan_gen`). An archive open does **not** supersede an in-flight folder scan.
+- `scan_bootstrapped` is a **global boolean** (`AppCore`), flipped true on the first non-empty
+  folder batch (`apply_scan_batch`, `app_core_impl.rs` ~1140) and reset to false **only when a
+  dir scan starts** (each shell's `begin_dir_scan`). An archive open never resets it.
+- So: folder scan bootstraps a deck → an archive open rebuilds the deck → the **still-alive**
+  folder scan emits another cumulative batch → `scan_bootstrapped` is still true → the batch
+  takes the **extend** branch → `extend_playlist` (`app_core_impl.rs` ~5346) swaps `self.source`
+  back to the folder **without** touching the ring, epoch, or `content_gen`.
+- Now index N names a *folder* item (maybe a `.zip` door) while both GPU rings still hold the
+  **archive** texture for N. `present_slot` returns **true with the wrong occupant** — which is
+  why a `present_slot`-success check can't detect it. A resize heals it only because
+  `invalidate_geometry` rebuilds both rings + bumps the epoch.
+
+## What is ALREADY fixed and protects macOS (do not redo)
+Commit `8293a662`, in `AppCore::apply_scan_batch` (`app_core_impl.rs` ~1159) — **shell-neutral,
+so macOS gets it for free**: the extend branch is guarded. A folder batch only extends when it
+is the *same* folder scan continuing (`self.archive_scope.is_none()` **and**
+`resolved.scan_root == self.scan_root`); otherwise it is dropped. An extend is *never*
+legitimately cross-deck, so this is unconditionally safe. Tests:
+`a_stale_folder_scan_batch_never_extends_an_archive_deck` and
+`a_matching_folder_scan_batch_still_extends_its_own_deck`. **This closes the severe "frozen
+view + wrong card" mode (mode A) on every shell, macOS included.**
+
+Also already done (all shells): the `door_presented()`/`door_card()` `presented_epoch` gate
+(`cd07a388`), and `PB_DOOR_DIAG=1` diagnostics (renderer draw-source in `gpu.rs`; core door
+belief + `present_slot`-miss line in `app_core_impl.rs::draw`/`present_item`). The earlier
+`present_item` "invalidate-on-miss" self-heal was a **mistake and was reverted** — it purged
+the retained full-res tier (regressing instant fullscreen to an EXIF-preview flash) and bumped
+the epoch mid-`drain_results`. Do **not** reintroduce it.
+
+## What macOS still needs (the shell half — YOUR job)
+The winit shell also **cancels the *other* worker on each open**, so only one deck-installing
+worker is ever alive. This closes the rarer **mode B** (a stale folder scan's *first* batch
+**bootstrapping** over an archive opened just after the scan started — a clean rebuild onto the
+wrong-but-valid folder deck; low severity, but still wrong). The core guard can't cover mode B,
+because a bootstrap *is* legitimately cross-deck — only open **order** distinguishes stale from
+fresh, which only the shell knows.
+
+Mirror the two winit edits (`crates/pb-app/src/main.rs`, commit `8293a662`) into
+`crates/pb-mac-ffi/src/lib.rs`:
+
+1. **`begin_archive_open`** (~line 2877): right after it cancels a prior archive
+   (`if let Some(prev) = self.archive_load.take() { prev.progress.request_cancel(); }`, ~2891),
+   also drop the in-flight folder scan:
+   ```rust
+   self.cancel_dir_scan(); // cross-type: an archive open must supersede a folder scan too
+   ```
+   Note: the mac `cancel_dir_scan` (~2864) **already sets `self.dir_scan = None`**, unlike the
+   winit one (where callers null it after) — so a bare `self.cancel_dir_scan();` is enough on
+   mac; do **not** also write `self.dir_scan = None;`.
+
+2. **`begin_dir_scan`** (~line 2744): after it confirms it's really starting a scan (mirror the
+   winit placement — after the `Source::Scan { .. }` match / roots extraction, not before), drop
+   any in-flight archive open:
+   ```rust
+   if let Some(prev) = self.archive_load.take() {
+       prev.progress.request_cancel();
+   }
+   ```
+   This stops a stale `ArchiveResolved` from rebuilding the deck back onto the archive on top of
+   the folder you just started scanning.
+
+The winit diff is the authoritative reference — read it (`git show 8293a662 -- crates/pb-app/src/main.rs`)
+and adapt to mac's slightly different `cancel_dir_scan` semantics (above).
+
+## Verify on the Mac
+- Reproduce first on a pre-fix build if you can (open an archive over a still-scanning folder,
+  or click a tree folder while an archive opens) to confirm the stuck-card/frozen-view.
+- After the change: the frozen card should not occur; opening an archive from a folder deck, or
+  clicking folders/archives rapidly in the ⇧F tree, should always land on the *right* deck.
+- If anything slips through, run a debug build with `PB_DOOR_DIAG=1` and read the interleaved
+  `[door-diag]` lines: `door_presented=true` with renderer `source=RingSlot` = the wrong-occupant
+  race (this bug); `Held`/`Single` = a *different*, literal empty-slot desync (Codex found no path
+  to that in normal use).
+
+## The deeper, still-deferred hardening (also task #109, both shells)
+The shell cross-cancel + core guard fully fix the user-visible bug. The *principled* fix Codex
+recommends, if you want to close the class of race for good (deferred, larger):
+- One **shared open generation** replacing the separate `archive_gen`/`scan_gen` + the global
+  `scan_bootstrapped` boolean; any result whose generation ≠ the latest open is dropped in the
+  core (race-proof, shell-neutral, also closes mode B without shell edits).
+- Add `content_gen`/`deck_gen` to `DecodeKey` and check it alongside `epoch` on every outcome
+  (`decode_pool.rs`) — epoch is *geometry* identity and shouldn't carry deck identity alone.
+- Make `Renderer::upload_slot` return a result; only `ring.mark_resident` after a successful
+  upload, and check `mark_resident`'s currently-ignored return (it reports a stale reservation).
+- Make `present_item` return success; on a genuine `present_slot` miss, abort the current
+  `drain_results` batch and resync **once after the loop** (never mid-loop).
+
+Full Codex analysis was captured in the 2026-07-18 session; task #109 has the itemized list.
