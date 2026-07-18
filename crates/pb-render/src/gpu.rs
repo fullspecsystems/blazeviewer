@@ -2243,6 +2243,10 @@ impl Renderer for WgpuRenderer {
     /// Override the letterbox / background fill color (sRGB), shown around a photo
     /// that doesn't cover the screen. Takes effect on the next `render`. Off the
     /// photo hot path — set from user settings, not per frame.
+    fn surface_size(&self) -> (u32, u32) {
+        (self.config.width, self.config.height)
+    }
+
     fn set_letterbox(&mut self, rgb: [u8; 3]) {
         self.letterbox = rgb;
     }
@@ -2973,7 +2977,15 @@ impl Renderer for WgpuRenderer {
                 // Re-query caps and clamp the present mode — a lost surface (WSLg/software) can
                 // report an empty/shrunken mode set, and a blind `configure` with the old mode
                 // panics. `reconfigure_surface` skips safely until the surface is usable again.
-                eprintln!("render: surface lost/outdated — reconfigured, frame dropped");
+                // NOTE: this only reconfigures at the CURRENT `config` size. If that size has
+                // drifted from the window (a fullscreen/DPI transition whose resize didn't reach
+                // us), the surface stays `Outdated` and every frame is dropped — a frozen display
+                // until a real resize. The shell's `heal_surface_if_dropped` re-asserts the true
+                // window size to break that loop; this log carries the size so it's diagnosable.
+                eprintln!(
+                    "render: surface lost/outdated — config={}x{} present_mode={:?} — reconfigured, frame dropped",
+                    self.config.width, self.config.height, self.config.present_mode
+                );
                 self.reconfigure_surface();
                 return Ok(false);
             }

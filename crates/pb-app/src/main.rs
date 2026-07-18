@@ -2407,6 +2407,60 @@ impl App {
         self.track_windowed_geometry();
     }
 
+    /// Break a frozen-display loop. When a frame is persistently dropped because the surface is
+    /// `Lost`/`Outdated` AND the swapchain's configured size has drifted from the live window (a
+    /// fullscreen / DPI / monitor transition whose `Resized` never fully reached the renderer),
+    /// the reconfigure inside `render` keeps re-using that stale size, so every frame is dropped
+    /// and the display freezes on the last presented frame until a manual resize. The renderer
+    /// holds no window handle, so it can't self-correct — re-assert the window's TRUE current size
+    /// here. Gated on an actual size mismatch, so a drop for any other reason never churns a
+    /// resize (that case is only logged, for follow-up). Owner-reported as "door card / photo
+    /// stuck, won't refresh when advancing" — the frozen contents were a red herring; the freeze
+    /// is this surface loop (confirmed via PB_DOOR_DIAG: core state correct, every frame dropped).
+    fn heal_surface_if_dropped(&mut self) {
+        if !self.core.redraw_pending {
+            return;
+        }
+        let Some(window) = self.window.as_ref() else {
+            return;
+        };
+        let sz = window.inner_size();
+        if sz.width == 0 || sz.height == 0 {
+            return; // minimized — not a real size to react to
+        }
+        let cfg = self.core.renderer.as_ref().map(|r| r.surface_size());
+        if cfg == Some((sz.width, sz.height)) {
+            // Size is correct — a dropped frame here is a transient surface loss that recovers on
+            // its own, not the stale-swapchain freeze. Don't churn a same-size reconfigure.
+            if door_diag() {
+                eprintln!(
+                    "[door-diag] frame dropped, surface size OK ({}x{}) — not a size drift",
+                    sz.width, sz.height
+                );
+            }
+            return;
+        }
+        if door_diag() {
+            eprintln!(
+                "[door-diag] surface heal: window {}x{} != config {:?} — re-asserting size",
+                sz.width, sz.height, cfg
+            );
+        }
+        // The full resize path: viewport + fit + swapchain reconfigure + refit.
+        self.handle_resized(sz.width, sz.height);
+        // Belt: `handle_resized` skips the renderer when the core's fit already matched (a
+        // renderer-config-only drift), so force the swapchain to the true size directly if it's
+        // still stale, then request a fresh frame — the corrected surface should now present.
+        if let Some(r) = self.core.renderer.as_mut() {
+            if r.surface_size() != (sz.width, sz.height) {
+                r.resize(sz.width, sz.height);
+            }
+        }
+        if let Some(w) = self.window.as_ref() {
+            w.request_redraw();
+        }
+    }
+
     fn apply_window_mode(&mut self) {
         // Clone the window handle (an Arc) so it can be driven while `self` is still borrowed
         // mutably below (the menu attach needs `&mut self`).
@@ -4557,6 +4611,11 @@ impl ApplicationHandler for App {
         // Execute the tick's effects (SetWake → `requested_wake`, StopLiveAudio, any
         // ShellFlowAction, redraws, …). Must run before we read `requested_wake`.
         self.drain_effects(event_loop);
+
+        // If the tick's dropped-frame retry (core `redraw_pending`) is stuck because the
+        // swapchain size drifted from the window, re-assert the true size so presents resume —
+        // otherwise the display freezes on the last frame until a manual resize.
+        self.heal_surface_if_dropped();
 
         // Drive the egui play hint's flash/fade (after the core tick bumped `play_hint_seq`);
         // stash this frame's pill for `render_overlay_frame` and dirty the overlay while it

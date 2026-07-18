@@ -248,6 +248,12 @@ pub trait Renderer {
     /// renderer still shows the prior photo (the "card over a photo" defect).
     fn present_slot(&mut self, slot: usize) -> bool;
 
+    /// The surface's currently-configured swapchain size (physical px). The shell compares
+    /// it to the live window size to detect a stale swapchain — a size drift the renderer
+    /// can't self-heal (it holds no window handle), which otherwise leaves the surface
+    /// perpetually `Outdated`, dropping every frame and freezing the display until a resize.
+    fn surface_size(&self) -> (u32, u32);
+
     /// Override the letterbox / background fill color (sRGB), shown around a photo
     /// that doesn't cover the screen. Takes effect on the next `render`. Off the
     /// photo hot path — set from user settings, not per frame.
