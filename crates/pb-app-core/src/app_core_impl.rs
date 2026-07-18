@@ -1156,6 +1156,19 @@ impl AppCore {
                 resolved.recursive,
                 start,
             );
+        } else if self.archive_scope.is_some() || resolved.scan_root != self.scan_root {
+            // Cross-deck open race (Codex-diagnosed 2026-07-17): a folder-scan worker keeps
+            // running when an *archive* open (a different worker type, so it doesn't supersede
+            // the scan) installs a new deck. A late cumulative batch from that still-alive scan
+            // must NOT extend the archive deck: `extend_playlist` swaps `self.source` without
+            // touching the ring, epoch, or `content_gen`, so index N would name a folder item
+            // while both rings still hold the *archive* texture for N — `present_slot` returns
+            // true with the wrong occupant, producing the "title advances but the view is frozen,
+            // door card over a photo" corruption (a resize heals it by rebuilding the rings).
+            // A legitimate extend is always the SAME folder scan continuing: no archive scope,
+            // and a matching `scan_root`. Anything else is a stale/cross-type batch — drop it.
+            // The shells also drop the other worker on each open (belt), but this keeps the core
+            // correct on its own (and covers macOS).
         } else {
             self.extend_playlist(resolved.source);
         }
@@ -6301,14 +6314,16 @@ impl AppCore {
         let t0 = Instant::now();
         let view = self.view_for(item);
         let title = title_for(self.source.name(item), item, self.source.len());
-        // Ask the renderer to rebind the slot. It returns `false` when that slot isn't
-        // uploaded in its ring (it keeps the previous frame): a core↔renderer ring desync,
-        // where our `ResidentRing` mirror still names `item` at `slot` but the renderer's
-        // ring doesn't hold it. In that case `item` is NOT actually on screen, so we must
-        // not mark it resolved below — doing so is what let `door_presented`/`displayed_item`
-        // report a door (or photo) as shown while the renderer still displays the prior
-        // photo: the owner-reported "archive card on top of a photo." Headless (`renderer =
-        // None`, unit tests) is treated as logically presented so the pure-core assertions hold.
+        // Ask the renderer to rebind the slot. It returns `false` when that slot isn't uploaded
+        // in its ring (it keeps the previous frame): a core↔renderer ring desync. That is NOT the
+        // "archive card over a photo" bug — that one is a cross-deck open race where `present_slot`
+        // returns *true* with the wrong occupant (see `apply_scan_batch`). So this is a loud
+        // diagnostic only, never a control-flow branch: the earlier invalidate-on-miss repair
+        // (cff70ca0 / c383107a) was unsafe — it bumped the epoch mid `drain_results` loop and
+        // purged the retained full-res tier (regressing instant fullscreen to a preview flash) —
+        // and is deliberately reverted here. Headless (`renderer = None`, unit tests) counts as
+        // presented so the pure-core assertions hold; the follow-up to propagate this result
+        // properly (abort the drain, resync once after the loop) is tracked, not done inline.
         let presented = match self.renderer.as_mut() {
             Some(r) => {
                 r.set_view(view);
@@ -6316,29 +6331,11 @@ impl AppCore {
             }
             None => true,
         };
-        if !presented {
-            // The renderer kept the old frame: our ring mirror says `item` is resident at `slot`
-            // but the renderer's ring doesn't hold it — the two have drifted. Resync BOTH by the
-            // *same* path a window resize takes (owner-confirmed to clear the stuck state):
-            // `invalidate_geometry` rebuilds each ring in lockstep at the current capacity, bumps
-            // the epoch to discard the stale in-flight decode, and moves the on-screen frame into
-            // the renderer's `held` so it keeps showing. (Not `invalidate_content` — the pixels
-            // didn't change, so there's no reason to purge the retained full-res tier.) The item
-            // stays un-resolved (pending), so `target_caught_up` is false and the prefetch/drain
-            // path re-decodes then re-presents it cleanly — never a false "presented" over the
-            // held photo, and never the permanent "titles advance but the view is frozen" hang.
-            // This branch only fires on a genuine desync; the in-sync photo hot path (slot
-            // verified via `display_slot`) always presents, so it is untouched.
-            if door_diag() {
-                eprintln!(
-                    "[door-diag] DESYNC present_slot({slot}) missed for item {item} (archive_kind={:?}); resyncing rings",
-                    self.item_archive_kind(item),
-                );
-            }
-            self.invalidate_geometry();
-            self.request_prefetch();
-            self.metrics.record("present", t0.elapsed());
-            return;
+        if !presented && door_diag() {
+            eprintln!(
+                "[door-diag] present_slot({slot}) missed for item {item} (archive_kind={:?})",
+                self.item_archive_kind(item),
+            );
         }
         self.effects.push(contract::CoreEffect::SetTitle(title));
         self.ring.set_displayed(slot);
@@ -11667,6 +11664,96 @@ mod tests {
             "unscoped: the deck IS the full source, no wrapper"
         );
         assert_eq!(core.source.len(), ARCHIVE.len());
+    }
+
+    #[test]
+    fn a_stale_folder_scan_batch_never_extends_an_archive_deck() {
+        // The cross-deck open race (Codex-diagnosed 2026-07-17): a folder-scan worker keeps
+        // streaming after an *archive* open installs a new deck — the archive open doesn't
+        // supersede the scan (different worker type). A late cumulative batch from that scan must
+        // be DROPPED, never fed to `extend_playlist`, which would swap `self.source` back to the
+        // folder while both GPU rings still hold the archive's textures for those indices: the
+        // "title advances but the view is frozen, door card over a photo" corruption a resize heals.
+        let mut core = test_core();
+        let folder = PathBuf::from("/some/folder");
+        let folder_src = |names: &[&str]| -> Arc<dyn ItemSource> {
+            Arc::new(FsSource::new(names.iter().map(|n| folder.join(n)).collect()))
+        };
+
+        // 1. A folder scan bootstraps its deck.
+        core.apply_scan_batch(crate::scan::Resolved {
+            source: folder_src(&["a.jpg", "b.jpg"]),
+            root: folder.clone(),
+            scan_root: Some(folder.clone()),
+            recursive: true,
+            start: 0,
+        });
+        assert!(core.scan_bootstrapped, "first non-empty batch bootstraps");
+        assert_eq!(core.source.len(), 2);
+
+        // 2. An archive opens over it: a full rebuild onto the archive deck (scope stamped).
+        let container = std::env::temp_dir().join("race.zip");
+        let archive: Arc<dyn ItemSource> = Arc::new(FakeArchive {
+            names: vec!["one.jpg".into(), "two.jpg".into(), "three.jpg".into()],
+            container: container.clone(),
+        });
+        core.apply_archive(crate::scan::Resolved {
+            source: archive,
+            root: container,
+            scan_root: None,
+            recursive: false,
+            start: 0,
+        });
+        assert!(core.archive_scope.is_some(), "we're on the archive deck now");
+        assert_eq!(core.source.len(), 3);
+
+        // 3. The still-alive folder scan delivers a LARGER cumulative batch. It must be rejected —
+        //    not extended over the archive.
+        core.apply_scan_batch(crate::scan::Resolved {
+            source: folder_src(&["a.jpg", "b.jpg", "c.jpg", "d.jpg"]),
+            root: folder.clone(),
+            scan_root: Some(folder),
+            recursive: true,
+            start: 0,
+        });
+
+        assert!(
+            core.archive_scope.is_some(),
+            "a stale folder batch must not clobber the archive scope"
+        );
+        assert_eq!(
+            core.source.len(),
+            3,
+            "a stale folder batch must not extend the archive deck"
+        );
+        assert_eq!(core.source.name(0), "one.jpg", "still the archive's items");
+    }
+
+    #[test]
+    fn a_matching_folder_scan_batch_still_extends_its_own_deck() {
+        // The guard must not break the normal case: a later cumulative batch from the *same*
+        // folder scan (no archive scope, matching `scan_root`) still grows the deck in place.
+        let mut core = test_core();
+        let folder = PathBuf::from("/some/folder");
+        let folder_src = |names: &[&str]| -> Arc<dyn ItemSource> {
+            Arc::new(FsSource::new(names.iter().map(|n| folder.join(n)).collect()))
+        };
+        core.apply_scan_batch(crate::scan::Resolved {
+            source: folder_src(&["a.jpg", "b.jpg"]),
+            root: folder.clone(),
+            scan_root: Some(folder.clone()),
+            recursive: true,
+            start: 0,
+        });
+        assert_eq!(core.source.len(), 2);
+        core.apply_scan_batch(crate::scan::Resolved {
+            source: folder_src(&["a.jpg", "b.jpg", "c.jpg"]),
+            root: folder.clone(),
+            scan_root: Some(folder),
+            recursive: true,
+            start: 0,
+        });
+        assert_eq!(core.source.len(), 3, "the same scan's later batch extends");
     }
 
     #[test]

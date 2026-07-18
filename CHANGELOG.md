@@ -73,16 +73,18 @@ with any pre-release suffix carried only by the tag.
   the setting updates the tree live.
 
 ### Fixed
-- **The archive "open" card no longer appears on top of a photo.** When you landed on an archive
-  (or opened a folder whose first item is one), the card that names the archive could appear over
-  the previous photo instead of over the archive's own (empty) frame. Two causes are fixed: the
-  card no longer shows before the archive's frame is actually on screen, and the app no longer
-  counts an archive as "shown" when the display didn't truly switch to it — it keeps the old photo
-  up and retries until the archive's frame really lands.
+- **The archive "open" card no longer gets stuck on top of a photo.** Opening an archive while a
+  folder was still loading (or opening a folder while an archive was still opening) could leave the
+  archive's card sitting over a stale, unrelated photo — pressing space changed the filename in the
+  title bar but never the picture, and only resizing the window recovered it. The cause was a race
+  between the folder-scan and archive-open background workers: a late batch from the folder scan
+  could quietly swap the deck back to the folder while the screen still showed the archive. Opening
+  either kind now cancels the other, and a stale batch is ignored, so they can't cross. The card
+  also waits until the archive's own frame is actually on screen before it draws.
 - **Opening an archive no longer occasionally shows a blank screen until you resize.** The first
-  image of a freshly opened archive is now decoded and shown immediately, the same way the app
-  paints the first photo at startup, instead of waiting on a background decode that could
-  intermittently get dropped and leave the deck blank until a window resize forced a redraw.
+  image of a freshly opened archive is decoded and shown immediately, the same way the app paints
+  the first photo at startup, instead of waiting on a background decode that could intermittently
+  get dropped and leave the deck blank until a window resize forced a redraw.
 - **Dialogs no longer let a keypress slip through to the photo (Windows).** When a message like
   "This archive has no images to show" appeared, pressing Enter or Space to dismiss it also
   advanced to the next photo. The dialog is now properly modal: the key that closes it does only

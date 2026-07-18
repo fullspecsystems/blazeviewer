@@ -1420,6 +1420,17 @@
           104
         ],
         "subtasks": []
+      },
+      {
+        "id": 109,
+        "title": "Harden the deck-open pipeline against cross-type races (deferred follow-ups)",
+        "description": "Follow-ups from the Codex root-cause review of the 'archive door card frozen over a photo' bug (fixed 2026-07-17 by a core-side extend guard in apply_scan_batch + a winit shell cross-cancel of the folder-scan and archive-open workers). The primary bug (mode A: a stale folder-scan batch extending an archive deck) is fixed on BOTH shells by the core guard. These are the remaining, lower-severity hardening items Codex recommended:\n(1) macOS shell (pb-mac-ffi) parity: mirror the winit begin_archive_open/begin_dir_scan cross-cancel so starting either worker drops the other. Without it, macOS is still exposed to 'mode B' (a stale folder scan's FIRST batch bootstrapping over an archive opened just after the scan started) - LOW severity (a clean rebuild onto the wrong-but-valid folder deck, not the frozen-view corruption; the core guard already covers mode A on mac). Needs an on-device build to verify (cfg(macos), can't compile on Windows).\n(2) Shared open generation (Codex #1/#2): replace the global scan_bootstrapped boolean + independent archive_gen/scan_gen with ONE monotonic open generation shared by both worker types, threaded through the contract (BeginArchiveOpen/BeginDirScan effects + ArchiveResolved/ScanBatch events carry it), so any result whose generation != the latest open is dropped in the core - the general, race-proof fix that also closes mode B shell-neutrally.\n(3) Decode identity (Codex #4): add content_gen/deck_gen to DecodeKey and its dedup identity, and check both epoch AND content generation on every outcome (decode_pool.rs / drain_results). Epoch is geometry identity; it should not carry deck identity alone, or a cross-deck stale decode can dedup as current.\n(4) Renderer upload correctness (Codex #5): make Renderer::upload_slot return bool/Result; only call ring.mark_resident after a successful upload, and check mark_resident's currently-ignored return (ring.rs reports a stale reservation). Make an out-of-bounds upload a loud error, not a silent return.\n(5) present_item result propagation (Codex #6): make present_item return success and have try_present_target/drain_results propagate it; on a genuine present_slot miss, abort the current drain batch and resync ONCE after the loop (never invalidate mid-loop - that was the reverted cff70ca0/c383107a repair that bumped the epoch mid drain_results and purged the retained full-res tier, regressing instant fullscreen to a preview flash).\nCodex full analysis saved during the 2026-07-17 session. The present_slot->bool signature + the PB_DOOR_DIAG diagnostics (render draw-source + core door belief + present_slot-miss log) are already in the tree from that session and are the starting point for (4)/(5).",
+        "status": "pending",
+        "priority": "medium",
+        "dependencies": [
+          104
+        ],
+        "subtasks": []
       }
     ]
   }

@@ -1109,6 +1109,15 @@ impl App {
         if let Some(prev) = self.archive_load.take() {
             prev.progress.request_cancel();
         }
+        // Cross-type supersession (cross-deck open race, Codex-diagnosed 2026-07-17): a folder
+        // scan is a DIFFERENT worker than an archive open, so the `archive_gen` bump above never
+        // cancels it. Left alive, its next cumulative batch reaches the core and extends *this*
+        // archive deck (`apply_scan_batch` → `extend_playlist`) while both GPU rings still hold
+        // the archive's textures — the "title advances, view frozen, door card over a photo"
+        // corruption. Drop the scan handle now so no stale folder batch survives this open.
+        // (The core also guards the extend, so this is belt-and-braces + stops the worker sooner.)
+        self.cancel_dir_scan();
+        self.dir_scan = None;
         // The synchronous ZIP shortcut is only safe when NO auto-try will run: a wrong-password
         // ZIP attempt decrypts the entire first entry (up to ~1 GiB via `ZipSource::password_ok`),
         // so any auto-try must go off the event loop. With an empty cache and no user password
@@ -1294,6 +1303,13 @@ impl App {
             Source::Scan { roots, recursive } => (roots, recursive),
             _ => return,
         };
+        // Cross-type supersession (cross-deck open race, 2026-07-17): starting a folder scan must
+        // also drop any in-flight archive open — otherwise a stale `ArchiveResolved` landing after
+        // this rebuilds the deck back onto the archive on top of the folder we're now scanning.
+        // Symmetric with the scan-drop in `begin_archive_open`.
+        if let Some(prev) = self.archive_load.take() {
+            prev.progress.request_cancel();
+        }
         let root = roots.first().cloned().unwrap_or_else(|| PathBuf::from("."));
         let scan_root = roots.first().cloned();
         let worker_progress = progress.clone();
