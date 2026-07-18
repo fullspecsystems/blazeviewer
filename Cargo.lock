@@ -4100,6 +4100,7 @@ dependencies = [
  "ureq 3.3.0",
  "walkdir",
  "windows 0.62.2",
+ "zeroize",
  "zip 2.4.2",
 ]
 

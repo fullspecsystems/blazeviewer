@@ -489,6 +489,15 @@ pub struct AppCore {
     /// carried so a submit re-opens that archive and a cancel/dismiss forgets it. The prompt +
     /// the worker spawn stay shell-owned; this is just the pending target. NS0 5.6.
     pub password_archive: Option<std::path::PathBuf>,
+    /// Passwords that have successfully unlocked encrypted archives **this session**
+    /// (session-archive-password-cache): auto-tried (MRU-first) before prompting on the next
+    /// encrypted archive, so a folder of same-password archives asks once. RAM-only,
+    /// zeroized + redacted ([`SecretString`](crate::SecretString)), **never persisted**
+    /// (privacy #2) — it is not a `Settings` field, so `settings.save()` can never write it,
+    /// and it is wiped by [`clear_archive_passwords`](AppCore::clear_archive_passwords) at
+    /// teardown. It deliberately survives in-session navigation (open archive A with a
+    /// password, then archive B elsewhere reuses it); it is never cleared on a folder change.
+    pub archive_passwords: Vec<crate::SecretString>,
 
     // --- HUD / overlay state (NS0 5.3e; the Hud rasterizer stays shell-side for 5.4) ---
     /// The basic `i` info line (filename · resolution · format): the **ephemeral**

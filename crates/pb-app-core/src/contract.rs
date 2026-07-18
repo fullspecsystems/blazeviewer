@@ -249,7 +249,9 @@ pub enum DialogResult {
     Dismissed(Option<DialogKind>),
     /// Password entry submitted (archive unlock); `None` if extraction failed. The core shows the
     /// "Checking…" state and re-opens the pending archive with the entry (via `BeginArchiveOpen`).
-    PasswordSubmitted(Option<String>),
+    /// The password is a [`SecretString`](crate::SecretString) (zeroized, redacted `Debug`) so it
+    /// never leaks through this `#[derive(Debug)]` enum (session-archive-password-cache).
+    PasswordSubmitted(Option<crate::SecretString>),
     /// The password prompt's Cancel — abandon the pending archive.
     PasswordCancelled,
     /// An ask-about-image question was submitted (task #44): run it through the describe
@@ -381,7 +383,9 @@ pub enum CoreEffect {
     /// drives the failure dialogs). `password` is `Some` only on a re-open with an entered password.
     BeginArchiveOpen {
         path: PathBuf,
-        password: Option<String>,
+        /// A [`SecretString`](crate::SecretString) (zeroized, redacted `Debug`) so the password
+        /// never leaks through this `#[derive(Debug)]` enum (session-archive-password-cache).
+        password: Option<crate::SecretString>,
     },
     /// Start scanning a folder off the event loop (NS0 5.6 Step 3): the host spawns the streaming
     /// walk worker, holds its handle + generation + progress dialog, and feeds snapshots back as

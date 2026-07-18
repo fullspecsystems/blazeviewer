@@ -42,6 +42,12 @@ with any pre-release suffix carried only by the tag.
   archive, play a video or an animation — so the chord your fingers already know works here, and
   pairs with the `Cmd+↑` / `Alt+↑` that go back out to the enclosing folder. `P` still does
   everything it did.
+- **Enter an archive password once for a whole folder.** When you unlock an encrypted archive,
+  the app remembers that password for the rest of the session and tries it automatically on the
+  next encrypted archive, so a folder of same-password archives only asks once. It's silent
+  when a saved password works, and it falls back to asking if none fit. The passwords are kept
+  in memory only, never written anywhere, and are wiped when you quit — matching how 7-Zip and
+  WinRAR behave.
 - **Turn off archives in the deck when you don't want them.** A new **View ▸ Show Archives**
   toggle (also in Settings, under Recursive) controls whether archives show as cards while you
   browse a folder. It's on by default; turn it off in a folder like Downloads that's full of

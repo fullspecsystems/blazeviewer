@@ -494,10 +494,12 @@ pub struct DialogWindow {
     /// archive doesn't look frozen and the user can't double-submit.
     checking: bool,
     /// The text the user just submitted (Unlock / Enter on a Password dialog), taken
-    /// by [`take_submitted_password`] right after the answering frame.
+    /// by [`take_submitted_password`] right after the answering frame. A
+    /// [`SecretString`](pb_app_core::SecretString) so it is zeroized on drop and never leaks
+    /// through `Debug` (session-archive-password-cache).
     ///
     /// [`take_submitted_password`]: DialogWindow::take_submitted_password
-    submitted_password: Option<String>,
+    submitted_password: Option<pb_app_core::SecretString>,
     /// The "Ask about image" question field's live contents (a [`DialogKind::AskImage`]
     /// dialog); cleared on close so each Ask starts blank.
     ask_input: String,
@@ -802,7 +804,7 @@ impl DialogWindow {
     /// Take the password the user just submitted on a [`DialogKind::Password`]
     /// dialog (Unlock / Enter), set during the answering frame. `None` until then.
     /// The caller pairs this with a `take_confirm_result()` of `Some(true)`.
-    pub fn take_submitted_password(&mut self) -> Option<String> {
+    pub fn take_submitted_password(&mut self) -> Option<pb_app_core::SecretString> {
         self.submitted_password.take()
     }
 
@@ -1087,9 +1089,11 @@ impl DialogWindow {
         }
         if confirm_click.is_some() {
             self.confirm_result = confirm_click;
-            // On Unlock/Enter, snapshot the entered text for the app to validate.
+            // On Unlock/Enter, snapshot the entered text (as a zeroizing SecretString) for the
+            // app to validate.
             if confirm_click == Some(true) && kind == DialogKind::Password {
-                self.submitted_password = Some(self.password_input.clone());
+                self.submitted_password =
+                    Some(pb_app_core::SecretString::new(self.password_input.clone()));
             }
             // On Ask, snapshot the typed question for the core to run through describe.
             if confirm_click == Some(true) && kind == DialogKind::AskImage {
@@ -1197,11 +1201,10 @@ impl Drop for DialogWindow {
     fn drop(&mut self) {
         // Scrub any entered password from RAM on close (privacy guarantee), covering
         // every teardown path — Cancel, Esc, the window close button, or replacement
-        // by another dialog.
+        // by another dialog. `password_input` is a plain `String` (scrubbed by hand);
+        // `submitted_password` is a `SecretString` that zeroizes when dropped here.
         scrub(&mut self.password_input);
-        if let Some(p) = self.submitted_password.as_mut() {
-            scrub(p);
-        }
+        self.submitted_password = None;
     }
 }
 

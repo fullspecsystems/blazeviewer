@@ -658,8 +658,9 @@ enum DialogRequest {
 enum DialogOutcome {
     /// Esc / close button dismissed a dialog of this kind (cancels the matching in-flight op).
     Dismissed(Option<dialog::DialogKind>),
-    /// Password entry submitted (archive unlock); `None` if extraction failed.
-    PasswordSubmitted(Option<String>),
+    /// Password entry submitted (archive unlock); `None` if extraction failed. A
+    /// [`SecretString`](pb_app_core::SecretString) — zeroized, redacted (session-archive-password-cache).
+    PasswordSubmitted(Option<pb_app_core::SecretString>),
     /// The password prompt's Cancel — abandon the pending archive.
     PasswordCancelled,
     /// The "Ask about image" question submitted (task #44). `None` shouldn't happen on Ask
@@ -857,6 +858,7 @@ impl App {
             redraw_pending: false,
             scan_bootstrapped: false,
             password_archive: None,
+            archive_passwords: Vec::new(),
             pending_delete: None,
             pending_confirm_delete: None,
             info_line: false,
@@ -1084,9 +1086,18 @@ impl App {
     /// `password` decrypts an encrypted archive: `None` on the first open (an
     /// encrypted archive then reports `PasswordRequired`, which prompts), `Some` when
     /// re-opening with a password the user entered.
-    fn begin_archive_open(&mut self, path: PathBuf, password: Option<String>) {
+    fn begin_archive_open(&mut self, path: PathBuf, password: Option<pb_app_core::SecretString>) {
         let kind = pb_source::archive_kind(&path).unwrap_or(pb_source::ArchiveKind::Zip);
-        let was_password_attempt = password.is_some();
+        // Auto-try cached session passwords (MRU-first) only on an INITIAL open — a user-entered
+        // retry tries exactly what they typed (session-archive-password-cache).
+        let cached = if password.is_none() {
+            self.core.archive_passwords_snapshot()
+        } else {
+            Vec::new()
+        };
+        // The user-entered password (if any), kept for the harvest-on-success and the
+        // wrong-password re-prompt (a repeat `PasswordRequired` with `Some` here was wrong).
+        let attempted_password = password.clone();
         // Anti-stacking: cancel any open already in flight before starting another, so
         // two eager decompresses never run (and pile up RAM) at once — the original
         // hang's worst case was the user re-triggering a "never-finishing" open and
@@ -1098,9 +1109,15 @@ impl App {
         if let Some(prev) = self.archive_load.take() {
             prev.progress.request_cancel();
         }
-        if !kind.background_open() {
-            let result = scan::open_archive(&path, password);
-            self.finish_archive_open(result, was_password_attempt, path);
+        // The synchronous ZIP shortcut is only safe when NO auto-try will run: a wrong-password
+        // ZIP attempt decrypts the entire first entry (up to ~1 GiB via `ZipSource::password_ok`),
+        // so any auto-try must go off the event loop. With an empty cache and no user password
+        // (a fresh session, every non-encrypted-archive session) this stays today's fast path.
+        let will_autotry = password.is_none() && !cached.is_empty();
+        if !kind.background_open() && !will_autotry {
+            let pw = password.as_ref().map(|p| p.expose().to_owned());
+            let result = scan::open_archive(&path, pw);
+            self.finish_archive_open((result, None), attempted_password, path);
             return;
         }
         self.archive_gen += 1;
@@ -1110,8 +1127,23 @@ impl App {
         let worker_path = path.clone();
         let worker_progress = progress.clone();
         std::thread::spawn(move || {
-            let result = scan::load_archive(&worker_path, kind, password, &worker_progress);
-            let _ = tx.send((generation, result));
+            // A user-entered password tries exactly that; an initial open auto-tries the cached
+            // session passwords (and reports the winner for MRU promotion).
+            let out = match password {
+                Some(pw) => (
+                    scan::load_archive(
+                        &worker_path,
+                        kind,
+                        Some(pw.expose().to_owned()),
+                        &worker_progress,
+                    ),
+                    None,
+                ),
+                None => {
+                    scan::load_archive_with_cache(&worker_path, kind, &cached, &worker_progress)
+                }
+            };
+            let _ = tx.send((generation, out));
         });
         // Show the determinate progress + Cancel dialog. If the password prompt is still
         // open (a just-verified password), promote it in place — same window, no flicker;
@@ -1135,7 +1167,7 @@ impl App {
             generation,
             rx,
             path,
-            was_password_attempt,
+            attempted_password,
             progress,
         });
     }
@@ -1155,11 +1187,11 @@ impl App {
                 if generation != load_gen {
                     return; // superseded by a newer open
                 }
-                let (path, was_attempt) = match load {
-                    Some(l) => (l.path, l.was_password_attempt),
+                let (path, attempted) = match load {
+                    Some(l) => (l.path, l.attempted_password),
                     None => return,
                 };
-                self.finish_archive_open(result, was_attempt, path);
+                self.finish_archive_open(result, attempted, path);
             }
             Err(TryRecvError::Empty) => {} // still loading
             Err(TryRecvError::Disconnected) => {
@@ -1177,25 +1209,47 @@ impl App {
     /// Act on a finished archive open (zip-sync or 7z-async), shared by both paths:
     /// a non-empty success rebuilds the playlist (closing any password prompt); a
     /// `PasswordRequired` opens (or re-prompts, after a wrong attempt) the password
-    /// dialog; any other failure shows the error dialog. `was_password_attempt` is
-    /// whether this open carried a user-entered password (so a repeat means it was
-    /// wrong).
+    /// dialog; any other failure shows the error dialog.
+    ///
+    /// `result` is `(open outcome, auto-try winner)` — the cached password that unlocked it,
+    /// if any. `attempted` is the user-entered password this open carried. On any success
+    /// (even an *empty* archive — the password was still correct), the unlocking password is
+    /// remembered: harvest for a new user entry, MRU promotion for a cached winner
+    /// (session-archive-password-cache). A repeat `PasswordRequired` with `attempted.is_some()`
+    /// was a wrong entry, so the prompt shows the retry error.
     fn finish_archive_open(
         &mut self,
-        result: Result<Resolved, archive::ArchiveOpenError>,
-        was_password_attempt: bool,
+        result: (
+            Result<Resolved, archive::ArchiveOpenError>,
+            Option<pb_app_core::SecretString>,
+        ),
+        attempted: Option<pb_app_core::SecretString>,
         path: PathBuf,
     ) {
+        let (result, winner) = result;
+        // Remember the unlocking password (harvest a user entry / MRU-promote a cached winner)
+        // whenever the archive actually OPENED — `Ok` (with images) or `Empty` (opened, no
+        // images): a correct password is worth reusing even if this archive had nothing to show.
+        // A wrong password is `PasswordRequired` (no winner; `attempted` drives the re-prompt),
+        // so this never remembers a wrong one.
+        let opened = matches!(result, Ok(_) | Err(archive::ArchiveOpenError::Empty));
+        if opened {
+            if let Some(pw) = attempted.as_ref().or(winner.as_ref()) {
+                self.core.remember_archive_password(pw);
+            }
+        }
         match result {
             Ok(r) if !r.source.is_empty() => {
-                // Close the loading/password dialog (host-side, like the scan's Done), then hand
-                // the resolved playlist to the core to install + forget the pending password.
+                // Close the loading/password dialog (host-side, like the scan's Done), then
+                // hand the resolved playlist to the core to install + forget the pending pw.
                 self.close_dialog();
                 self.core.handle(contract::CoreEvent::ArchiveResolved(r));
             }
-            Ok(_) => self.fail_archive_open(&archive::ArchiveOpenError::Empty),
+            Ok(_) | Err(archive::ArchiveOpenError::Empty) => {
+                self.fail_archive_open(&archive::ArchiveOpenError::Empty)
+            }
             Err(archive::ArchiveOpenError::PasswordRequired) => {
-                self.prompt_archive_password(path, was_password_attempt)
+                self.prompt_archive_password(path, attempted.is_some())
             }
             // User cancelled: drop quietly, keeping whatever was on screen — no error
             // dialog. The loading dialog is already closed (or closes here as a backstop).
@@ -3652,6 +3706,10 @@ impl App {
         self.core.live_motion_cache.clear();
         self.core.rotations.clear();
         self.core.video_resume.clear();
+        // Session archive passwords (session-archive-password-cache): wipe (zeroizing) at
+        // teardown. Explicit, not just `Drop`, so it's auditable here with the other RAM
+        // caches — and so it holds even if the process later exits without unwinding.
+        self.core.clear_archive_passwords();
         self.core.failed.clear();
         self.core.preview_resident.clear();
         self.core.upgrade_done.clear();
@@ -4807,13 +4865,25 @@ struct DirScan {
 /// so a superseded open (a newer one bumped `App::archive_gen`) is discarded.
 struct ArchiveLoad {
     generation: u64,
-    rx: std::sync::mpsc::Receiver<(u64, Result<Resolved, archive::ArchiveOpenError>)>,
+    /// The worker's result: the open outcome plus the **auto-try winner** — the cached
+    /// password (if any) that unlocked the archive, so the shell can promote it to MRU
+    /// (session-archive-password-cache). `None` winner = unencrypted, or a user-entered
+    /// password (which the shell already has in `attempted_password`), or a failure.
+    #[allow(clippy::type_complexity)]
+    rx: std::sync::mpsc::Receiver<(
+        u64,
+        (
+            Result<Resolved, archive::ArchiveOpenError>,
+            Option<pb_app_core::SecretString>,
+        ),
+    )>,
     /// The archive being opened, so a `PasswordRequired` result can re-prompt and
     /// re-open the same path with the entered password.
     path: PathBuf,
-    /// Whether this open carried a user-entered password (a repeat `PasswordRequired`
-    /// then means it was wrong, so the prompt shows the retry error).
-    was_password_attempt: bool,
+    /// The user-entered password this open carried, if any. `Some` means a repeat
+    /// `PasswordRequired` was a wrong entry (so the prompt shows the retry error), and a
+    /// success harvests it into the session cache. `None` on an initial (auto-try) open.
+    attempted_password: Option<pb_app_core::SecretString>,
     /// Shared progress + cancel handle for this open. The loading dialog reads it to
     /// draw its bar; the Cancel button / Esc / a superseding open flips its cancel flag
     /// so the worker stops at the next entry boundary (freeing its partial RAM).

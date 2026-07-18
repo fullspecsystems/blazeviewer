@@ -414,6 +414,15 @@ impl OpenProgress {
         self.inner.total.store(total, Ordering::Relaxed);
     }
 
+    /// Reset the streamed/total counters (keeping the cancel flag) so one handle can be reused
+    /// across several open attempts — the password-cache auto-try opens an archive once per
+    /// candidate password, and `done` is cumulative, so without this the progress bar would
+    /// climb past 100% across attempts (session-archive-password-cache).
+    pub fn reset_counters(&self) {
+        self.inner.done.store(0, Ordering::Relaxed);
+        self.inner.total.store(0, Ordering::Relaxed);
+    }
+
     /// Total decompressed bytes to stream (0 until [`set_total`](OpenProgress::set_total)).
     pub fn total(&self) -> u64 {
         self.inner.total.load(Ordering::Relaxed)

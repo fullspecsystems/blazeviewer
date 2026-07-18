@@ -80,6 +80,7 @@ pub mod pb_key;
 pub mod prompt;
 pub mod save_rotation;
 pub mod scan;
+pub mod secret;
 pub mod settings;
 // Sidecar subtitle discovery (task #90.1): pure matching rules over a list of sibling
 // names, so one implementation serves both loose files and archive entries.
@@ -123,6 +124,7 @@ pub use pb_decode::{AudioError, FfAudioDecoder};
 #[cfg(feature = "ffvideo")]
 pub use pb_decode::{DemuxPacket, DemuxStreamInfo, DoviConfig, VideoCodec, VideoDemuxer};
 pub use pb_key::PbKey;
+pub use secret::SecretString;
 pub use slideshow::Slideshow;
 pub use undo::UndoAction;
 pub use video::{

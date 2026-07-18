@@ -264,8 +264,19 @@ is persisted unless the user deliberately invokes the action.
 - **Every runtime cache is RAM-only and dropped on exit.** Inventory: the resident
   GPU texture ring + its `pb-core::ResidentRing` mirror, the decode pool's in-flight
   buffers + `pending_uploads`, `meta_cache` (per-photo panel data), per-image
-  `rotations`, the `failed` set, the transient `toast`, and on-demand EXIF reads
-  (`Shift+I`) — all in memory, never serialized. `pb-core` is pure (no `std::fs`).
+  `rotations`, the `failed` set, the transient `toast`, on-demand EXIF reads
+  (`Shift+I`), and the **session archive-password cache** (`AppCore::archive_passwords`)
+  — all in memory, never serialized. `pb-core` is pure (no `std::fs`).
+  - The password cache (session-archive-password-cache) auto-tries passwords the user has
+    successfully used this session on later encrypted archives, so a same-password folder
+    asks once. It holds `SecretString`s — **zeroized on drop, redacted `Debug`, never
+    `Display`ed or serialized** — so it is not a `Settings` field (`settings.save()` can't
+    write it) and threads redacted through `DialogResult`/`CoreEffect`. It is wiped
+    (zeroizing) at teardown (`clear_session_state` / the macOS quit intercept), explicitly so
+    it holds even if the process `exit()`s without unwinding. Scope note (honest, not
+    overclaimed): this protects against *app-level* leaks (a stray `{:?}`, a settings write),
+    **not** OS capture of live process RAM (a kernel crash dump, swap, hibernation) — the
+    same exposure as the password while the user types it.
 - **On-disk I/O is read-only on every view/cache hot path.** The only files
   PhotoBlaze opens *while viewing* are the photos themselves, and only to *read*:
   directory scan (`read_dir`), decode (`fs::read`), and the panel's

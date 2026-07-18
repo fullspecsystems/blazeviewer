@@ -677,6 +677,63 @@ pub fn load_archive(
     result
 }
 
+/// Open an archive, auto-trying `cached` session passwords (MRU-first) when it turns out to be
+/// encrypted, before giving up with [`PasswordRequired`](crate::archive::ArchiveOpenError::PasswordRequired)
+/// (session-archive-password-cache). Returns on the FIRST success — an unencrypted archive
+/// (opens with `None`, `winner = None`) or a cached password that works (`winner = Some(pw)`,
+/// which the shell then promotes/harvests to MRU) — or the first hard error. Only
+/// `PasswordRequired` advances to the next candidate; a corrupt / too-large / unsupported / I/O
+/// error stops immediately (retrying it is pointless). Bounded by `cached.len()`
+/// (≤ [`MAX_ARCHIVE_PASSWORDS`](crate::AppCore::MAX_ARCHIVE_PASSWORDS)).
+///
+/// Cancellation is honoured **before** the first open and **between** candidates (each
+/// `load_archive` for a wrong password can read the whole first encrypted entry — up to a
+/// gigabyte for ZIP — so this must run on the shell's archive-open worker thread, never the
+/// event loop). The progress counters are reset per attempt (`done`/`total` are cumulative).
+///
+/// The returned `winner` is what a plain `Ok` cannot tell the caller: *which* candidate
+/// matched, so the shell can move it to the front of the cache (MRU). A password that unlocks
+/// an *empty* archive is still returned as the winner — it was correct, so it is worth
+/// remembering for the next same-password archive.
+pub fn load_archive_with_cache(
+    path: &Path,
+    kind: ArchiveKind,
+    cached: &[crate::SecretString],
+    progress: &pb_source::OpenProgress,
+) -> (
+    Result<Resolved, crate::archive::ArchiveOpenError>,
+    Option<crate::SecretString>,
+) {
+    use crate::archive::ArchiveOpenError;
+    if progress.is_cancelled() {
+        return (Err(ArchiveOpenError::Cancelled), None);
+    }
+    match load_archive(path, kind, None, progress) {
+        Err(ArchiveOpenError::PasswordRequired) => {} // encrypted — try the cache
+        other => return (other, None),                // Ok (unencrypted), or a hard error
+    }
+    for pw in cached {
+        if progress.is_cancelled() {
+            return (Err(ArchiveOpenError::Cancelled), None);
+        }
+        progress.reset_counters(); // done/total are cumulative; each attempt restarts the bar
+        match load_archive(path, kind, Some(pw.expose().to_owned()), progress) {
+            Err(ArchiveOpenError::PasswordRequired) => continue, // wrong password → next
+            Ok(r) => return (Ok(r), Some(pw.clone())),           // unlocked, has images
+            // Unlocked but no images: an image-less archive resolves to `Empty`, not `Ok`. The
+            // password was still correct, so report it as the winner (the shell remembers it —
+            // the next same-password archive shouldn't re-ask).
+            Err(ArchiveOpenError::Empty) => {
+                return (Err(ArchiveOpenError::Empty), Some(pw.clone()));
+            }
+            Err(e) => return (Err(e), None), // hard error (corrupt/too-large/io) / cancelled
+        }
+    }
+    // Nothing in the cache worked — the shell prompts (a fresh prompt, not "incorrect": the
+    // user never typed these).
+    (Err(ArchiveOpenError::PasswordRequired), None)
+}
+
 fn load_archive_impl(
     path: &Path,
     kind: ArchiveKind,
@@ -858,6 +915,129 @@ mod archive_video_tests {
         }
         zw.finish().unwrap();
         path
+    }
+
+    /// An AES-256-encrypted ZIP for the password-cache tests. The central directory (names) is
+    /// readable without the password, so `load_archive(None)` sees the encrypted entries and
+    /// returns `PasswordRequired`; the right password decrypts.
+    fn write_encrypted_zip(tag: &str, password: &str, files: &[(&str, &[u8])]) -> PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "pb_scan_enc_{tag}_{}_{}.zip",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("t").len()
+        ));
+        let f = std::fs::File::create(&path).unwrap();
+        let mut zw = zip::ZipWriter::new(f);
+        let opts = zip::write::SimpleFileOptions::default()
+            .with_aes_encryption(zip::AesMode::Aes256, password);
+        for (name, bytes) in files {
+            zw.start_file(*name, opts).unwrap();
+            zw.write_all(bytes).unwrap();
+        }
+        zw.finish().unwrap();
+        path
+    }
+
+    /// The auto-try helper (session-archive-password-cache): unencrypted opens with no
+    /// candidates; an encrypted archive is unlocked by a cached password that need not be first;
+    /// a miss (or empty cache) reports `PasswordRequired`; a cancel short-circuits.
+    #[test]
+    fn load_archive_with_cache_unencrypted_never_tries_a_password() {
+        use crate::SecretString;
+        let zip = write_zip("plain_cache", &[("a.jpg", b"img".as_slice())]);
+        let cached = [SecretString::new("nope")];
+        let prog = pb_source::OpenProgress::new();
+        let (res, winner) = load_archive_with_cache(&zip, ArchiveKind::Zip, &cached, &prog);
+        assert!(res.is_ok(), "unencrypted archive opens");
+        assert!(winner.is_none(), "no password was used");
+        let _ = std::fs::remove_file(&zip);
+    }
+
+    #[test]
+    fn load_archive_with_cache_unlocks_with_a_non_first_cached_password() {
+        use crate::SecretString;
+        let zip = write_encrypted_zip("hit", "correct-horse", &[("a.jpg", b"secret img")]);
+        // The right password is NOT first — the wrong one is tried and skipped.
+        let cached = [
+            SecretString::new("wrong-one"),
+            SecretString::new("correct-horse"),
+        ];
+        let prog = pb_source::OpenProgress::new();
+        let (res, winner) = load_archive_with_cache(&zip, ArchiveKind::Zip, &cached, &prog);
+        assert!(
+            res.is_ok(),
+            "a cached password unlocks the archive: {res:?}"
+        );
+        assert_eq!(
+            winner.as_ref().map(|s| s.expose()),
+            Some("correct-horse"),
+            "the winning password is reported for MRU promotion"
+        );
+        let _ = std::fs::remove_file(&zip);
+    }
+
+    #[test]
+    fn load_archive_with_cache_reports_password_required_on_a_miss() {
+        use crate::SecretString;
+        let zip = write_encrypted_zip("miss", "the-real-one", &[("a.jpg", b"secret img")]);
+        // No matching password.
+        let cached = [SecretString::new("nope1"), SecretString::new("nope2")];
+        let prog = pb_source::OpenProgress::new();
+        let (res, winner) = load_archive_with_cache(&zip, ArchiveKind::Zip, &cached, &prog);
+        assert!(
+            matches!(res, Err(crate::archive::ArchiveOpenError::PasswordRequired)),
+            "all-miss reports PasswordRequired so the shell prompts: {res:?}"
+        );
+        assert!(winner.is_none());
+
+        // An empty cache short-circuits to the same result.
+        let (res2, _) = load_archive_with_cache(&zip, ArchiveKind::Zip, &[], &prog);
+        assert!(matches!(
+            res2,
+            Err(crate::archive::ArchiveOpenError::PasswordRequired)
+        ));
+        let _ = std::fs::remove_file(&zip);
+    }
+
+    /// An image-less *per-file*-encrypted ZIP needs no password to be judged empty: the
+    /// central directory (names) is readable in the clear, so the non-image entry is filtered
+    /// out and the archive resolves to `Empty` at the no-password open — no candidate is tried
+    /// and there is nothing to harvest. (The `Empty`-with-a-winner path in
+    /// `load_archive_with_cache` is for the rarer *header*-encrypted (`-hp`) image-less case,
+    /// where the header itself needs the password; the `zip` crate can't produce that fixture,
+    /// so that arm is validated by inspection + the shell's `opened` harvest.)
+    #[test]
+    fn load_archive_with_cache_on_an_image_less_encrypted_zip_needs_no_password() {
+        use crate::SecretString;
+        let zip = write_encrypted_zip("emptyenc", "pw123", &[("notes.txt", b"no images here")]);
+        let cached = [SecretString::new("pw123")];
+        let prog = pb_source::OpenProgress::new();
+        let (res, winner) = load_archive_with_cache(&zip, ArchiveKind::Zip, &cached, &prog);
+        assert!(
+            matches!(res, Err(crate::archive::ArchiveOpenError::Empty)),
+            "an image-less archive resolves to Empty without a password: {res:?}"
+        );
+        assert!(
+            winner.is_none(),
+            "no password was needed, so nothing to harvest"
+        );
+        let _ = std::fs::remove_file(&zip);
+    }
+
+    #[test]
+    fn load_archive_with_cache_honours_a_precancel() {
+        use crate::SecretString;
+        let zip = write_encrypted_zip("cancel", "pw", &[("a.jpg", b"img")]);
+        let cached = [SecretString::new("pw")];
+        let prog = pb_source::OpenProgress::new();
+        prog.request_cancel();
+        let (res, winner) = load_archive_with_cache(&zip, ArchiveKind::Zip, &cached, &prog);
+        assert!(matches!(
+            res,
+            Err(crate::archive::ArchiveOpenError::Cancelled)
+        ));
+        assert!(winner.is_none());
+        let _ = std::fs::remove_file(&zip);
     }
 
     #[test]
