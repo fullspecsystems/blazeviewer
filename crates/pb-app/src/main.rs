@@ -864,6 +864,7 @@ impl App {
             dialog_open: false,
             archive_loading: false,
             redraw_pending: false,
+            resize_hold: None,
             scan_bootstrapped: false,
             password_archive: None,
             archive_passwords: Vec::new(),

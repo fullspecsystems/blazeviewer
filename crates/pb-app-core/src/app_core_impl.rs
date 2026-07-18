@@ -184,6 +184,7 @@ impl AppCore {
             dialog_open: false,
             archive_loading: false,
             redraw_pending: false,
+            resize_hold: None,
             scan_bootstrapped: false,
             password_archive: None,
             archive_passwords: Vec::new(),
@@ -1371,6 +1372,25 @@ impl AppCore {
         self.fit = Some(new_fit);
         if let Some(r) = self.renderer.as_mut() {
             r.resize(width, height);
+        }
+        // #106.7 §6 — instant, SHARP resize/fullscreen (the Fit↔1:1 toggle already rebinds like
+        // this; only a true window resize was left on the old road). The fit box just changed, so
+        // the fit-sized texture the renderer GPU-refit above is now the WRONG size: upscaling a
+        // windowed fit to fullscreen is blurry, and the deferred settle then re-decodes
+        // preview-first (the EXIF-thumbnail flash the owner sees). If the current photo's full-res
+        // `Original` is resident (the parked tier holds it while parked), rebind to it NOW — the
+        // GPU downscales full-res to ANY size sharply, so the frame is crisp immediately, and it
+        // becomes the renderer's `held` across the settle's ring rebuild, bridging to the fresh
+        // Lanczos Fit with no preview flash. `resize_hold` makes the settle's preview quality-
+        // monotonic (see `drain_results`). Falls through to the old upscale+re-decode when no
+        // Original is held (radius 0, just-blazed, or excluded: RAW/SVG/video/gigapixel).
+        if let Some(item) = self.displayed_item {
+            if self.target_item == Some(item) {
+                if let Some(orig) = self.ring.original_slot(item) {
+                    self.resize_hold = Some(item);
+                    self.present_item(item, orig);
+                }
+            }
         }
         // A resize in flight pauses playback — freeze together, resume together.
         // The modal drag loop stalls the presenter while audio plays on; every
@@ -3161,6 +3181,7 @@ impl AppCore {
         self.thumbs.clear_deck();
         self.emit_panels_changed();
         self.preview_resident.clear();
+        self.resize_hold = None; // indices reassigned — any resize hold is meaningless now
         // Drop any in-flight archive-video poster requests: item indices are deck-relative,
         // so a straggler callback must not upgrade a same-index item in the new deck.
         self.poster_inflight.clear();
@@ -3276,6 +3297,7 @@ impl AppCore {
         self.thumbs.clear_deck();
         self.emit_panels_changed();
         self.preview_resident.clear();
+        self.resize_hold = None; // indices reassigned — any resize hold is meaningless now
         // Drop any in-flight archive-video poster requests: item indices are deck-relative,
         // so a straggler callback must not upgrade a same-index item in the new deck.
         self.poster_inflight.clear();
@@ -6389,6 +6411,11 @@ impl AppCore {
         // reverting to its still) doesn't re-arm it.
         if self.displayed_item != Some(item) {
             self.anim_hint_shown_for = None;
+            // Navigating to a different photo ends any resize hold on the previous one (its
+            // quality-monotonic preview guard no longer applies).
+            if self.resize_hold.is_some() && self.resize_hold != Some(item) {
+                self.resize_hold = None;
+            }
         }
         self.mark_resolved(item);
         self.current = self.meta_cache.get(&item).cloned();
@@ -6662,6 +6689,12 @@ impl AppCore {
                 }
                 self.ring.set_slot_bytes(item, rep.kind(), item_bytes);
                 self.preview_resident.remove(&item);
+                // The fresh full for a resize-held photo has landed — release the quality-monotonic
+                // hold so the sharp Fit presents below (upgrade path) and normal preview behaviour
+                // resumes.
+                if self.resize_hold == Some(item) {
+                    self.resize_hold = None;
+                }
                 self.perf_note_full(item); // preview upgraded to full → one more cached
                                            // Real end-to-end sharpen latency for the ON-SCREEN photo (what the
                                            // user actually waits on): full requested → full on screen. Ahead-ring
@@ -6713,6 +6746,11 @@ impl AppCore {
                         self.preview_resident.insert(item);
                     } else {
                         self.preview_resident.remove(&item);
+                        // A fresh full for a resize-held photo landed directly (no preview step) —
+                        // release the hold so it presents below.
+                        if self.resize_hold == Some(item) {
+                            self.resize_hold = None;
+                        }
                         self.perf_note_full(item); // a fresh full landed directly (no preview step)
                     }
                 }
@@ -6722,7 +6760,19 @@ impl AppCore {
                 // is false even though the index matches), so a resize / scale-mode / rebuild
                 // swaps the held stale-scale frame for the fresh one (task #18 finding #5). A
                 // parked Original (rk != dk) is held, never presented.
-                if rk == dk && self.target_item == Some(item) && !self.target_caught_up() {
+                //
+                // Quality-monotonic (#106.7 §6): while a resize is holding this photo's full-res
+                // `Original` on screen (`resize_hold`), do NOT present the settle re-decode's
+                // *preview* — it would flash the low-res EXIF frame over the sharp held one. The
+                // preview still lands in the ring (upgraded in place when its full arrives, which
+                // clears the hold above and presents sharp); a preview for any *other* item, or the
+                // normal preview-first first frame of a fresh photo, is unaffected.
+                let hold_preview = img.is_preview && self.resize_hold == Some(item);
+                if rk == dk
+                    && self.target_item == Some(item)
+                    && !self.target_caught_up()
+                    && !hold_preview
+                {
                     self.present_item(item, res.slot);
                 }
             }
@@ -14864,6 +14914,71 @@ mod tests {
         assert!(
             core.ring.slot_for(0).is_some(),
             "the Fit slot survived the toggle"
+        );
+    }
+
+    #[test]
+    fn resize_with_a_held_original_arms_the_quality_monotonic_hold() {
+        // The fullscreen/resize analog of the Fit↔1:1 toggle (#106.7 §6): a TRUE window resize
+        // rebinds the current photo's retained full-res Original — sharp immediately, no EXIF
+        // preview flash — and arms `resize_hold` so the settle re-decode's preview can't downgrade
+        // the on-screen frame. Navigating away ends the hold.
+        let mut core = test_core();
+        core.source = photos_named(&["a.jpg", "b.jpg"]);
+        core.playlist = Playlist::new(2, 0);
+        core.ring = ResidentRing::new(4);
+        core.fit = Some(FitBox {
+            max_width: 100,
+            max_height: 100,
+        });
+        core.view.mode = ScaleMode::Fit;
+        core.displayed_item = Some(0);
+        core.target_item = Some(0);
+        // Parked: the Original is held while the Fit is on screen (the parked full-res tier).
+        let fit_rep = core.rep_of(pb_core::RepKind::Fit);
+        make_resident(&mut core, 0, fit_rep, &[0]);
+        make_resident(&mut core, 0, pb_core::Representation::Original, &[0]);
+        core.mark_resolved(0);
+        assert!(core.resize_hold.is_none(), "no hold before a resize");
+
+        // A true resize (a new fit box, e.g. windowed → fullscreen) rebinds the Original + holds.
+        core.resize(1920, 1080, 1.0);
+        assert_eq!(
+            core.resize_hold,
+            Some(0),
+            "a resize with a resident Original rebinds + holds it"
+        );
+
+        // Navigating to a different photo ends the hold (its preview guard no longer applies).
+        core.present_item(1, 0);
+        assert_eq!(core.resize_hold, None, "nav to another photo clears the hold");
+    }
+
+    #[test]
+    fn resize_without_a_held_original_does_not_arm_the_hold() {
+        // No parked Original (radius 0 / just-blazed / an excluded item): the resize falls through
+        // to the old upscale + async re-decode, and the quality-monotonic hold is never armed — so
+        // preview-first still works normally for that photo.
+        let mut core = test_core();
+        core.source = photos_named(&["a.jpg"]);
+        core.playlist = Playlist::new(1, 0);
+        core.ring = ResidentRing::new(4);
+        core.fit = Some(FitBox {
+            max_width: 100,
+            max_height: 100,
+        });
+        core.view.mode = ScaleMode::Fit;
+        core.displayed_item = Some(0);
+        core.target_item = Some(0);
+        // Only the Fit is resident — no Original to rebind.
+        let fit_rep = core.rep_of(pb_core::RepKind::Fit);
+        make_resident(&mut core, 0, fit_rep, &[0]);
+        core.mark_resolved(0);
+
+        core.resize(1920, 1080, 1.0);
+        assert_eq!(
+            core.resize_hold, None,
+            "no resident Original ⇒ no hold (old preview-first path unchanged)"
         );
     }
 

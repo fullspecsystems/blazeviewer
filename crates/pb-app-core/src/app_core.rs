@@ -473,6 +473,13 @@ pub struct AppCore {
     /// and `tick` retries the draw next frame (2026-07-04, the Mac "unfilled background
     /// after a fullscreen toggle" bug — a one-shot render with no retry).
     pub redraw_pending: bool,
+    /// The item currently shown via its retained full-res `Original` across a window resize /
+    /// fullscreen toggle (#106.7 §6). Set when [`resize`](Self::resize) rebinds the Original for an
+    /// instant SHARP frame; while set, the settled re-decode's *preview* for this item is NOT
+    /// presented (quality-monotonic: a resize never drops the on-screen photo to a lower-res
+    /// preview of itself — Codex 2026-07-18). Cleared when the fresh full Fit lands, on nav to a
+    /// different item, or on a deck rebuild. `None` = no resize hold in effect.
+    pub resize_hold: Option<usize>,
     /// Whether the in-flight directory scan has applied its first non-empty batch (the first photo
     /// is shown). The `ScanBatch` handler bootstraps the playlist while this is false, then extends
     /// it; the host reads it to gate the Scanning-dialog reveal / the scan-count chip. Reset to

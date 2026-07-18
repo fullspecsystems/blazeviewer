@@ -73,6 +73,12 @@ with any pre-release suffix carried only by the tag.
   the setting updates the tree live.
 
 ### Fixed
+- **Fullscreen and window resizing stay sharp now — no blurry reload.** Toggling fullscreen (or
+  resizing the window) on a large photo used to flash the photo's low-resolution embedded
+  thumbnail and then re-sharpen, the same reload the Fit↔1:1 (`0`) toggle already avoids.
+  Fullscreen now reuses the full-resolution copy the app keeps ready for the current photo:
+  the picture is crisp immediately and stays crisp while the new size finishes decoding — it
+  never drops to a lower-quality preview of the same photo mid-resize.
 - **The archive "open" card no longer gets stuck on top of a photo.** Opening an archive while a
   folder was still loading (or opening a folder while an archive was still opening) could leave the
   archive's card sitting over a stale, unrelated photo — pressing space changed the filename in the
