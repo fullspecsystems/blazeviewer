@@ -66,6 +66,16 @@ fn door_diag() -> bool {
     *ON.get_or_init(|| std::env::var_os("PB_DOOR_DIAG").is_some())
 }
 
+/// `PB_SHARP_DIAG=1` → the preview→full "sharpen" lifecycle to stderr (dev-only; zero cost when
+/// off; event-driven, so low noise). For the "photo loads blurry and never sharpens until a
+/// resize" bug (#111): if a stuck photo logs a `sharpen request` but no `full landed` line, its
+/// full decode was never requested/never arrived; a `full landed … dropped|upgrade_done` means it
+/// arrived and was rejected — each points at a different fix.
+fn sharp_diag() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("PB_SHARP_DIAG").is_some())
+}
+
 /// `PB_PERF=1` → live one-shot latency lines to stderr (open→first-photo, open→all-cached,
 /// resize→on-screen). Shell-agnostic (works on the macOS host too, read via a captured
 /// stderr), unlike the winit-only `--metrics` summary. Zero cost when off (see [`perf`]).
@@ -5471,7 +5481,25 @@ impl AppCore {
         let ring: HashSet<usize> = self.prefetch_fulls().into_iter().collect();
         // Stamp when each full was first requested, for the `sharpen` latency metric.
         if let Some(d) = sharpen {
+            let first = !self.full_requested_at.contains_key(&d);
             self.full_requested_at.entry(d).or_insert_with(Instant::now);
+            if first && sharp_diag() {
+                eprintln!("[sharp-diag] sharpen requested item={d} (full decode wanted)");
+            }
+        } else if sharp_diag() {
+            // The on-screen photo is NOT eligible to sharpen — the "never requested" case. Show why
+            // (only when it's a resident preview, i.e. blurry, so this stays quiet on a full photo).
+            if let Some(d) = self.displayed_item {
+                if self.preview_resident.contains(&d) || self.upgrade_done.contains(&d) {
+                    eprintln!(
+                        "[sharp-diag] NO sharpen for displayed item={d}: display_slot={} preview_resident={} upgrade_done={} held_nav={}",
+                        self.display_slot(d).is_some(),
+                        self.preview_resident.contains(&d),
+                        self.upgrade_done.contains(&d),
+                        self.held_nav().is_some(),
+                    );
+                }
+            }
         }
         for &t in &ring {
             self.full_requested_at.entry(t).or_insert_with(Instant::now);
@@ -6578,6 +6606,11 @@ impl AppCore {
                 if resident {
                     // A full-upgrade decode failed, but the resident preview is fine
                     // — keep it and stop retrying the upgrade.
+                    if sharp_diag() && self.displayed_item == Some(item) {
+                        eprintln!(
+                            "[sharp-diag] full landed item={item} ERROR ({e}) -> upgrade_done (preview stays blurry forever)"
+                        );
+                    }
                     self.upgrade_done.insert(item);
                     return false;
                 }
@@ -6608,6 +6641,19 @@ impl AppCore {
                 // forever. Any other already-resident duplicate is dropped.
                 let is_prev = self.preview_resident.contains(&item);
                 let img = o.result.as_ref().expect("Err handled above");
+                if sharp_diag() && self.displayed_item == Some(item) {
+                    let decision = if is_prev && img.is_preview {
+                        "upgrade_done (full came back a PREVIEW — stays blurry)"
+                    } else if is_prev {
+                        "UPGRADE (sharpen applied)"
+                    } else {
+                        "DROPPED (item not preview_resident when the full landed)"
+                    };
+                    eprintln!(
+                        "[sharp-diag] full landed item={item} is_preview={} is_prev={} rk={:?} -> {decision}",
+                        img.is_preview, is_prev, rk
+                    );
+                }
                 if is_prev && img.is_preview {
                     self.upgrade_done.insert(item);
                 }
@@ -6815,6 +6861,15 @@ impl AppCore {
         self.metrics.record("decode", t0.elapsed());
         match decoded {
             Ok(img) => {
+                if sharp_diag() && img.is_preview {
+                    // The first frame is a PREVIEW shown via the single-image path (outside the
+                    // ring), so `display_slot` is None until the async prefetch re-decodes it into
+                    // the ring — `sharpen_now` can't fire meanwhile. If it never migrates, it's stuck.
+                    eprintln!(
+                        "[sharp-diag] preview shown (single-image, load_current_sync) item={idx} {}x{}",
+                        img.width, img.height
+                    );
+                }
                 let meta = meta_for(self.source.as_ref(), idx, &self.root, &img);
                 self.current = Some(meta.clone());
                 self.meta_cache.insert(idx, meta);
