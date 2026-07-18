@@ -229,6 +229,9 @@ pub trait Renderer {
     /// into the slot's bind group (see [`Renderer::set_image`] for the buffer layout).
     /// Runs during prefetch, off the keypress frame — so the later `present_slot`
     /// rebind carries everything for free.
+    /// `mip` = build a mipmap chain for this texture (gpu-mipmap-hq-scaling). Only the full-res
+    /// `Original` rep passes `true`, so trilinear fit-downscaling of it is near-Lanczos; the
+    /// `Fit`/preview reps (shown ~1:1) pass `false` and stay single-level.
     #[allow(clippy::too_many_arguments)]
     fn upload_slot(
         &mut self,
@@ -239,6 +242,7 @@ pub trait Renderer {
         color: ColorTransform,
         hdr: bool,
         peak: f32,
+        mip: bool,
     );
     /// Select ring slot `slot` as the displayed image (the keypress fast path: a
     /// rebind, no decode or upload). Returns `true` when the slot was live and is now

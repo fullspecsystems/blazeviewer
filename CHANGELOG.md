@@ -57,6 +57,11 @@ with any pre-release suffix carried only by the tag.
   works either way — this only changes whether a folder *lists* them.
 
 ### Changed
+- **Sharper GPU downscaling when a photo is fit to the window.** The full-resolution copy the
+  app keeps ready is now mip-mapped, so when it's scaled to fit (a fullscreen toggle, a resize,
+  or 1:1→fit) it uses high-quality trilinear filtering instead of plain bilinear — no more soft,
+  faintly-aliased look on the instant frame. The result is close enough to the full re-decode
+  that the brief re-sharpen after a fullscreen toggle is now hard to notice.
 - **The side panels resize narrower now (macOS).** The folder / thumbnails pane shrinks all
   the way to 120 pt (was 200 pt) — once it's too narrow for the "Folders" / "Thumbnails" tab
   labels, they give way to just their icons rather than truncating. The info inspector goes a

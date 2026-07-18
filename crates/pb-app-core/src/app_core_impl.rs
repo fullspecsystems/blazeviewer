@@ -6684,6 +6684,7 @@ impl AppCore {
                         render_color(&img.color),
                         is_hdr(img),
                         img.peak,
+                        rk == pb_core::RepKind::Original,
                     );
                     self.metrics.record("upload", t0.elapsed());
                 }
@@ -6735,6 +6736,7 @@ impl AppCore {
                         render_color(&img.color),
                         is_hdr(img),
                         img.peak,
+                        rk == pb_core::RepKind::Original,
                     );
                     self.metrics.record("upload", t0.elapsed());
                 }

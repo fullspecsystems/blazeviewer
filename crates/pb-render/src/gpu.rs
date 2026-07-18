@@ -327,6 +327,66 @@ fn fs_egui(in: VsOut) -> @location(0) vec4<f32> {
 }
 "#;
 
+/// Mipmap generation (#106.7 §6 / gpu-mipmap-hq-scaling plan): one 2× box-downsample per level,
+/// so trilinear sampling gives near-Lanczos quality when a photo is fit-downscaled, retiring the
+/// soft/aliased mipless-bilinear look. Correctness (Codex-reviewed): averages in **linear light**
+/// (encoded averaging is badly wrong on high-contrast edges) with **premultiplied alpha** (else
+/// transparent PNG/SVG edges halo), reading four explicit `textureLoad`s. `fs_srgb` decodes/encodes
+/// sRGB (SDR mode-0 `Rgba8Unorm`); `fs_linear` averages directly (HDR mode-2 `Rgba16Float`, already
+/// scene-linear). Source-ICC (mode 1) images are NOT mipped (stay L0) — their TRC isn't threaded
+/// here. Known Phase-1 limit: odd source dims use a clamped 2×2 box (the trailing texel is
+/// under-weighted, never dropped); a polyphase box is a later refinement.
+const MIPGEN_WGSL: &str = r#"
+@vertex
+fn vs(@builtin(vertex_index) vi: u32) -> @builtin(position) vec4<f32> {
+    let uv = vec2<f32>(f32((vi << 1u) & 2u), f32(vi & 2u));
+    return vec4<f32>(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0, 0.0, 1.0);
+}
+
+@group(0) @binding(0) var src: texture_2d<f32>;
+
+fn s2l(x: f32) -> f32 {
+    if (x <= 0.04045) { return x / 12.92; }
+    return pow((x + 0.055) / 1.055, 2.4);
+}
+fn l2s(x: f32) -> f32 {
+    let c = clamp(x, 0.0, 1.0);
+    if (c <= 0.0031308) { return 12.92 * c; }
+    return 1.055 * pow(c, 1.0 / 2.4) - 0.055;
+}
+
+fn box2x(pos: vec4<f32>, is_srgb: bool) -> vec4<f32> {
+    let dim = vec2<i32>(textureDimensions(src));
+    let base = vec2<i32>(pos.xy) * 2;
+    var acc = vec3<f32>(0.0, 0.0, 0.0);   // premultiplied, linear
+    var asum = 0.0;
+    for (var dy = 0; dy < 2; dy = dy + 1) {
+        for (var dx = 0; dx < 2; dx = dx + 1) {
+            let c = clamp(base + vec2<i32>(dx, dy), vec2<i32>(0, 0), dim - vec2<i32>(1, 1));
+            let t = textureLoad(src, c, 0);
+            var rgb = t.rgb;
+            if (is_srgb) { rgb = vec3<f32>(s2l(rgb.r), s2l(rgb.g), s2l(rgb.b)); }
+            acc = acc + rgb * t.a;
+            asum = asum + t.a;
+        }
+    }
+    let a = asum / 4.0;
+    var lin = vec3<f32>(0.0, 0.0, 0.0);
+    if (asum > 0.0) { lin = acc / asum; }   // un-premultiply: (acc/4)/(asum/4)
+    if (is_srgb) { lin = vec3<f32>(l2s(lin.r), l2s(lin.g), l2s(lin.b)); }
+    return vec4<f32>(lin, a);
+}
+
+@fragment
+fn fs_srgb(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
+    return box2x(pos, true);
+}
+@fragment
+fn fs_linear(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
+    return box2x(pos, false);
+}
+"#;
+
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct Vertex {
@@ -581,6 +641,139 @@ struct Pipelines {
     planar_bgl: wgpu::BindGroupLayout,
     /// Layout for the tone-map bind group: intermediate tex + sampler + peak uniform.
     tonemap_bgl: wgpu::BindGroupLayout,
+}
+
+/// Mipmap-generation pipelines (see [`MIPGEN_WGSL`]). Two, because the render-target format is
+/// baked into a pipeline: `srgb` targets `Rgba8Unorm` (SDR, decode/encode sRGB), `linear` targets
+/// `Rgba16Float` (HDR, already scene-linear). The bind-group layout is a single sampled texture
+/// (the previous mip level) — `textureLoad`, no sampler.
+struct MipGen {
+    bgl: wgpu::BindGroupLayout,
+    srgb: wgpu::RenderPipeline,
+    linear: wgpu::RenderPipeline,
+}
+
+fn build_mipgen(device: &wgpu::Device) -> MipGen {
+    let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("pb-mipgen"),
+        source: wgpu::ShaderSource::Wgsl(MIPGEN_WGSL.into()),
+    });
+    let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("mipgen-bgl"),
+        entries: &[wgpu::BindGroupLayoutEntry {
+            binding: 0,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                view_dimension: wgpu::TextureViewDimension::D2,
+                multisampled: false,
+            },
+            count: None,
+        }],
+    });
+    let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("mipgen-layout"),
+        bind_group_layouts: &[&bgl],
+        push_constant_ranges: &[],
+    });
+    let make = |entry: &'static str, format: wgpu::TextureFormat| {
+        device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("mipgen-pipeline"),
+            layout: Some(&layout),
+            vertex: wgpu::VertexState {
+                module: &module,
+                entry_point: "vs",
+                compilation_options: Default::default(),
+                buffers: &[],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &module,
+                entry_point: entry,
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+            cache: None,
+        })
+    };
+    MipGen {
+        srgb: make("fs_srgb", wgpu::TextureFormat::Rgba8Unorm),
+        linear: make("fs_linear", wgpu::TextureFormat::Rgba16Float),
+        bgl,
+    }
+}
+
+/// Mip-chain length for a texture: `1 + floor(log2(max(w,h)))`, computed on integers (not float
+/// `log2`, per Codex) so odd sizes are exact. `max(w,h)==1 → 1` (no chain).
+fn mip_levels(w: u32, h: u32) -> u32 {
+    32 - w.max(h).max(1).leading_zeros()
+}
+
+/// Fill mip levels `1..levels` of `tex` by 2× box-downsampling the previous level (linear-light,
+/// premultiplied — see [`MIPGEN_WGSL`]). `srgb` selects the SDR (sRGB) vs HDR (linear) pipeline.
+/// Records one render pass per level into its own encoder and submits it — the L0 upload was
+/// submitted first, so same-queue ordering guarantees each level reads a completed previous level.
+fn generate_mips(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    mip: &MipGen,
+    tex: &wgpu::Texture,
+    levels: u32,
+    srgb: bool,
+) {
+    let pipeline = if srgb { &mip.srgb } else { &mip.linear };
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("mipgen"),
+    });
+    for level in 1..levels {
+        // Non-overlapping single-level views: the source is level-1 (sampled), the target is
+        // `level` (rendered). Binding the all-mips view as source would alias the attachment.
+        let src_view = tex.create_view(&wgpu::TextureViewDescriptor {
+            label: Some("mipgen-src"),
+            base_mip_level: level - 1,
+            mip_level_count: Some(1),
+            ..Default::default()
+        });
+        let dst_view = tex.create_view(&wgpu::TextureViewDescriptor {
+            label: Some("mipgen-dst"),
+            base_mip_level: level,
+            mip_level_count: Some(1),
+            ..Default::default()
+        });
+        let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("mipgen-bg"),
+            layout: &mip.bgl,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(&src_view),
+            }],
+        });
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("mipgen-pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: &dst_view,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+        });
+        pass.set_pipeline(pipeline);
+        pass.set_bind_group(0, &bg, &[]);
+        pass.draw(0..3, 0..1); // fullscreen triangle → covers every target texel
+    }
+    queue.submit(Some(encoder.finish()));
 }
 
 fn build_pipelines(device: &wgpu::Device, surface_format: wgpu::TextureFormat) -> Pipelines {
@@ -1238,6 +1431,12 @@ fn upload_image(
     color: &ColorTransform,
     hdr: bool,
     scale: f32,
+    // Mip policy (gpu-mipmap-hq-scaling): `Some` (only the ring's full-res `Original` rep passes
+    // it) builds a mipmap chain so trilinear gives near-Lanczos fit-downscaling. `None` (Fit,
+    // preview, single-image/animation, UI bitmaps) stays single-level — those are shown ~1:1 or
+    // re-uploaded per frame. Source-ICC (mode 1) images are never mipped (their TRC isn't in the
+    // mip shader), so they fall back to single-level even when a policy is passed.
+    mip: Option<&MipGen>,
 ) -> wgpu::BindGroup {
     // HDR images are scene-linear fp16 (Rgba16Float, mode 2); everything else is
     // sRGB/source-encoded RGBA8 (mode 1 if a profile applies, else 0).
@@ -1264,23 +1463,38 @@ fn upload_image(
     };
     let image: &[u8] = &image;
 
+    // Mip only the full-res Original rep, and never a source-ICC (mode 1) image (its TRC isn't in
+    // the mip shader). `levels == 1` when the image is 1×1.
+    let do_mip = mip.is_some() && mode != 1.0;
+    let levels = if do_mip { mip_levels(img_w, img_h) } else { 1 };
+
     let size = wgpu::Extent3d {
         width: img_w,
         height: img_h,
         depth_or_array_layers: 1,
     };
+    let mut usage = wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST;
+    if levels > 1 {
+        usage |= wgpu::TextureUsages::RENDER_ATTACHMENT; // mip levels are rendered into
+    }
     let tex = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("image"),
         size,
-        mip_level_count: 1,
+        mip_level_count: levels,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
         format: tex_format,
-        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        usage,
         view_formats: &[],
     });
-    // The staging-ring upload (`copy_buffer_to_texture`), not `write_texture`.
+    // The staging-ring upload (`copy_buffer_to_texture`), not `write_texture` — fills mip 0.
     uploader.upload(device, queue, &tex, image, img_w, img_h);
+    // Generate the rest of the chain by 2× box-downsampling (linear-light, premultiplied). Runs
+    // after the L0 copy on the same queue, so ordering is guaranteed. `srgb = !hdr` because the
+    // only SDR case reaching here is mode 0 (mode 1 set `do_mip` false).
+    if levels > 1 {
+        generate_mips(device, queue, mip.expect("do_mip"), &tex, levels, !hdr);
+    }
     let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
     // Linear so large photos scaled down to the screen are smooth, not grainy/
     // aliased. (Crisp high-ratio downscaling via mipmaps/Lanczos is a later
@@ -1798,6 +2012,9 @@ pub struct WgpuRenderer {
     /// construction, and `configure` **panics** on a mode that's no longer supported. See
     /// [`WgpuRenderer::reconfigure_surface`].
     adapter: wgpu::Adapter,
+    /// Mipmap-generation pipelines, built once (gpu-mipmap-hq-scaling). Used by `upload_slot` when
+    /// uploading the full-res `Original` rep so trilinear sampling downscales it near-Lanczos.
+    mipgen: MipGen,
     device: wgpu::Device,
     queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
@@ -2090,6 +2307,7 @@ impl WgpuRenderer {
         let scene_scale = if want_fp16 && !hdr { sdr_scale } else { 1.0 };
         let view = ViewTransform::default();
         let pipelines = build_pipelines(&device, format);
+        let mipgen = build_mipgen(&device);
         let mut upload: Box<dyn UploadStrategy> = Box::new(StagingUpload::new());
         let bind_group = upload_image(
             &device,
@@ -2102,6 +2320,7 @@ impl WgpuRenderer {
             &color,
             hdr,
             scene_scale,
+            None, // single-image / animation path — never mipped (re-uploaded per frame)
         );
         let vbuf = vertex_buffer(&device, &view, img_w, img_h, config.width, config.height);
         let ibuf = index_buffer(&device);
@@ -2124,6 +2343,7 @@ impl WgpuRenderer {
         Self {
             surface,
             adapter,
+            mipgen,
             device,
             queue,
             config,
@@ -2274,6 +2494,7 @@ impl Renderer for WgpuRenderer {
                     &ColorTransform::srgb(),
                     false,
                     scale,
+                    None, // UI bitmap — never mipped
                 );
                 let vbuf = self
                     .device
@@ -2320,6 +2541,7 @@ impl Renderer for WgpuRenderer {
                     &ColorTransform::srgb(),
                     false,
                     scale,
+                    None, // UI bitmap — never mipped
                 );
                 let vbuf = self
                     .device
@@ -2709,6 +2931,7 @@ impl Renderer for WgpuRenderer {
                     &ColorTransform::srgb(),
                     false,
                     scale,
+                    None, // UI bitmap — never mipped
                 );
                 let vbuf = self
                     .device
@@ -2760,6 +2983,7 @@ impl Renderer for WgpuRenderer {
                     &ColorTransform::srgb(),
                     false,
                     scale,
+                    None, // UI bitmap — never mipped
                 );
                 let vbuf = self
                     .device
@@ -2805,6 +3029,7 @@ impl Renderer for WgpuRenderer {
                     &ColorTransform::srgb(),
                     false,
                     scale,
+                    None, // UI bitmap — never mipped
                 );
                 let vbuf = self
                     .device
@@ -2851,6 +3076,7 @@ impl Renderer for WgpuRenderer {
                     &ColorTransform::srgb(),
                     false,
                     scale,
+                    None, // UI bitmap — never mipped
                 );
                 let vbuf = self
                     .device
@@ -2910,11 +3136,16 @@ impl Renderer for WgpuRenderer {
         color: ColorTransform,
         hdr: bool,
         peak: f32,
+        mip: bool,
     ) {
         if slot >= self.ring.len() {
             return;
         }
         let scale = self.scene_scale(hdr);
+        // `mip` (only the full-res Original rep passes true) builds a mipmap chain so trilinear
+        // fit-downscaling is near-Lanczos. Disjoint field borrows: `self.upload` (mut) vs
+        // `self.mipgen` (shared).
+        let mipgen = mip.then_some(&self.mipgen);
         let bind_group = upload_image(
             &self.device,
             &self.queue,
@@ -2926,6 +3157,7 @@ impl Renderer for WgpuRenderer {
             &color,
             hdr,
             scale,
+            mipgen,
         );
         self.ring[slot] = Some(RingSlot {
             bind_group,
@@ -3403,6 +3635,7 @@ async fn render_offscreen_async(
                 &color,
                 false,
                 1.0,
+                None, // offscreen: default non-mipped; a mipped variant is a test opt-in
             ),
         ),
         OffscreenSource::Planar { y, uv, present } => {
@@ -3748,6 +3981,136 @@ mod tests {
         [buf[i], buf[i + 1], buf[i + 2], buf[i + 3]]
     }
 
+    #[test]
+    fn mip_levels_is_exact_on_odd_sizes() {
+        assert_eq!(mip_levels(1, 1), 1);
+        assert_eq!(mip_levels(2, 1), 2);
+        assert_eq!(mip_levels(3, 3), 2); // 3→1
+        assert_eq!(mip_levels(4, 4), 3); // 4→2→1
+        assert_eq!(mip_levels(5, 2), 3); // 5→2→1
+        assert_eq!(mip_levels(6000, 4000), 13); // 24 MP photo
+    }
+
+    /// The mip-gen fragment must average in **linear light**, not in encoded (sRGB) space — the
+    /// correctness Codex insisted on. A 2×2 checkerboard of pure black + white sRGB texels has a
+    /// LINEAR average of 0.5 (→ sRGB ≈ 0.735 ≈ 188), whereas a naïve encoded average is ~128. The
+    /// gap is exactly what proves the linearize→average→re-encode path.
+    #[test]
+    fn mip_downsample_averages_in_linear_light() {
+        let px = pollster::block_on(gen_mip_1x1_srgb([
+            [0, 0, 0, 255],
+            [255, 255, 255, 255],
+            [255, 255, 255, 255],
+            [0, 0, 0, 255],
+        ]));
+        assert!(
+            (180..=192).contains(&px[0]),
+            "linear-light average should be ~188, got {} (naïve encoded avg would be ~128)",
+            px[0]
+        );
+        assert_eq!(px[3], 255, "opaque alpha preserved");
+    }
+
+    /// Build a 2×2 sRGB texture, generate its single mip level, and read back the 1×1 result.
+    async fn gen_mip_1x1_srgb(texels: [[u8; 4]; 4]) -> [u8; 4] {
+        let instance = instance();
+        let adapter = instance
+            .request_adapter(&wgpu::RequestAdapterOptions {
+                power_preference: wgpu::PowerPreference::HighPerformance,
+                force_fallback_adapter: false,
+                compatible_surface: None,
+            })
+            .await
+            .expect("no GPU adapter");
+        let (device, queue, _p010) = request_device_p010(&adapter).await;
+        let mipgen = build_mipgen(&device);
+
+        let tex = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("mip-test"),
+            size: wgpu::Extent3d {
+                width: 2,
+                height: 2,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 2,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::COPY_DST
+                | wgpu::TextureUsages::COPY_SRC
+                | wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+        let l0: Vec<u8> = texels.iter().flatten().copied().collect();
+        queue.write_texture(
+            wgpu::ImageCopyTexture {
+                texture: &tex,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &l0,
+            wgpu::ImageDataLayout {
+                offset: 0,
+                bytes_per_row: Some(8),
+                rows_per_image: Some(2),
+            },
+            wgpu::Extent3d {
+                width: 2,
+                height: 2,
+                depth_or_array_layers: 1,
+            },
+        );
+        generate_mips(&device, &queue, &mipgen, &tex, 2, true);
+
+        let padded = 256u32; // wgpu requires bytes_per_row a multiple of 256
+        let readback = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("mip-readback"),
+            size: padded as u64,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("mip-copy"),
+        });
+        encoder.copy_texture_to_buffer(
+            wgpu::ImageCopyTexture {
+                texture: &tex,
+                mip_level: 1,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::ImageCopyBuffer {
+                buffer: &readback,
+                layout: wgpu::ImageDataLayout {
+                    offset: 0,
+                    bytes_per_row: Some(padded),
+                    rows_per_image: Some(1),
+                },
+            },
+            wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+        );
+        queue.submit(std::iter::once(encoder.finish()));
+
+        let slice = readback.slice(..);
+        let (tx, rx) = std::sync::mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |r| {
+            let _ = tx.send(r);
+        });
+        device.poll(wgpu::Maintain::Wait);
+        rx.recv().expect("map channel").expect("map readback");
+        let mapped = slice.get_mapped_range();
+        let px = [mapped[0], mapped[1], mapped[2], mapped[3]];
+        drop(mapped);
+        readback.unmap();
+        px
+    }
+
     /// The subtitle quad is the one overlay placed at an absolute point rather than an
     /// inset, so its px→NDC conversion is the whole contract with `subtitle::place`.
     #[test]
@@ -3806,6 +4169,7 @@ mod tests {
             &ColorTransform::srgb(),
             false,
             1.0,
+            None,
         );
         // The quad covers the whole 2×2 target, so every texel is the blend result.
         let vbuf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -4553,6 +4917,7 @@ mod tests {
                     &color,
                     false,
                     1.0,
+                    None,
                 );
                 old_ms.push(t.elapsed().as_secs_f64() * 1000.0);
             }
