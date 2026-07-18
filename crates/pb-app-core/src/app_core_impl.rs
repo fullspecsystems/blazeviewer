@@ -1376,6 +1376,16 @@ impl AppCore {
             max_width: width.max(1),
             max_height: height.max(1),
         };
+        // DIAGNOSTIC (stuck-preview desync): a transient SMALL viewport during a fullscreen
+        // transition makes decode_fit() tiny, so a "full" decode-to-fit lands at ~256px
+        // (is_preview=false) and strands as an untracked, never-sharpened slot. The 0x0 guard
+        // above only catches a fully-minimized window, not a transient small-but-nonzero size.
+        if sharp_diag() && new_fit.max_width.min(new_fit.max_height) < 400 {
+            eprintln!(
+                "[sharp-diag] resize to SMALL viewport {}x{} (scale={scale}) — fit-collapse suspect for the stuck-preview bug",
+                width, height
+            );
+        }
         if Some(new_fit) == self.fit {
             return;
         }
@@ -5523,7 +5533,7 @@ impl AppCore {
             let resident = self.ring.slot_for_rep(t, dk).is_some();
             let is_prev = resident && self.preview_resident.contains(&t);
             if resident && !is_prev {
-                continue; // already full
+                continue; // already the definitive full (see `decode_is_definitive_full`)
             }
             if !resident {
                 previews.push(Job::display(t, fit, true));
@@ -5607,6 +5617,33 @@ impl AppCore {
             ScaleMode::Fit => self.fit,
             ScaleMode::Fill | ScaleMode::Original => None,
         }
+    }
+
+    /// Whether a landed **display-rep** decode is the DEFINITIVE full for the current fit — i.e. it
+    /// should end the sharpen loop (`preview_resident` cleared). A real preview never is. A
+    /// decode-to-fit "full" is definitive UNLESS it was decoded at a stale, smaller fit than the
+    /// current viewport while more source detail exists: a transient tiny viewport during a
+    /// fullscreen toggle yields a ~256px "full" (`is_preview=false`), and treating that as final
+    /// strands the photo low-res forever — the job loop then reads the resident-but-untracked slot
+    /// as "already full" and never re-decodes (the stuck-preview bug, #111). Such an undersized
+    /// frame must stay sharpen-eligible so the real full re-decodes at the current fit. A native-size
+    /// decode (source no larger than the output — a genuinely small photo, or a video/door
+    /// placeholder) is always definitive, so those never loop.
+    fn decode_is_definitive_full(&self, img: &pb_decode::DecodedImage) -> bool {
+        if img.is_preview {
+            return false;
+        }
+        let Some(fit) = self.decode_fit() else {
+            return true; // Original / Fill: native, geometry-independent decode
+        };
+        // Downscaled below the current fit on BOTH edges (SLACK absorbs decode-to-fit rounding on
+        // the constraining edge, which normally lands exactly on the fit) while the source has more
+        // pixels than we kept ⇒ this was decoded at a stale/smaller fit, not the current one.
+        const SLACK: u32 = 4;
+        let undersized =
+            img.width + SLACK < fit.max_width && img.height + SLACK < fit.max_height;
+        let has_more = img.width < img.orig_width || img.height < img.orig_height;
+        !(undersized && has_more)
     }
 
     /// The ring [`Representation`] the current scale mode's decode produces: a
@@ -6735,14 +6772,24 @@ impl AppCore {
                     self.metrics.record("upload", t0.elapsed());
                 }
                 self.ring.set_slot_bytes(item, rep.kind(), item_bytes);
-                self.preview_resident.remove(&item);
-                // The fresh full for a resize-held photo has landed — release the quality-monotonic
-                // hold so the sharp Fit presents below (upgrade path) and normal preview behaviour
-                // resumes.
-                if self.resize_hold == Some(item) {
-                    self.resize_hold = None;
+                if self.decode_is_definitive_full(img) {
+                    self.preview_resident.remove(&item);
+                    // The fresh full for a resize-held photo has landed — release the quality-monotonic
+                    // hold so the sharp Fit presents below (upgrade path) and normal preview behaviour
+                    // resumes.
+                    if self.resize_hold == Some(item) {
+                        self.resize_hold = None;
+                    }
+                    self.perf_note_full(item); // preview upgraded to full → one more cached
+                } else if sharp_diag() {
+                    // An undersized "full" (decoded at a stale/tiny fit) upgraded the preview in place
+                    // but is still low-res: keep `preview_resident` so it re-decodes at the current fit
+                    // instead of sticking blurry forever (#111).
+                    eprintln!(
+                        "[sharp-diag] upgrade got UNDERSIZED full item={item} dims={}x{} — kept sharpen-eligible",
+                        img.width, img.height
+                    );
                 }
-                self.perf_note_full(item); // preview upgraded to full → one more cached
                                            // Real end-to-end sharpen latency for the ON-SCREEN photo (what the
                                            // user actually waits on): full requested → full on screen. Ahead-ring
                                            // fulls land late by design (low priority), so they'd skew this — only
@@ -6790,9 +6837,7 @@ impl AppCore {
                 // `preview_resident` and the cache metrics track the DISPLAY texture only; a
                 // parked Original (rk != dk) is held silently and must not touch either.
                 if rk == dk {
-                    if img.is_preview {
-                        self.preview_resident.insert(item);
-                    } else {
+                    if self.decode_is_definitive_full(img) {
                         self.preview_resident.remove(&item);
                         // A fresh full for a resize-held photo landed directly (no preview step) —
                         // release the hold so it presents below.
@@ -6800,6 +6845,24 @@ impl AppCore {
                             self.resize_hold = None;
                         }
                         self.perf_note_full(item); // a fresh full landed directly (no preview step)
+                    } else {
+                        // A real preview, OR an undersized "full" decoded at a stale/tiny fit (a
+                        // transient viewport during a fullscreen toggle → ~256px): keep it
+                        // sharpen-eligible so the real full re-decodes at the current fit, instead of
+                        // freezing the photo low-res forever (the stuck-preview bug, #111).
+                        self.preview_resident.insert(item);
+                    }
+                    // DIAGNOSTIC (stuck-preview desync): what landed in a FRESH slot for the ON-SCREEN
+                    // photo and how it was classified. A tiny (~256px) image arriving is_preview=false
+                    // is an undersized full kept sharpen-eligible by `decode_is_definitive_full`.
+                    if sharp_diag() && self.displayed_item == Some(item) {
+                        eprintln!(
+                            "[sharp-diag] reserve upload item={item} is_preview={} dims={}x{} -> preview_resident={}",
+                            img.is_preview,
+                            img.width,
+                            img.height,
+                            self.preview_resident.contains(&item),
+                        );
                     }
                 }
                 uploads += 1;
@@ -15150,6 +15213,159 @@ mod tests {
     }
 
     /// Diagnostic (initial-video-poster bug): a video as the initial item, whose
+    /// The stuck-preview bug (#111): a fullscreen toggle's transient tiny viewport yields a ~256px
+    /// "full" (`is_preview=false`) decoded at a fit far smaller than the current viewport. Treating
+    /// it as the final sharp full strands the photo low-res forever, because the job loop then reads
+    /// the resident-but-untracked slot as "already full" (`resident && !preview_resident`) and never
+    /// re-decodes. It must stay sharpen-eligible so the real full re-decodes at the current fit.
+    #[test]
+    fn an_undersized_full_from_a_stale_fit_stays_sharpen_eligible() {
+        let mut core = test_core();
+        core.source = photos_named(&["a.jpg"]);
+        core.playlist = Playlist::new(1, 0).with_cursor(0);
+        core.ring = ResidentRing::new(4);
+        core.fit = Some(FitBox {
+            max_width: 1440,
+            max_height: 2036,
+        }); // the CURRENT (large) viewport
+        core.view.mode = ScaleMode::Fit;
+        core.targets = vec![0];
+        core.displayed_item = Some(0);
+        core.target_item = Some(0);
+
+        // A "full" (is_preview=false) but decoded at a stale ~256px fit: 256x171 of a 6000x4000 source.
+        let undersized = pb_decode::DecodedImage {
+            width: 256,
+            height: 171,
+            orig_width: 6000,
+            orig_height: 4000,
+            codec: "JPEG",
+            format: pb_decode::PixelFormat::Rgba8,
+            pixels: vec![0; 256 * 171 * 4],
+            is_preview: false,
+            color: pb_decode::ColorTransform::srgb(),
+            peak: 1.0,
+            animated: None,
+        };
+        core.pending_uploads.push(Outcome::synthetic(
+            0,
+            core.epoch,
+            pb_core::RepKind::Fit,
+            Ok(undersized),
+        ));
+        core.drain_results();
+
+        assert!(
+            core.display_slot(0).is_some(),
+            "the (undersized) frame became resident"
+        );
+        assert!(
+            core.preview_resident.contains(&0),
+            "an undersized full must stay sharpen-eligible, not be treated as the final sharp full"
+        );
+        assert_eq!(
+            core.sharpen_now(),
+            Some(0),
+            "so the real full is re-requested at the current fit"
+        );
+    }
+
+    /// Regression guard: a full that actually fills the current fit is FINAL — cleared from
+    /// `preview_resident`, nothing left to sharpen (no re-decode loop).
+    #[test]
+    fn a_full_that_fills_the_current_fit_is_final() {
+        let mut core = test_core();
+        core.source = photos_named(&["a.jpg"]);
+        core.playlist = Playlist::new(1, 0).with_cursor(0);
+        core.ring = ResidentRing::new(4);
+        core.fit = Some(FitBox {
+            max_width: 1440,
+            max_height: 2036,
+        });
+        core.view.mode = ScaleMode::Fit;
+        core.targets = vec![0];
+        core.displayed_item = Some(0);
+        core.target_item = Some(0);
+
+        // A real full: fills the fit width (1440), a 6000x4000 source downscaled.
+        let full = pb_decode::DecodedImage {
+            width: 1440,
+            height: 960,
+            orig_width: 6000,
+            orig_height: 4000,
+            codec: "JPEG",
+            format: pb_decode::PixelFormat::Rgba8,
+            pixels: vec![0; 1440 * 960 * 4],
+            is_preview: false,
+            color: pb_decode::ColorTransform::srgb(),
+            peak: 1.0,
+            animated: None,
+        };
+        core.pending_uploads.push(Outcome::synthetic(
+            0,
+            core.epoch,
+            pb_core::RepKind::Fit,
+            Ok(full),
+        ));
+        core.drain_results();
+
+        assert!(
+            !core.preview_resident.contains(&0),
+            "a full that fills the fit is final, not sharpen-eligible"
+        );
+        assert_eq!(core.sharpen_now(), None, "nothing left to sharpen");
+    }
+
+    /// Regression guard: a genuinely small photo (native size — source no larger than the output,
+    /// which decode-to-fit never upscales) is FINAL, so it can't spin an endless re-decode loop.
+    #[test]
+    fn a_native_small_photo_is_final_not_a_sharpen_loop() {
+        let mut core = test_core();
+        core.source = photos_named(&["tiny.jpg"]);
+        core.playlist = Playlist::new(1, 0).with_cursor(0);
+        core.ring = ResidentRing::new(4);
+        core.fit = Some(FitBox {
+            max_width: 1440,
+            max_height: 2036,
+        });
+        core.view.mode = ScaleMode::Fit;
+        core.targets = vec![0];
+        core.displayed_item = Some(0);
+        core.target_item = Some(0);
+
+        // A genuinely 256px source (orig == decoded): decode-to-fit never upscales it.
+        let native = pb_decode::DecodedImage {
+            width: 256,
+            height: 171,
+            orig_width: 256,
+            orig_height: 171,
+            codec: "JPEG",
+            format: pb_decode::PixelFormat::Rgba8,
+            pixels: vec![0; 256 * 171 * 4],
+            is_preview: false,
+            color: pb_decode::ColorTransform::srgb(),
+            peak: 1.0,
+            animated: None,
+        };
+        core.pending_uploads.push(Outcome::synthetic(
+            0,
+            core.epoch,
+            pb_core::RepKind::Fit,
+            Ok(native),
+        ));
+        core.drain_results();
+
+        assert!(
+            !core.preview_resident.contains(&0),
+            "a native-size photo is final (no infinite re-decode)"
+        );
+        assert_eq!(
+            core.sharpen_now(),
+            None,
+            "a small source has no larger full to fetch"
+        );
+    }
+
     /// pool-decoded poster lands at the launch epoch, MUST become resident AND be
     /// presented — exactly as a photo does. Reproduces the launch state
     /// `rebuild_playlist` leaves (displayed==target, presented_epoch=None).

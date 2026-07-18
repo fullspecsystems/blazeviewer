@@ -84,6 +84,13 @@ with any pre-release suffix carried only by the tag.
   Fullscreen now reuses the full-resolution copy the app keeps ready for the current photo:
   the picture is crisp immediately and stays crisp while the new size finishes decoding — it
   never drops to a lower-quality preview of the same photo mid-resize.
+- **Photos no longer get stuck on a blurry preview after a fullscreen toggle.** Flicking to
+  fullscreen while quickly moving between photos could leave one frozen on its low-resolution
+  embedded thumbnail. It never sharpened until you resized the window or switched away and back.
+  A fullscreen transition can briefly report a tiny viewport, so the sharp copy came back
+  undersized and the app mistook that undersized frame for the finished image and stopped trying.
+  The app now recognizes an undersized frame and keeps decoding until the real full-quality
+  version lands.
 - **The archive "open" card no longer gets stuck on top of a photo.** Opening an archive while a
   folder was still loading (or opening a folder while an archive was still opening) could leave the
   archive's card sitting over a stale, unrelated photo — pressing space changed the filename in the
