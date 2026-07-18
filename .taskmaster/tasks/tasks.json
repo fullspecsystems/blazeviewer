@@ -1440,6 +1440,15 @@
         "priority": "medium",
         "dependencies": [],
         "subtasks": []
+      },
+      {
+        "id": 111,
+        "title": "Stuck preview: full-res never upgrades in the normal flow (blurry in Fit / tiny in 1:1)",
+        "description": "Owner-reported 2026-07-18, reproduces on a plain SSD FOLDER too (so NOT archive-specific; an archive only widens the timing window). Sometimes loading a photo shows the low-res EXIF preview and it NEVER sharpens until a resize / fullscreen toggle / scale change forces a fresh decode. The unifying clue: pressing 0 (1:1/Original mode) in that state SHRINKS the image to the PREVIEW's native size — proving both symptoms are ONE root: the full-resolution decode is stuck at the preview stage (preview shown; full upgrade never completes). In Fit mode → upscaled/blurry; in Original mode → the tiny preview at true 1:1. A resize re-decodes fresh and completes.\nNOT the surface-drop bug (the preview IS presented; it's the full that's missing) — distinct from the frozen-door / same-size-Lost surface issue (that one still needs surface recreation, held in reserve).\nCandidate mechanisms traced (app_core_impl.rs, verify with a diagnostic — DON'T guess): sharpen_now (~5653) only requests the full while display_slot(d).is_some() && preview_resident.contains(d) && !upgrade_done.contains(d); request_prefetch (~5497) SKIPS the sharpen when `resident && !is_prev` ('already full'). So a preview that's resident-but-not-in-preview_resident, or shown via the single-image path (load_current_sync ~6814 uses set_image, outside the ring, so display_slot is None), or a full outcome dropped in drain_results' retain (~6611: kept only if `is_prev && !img.is_preview`; else dropped and possibly upgrade_done'd) — any of these leaves the preview stranded. Cancellation is cleanly discarded (decode_pool ~388/417), so it's NOT that. upgrade_done (~6471/6611) is the permanent 'stop sharpening' flag — a genuine decode error OR a full-that-came-back-a-preview sets it.\nNEXT: add a gated preview->full lifecycle diagnostic (preview presented / sharpen requested / full landed: is_preview, is_prev, kept|dropped|upgrade_done) so ONE capture pins which path strands it, then fix. Likely a pre-existing #106.5/#106.7 interaction, not the recent mip/resize work.",
+        "status": "pending",
+        "priority": "high",
+        "dependencies": [],
+        "subtasks": []
       }
     ]
   }
