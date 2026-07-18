@@ -1,181 +1,180 @@
 # Plan — High-quality GPU image scaling (mipmaps + trilinear), and retire the resize re-decode
 
-**Status:** draft (pre-Codex-review) · **Owner track:** rendering quality / #106.7 §6 follow-on
-· **Author:** 2026-07-18
+**Status:** rev2 (Codex-reviewed 2026-07-18) · **Track:** rendering quality / #106.7 §6 follow-on
 
 ## 1. Problem
 
-Fitting a photo to the window is almost always a **downscale** (a 24 MP / 6000×4000
-photo into, say, a 3440×1440 window is a ~2.8× reduction). The renderer samples the image
-texture with **plain bilinear and no mipmaps**:
+Fitting a photo to the window is almost always a **downscale** (a 24 MP / 6000×4000 photo into
+a 3440×1440 window is ~2.8×). The renderer samples the image texture with **plain bilinear, no
+mipmaps** (`crates/pb-render/src/gpu.rs:1272` `mip_level_count: 1`; sampler `gpu.rs:1288`; scene
+shader `SCENE_WGSL` samples `textureSample` at `gpu.rs:107`). Bilinear reads only a 2×2 texel
+neighbourhood, so at 2–3× it **undersamples** — the soft/aliased look the owner sees the instant
+a fullscreen toggle GPU-scales the frame (`gpu.rs:1286` already flags this as deferred).
 
-- `upload_image` (`crates/pb-render/src/gpu.rs:1272`) creates the texture with
-  `mip_level_count: 1`.
-- The sampler (`gpu.rs:1288`) is `mag=Linear, min=Linear, mipmap_filter=Linear` — but with a
-  single mip level, `mipmap_filter` does nothing.
-- The scene shader samples with `textureSample(tex, samp, in.uv)` (`SCENE_WGSL`,
-  `gpu.rs:107`).
+To route around it, the app CPU-Lanczos-re-decodes the fit on every resize/fullscreen (over SMB
+a full re-read — the ~1 s wait), keeps both reps resident for the `0` toggle (#106.7), and we now
+also rebind the resident full-res Original for an instant frame (`bcd37ea6`/`792dfa9e`). But that
+instant frame is still the **bilinear** GPU downscale of the Original, so the ~1 s Lanczos
+re-decode + a bilinear→Lanczos swap-flicker remain.
 
-Bilinear reads only a 2×2 texel neighbourhood per output pixel, so at a 2–3× downscale it
-**undersamples** the source — the soft, faintly-aliased look the owner sees the instant a
-fullscreen toggle GPU-scales the frame. The code itself flags this as deferred
-(`gpu.rs:1286`: *"Crisp high-ratio downscaling via mipmaps/Lanczos is a later quality pass"*).
+## 2. Goal (and the corrected, phased shape)
 
-To route around the weak GPU downscale, the app pays for a **CPU Lanczos decode-to-fit** on
-every geometry change: on a resize/fullscreen the ring is invalidated and the current photo is
-re-decoded at the new fit (over SMB that's a full re-read of the file — the owner's ~1 s wait),
-and the Fit↔1:1 toggle keeps *both* representations resident so a toggle is a pure rebind
-(#106.7). We just added an instant-Original rebind for resize (`bcd37ea6` + `792dfa9e`), which
-removes the EXIF-preview flash and the stuck pie, but the instant frame is still the
-**bilinear GPU downscale** of the full-res Original, and the ~1 s Lanczos re-decode + a subtle
-bilinear→Lanczos swap remain.
+1. **Phase 1 — near-Lanczos GPU downscaling:** generate mipmaps on upload (correctly: linear
+   light, premultiplied alpha, odd-dim-safe) for the textures that are GPU-downscaled, and let
+   the already-configured trilinear sampler use them. This alone makes the *instant* fullscreen
+   frame sharp, so the subsequent Lanczos swap becomes near-invisible.
+2. **Phase D — retire the resize re-decode (CONDITIONAL, deferred):** box-mip trilinear is much
+   better than mipless bilinear but **not** equal to Lanczos-3 (Codex). So keep the background
+   Lanczos Fit **behind a switch**, A/B it against mipped-Original-only at 2–3×, and remove the
+   re-decode only if the owner confirms the swap is genuinely redundant. Implementing it also
+   needs a real renderer **retain/remap** API (below) — not a `mark_resolved` tweak.
 
-## 2. Goal
+Non-goals: the first-frame CPU decode-to-fit; upscaling quality (separate — see §7); video/planar
+sampling; anisotropic filtering (wrong lever — uniform axis-aligned scale, no perspective).
 
-1. **Make GPU downscaling near-Lanczos quality** by generating a mipmap chain on upload and
-   engaging the already-configured trilinear sampler.
-2. **Retire the resize/fullscreen re-decode**: with a high-quality GPU downscale, serving the
-   fit from the resident full-res **Original** is good enough, so a resize becomes a pure
-   rebind (like the `0` toggle) — instant, sharp, no ~1 s wait, no swap-flicker.
+## 3. Corrected facts (Codex, with anchors)
 
-Non-goals: changing the CPU decode-to-fit path for the *first* frame of a photo (still Lanczos
-via `common::finalize`); zoom/1:1 quality (already true-1:1); video/planar (NV12) sampling.
+- **The upload GPU work is NOT on spare workers.** Decodes are off-thread, but finished images
+  are *uploaded from the event-loop tick* (`app_core_impl.rs:6531`, ≤2/tick) and mip passes share
+  the **same GPU queue as presentation** — two large neighbour chains can sit ahead of a draw.
+  Benchmark **GPU duration + queue-to-present latency**, not how fast `upload_slot` returns.
+- **`nv-flip` is NOT a dev-dependency yet** (`pb-render/Cargo.toml:32`) — the rev1 claim was
+  wrong. Add it, or use another perceptual metric.
+- **The offscreen harness** (`gpu.rs:3389`) exercises the real scene+present passes (good) but
+  requests `force_fallback_adapter: false` (`gpu.rs:3378`) — it does **not** guarantee
+  WARP/lavapipe determinism. Use perceptual tolerances, not byte-exact goldens.
+- **`clamp_to_max` uses nearest-neighbour** reduction (`gpu.rs:1206`); mips can't recover detail
+  it already destroyed — the "huge clamped panorama looks right" case needs that step redesigned
+  (Lanczos/area clamp), tracked separately.
+- **Ring VRAM accounting is already wrong**: the ring records `img.pixels.len()` = L0 only
+  (`app_core_impl.rs:6669`); with mips, true residency ≈ 4/3×. And a **pre-existing upgrade-budget
+  bug**: preview→full uploads then `set_slot_bytes` (`:6672`) without the required
+  `make_room_for_upgrade` (`ring.rs:453`).
+- **`full_res_eligible` is pixel-count only** (`app_core_impl.rs:5742`), does **not** exclude HDR,
+  and HDR bypasses `clamp_to_max` (`gpu.rs:1252`); the 200 MP ceiling (`engine.rs:56`) is not a
+  byte ceiling (200 MP HDR + mips ≈ 2.13 GB > the 1.5 GB budget).
+- **`upload_image` is shared** by toast/pie/overlay/tree/subtitle uploads (`gpu.rs:2258`, `:2690`)
+  and by `upload_image_reusable` (`gpu.rs:1328`, animation/video, re-uploads L0 every frame).
+- The renderer's `held` frame is deliberately **outside** the ring budget (`gpu.rs:1872`); a
+  `RingSlot` stores only the bind group, not an accessible texture/view (`gpu.rs:1748`).
+- Scene texture-sample (`SCENE_WGSL` frag `gpu.rs:105`) does either the sRGB EOTF (mode 0) or the
+  source ICC TRC + source-linear→BT.709 matrix (mode 1); HDR fp16 is mode 2, already scene-linear
+  (`color.rs`, `ColorUniform`). CPU Lanczos runs on **source-encoded U8x4** *before* the GPU
+  colour transform (`common.rs:316`).
 
-## 3. Current state (anchors)
+## 4. Phase 1 design — correct mip generation
 
-- `upload_image` (`gpu.rs:1230`) — the one texture-upload path; builds the texture + sampler +
-  color uniform + bind group. Used by the ring (`upload_slot`), `set_image`, offscreen, egui.
-  Its reusable twin `upload_image_reusable` (`gpu.rs:1328`) re-uploads into an existing texture
-  for animation/video frames.
-- `clamp_to_max` (`gpu.rs:~1258`) — huge SDR images are CPU-downscaled to the GPU max dimension
-  before upload; HDR fp16 is already fit-sized in the decoder.
-- Texture formats: SDR = `Rgba8Unorm` (source-encoded; a `mode` flag drives the in-shader color
-  transform), HDR = `Rgba16Float` (scene-linear).
-- Scene shader `SCENE_WGSL` (`gpu.rs:29`), fragment at `gpu.rs:105`, samples `textureSample`.
-- `resize` (`app_core_impl.rs:1347`) — rebinds the Original (part A, `bcd37ea6`), sets
-  `resize_hold`, defers the crisp re-decode 180 ms (`resize_settle_at`).
-- `refresh_after_geometry_change` (`app_core_impl.rs:~5342`) — the settle re-decode trigger.
-- `drain_results` (`app_core_impl.rs:~6640`) — the `resize_hold` quality-monotonic preview
-  guard + `mark_resolved` (`792dfa9e`).
-- Ring VRAM budget: `RING_BUDGET_BYTES`, `slot_bytes_estimate` (`app_core_impl.rs`),
-  `ring_capacity`.
-- Golden/offscreen harness: `offscreen_letterboxes_and_draws_image` (`gpu.rs:4595`) and the
-  NV12 offscreen tests render headless to a buffer and read back; `nv-flip` is available
-  (`crates/pb-render/Cargo.toml`) for perceptual diffs.
+### 4a. A `MipPolicy` seam (do NOT mip every texture)
+`upload_image` is generic. Add an explicit policy param (extend the `Renderer::upload_slot` seam,
+`lib.rs:224`, which currently has no representation kind):
 
-## 4. Design
+| Texture path | Policy |
+|---|---|
+| Parked still `Original`; Fill/Original **display** rep | **Full chain** (the key HQ-downscale source) |
+| CPU-Lanczos `Fit` at its natural viewport size | **L0 only** (already prefiltered, shown ~1:1) |
+| Preview/thumbnail Fit | L0 only |
+| `upload_image_reusable` (animation/video) | **L0 only** — never mip (re-uploads L0/frame → stale lower levels = a correctness bug) |
+| Planar video, toast/pie/overlay/tree/subtitle, present/tonemap, egui | L0 only |
+| Offscreen tests | explicit mipped/non-mipped variant |
 
-### (A) Mipmap generation on upload
+Never *skip mips above a size threshold* — the largest Originals need them most. If VRAM can't
+afford a chain, don't promise that Original as an HQ Fit fallback: use the Lanczos Fit instead
+(the eligibility decision, §4d).
 
-Create the texture with a full chain and generate it once per upload:
+### 4b. Generation (per-upload GPU blit chain, wgpu 22)
+- `mip_level_count = 1 + floor(log2(max(w,h)))` computed **on integers, after `clamp_to_max`**.
+- Texture usage += `RENDER_ATTACHMENT`.
+- Build the mip pipelines **once** alongside the others (`gpu.rs:558`); need **separate
+  `Rgba8Unorm` and `Rgba16Float` pipelines** (target format is part of the pipeline).
+- For `level` in `1..N`: one render pass per level. Source view
+  `base_mip_level = level-1, mip_level_count = Some(1)`; target view
+  `base_mip_level = level, mip_level_count = Some(1)`. **Views must not overlap** (can't bind the
+  all-mips view as source while rendering a level). Rely on same-queue ordering (L0 copy →
+  mip-gen → scene draws). Record in the upload encoder; the final scene view spans the whole chain.
+- **Correct downsample fragment** (not a bilinear tap):
+  - Four explicit `textureLoad`s of the L(level-1) texels (handles the average honestly).
+  - **Odd dimensions**: `3→1` etc. must not drop the odd texel — clamp/weight the extra
+    column/row (a 2- or 3-tap edge case). Test 1×N, 3×3, 5×2.
+  - **Linear-light averaging** (Codex §2): naïve encoded averaging is *not* always small — a
+    50/50 black/white edge is wrong by a lot. Per mode:
+    - **Mode 0**: sRGB-decode → average → sRGB-encode.
+    - **Mode 1**: apply the source parametric TRC → average in source-linear → inverse TRC before
+      store. (The primaries matrix stays in the scene shader — it commutes with linear averaging.)
+      → the mip-gen fragment needs the same TRC params the scene uses (thread the `ColorUniform`/
+      TRC through, or generate mips per colour mode).
+    - **Mode 2 (HDR fp16)**: already linear → average directly.
+  - **Premultiplied-alpha filtering** for straight-alpha sources (the decoded contract is straight
+    alpha, `pb-decode/lib.rs:223`): premultiply → average → un-premultiply, or PNG/SVG edges get
+    halos.
+- A "13-tap Lanczos" mip kernel is **not** a small drop-in (two passes + intermediate; a UNORM
+  intermediate clamps negative lobes). Ship the correct linear-light box first; only escalate the
+  kernel if the golden test demands it.
 
-- `mip_level_count = 1 + floor(log2(max(img_w, img_h)))`.
-- Add `RENDER_ATTACHMENT` to the texture usage (needed to render into each mip level).
-- A dedicated **mip-gen pipeline** (its own tiny WGSL, or reuse a fullscreen-triangle vertex +
-  a downsample fragment): for `level` in `1..N`, begin a render pass targeting `level`'s view,
-  bind a texture view of `level-1` + a Linear-clamp sampler, draw the fullscreen triangle. One
-  encoder, N-1 passes, submitted with the upload.
-- This is off the keypress frame — uploads happen during **prefetch** — so the cost is paid on
-  spare workers, never on a present (the architecture's contract). Measure it anyway
-  (`PB_PERF`/a Criterion micro-bench) to confirm it doesn't starve the on-screen sharpen.
+### 4c. Sampler / shader — unchanged
+The sampler already has `mipmap_filter: Linear` (`gpu.rs:1291`); with mips present,
+`textureSample` auto-selects the LOD from screen-space UV derivatives → trilinear. `SCENE_WGSL` is
+unchanged. Present/tonemap texture stays single-level (sampled ~1:1, `gpu.rs:169`).
 
-**Quality tiers for the downsample kernel** (start simple, escalate only if a golden test
-demands it):
+### 4d. VRAM — exact accounting + allocation-aware eligibility
+- Record **exact allocation** per slot: `Σ_levels max(1, w>>l)·max(1, h>>l)·bpp` (4 B SDR, 8 B
+  fp16), on post-clamp dims — replace the L0-only `img.pixels.len()` byte count.
+- Make `full_res_eligible` **allocation-aware** (a byte ceiling by pixel-format + mip policy +
+  device-max-dim), not a pixel count; **exclude/limit HDR** (200 MP HDR + mips ≈ 2.13 GB).
+- Fix the pre-existing **upgrade-budget** path: call `make_room_for_upgrade` (`ring.rs:453`)
+  before `set_slot_bytes`, and wire **renderer eviction notifications** so freeing a core slot
+  actually drops the renderer texture (else VRAM isn't reclaimed).
+- Don't let a large mipped Original sit in the out-of-budget `held` slot indefinitely after a
+  resize (§ Phase D).
 
-1. **Box / bilinear mip-gen** (each level = a 2×2 average of the previous). Simple, standard
-   trilinear. Already a large step up from single-level bilinear. Ship this first.
-2. **Wide kernel mip-gen** (e.g. a separable Kaiser/Lanczos-3, 13-tap) if tier 1 isn't sharp
-   enough vs CPU Lanczos in the golden test. More shader work; behind the same seam.
+## 5. Phase D design — retire the re-decode (deferred, conditional)
+Not shippable as a `resize_hold`/`mark_resolved` tweak (Codex): resize always arms the settle
+(`app_core_impl.rs:1418`), which invalidates geometry and **replaces the whole core ring**
+(`:6858`), and `reserve_ring` keeps only the displayed texture as an out-of-budget `held`
+(`gpu.rs:2882`). Requirements:
+- A renderer **retain + old-slot→new-slot remap** API (the unused `ResidentRing::drop_fit_slots`,
+  `ring.rs:211`, is the core half; there is no renderer half yet).
+- A display-selection rule: **"Fit may be satisfied by a mipmapped Original."**
+- **Split the settle timer**: "geometry settled" (also resumes paused video/audio + repositions
+  overlays, `:1833`) must stay; only "re-decode the current Fit" becomes conditional.
+- **Keep the Lanczos Fit behind a switch**; A/B at 1.25–8×; remove the re-decode only if the owner
+  confirms it's redundant.
+- **Escalation if box mips miss the bar (Codex's preferred fallback):** derive an exact-size
+  Lanczos/Kaiser Fit **from the mipped Original GPU texture in one background GPU pass** — no SMB
+  re-read, no retained CPU pixels. Needs `RingSlot` to expose a texture/view (`gpu.rs:1748`).
 
-### (B) Colour-space correctness of mip generation
+## 6. Golden / correctness tests
+- Add `nv-flip` (or a chosen perceptual metric) as a `pb-render` dev-dep.
+- **Ratios**: 1.25, 1.5, exact 2.0, 2.2, 2.8, 3.7, and a 6–8× stress case; include **subpixel
+  phase offsets** (exact 2× flatters a box chain).
+- **Patterns**: chirps/checkerboards, slanted edges, Siemens star / zone plate, fine text and
+  1-px diagonals, a natural foliage/fabric crop, black/white **and coloured** edges (gamma),
+  **transparent coloured** edges (alpha), and both **profiled SDR** + **fp16 HDR** fixtures.
+- Compare **perceptual similarity AND alias energy** (a zone plate alone rewards blur). Two
+  references: current **encoded-space Lanczos** (compat) and a **linear-light** reference
+  (correctness — the linear-light mip won't match the encoded-space CPU Lanczos exactly).
+- A separate **deterministic** test reads back individual generated mip levels and checks odd
+  dims, gamma, and alpha directly (no adapter variance).
+- Perceptual tolerances (WARP/lavapipe + fp16 + `pow` differ slightly cross-adapter).
 
-Downsampling must happen in **linear** light or the mips are subtly wrong (dark fringing on
-high-contrast edges):
+## 7. Upscaling (separate, not required here)
+Fit **does** magnify small images (view scale isn't capped at 1, `view.rs:105`) while CPU
+decode-to-fit never upscales (`common.rs:325`). Mips don't help magnification. Retiring the
+re-read doesn't regress small images (the re-decode returns the same L0 anyway). Add a
+bicubic/Catmull-Rom magnify path **only if** owner testing shows a need — out of scope for the
+downscale fix.
 
-- **HDR `Rgba16Float`** is already scene-linear → downsample directly. ✔
-- **SDR `Rgba8Unorm`** holds *source-encoded* (≈sRGB/gamma) data that the scene shader converts
-  later via the `mode` flag. Averaging encoded values is technically wrong. Options, cheapest
-  first: (i) accept it — at photographic content + these ratios the error is small and it's
-  still far better than undersampled bilinear; (ii) mip-gen fragment linearizes → averages →
-  re-encodes (sRGB approx) so the stored mip matches how L0 is interpreted; (iii) upload SDR as
-  `Rgba8UnormSrgb` so the hardware linearizes on sample (but that collides with the existing
-  `mode`-flag colour path — likely off the table). **Recommendation:** ship (i), and make the
-  mip-gen fragment do (ii) if the golden test shows visible fringing. Decide with Codex.
-
-### (C) Sampler — no shader change
-
-The sampler already declares `mipmap_filter: Linear`; with mips present, `textureSample`
-auto-selects the level from screen-space UV derivatives → trilinear. `SCENE_WGSL` is
-unchanged. (Confirm the scene sampler is the one on the image bind group at `gpu.rs:1288`, not
-the present/overlay/egui samplers, which don't need mips.)
-
-### (D) Retire the resize/fullscreen re-decode
-
-With a high-quality GPU downscale, serving the current photo from its resident full-res
-**Original** across a resize is near-Lanczos. So:
-
-- On resize, keep the current behaviour of **rebinding the Original** (part A), but **do not
-  re-decode the current item's Fit** — no settle re-decode for it, no swap, no ~1 s wait, no
-  flicker. It becomes a pure rebind like the `0` toggle.
-- **Neighbours**: their resident Fit slots are now stale-sized. Either (a) still re-decode
-  neighbours at the new fit so nav is crisp (keep the settle for neighbours, drop it for the
-  current item), or (b) also serve neighbours from their Originals when resident (radius) and
-  only re-decode the ones without an Original. Prefer (a) for a smaller change; revisit (b) if
-  nav-after-resize softness is noticeable.
-- **Simplify `resize_hold`**: if the current item isn't re-decoded, there's no settle preview
-  to skip — the quality-monotonic guard + the `792dfa9e` `mark_resolved` may collapse into
-  "rebind the Original + `mark_resolved` at the new epoch, don't re-decode it." Re-derive the
-  exact state machine once (A) lands; keep the fallback (no Original resident → old re-decode
-  path) intact.
-- **Fallback unchanged**: radius 0 / just-blazed / excluded items (RAW/SVG/video/gigapixel) with
-  no resident Original still take the old upscale-then-re-decode path.
-
-### (E) VRAM budget
-
-Mips add ~33% per texture (`1 + 1/4 + 1/16 + … = 4/3`). Update `slot_bytes_estimate` /
-`RING_BUDGET_BYTES` accounting so the ring capacity math still holds — a resident ring of full
-chains must stay within the VRAM budget (esp. with the parked full-res Original tier, which is
-the largest). Confirm the gigapixel ceiling still bounds the worst case.
-
-## 5. Phases
-
-1. **Mip-gen + trilinear (the quality win).** Tier-1 (box) mip-gen in `upload_image` (+
-   `upload_image_reusable`), usage flag, VRAM accounting. Golden test. Measure upload cost. This
-   alone makes the *instant* fullscreen frame sharp.
-2. **Retire the resize re-decode.** Serve the current item from the Original, drop its settle
-   re-decode, simplify `resize_hold`. Result: fullscreen = instant + sharp + smooth, matching
-   the `0` toggle.
-3. **(Optional) High-quality mip kernel (tier 2)** only if the golden test shows tier-1 mips are
-   visibly softer than CPU Lanczos at target ratios.
-
-## 6. Acceptance / tests
-
-- **Golden image (headless, no GPU-vendor dependence via WARP/lavapipe):** render a
-  high-frequency pattern (fine lines / a zone plate) downscaled ~3×; compare `bilinear-no-mips`
-  vs `trilinear+mips` vs a **CPU Lanczos reference** with `nv-flip`; assert `trilinear+mips` is
-  perceptually closer to Lanczos than bilinear, and below a tolerance. Extend
-  `offscreen_letterboxes_and_draws_image` (`gpu.rs:4595`).
-- **VRAM:** a unit assertion that `slot_bytes_estimate` includes the mip overhead and the ring
-  capacity stays within `RING_BUDGET_BYTES` at the pro-range sizes (#106.7 §9 ceiling).
-- **Hot path:** `present` stays a rebind (no per-keypress mip-gen); mip-gen only on upload.
-  `PB_PERF` `resize→on-screen` for a resident Original becomes ~0 ms (rebind) with no re-decode.
-- **Manual (owner):** fullscreen toggle on a large archive photo is instant + sharp, no ~1 s
-  reload, no flicker; nav after a resize is crisp; zoom/1:1 unaffected; HDR photo still correct;
-  a huge (clamped) panorama still uploads and looks right; video/animation frames unaffected.
-
-## 7. Risks / open questions (for Codex)
-
-1. **sRGB mip-gen correctness** (§B) — ship the naive average or do linearize→average→encode?
-2. **VRAM +33%** — does the ring budget / gigapixel ceiling still hold with full chains for the
-   parked Original tier? Any capacity regressions?
-3. **Upload cost** — N-1 render passes per upload; acceptable on prefetch workers, or should
-   mip-gen be capped/skipped above some size, or only generated for the *display* rep?
-4. **`upload_image_reusable`** (animation/video frames): should per-frame animation textures get
-   mips at all (they're re-uploaded every frame; mip-gen per frame may be wasteful)? Probably
-   **skip mips for the reusable/animation path**, mips only for still photos. Confirm.
-5. **Interaction with `clamp_to_max`** and with the fp16 HDR path.
-6. **Retiring the re-decode (§D)** — is serving the current item permanently from the Original
-   (bilinear-of-mips) acceptable vs a Lanczos Fit, or should we still re-decode a Lanczos Fit in
-   the background and swap it *seamlessly*? The owner explicitly prefers smoothness; confirm the
-   quality is genuinely indistinguishable at target ratios before dropping the re-decode.
-7. Anything the plan misses in the present/tonemap or the `mode`-flag colour path.
+## 8. Phasing / acceptance
+- **Phase 1a** — mip-gen pipelines + correct linear-light/premult/odd-dim downsample fragment +
+  the `MipPolicy` seam (Original/display-rep full chain; everything else L0). Deterministic
+  mip-level readback test + the golden-image suite. **Benchmark GPU pass duration +
+  queue-to-present.**
+- **Phase 1b** — exact VRAM accounting + allocation-aware (HDR-limited) `full_res_eligible` + the
+  `make_room_for_upgrade`/eviction fix.
+- **Phase D** — deferred, behind a switch, A/B, needs the retain/remap API. Do **not** rip out the
+  Lanczos re-decode until confirmed redundant.
+- **Manual (owner):** fullscreen toggle on a large archive photo is instant + sharp (no bilinear
+  softness); the residual Lanczos swap is now imperceptible; nav crisp; zoom/1:1 unaffected; HDR
+  correct; transparent-edge PNG/SVG have no halos; a clamped panorama unaffected (its softness is
+  `clamp_to_max`, tracked separately); animation/video unaffected. **Metal smoke test** for fp16
+  mips.
+- **Changelog** entry on ship.
