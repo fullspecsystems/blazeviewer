@@ -1142,6 +1142,27 @@ impl AppCore {
         if resolved.source.is_empty() {
             return; // nothing to show yet (shouldn't happen — worker skips empties)
         }
+        // PB_DOOR_DIAG: which branch a folder-scan batch takes, and the state it decides on.
+        // A `BOOTSTRAP` while `archive_scope=true` is the still-open "mode B" hole (a stale scan's
+        // first batch clobbering an archive deck — the extend guard below doesn't cover bootstrap).
+        if door_diag() {
+            let branch = if !self.scan_bootstrapped {
+                "BOOTSTRAP"
+            } else if self.archive_scope.is_some() || resolved.scan_root != self.scan_root {
+                "REJECT"
+            } else {
+                "EXTEND"
+            };
+            eprintln!(
+                "[door-diag] scan_batch -> {branch} batch_len={} batch_scan_root={:?} | scan_bootstrapped={} archive_scope={} cur_scan_root={:?} cur_src_len={}",
+                resolved.source.len(),
+                resolved.scan_root,
+                self.scan_bootstrapped,
+                self.archive_scope.is_some(),
+                self.scan_root,
+                self.source.len(),
+            );
+        }
         if !self.scan_bootstrapped {
             self.scan_bootstrapped = true;
             // A `--start-at` / `--shuffle` / `--reverse` launch chooses the first photo shown over
@@ -3287,6 +3308,18 @@ impl AppCore {
         self.displayed_item = self.playlist.current();
         self.target_item = self.playlist.current();
         self.presented_epoch = None;
+        if door_diag() {
+            eprintln!(
+                "[door-diag] rebuild_playlist src_len={} first={:?} scan_root={:?} recursive={} start={} epoch={} content_gen={}",
+                self.source.len(),
+                (!self.source.is_empty()).then(|| self.source.name(0)),
+                self.scan_root,
+                self.recursive,
+                self.displayed_item.unwrap_or(0),
+                self.epoch,
+                self.content_gen,
+            );
+        }
         self.request_prefetch();
         self.effects.push(contract::CoreEffect::RequestRender);
     }
@@ -5347,6 +5380,15 @@ impl AppCore {
         let new_len = source.len();
         if new_len <= self.source.len() {
             return;
+        }
+        if door_diag() {
+            eprintln!(
+                "[door-diag] extend_playlist {}->{} first={:?} archive_scope={}",
+                self.source.len(),
+                new_len,
+                (new_len > 0).then(|| source.name(0)),
+                self.archive_scope.is_some(),
+            );
         }
         self.source = source;
         self.playlist.extend(new_len);
@@ -9471,13 +9513,21 @@ impl AppCore {
         // but the renderer drew Held/Single. `door_card` allocates, so only build it when on.
         if door_diag() {
             let di = self.displayed_item;
+            // Source identity is the tell: inside album.zip the source is its 8 photos and
+            // `door_card` is None (a stale card => shell overlay bug); if the source is the
+            // parent folder with `displayed` back on the archive door, `door_card` names the
+            // archive (=> the deck/source was swapped back, a core bug). `name`/`door_card`
+            // allocate — gated, so off the hot path.
             eprintln!(
-                "[door-diag] draw displayed={di:?} archive_kind={:?} presented_epoch={:?} epoch={} door_presented={} door_card={}",
+                "[door-diag] draw displayed={di:?} name={:?} src_len={} archive_scope={} archive_kind={:?} presented_epoch={:?} epoch={} door_presented={} door_card={:?}",
+                di.map(|i| self.source.name(i)),
+                self.source.len(),
+                self.archive_scope.is_some(),
                 di.and_then(|i| self.item_archive_kind(i)),
                 self.presented_epoch,
                 self.epoch,
                 self.door_presented(),
-                self.door_card().is_some(),
+                self.door_card().map(|c| c.name),
             );
         }
         // Push after the `self.renderer` borrow ends (can't touch `self.effects` inside it).

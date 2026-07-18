@@ -247,6 +247,14 @@ fn esc_quits(guard: Option<Instant>, now: Instant) -> bool {
     }
 }
 
+/// `PB_DOOR_DIAG=1` → shell-side overlay/door diagnostics to stderr (dev-only; zero cost when
+/// off). Same env as the core's `door_diag`, so the shell's overlay lines interleave with the
+/// core's deck/draw lines in one capture when chasing the "door card stuck over a photo" bug.
+fn door_diag() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("PB_DOOR_DIAG").is_some())
+}
+
 /// Build the winit event loop. On Linux, prefer the **X11 (XWayland) backend inside
 /// WSL**: WSLg's RDP→Wayland input bridge sends bogus keycodes that overflow-panic
 /// winit's Wayland backend (`key + 8` on e.g. Alt+Right — unfixed upstream as of
@@ -2036,6 +2044,18 @@ impl App {
         // (`current_has_motion` needs `&mut`). `None` when the toolbar is hidden.
         let toolbar_state = self.toolbar_visible().then(|| self.build_toolbar_state());
         let mut frame = panels_ui::PanelFrame::snapshot(&self.core);
+        // PB_DOOR_DIAG: every time the overlay texture is actually rebuilt, whether the door card
+        // is in it. If the card is stuck on screen but these lines STOP (no rebuild) while the
+        // core's `[door-diag] draw door_card=None` keeps printing, the overlay texture is stale
+        // (shell bug). If `frame.door=Some` here, the core still believes it's a door (core bug).
+        if door_diag() {
+            eprintln!(
+                "[door-diag] shell render_overlay_frame: frame.door={:?} core.door_presented={} displayed={:?}",
+                frame.door.as_ref().map(|d| d.name.clone()),
+                self.core.door_presented(),
+                self.core.displayed_item,
+            );
+        }
         // Fade the info line in/out over ~100 ms (macOS-shell parity — its SwiftUI
         // overlays transition; the egui line used to pop, most visibly on the
         // video hover reveal). Appearances ramp `fade` up; a disappearance keeps
@@ -4554,6 +4574,15 @@ impl ApplicationHandler for App {
             .door_presented()
             .then_some(self.core.displayed_item);
         if door_sig != self.door_sig {
+            if door_diag() {
+                eprintln!(
+                    "[door-diag] shell door_sig {:?} -> {:?} (overlay_visible={} overlay_active={})",
+                    self.door_sig,
+                    door_sig,
+                    self.overlay_visible(),
+                    self.overlay_active,
+                );
+            }
             self.door_sig = door_sig;
             self.overlay_dirty = true;
             if let Some(w) = self.window.as_ref() {
