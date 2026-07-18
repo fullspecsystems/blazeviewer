@@ -1,144 +1,87 @@
 # Blaze Viewer
 
-An image viewer with one obsession: **how fast you can flick through thousands of
-images.** No chrome, fit-to-screen, keyboard-driven, with images held in GPU
-memory so the next frame is already there when you press a key.
+<!-- TODO: Come up with a wordmark and show it here (and in the about screen, and the website -->
 
-> Prime directive: *will this make it faster, or have basically zero performance
-> impact?* If it's neither, it doesn't ship. See [`CLAUDE.md`](./CLAUDE.md) and
-> [`.taskmaster/docs/`](./.taskmaster/docs/) for the full design, research, and
-> decision log.
+Blaze Viewer lets you blaze through images as fast as your monitor refreshes. It is a flexible viewer for images and videos with a central, underlying obsession: everything should feel as fast as possible and the app should never get in your way.
 
-## Status
+- You almost never wait for images to load
+- Everything is controlled with customizable keyboard shortcuts
+- Virtually all modern image and video formats just work — even Apple Live Photos and HEIC files
+- You can browse nested folders or archives (zip/7z/tar/rar) without extracting them. Encrypted archives are supported.
 
-Early but real. The decode/upload performance spikes are done (they drove the
-architecture), and the viewer paages through folders today:
+For a feature or change to ship, it has to pass a simple, evidence-based test:
+_will this make it faster, or have near-zero performance impact?_
 
-- **Phase 1 (done):** chrome-less fullscreen window, wgpu (DX12) renderer,
-  fit-to-screen letterboxing, headless golden-image test harness.
-- **Phase 2 (done):** directory scan (+ recursive), `zune-jpeg` decode with EXIF
-  orientation, sequential navigation, self-paced advance, linear filtering,
-  HiDPI-aware, GPU-adaptive texture limits.
-- **Next — Phase 3:** the decode pool + prefetch ring + self-paced advance that
-  make holding a key *blaze* on full-resolution photos.
+If not, it doesn't ship.
 
-The GPU-stack architecture was chosen from measurement (CPU decode ≈ 2.5× and a
-staging-ring upload ≈ 3.4× the 120 Hz budget on the test machine), reviewed, and
-recorded in [`.taskmaster/docs/decisions.md`](./.taskmaster/docs/decisions.md).
+## About This Project
 
-## Requirements
+Blaze Viewer started in July 2025 as a proof of concept: lots of photo viewers feel slow and make you wait for images to load. But what if you just want to _blaze_ through a large photo library at maximum speed? How could one build the fastest photo viewer possible?
 
-- Rust (stable; see [`rust-toolchain.toml`](./rust-toolchain.toml))
-- A GPU with Vulkan or D3D12 (wgpu)
+Blaze Viewer was born to answer that question, and make viewing photos fast and effortless, yet keep all the flexibility and features you expect from a modern photo viewer at your fingertips.
 
-## Install (Windows)
+## How It's Made
 
-Download the signed `PhotoBlaze-x.y.z-x86_64.msi` from the **Releases** page and
-run it. The installer adds PhotoBlaze to the **Open with** list for common image
-types and an **Open with PhotoBlaze** entry to the folder right-click menu.
-Windows won't let any installer silently take over the default viewer — to make
-it the default, open a photo's *Open with → Choose another app*, pick PhotoBlaze,
-and tick *Always*. Building the MSI yourself: see
-[`.taskmaster/docs/packaging.md`](./.taskmaster/docs/packaging.md).
+Blaze Viewer is written in Rust and renders through [wgpu](https://github.com/gfx-rs/wgpu) (Direct3D 12 on Windows, Metal on macOS, Vulkan on Linux), so the core is cross-platform from the ground up. The image hot path is hand-written wgpu on every platform; the surrounding chrome — settings, dialogs, etc. — uses [egui](https://github.com/emilk/egui) on Windows and Linux, while macOS wraps the same Rust engine in a native SwiftUI shell that follows modern macOS conventions.
 
-## Build & run
+The speed comes from the architecture, not from micro-tuning the GPU. Images are decoded no larger than the screen shows, an embedded preview is shown instantly and swapped for the full decode when ready, and a direction-biased ring of neighbours is decoded and uploaded into resident GPU textures _ahead_ of you. By the time you press a key, the next frame is already there. Everything feels instant.
 
-```sh
-cargo run -p pb-app --release -- "C:\path\to\photos"          # a folder (recursive by default)
-cargo run -p pb-app --release -- "C:\path\to\photo.jpg"       # one photo (opens its folder, flat)
-cargo run -p pb-app --release -- "C:\path\to\photos" --no-recursive
-cargo run -p pb-app --release -- --windowed                   # dev window; then drop a photo or press O
-```
+The codebase is a Cargo workspace split into crates:
 
-At runtime you can also **double-click** an image (once installed), **drag-and-drop**
-photos or a folder onto the window, or press **`O`** for the native open dialog.
+| Crate         | Responsibility                                                                          |
+| ------------- | --------------------------------------------------------------------------------------- |
+| `pb-core`     | Navigation, prefetch, and cache-residency logic. Fully unit-tested                      |
+| `pb-decode`   | Multi-codec decode behind a trait (decode-to-fit, preview-first, swappable backends)    |
+| `pb-source`   | The item-source seam: encoded bytes for items over a folder or an archive.              |
+| `pb-render`   | wgpu presentation and fit-to-screen geometry                                            |
+| `pb-ui`       | The egui design system (tokens + components) powering the chrome                        |
+| `pb-app-core` | Platform-neutral orchestration: actions, keymap, timing — no windowing or GPU           |
+| `pb-app`      | The winit shell binary (Windows/Linux); macOS drives the same engine via a SwiftUI host |
 
-### Command-line options
+Video support covers modern codecs — using the OS decoders where they suffice and [FFmpeg](https://github.com/FFmpeg/FFmpeg) where they don't — with customizable subtitle support built in.
 
-Run `photoblaze --help` for the full list. Every option shapes a **single launch**
-and never changes your saved settings.
+## Download & Install
 
-| Option | Effect |
-|---|---|
-| `PATH...` | Files, a folder, or an archive (`.zip` / `.7z`) to open |
-| `-w, --windowed` / `-f, --fullscreen` | Start windowed or borderless-fullscreen |
-| `-r, --recursive` / `--no-recursive` | Include subfolders, or open the folder flat |
-| `--info` / `--no-info` | Show or hide the info line on launch |
-| `--details` / `--folders` | Open the image-details (Inspector) / folder-tree panel |
-| `--slideshow[=SECS]` | Start a slideshow, optionally at SECS per slide (`5`, `3s`, `0.5m`; clamped to 0.1–60 s) |
-| `--shuffle` | Navigate in random (shuffle) order |
-| `--reverse` | Play backward — with `--shuffle`, a reverse shuffle |
-| `--scale fit\|fill\|original` | Initial scale mode |
-| `--theme light\|dark\|system` | Light / dark theme for this launch |
-| `--mute` | Mute Live Photo audio |
-| `--start-at N\|NAME` | Open at photo N (1-based) or the first name match |
-| `-h, --help` / `-V, --version` | Print help / version and exit |
+Grab a build for your platform from [blazeviewer.app/download](https://blazeviewer.app/download). Windows, macOS, and Linux each auto-update in place, so you only download once.
 
-Encrypted archives are opened by entering the password in the viewer, not on the
-command line.
+- **macOS** (Apple silicon, macOS 14+) — [download](https://downloads.blazeviewer.app/latest/mac)
+- **Windows** (64-bit, Windows 10/11) — [download](https://downloads.blazeviewer.app/latest/windows) · [ARM64](https://downloads.blazeviewer.app/latest/windows-arm64) · [portable zip](https://downloads.blazeviewer.app/win/BlazeViewer-win-Portable.zip)
+- **Linux** (AppImage) — [x86_64](https://downloads.blazeviewer.app/latest/linux) · [aarch64](https://downloads.blazeviewer.app/latest/linux-arm64)
 
-#### macOS
+## Building from Source
 
-The same options work on macOS. Install the `photoblaze` command once via
-**PhotoBlaze ▸ Install Command-Line Tool…** (creates
-`/usr/local/bin/blaze`; the same menu item removes or repairs it), then:
+You'll need the Rust toolchain via [rustup](https://rustup.rs); the exact version is pinned in `rust-toolchain.toml` and installed automatically on first build.
 
 ```sh
-photoblaze ~/Photos --slideshow=3s --shuffle
+git clone https://github.com/fullspecsystems/blazeviewer.git
+cd blazeviewer
 ```
 
-- Bare paths work (`photoblaze ~/Photos`); the older `--pb-open <path>` form
-  remains as a compatibility alias.
-- `--help` / `--version` / errors print to the terminal — colored on a TTY,
-  plain when piped or redirected. A Finder/Dock launch with a bad option shows
-  a dialog instead of failing silently.
-- `open -a PhotoBlaze --args --theme dark ~/Photos` also works, but `open`
-  detaches the terminal — use the installed `photoblaze` command when you want
-  `--help`/`--version` output.
-
-### Keys
-
-| Key | Action |
-|---|---|
-| `space` | next photo |
-| `backspace` | previous photo |
-| `enter` | random photo (precomputed shuffle) |
-| `← ↑ ↓ →` | pan around the photo (hold to accelerate) |
-| `=` / `-` | zoom in / out (hold; numpad `+`/`-` too) |
-| `8` / `9` / `0` | fit / fill / toggle original 1:1 ↔ fit |
-| `r` / `Shift+R` | rotate 90° cw / ccw (per-image, RAM-only) |
-| `Ctrl+R` | toggle recursive subfolder browsing |
-| `o` / `Shift+O` | open file(s) / open a folder |
-| `i` / `Shift+I` | info panel / full-EXIF panel |
-| `/` or `?` | keyboard-shortcut help |
-| `esc` | quit |
-
-Hold a nav key to page through every photo (advance is self-paced and capped at
-the display refresh; nothing is skipped).
-
-## Workspace
-
-```
-crates/
-  pb-core    pure nav / precomputed-random / prefetch / cache logic (no I/O, no GPU)
-  pb-decode  decode abstraction (decode-to-fit + preview-first) + zune-jpeg backend
-  pb-render  wgpu presenter + fit-to-screen geometry
-  pb-app     the binary: winit event loop wiring it together
-spikes/      throwaway measurement spikes (decode + upload throughput)
-.taskmaster/ design docs, research, decisions, roadmap, and the task backlog
-```
-
-## Development
+**Linux** — a plain cargo run works; add features for HEIC and full video:
 
 ```sh
-cargo test --workspace
-cargo clippy --workspace --all-targets -- -D warnings
+cargo run -p pb-app --release --features livephoto,pb-decode/libheif
+```
+
+**Windows** — use the build script, not a bare `cargo run`. It enters the VS Developer shell FFmpeg needs and builds with the ship feature set (`libheif,dav1d,ffprobe`):
+
+```powershell
+pwsh scripts/build-windows.ps1 -Run          # add -Release for an optimized build
+pwsh scripts/build-windows.ps1 -NoNative -Run # skip the native libs (no vcpkg needed)
+```
+
+**macOS** — `pb-app` doesn't build here; the Mac app is the SwiftUI host over the Rust engine:
+
+```sh
+scripts/build-swift-host.sh --debug --run   # dev video needs `brew install ffmpeg`
+```
+
+Common workspace commands:
+
+```sh
+cargo test                              # unit, property, and golden-image tests
+cargo clippy --all-targets -- -D warnings
 cargo fmt --all
+cargo bench                             # Criterion microbenchmarks over the corpus
+cargo run -p pb-ui --example gallery    # preview the design system (light/dark/both)
 ```
-
-Tests follow TDD: the pure logic in `pb-core` is fully unit-tested, and the GPU
-path is covered by headless golden-image tests.
-
-## License
-
-Dual-licensed under MIT or Apache-2.0.
