@@ -1409,6 +1409,17 @@
           105
         ],
         "subtasks": []
+      },
+      {
+        "id": 108,
+        "title": "Explore: show archives in the folder tree / Go navigation (zipper icon)",
+        "description": "Owner idea 2026-07-17: list archives alongside folders in the folder-tree overlay (Shift+F) and the Go > Next/Prev Folder navigation, drawn with a 'zipper file' icon instead of a folder icon. The point is navigation parity: you can already step folder-to-folder with Alt+Left/Right and click rows in the tree; extend that so you can step archive-to-archive (and folder-to-archive) the same way, instead of Alt+Up-ing back out to the folder and hunting for the next one. GATED on the 'Show Archives' setting (settings.show_archives) - when archives are hidden they must not appear here either (same rule as the deck). CONTEXT / why this is its own task: the #104 plan deliberately deferred this and left a trap note - 'Do not retype subdirs (folder_tree.rs): it is shared with sibling_with_photos (Go Next/Prev Folder), so retyping it in place would leak archives into folder navigation. Add a separate typed reader for the FsTree worker.' So this is the intended, opt-in version of that: a typed Dir-vs-Archive tree/sibling reader that includes archive entries ONLY when show_archives is on, with the archive rows carrying an 'open this archive' target (the open_plan(Source::Archive) path, password prompt + RAM pre-flight included) rather than a re-scope. EXPLORE scope: (a) the tree overlay rows (folder_tree.rs rows_from_disk / the FsTree worker at app_core_impl.rs, plus the three activation dispatches the #104 plan lists); (b) the Go Next/Prev Folder sibling walk (sibling_with_photos + spawn_sibling) so a sibling can be an archive; (c) the zipper icon (reuse the door card's folder-zip artwork / a Font Awesome file-zipper glyph for the tree row); (d) decide whether entering an archive from the tree then lets you Alt+Left/Right across sibling archives. Related: #104 (doors), #105 (door card), the show_archives setting (this session).",
+        "status": "pending",
+        "priority": "low",
+        "dependencies": [
+          104
+        ],
+        "subtasks": []
       }
     ]
   }
