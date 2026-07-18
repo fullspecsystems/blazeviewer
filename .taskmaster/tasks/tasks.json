@@ -1431,6 +1431,15 @@
           104
         ],
         "subtasks": []
+      },
+      {
+        "id": 110,
+        "title": "GPU HQ-scaling follow-ons (Phase 1b VRAM + Phase D + Codex items)",
+        "description": "Follow-ons to the mipmap Phase 1 (shipped d82df25f; plan .taskmaster/plans/gpu-mipmap-hq-scaling.md rev2). Phase 1 = mipmapped near-Lanczos GPU downscaling for the full-res Original rep. Deferred, in rough priority:\n(1) Phase 1b VRAM: exact mip-inclusive byte accounting in the ring (it records L0 only today), allocation-aware + HDR-limited full_res_eligible (200MP HDR + mips ~2.13GB > 1.5GB budget; full_res_eligible is pixel-count-only and doesn't exclude HDR), and the pre-existing make_room_for_upgrade/renderer-eviction bug (preview->full sets slot bytes without making room). Common <=24MP radius-1 case is safe today; this is for the pro/gigapixel range.\n(2) Phase D (retire the resize re-decode, truly toggle-smooth): CONDITIONAL + A/B-gated. Box mips != Lanczos-3 at 2-3x; keep the Lanczos Fit behind a switch, A/B at 1.25-8x, remove only if the owner confirms redundant. Needs a renderer retain/remap API (drop_fit_slots exists in ring.rs, no renderer half) + a 'Fit may be satisfied by a mipmapped Original' display rule + splitting the settle timer (it also resumes video/audio + repositions overlays). Escalation if box mips miss the bar: GPU-derive an exact-size Lanczos/Kaiser Fit from the mipped Original texture (no SMB re-read; needs RingSlot to expose a texture/view).\n(3) Odd-dim polyphase mip box (Phase 1 uses a clamped 2x2 that under-weights, never drops, the trailing texel). (4) Mode-1 source-ICC mips (thread the TRC into the mip shader; today mode-1 stays L0). (5) clamp_to_max uses nearest-neighbor reduction — replace with Lanczos/area so huge clamped panoramas aren't pre-softened. (6) Expand the golden suite (nv-flip dep; many ratios/patterns/phases, SDR+HDR+alpha) + a Metal smoke test for fp16 mips. (7) Bicubic-in-shader magnify path ONLY if owner testing shows upscaling needs it. Full Codex review captured in the 2026-07-18 session.",
+        "status": "pending",
+        "priority": "medium",
+        "dependencies": [],
+        "subtasks": []
       }
     ]
   }
