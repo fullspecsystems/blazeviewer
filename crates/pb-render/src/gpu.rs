@@ -1737,6 +1737,14 @@ struct SubtitleDraw {
     y: f32,
 }
 
+/// `PB_DOOR_DIAG=1` → per-frame draw-source diagnostics to stderr (dev-only; zero cost
+/// when off — the env is read once). Pairs with the core's `[door-diag]` lines to trace
+/// the "archive card over a photo" defect end to end.
+fn door_diag() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("PB_DOOR_DIAG").is_some())
+}
+
 /// One resident ring slot: a pre-uploaded image texture reused across photos, so
 /// a keypress is a rebind (`present_slot`) — never a decode or upload. v1 slots
 /// are image-sized; the win is that the texture is uploaded during prefetch, off
@@ -2923,14 +2931,14 @@ impl Renderer for WgpuRenderer {
         });
     }
 
-    fn present_slot(&mut self, slot: usize) {
+    fn present_slot(&mut self, slot: usize) -> bool {
         let Some((w, h, peak)) = self
             .ring
             .get(slot)
             .and_then(|s| s.as_ref())
             .map(|s| (s.w, s.h, s.peak))
         else {
-            return; // unknown / not-yet-uploaded slot: keep the current frame (and its hold)
+            return false; // unknown / not-yet-uploaded slot: keep the current frame (and its hold)
         };
         self.blank = false; // a photo is showing again
         self.message = None; // hide the empty-state hint
@@ -2951,6 +2959,7 @@ impl Renderer for WgpuRenderer {
                 self.content_top_inset,
             )),
         );
+        true
     }
 
     fn render(&mut self) -> Result<bool, RenderError> {
@@ -3010,15 +3019,28 @@ impl Renderer for WgpuRenderer {
             // `blank` is already handled by the outer branch, so it's false here; the
             // held-frame preference keeps a geometry change from flashing a stale single
             // image (task #18 finding #5). See `choose_draw_source`.
-            let (pipeline, bind_group) =
-                match choose_draw_source(false, ring_slot.is_some(), self.held.is_some()) {
-                    DrawSource::RingSlot => (&self.scene_pipeline, &ring_slot.unwrap().bind_group),
-                    DrawSource::Held => (
-                        &self.scene_pipeline,
-                        &self.held.as_ref().unwrap().bind_group,
-                    ),
-                    DrawSource::Single | DrawSource::Blank => single(),
-                };
+            let source = choose_draw_source(false, ring_slot.is_some(), self.held.is_some());
+            // PB_DOOR_DIAG: what the quad actually draws this frame (dev-only; zero cost when
+            // off). Pairs with the core's `[door-diag] draw` line to tell "card over a stale
+            // photo" (quad = Held/Single while the core says door presented) from an overlay
+            // problem — so the next occurrence is diagnosable, not guessed.
+            if door_diag() {
+                eprintln!(
+                    "[door-diag] render source={source:?} present_idx={:?} ring_live={} held={} blank={}",
+                    self.present_idx,
+                    ring_slot.is_some(),
+                    self.held.is_some(),
+                    self.blank,
+                );
+            }
+            let (pipeline, bind_group) = match source {
+                DrawSource::RingSlot => (&self.scene_pipeline, &ring_slot.unwrap().bind_group),
+                DrawSource::Held => (
+                    &self.scene_pipeline,
+                    &self.held.as_ref().unwrap().bind_group,
+                ),
+                DrawSource::Single | DrawSource::Blank => single(),
+            };
             draw_scene(
                 &mut encoder,
                 &intermediate_view,

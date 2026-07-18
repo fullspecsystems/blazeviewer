@@ -74,9 +74,11 @@ with any pre-release suffix carried only by the tag.
 
 ### Fixed
 - **The archive "open" card no longer appears on top of a photo.** When you landed on an archive
-  (or opened a folder whose first item is one), the card that names the archive could flash over
-  the previous photo — the card was showing before the archive's own frame had been drawn. The
-  card now waits until the archive's frame is actually on screen.
+  (or opened a folder whose first item is one), the card that names the archive could appear over
+  the previous photo instead of over the archive's own (empty) frame. Two causes are fixed: the
+  card no longer shows before the archive's frame is actually on screen, and the app no longer
+  counts an archive as "shown" when the display didn't truly switch to it — it keeps the old photo
+  up and retries until the archive's frame really lands.
 - **Opening an archive no longer occasionally shows a blank screen until you resize.** The first
   image of a freshly opened archive is now decoded and shown immediately, the same way the app
   paints the first photo at startup, instead of waiting on a background decode that could

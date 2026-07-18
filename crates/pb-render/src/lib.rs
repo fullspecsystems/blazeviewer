@@ -241,8 +241,12 @@ pub trait Renderer {
         peak: f32,
     );
     /// Select ring slot `slot` as the displayed image (the keypress fast path: a
-    /// rebind, no decode or upload). A no-op if the slot isn't uploaded yet.
-    fn present_slot(&mut self, slot: usize);
+    /// rebind, no decode or upload). Returns `true` when the slot was live and is now
+    /// on screen; `false` when the slot isn't uploaded yet (the previous frame is kept),
+    /// so a caller can tell "actually presented" from "held the old frame" — the core
+    /// gates `mark_resolved` on this, or a door/photo would be marked on-screen while the
+    /// renderer still shows the prior photo (the "card over a photo" defect).
+    fn present_slot(&mut self, slot: usize) -> bool;
 
     /// Override the letterbox / background fill color (sRGB), shown around a photo
     /// that doesn't cover the screen. Takes effect on the next `render`. Off the

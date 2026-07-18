@@ -57,6 +57,15 @@ fn pb_trace() -> bool {
     *ON.get_or_init(|| std::env::var_os("PB_TRACE").is_some())
 }
 
+/// `PB_DOOR_DIAG=1` → per-draw archive-door state to stderr (dev-only; zero cost when off).
+/// Pairs with the renderer's `[door-diag] render` line: if the core says a door is presented
+/// while the renderer's draw source is `Held`/`Single` (a stale photo), it is a ring desync
+/// (the "card over a photo" defect); a mismatch the other way points at the shell overlay.
+fn door_diag() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("PB_DOOR_DIAG").is_some())
+}
+
 /// `PB_PERF=1` → live one-shot latency lines to stderr (open→first-photo, open→all-cached,
 /// resize→on-screen). Shell-agnostic (works on the macOS host too, read via a captured
 /// stderr), unlike the winit-only `--metrics` summary. Zero cost when off (see [`perf`]).
@@ -6292,9 +6301,34 @@ impl AppCore {
         let t0 = Instant::now();
         let view = self.view_for(item);
         let title = title_for(self.source.name(item), item, self.source.len());
-        if let Some(r) = self.renderer.as_mut() {
-            r.set_view(view);
-            r.present_slot(slot);
+        // Ask the renderer to rebind the slot. It returns `false` when that slot isn't
+        // uploaded in its ring (it keeps the previous frame): a core↔renderer ring desync,
+        // where our `ResidentRing` mirror still names `item` at `slot` but the renderer's
+        // ring doesn't hold it. In that case `item` is NOT actually on screen, so we must
+        // not mark it resolved below — doing so is what let `door_presented`/`displayed_item`
+        // report a door (or photo) as shown while the renderer still displays the prior
+        // photo: the owner-reported "archive card on top of a photo." Headless (`renderer =
+        // None`, unit tests) is treated as logically presented so the pure-core assertions hold.
+        let presented = match self.renderer.as_mut() {
+            Some(r) => {
+                r.set_view(view);
+                r.present_slot(slot)
+            }
+            None => true,
+        };
+        if !presented {
+            // The renderer kept the old frame. Our ring mirror and the renderer's ring have
+            // drifted, so resync BOTH (invalidate_content rebuilds each in lockstep, bumps the
+            // epoch to discard the stale in-flight decode, and moves the on-screen frame into the
+            // renderer's `held` so it keeps showing). The item stays un-resolved (pending), so
+            // `target_caught_up` is false and the prefetch/drain path re-decodes then re-presents
+            // it cleanly — never a false "presented" over the held photo. This branch only fires
+            // on a genuine desync; the in-sync photo hot path (slot verified via `display_slot`)
+            // always presents, so it is untouched.
+            self.invalidate_content();
+            self.request_prefetch();
+            self.metrics.record("present", t0.elapsed());
+            return;
         }
         self.effects.push(contract::CoreEffect::SetTitle(title));
         self.ring.set_displayed(slot);
@@ -9425,6 +9459,20 @@ impl AppCore {
                 self.viewport.width, self.viewport.height
             );
         }
+        // PB_DOOR_DIAG=1: the core's door belief this frame, next to the renderer's draw
+        // source (logged in `render` above). "card over a photo" = door_presented=true here
+        // but the renderer drew Held/Single. `door_card` allocates, so only build it when on.
+        if door_diag() {
+            let di = self.displayed_item;
+            eprintln!(
+                "[door-diag] draw displayed={di:?} archive_kind={:?} presented_epoch={:?} epoch={} door_presented={} door_card={}",
+                di.and_then(|i| self.item_archive_kind(i)),
+                self.presented_epoch,
+                self.epoch,
+                self.door_presented(),
+                self.door_card().is_some(),
+            );
+        }
         // Push after the `self.renderer` borrow ends (can't touch `self.effects` inside it).
         if fatal {
             self.effects.push(contract::CoreEffect::Quit);
@@ -11801,7 +11849,7 @@ mod tests {
         assert!(
             core.effects.iter().any(|e| matches!(
                 e,
-                contract::CoreEffect::BeginArchiveOpen { path, .. } if *path == PathBuf::from("/p/a.zip")
+                contract::CoreEffect::BeginArchiveOpen { path, .. } if path.as_path() == Path::new("/p/a.zip")
             )),
             "an archive target opens the archive"
         );
