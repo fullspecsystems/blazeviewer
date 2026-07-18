@@ -343,6 +343,68 @@ pub(crate) fn subdirs(dir: &Path) -> Vec<String> {
     sort_names(v)
 }
 
+/// A navigable child of a folder on disk (task #108): a **subfolder** (open as a folder deck)
+/// or an **archive file** (open the archive as its own deck). The one typed target the Go-sibling
+/// walk and the tree rows share, so activation picks `open_dir` vs `open_plan(Source::Archive)`
+/// off the type instead of re-`stat`ing a path. `Archive` variants are produced **only** when
+/// `show_archives` is on (the readers gate them), so an activation can open one unconditionally.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum DiskTarget {
+    Directory(PathBuf),
+    Archive(PathBuf),
+}
+
+impl DiskTarget {
+    pub fn path(&self) -> &Path {
+        match self {
+            DiskTarget::Directory(p) | DiskTarget::Archive(p) => p,
+        }
+    }
+    pub fn is_archive(&self) -> bool {
+        matches!(self, DiskTarget::Archive(_))
+    }
+}
+
+/// The non-hidden **navigable** children of `dir` — subfolders always, plus archive files when
+/// `show_archives` (task #108) — as absolute paths, display-sorted with folders and archives
+/// **interleaved by name** (the order the tree shows and the Go-sibling walk steps). Read-only;
+/// a missing/unreadable directory yields an empty list.
+///
+/// Deliberately separate from [`subdirs`], which stays folder-only for the callers that must
+/// never surface archives (the #104 trap: retyping `subdirs` in place would leak archives into
+/// folder-only navigation).
+pub(crate) fn dir_children(dir: &Path, show_archives: bool) -> Vec<DiskTarget> {
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut items: Vec<(String, DiskTarget)> = Vec::new();
+    for e in rd.flatten() {
+        if entry_hidden(&e) {
+            continue;
+        }
+        let name = e.file_name().to_string_lossy().into_owned();
+        if name.starts_with('.') {
+            continue;
+        }
+        let Ok(ft) = e.file_type() else { continue };
+        if ft.is_dir() {
+            items.push((name, DiskTarget::Directory(e.path())));
+        } else if show_archives && ft.is_file() {
+            let path = e.path();
+            if pb_source::archive_kind(&path).is_some() {
+                items.push((name, DiskTarget::Archive(path)));
+            }
+        }
+    }
+    // The same case-insensitive, total order as `sort_names`, over folders + archives together.
+    items.sort_unstable_by(|a, b| {
+        a.0.to_lowercase()
+            .cmp(&b.0.to_lowercase())
+            .then_with(|| a.0.cmp(&b.0))
+    });
+    items.into_iter().map(|(_, t)| t).collect()
+}
+
 /// Windows hides folders by *attribute*, not by name — `$RECYCLE.BIN`, `System
 /// Volume Information`, `found.000` all carry FILE_ATTRIBUTE_HIDDEN/SYSTEM and
 /// never appear in Explorer, so they mustn't appear in the tree either (the
@@ -551,12 +613,13 @@ pub enum TreeIoResult {
     FullTree { sig: String, model: FolderTreeModel },
     /// The Go ▸ previous/next resolution: the deck root the search started from
     /// (so a result that outlives its deck is dropped, not opened — the probe
-    /// can run for seconds on a slow share) and the first sibling **with
-    /// photos** in that direction (`None` = nothing that way → the host
-    /// toasts).
+    /// can run for seconds on a slow share) and the first navigable sibling in
+    /// that direction — a folder **with photos** or (task #108) an **archive** —
+    /// as a typed [`DiskTarget`] so the caller opens it the right way (`None` =
+    /// nothing that way → the host toasts).
     Sibling {
         from_root: PathBuf,
-        target: Option<PathBuf>,
+        target: Option<DiskTarget>,
     },
 }
 
@@ -624,16 +687,28 @@ const SIBLING_BUDGET: Duration = Duration::from_secs(3);
 /// Resolve the Go ▸ previous/next (`step` = ∓1) target of `root` off-thread —
 /// the listing (and even the `is_dir` stat) can stall on a dead share, and the
 /// per-candidate photo probes (#49) can walk entire subtrees.
-pub(crate) fn spawn_sibling(root: PathBuf, step: i32, show_archives: bool) -> TreeIo {
+pub(crate) fn spawn_sibling(
+    anchor: PathBuf,
+    step: i32,
+    show_archives: bool,
+    archives_only: bool,
+) -> TreeIo {
     let (tx, rx) = std::sync::mpsc::channel();
     let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let seen = std::sync::Arc::clone(&cancel);
     std::thread::spawn(move || {
         let deadline = Instant::now() + SIBLING_BUDGET;
-        let target =
-            sibling_with_photos(&root, step, show_archives, &seen, SIBLING_HOP_CAP, deadline);
+        let target = sibling_target(
+            &anchor,
+            step,
+            show_archives,
+            archives_only,
+            &seen,
+            SIBLING_HOP_CAP,
+            deadline,
+        );
         let _ = tx.send(TreeIoResult::Sibling {
-            from_root: root,
+            from_root: anchor,
             target,
         });
     });
@@ -644,41 +719,58 @@ pub(crate) fn spawn_sibling(root: PathBuf, step: i32, show_archives: bool) -> Tr
     }
 }
 
-/// The nearest sibling directory of `root` **containing at least one photo**
-/// (anywhere under it — matching what the recursive open would find), stepping
-/// through the parent's sorted listing in `step`'s direction and skipping
-/// photo-less candidates (#49: an empty folder must not dead-end ⌘←/→ behind
-/// a modal). `None` at the row's end, for an unlisted root, or when the hop
-/// cap / deadline / `cancel` cuts the search short — never a folder without
-/// photos, so the caller's open can't hit "No supported images".
-fn sibling_with_photos(
-    root: &Path,
+/// The nearest **navigable** sibling of `anchor` in `step`'s direction — a folder
+/// **containing at least one photo** (anywhere under it, matching a recursive open) or (task
+/// #108) an **archive file** — stepping through the parent's [`dir_children`] row and skipping
+/// photo-less folders (#49: an empty folder must not dead-end ⌘←/→ behind a modal). `anchor`
+/// may itself be a folder OR an archive file (the archive-root Go-sibling case anchors on the
+/// archive). With `archives_only`, folders are skipped entirely (step archive→archive). `None`
+/// at the row's end, for an unlisted anchor, or when the hop cap / deadline / `cancel` cuts the
+/// search short — never a photo-less folder, so the caller's open can't hit "No supported
+/// images".
+#[allow(clippy::too_many_arguments)]
+fn sibling_target(
+    anchor: &Path,
     step: i32,
     show_archives: bool,
+    archives_only: bool,
     cancel: &std::sync::atomic::AtomicBool,
     cap: usize,
     deadline: Instant,
-) -> Option<PathBuf> {
-    if !root.is_dir() {
-        return None;
-    }
-    let parent = root.parent().filter(|p| !p.as_os_str().is_empty())?;
-    let sibs = subdirs(parent);
-    let name = name_of(root);
-    let pos = sibs.iter().position(|s| *s == name)?;
+) -> Option<DiskTarget> {
+    let parent = anchor.parent().filter(|p| !p.as_os_str().is_empty())?;
+    let children = dir_children(parent, show_archives);
+    // Match by file name (as the old subdirs walk did) — robust to path-normalization quirks,
+    // and an archive's name (`foo.zip`) can't collide with a folder's (`foo`).
+    let anchor_name = anchor.file_name()?;
+    let pos = children
+        .iter()
+        .position(|c| c.path().file_name() == Some(anchor_name))?;
     let mut i = pos as i64 + step as i64;
     let mut hops = 0usize;
-    while i >= 0 && (i as usize) < sibs.len() && hops < cap {
-        let candidate = parent.join(&sibs[i as usize]);
-        match crate::scan::dir_has_image(&candidate, show_archives, cancel, deadline) {
-            crate::scan::Probe::Found => return Some(candidate),
-            crate::scan::Probe::Empty => {} // skip it — keep stepping
-            crate::scan::Probe::Aborted => return None,
+    while i >= 0 && (i as usize) < children.len() && hops < cap {
+        // A superseding press / teardown / the wall-clock ceiling aborts (an archive candidate
+        // short-circuits before the folder photo-probe, which is where the old walk checked).
+        if cancel.load(std::sync::atomic::Ordering::Relaxed) || Instant::now() > deadline {
+            return None;
+        }
+        match &children[i as usize] {
+            // An archive is always a valid target (no photo probe — entering it is the probe).
+            DiskTarget::Archive(p) => return Some(DiskTarget::Archive(p.clone())),
+            // A folder counts only if it has photos, and only when folders are wanted.
+            DiskTarget::Directory(p) if !archives_only => {
+                match crate::scan::dir_has_image(p, show_archives, cancel, deadline) {
+                    crate::scan::Probe::Found => return Some(DiskTarget::Directory(p.clone())),
+                    crate::scan::Probe::Empty => {} // skip it — keep stepping
+                    crate::scan::Probe::Aborted => return None,
+                }
+            }
+            DiskTarget::Directory(_) => {} // archives_only: skip folders
         }
         i += step as i64;
         hops += 1;
     }
-    None // the row's end (or the cap) — nothing with photos that way
+    None // the row's end (or the cap) — nothing navigable that way
 }
 
 #[cfg(test)]
@@ -1010,11 +1102,12 @@ mod tests {
         let live = AtomicBool::new(false);
         let far = Instant::now() + Duration::from_secs(60);
         let sib = |from: &str, step, cancel: &AtomicBool, cap| {
-            sibling_with_photos(&base.join(from), step, true, cancel, cap, far)
+            sibling_target(&base.join(from), step, true, false, cancel, cap, far)
         };
+        let dir = |name: &str| Some(DiskTarget::Directory(base.join(name)));
         // beta is photo-less → skipped in both directions.
-        assert_eq!(sib("alpha", 1, &live, 64), Some(base.join("gamma")));
-        assert_eq!(sib("gamma", -1, &live, 64), Some(base.join("alpha")));
+        assert_eq!(sib("alpha", 1, &live, 64), dir("gamma"));
+        assert_eq!(sib("gamma", -1, &live, 64), dir("alpha"));
         // Past gamma there is only photo-less delta, then the row ends.
         assert_eq!(sib("gamma", 1, &live, 64), None);
         assert_eq!(sib("alpha", -1, &live, 64), None);
@@ -1026,10 +1119,11 @@ mod tests {
         assert_eq!(sib("alpha", 1, &cancelled, 64), None);
         // An expired deadline likewise aborts rather than mislabeling.
         assert_eq!(
-            sibling_with_photos(
+            sibling_target(
                 &base.join("alpha"),
                 1,
                 true,
+                false,
                 &live,
                 64,
                 Instant::now() - Duration::from_secs(1)
@@ -1037,6 +1131,77 @@ mod tests {
             None
         );
         std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    /// `dir_children` (task #108): subfolders always; archive files only when `show_archives`;
+    /// interleaved by name; non-archive files and hidden entries excluded.
+    #[test]
+    fn dir_children_lists_folders_always_and_archives_when_shown() {
+        let base = std::env::temp_dir().join(format!("pb-ftree-children-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(base.join("alpha")).unwrap();
+        std::fs::create_dir_all(base.join("gamma")).unwrap();
+        std::fs::write(base.join("beta.zip"), b"PK").unwrap(); // archive (typed by extension)
+        std::fs::write(base.join("notes.txt"), b"x").unwrap(); // not an archive → excluded
+
+        // Folders only when archives are hidden.
+        assert_eq!(
+            dir_children(&base, false),
+            vec![
+                DiskTarget::Directory(base.join("alpha")),
+                DiskTarget::Directory(base.join("gamma")),
+            ]
+        );
+        // Folders + archives, interleaved by name (alpha, beta.zip, gamma), when shown.
+        assert_eq!(
+            dir_children(&base, true),
+            vec![
+                DiskTarget::Directory(base.join("alpha")),
+                DiskTarget::Archive(base.join("beta.zip")),
+                DiskTarget::Directory(base.join("gamma")),
+            ]
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// `sibling_target` (task #108): from an archive anchor, `archives_only` steps
+    /// archive→archive; a folder-deck walk (`archives_only=false`) also lands on archives; and
+    /// with `show_archives` off an archive anchor isn't listed, so there's nothing to step to.
+    #[test]
+    fn sibling_target_steps_across_archives() {
+        use std::sync::atomic::AtomicBool;
+        let base = std::env::temp_dir().join(format!("pb-ftree-sibarch-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        std::fs::write(base.join("a.zip"), b"PK").unwrap();
+        std::fs::write(base.join("b.7z"), b"7z").unwrap();
+        std::fs::write(base.join("c.zip"), b"PK").unwrap();
+        std::fs::create_dir_all(base.join("d_folder")).unwrap();
+        std::fs::write(base.join("d_folder/x.jpg"), b"x").unwrap();
+
+        let live = AtomicBool::new(false);
+        let far = Instant::now() + Duration::from_secs(60);
+        let arch = |n: &str| Some(DiskTarget::Archive(base.join(n)));
+        // archives_only: a.zip → b.7z → c.zip → (row end); reverse too. d_folder is skipped.
+        let only =
+            |from: &str, dir| sibling_target(&base.join(from), dir, true, true, &live, 64, far);
+        assert_eq!(only("a.zip", 1), arch("b.7z"));
+        assert_eq!(only("b.7z", 1), arch("c.zip"));
+        assert_eq!(only("c.zip", 1), None); // only d_folder past c.zip, and folders are skipped
+        assert_eq!(only("b.7z", -1), arch("a.zip"));
+
+        // Folder deck (archives_only=false): from a photo folder step back onto the archive.
+        assert_eq!(
+            sibling_target(&base.join("d_folder"), -1, true, false, &live, 64, far),
+            arch("c.zip")
+        );
+
+        // Archives hidden: an archive anchor isn't in dir_children → no sibling.
+        assert_eq!(
+            sibling_target(&base.join("a.zip"), 1, false, true, &live, 64, far),
+            None
+        );
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[cfg(windows)]

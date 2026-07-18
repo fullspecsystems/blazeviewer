@@ -1710,8 +1710,9 @@ impl AppCore {
                         .unwrap_or_else(|| self.root.clone());
                     if from_root != anchor {
                         // Stale — the folder moved on while the probe ran.
-                    } else if let Some(d) = target {
-                        self.open_dir(d);
+                    } else if let Some(t) = target {
+                        // A folder re-roots the deck; an archive opens as its own deck (task #108).
+                        self.open_disk_target(t);
                     } else {
                         // Nothing with photos in that direction (or the search
                         // hit its cap/budget): non-blocking feedback, never the
@@ -2746,8 +2747,35 @@ impl AppCore {
     /// on the window — the shared plan (recursive per the launch policy), so tree
     /// clicks and the Go commands can't drift from the canonical open path.
     pub fn open_dir(&mut self, dir: PathBuf) {
+        self.open_dir_at(dir, None);
+    }
+
+    /// Like [`open_dir`](Self::open_dir), but land the deck cursor on `at` (a file in the
+    /// folder) instead of the first item — Open Parent uses it to land on the archive **door**
+    /// you climbed out of (task #108). `at` must be a file the scan will actually surface (an
+    /// archive is only surfaced when `show_archives` is on), or the streaming scanner would gate
+    /// its first batch on an unreachable target and show nothing — the caller gates that.
+    pub fn open_dir_at(&mut self, dir: PathBuf, at: Option<PathBuf>) {
         let plan = pb_core::open::plan(pb_core::open::LaunchInput::Directory(dir));
-        self.open_plan(plan.source, plan.cursor);
+        let cursor = match at {
+            Some(p) => pb_core::open::Cursor::At(p),
+            None => plan.cursor,
+        };
+        self.open_plan(plan.source, cursor);
+    }
+
+    /// Open a typed [`DiskTarget`](crate::folder_tree::DiskTarget) (task #108): a folder as a
+    /// folder deck, or an archive as its own deck (the full door / File-open path — password
+    /// prompt, RAM pre-flight, progress). The shared activation for the Go-sibling walk and the
+    /// tree rows, so neither can drift on how an archive opens.
+    pub fn open_disk_target(&mut self, target: crate::folder_tree::DiskTarget) {
+        match target {
+            crate::folder_tree::DiskTarget::Directory(p) => self.open_dir(p),
+            crate::folder_tree::DiskTarget::Archive(p) => self.open_plan(
+                pb_core::open::Source::Archive(p),
+                pb_core::open::Cursor::First,
+            ),
+        }
     }
 
     /// Re-scope the archive deck to the entries under the internal folder
@@ -2814,7 +2842,15 @@ impl AppCore {
         }
         if let Some(par) = anchor.parent().filter(|p| !p.as_os_str().is_empty()) {
             let par = par.to_path_buf();
-            self.open_dir(par.clone()); // clears climb_anchor (via open_plan)…
+            // Climbing out of an archive **root**, land on that archive's door (task #108), so
+            // `space` continues past it instead of restarting at the folder's first item — the
+            // owner's "more consistent" fix. `self.root` is the archive file for an archive deck.
+            // Gate on `show_archives`: with archives hidden the door isn't in the scan, and the
+            // streaming scanner would wait for that unreachable target before showing anything
+            // (Codex review) — so fall back to the first item there.
+            let at = (self.archive_scope.is_some() && self.settings.show_archives)
+                .then(|| self.root.clone());
+            self.open_dir_at(par.clone(), at); // clears climb_anchor (via open_plan)…
             self.climb_anchor = Some(par); // …then remembers this rung for the next ⌘↑.
         }
     }
@@ -2837,11 +2873,30 @@ impl AppCore {
         // from the folder you land on, not the stale climb rung.
         self.climb_anchor = None;
         if let Some(scope) = &self.archive_scope {
-            let full = Arc::clone(&scope.full);
-            let names = (0..full.len()).map(|i| full.name(i));
-            match crate::folder_tree::sibling_scope(names, &scope.prefix, dir) {
-                Some(sib) => self.rescope_archive(sib),
-                None => self.show_toast("No more folders with images"),
+            // Scoped into an internal folder: step the archive's internal sibling folders
+            // (in-RAM over the entry names), exactly as before.
+            if !scope.prefix.is_empty() {
+                let full = Arc::clone(&scope.full);
+                let names = (0..full.len()).map(|i| full.name(i));
+                match crate::folder_tree::sibling_scope(names, &scope.prefix, dir) {
+                    Some(sib) => self.rescope_archive(sib),
+                    None => self.show_toast("No more folders with images"),
+                }
+                return;
+            }
+            // At the archive **root**: step to the adjacent **archive on disk** (task #108) —
+            // anchor on the archive file (`self.root`), archives-only, off-thread (the containing
+            // folder's `read_dir` can stall on a share). Only when Show Archives is on; otherwise
+            // archives aren't surfaced and there's nothing to step to.
+            if self.settings.show_archives {
+                self.tree_io = Some(crate::folder_tree::spawn_sibling(
+                    self.root.clone(),
+                    dir,
+                    true, // show_archives
+                    true, // archives_only — flick archive → archive
+                ));
+            } else {
+                self.show_toast("No more folders");
             }
             return;
         }
@@ -2878,6 +2933,7 @@ impl AppCore {
             anchor,
             dir,
             self.settings.show_archives,
+            false, // archives_only=false — a folder deck steps to folder-or-archive siblings
         ));
     }
 
@@ -11527,15 +11583,31 @@ mod tests {
     #[test]
     fn sibling_cmd_steps_scopes_in_ram_without_a_worker() {
         let mut core = archive_core(ARCHIVE);
-        // Unscoped: the whole archive has no siblings inside itself — silent no-op.
+        core.settings.show_archives = true;
+        // At the archive ROOT, ⌘←/→ now steps to the adjacent archive on disk (task #108) — a
+        // disk worker; the deck is unchanged until it lands.
         core.open_sibling_cmd(1);
         assert_eq!(core.archive_scope.as_ref().unwrap().prefix, "");
-        assert!(core.tree_io.is_none(), "no disk worker for archive decks");
+        assert!(
+            core.tree_io.is_some(),
+            "archive root steps to the adjacent archive via a disk worker"
+        );
+        core.tree_io = None; // cancels the fire-and-forget probe
+                             // With Show Archives off there's nothing to step to at the root — no worker.
+        core.settings.show_archives = false;
+        core.open_sibling_cmd(1);
+        assert!(
+            core.tree_io.is_none(),
+            "archives hidden → no disk worker at the archive root"
+        );
+        core.settings.show_archives = true;
 
+        // Scoped into an internal folder: stepping stays in-RAM, no disk worker (the subject).
         core.rescope_archive("a/b".to_string());
         core.open_sibling_cmd(1);
         assert_eq!(core.archive_scope.as_ref().unwrap().prefix, "a/bc");
         assert_eq!(deck_names(&core), vec!["a/bc/three.jpg"]);
+        assert!(core.tree_io.is_none(), "internal-folder stepping is in-RAM");
         core.open_sibling_cmd(1);
         assert_eq!(
             core.archive_scope.as_ref().unwrap().prefix,
@@ -11554,7 +11626,9 @@ mod tests {
                 .iter()
                 .any(|e| matches!(e, contract::CoreEffect::BeginDirScan { .. }))
         };
-        let feed = |core: &mut AppCore, from_root: PathBuf, target: Option<PathBuf>| {
+        let feed = |core: &mut AppCore,
+                    from_root: PathBuf,
+                    target: Option<crate::folder_tree::DiskTarget>| {
             let (tx, rx) = std::sync::mpsc::channel();
             tx.send(crate::folder_tree::TreeIoResult::Sibling { from_root, target })
                 .unwrap();
@@ -11570,7 +11644,9 @@ mod tests {
         feed(
             &mut core,
             PathBuf::from("/somewhere/else"),
-            Some(PathBuf::from("/somewhere/else/next")),
+            Some(crate::folder_tree::DiskTarget::Directory(PathBuf::from(
+                "/somewhere/else/next",
+            ))),
         );
         assert!(!opened_dir(&core), "stale sibling results are dropped");
         assert!(core.tree_io.is_none(), "the finished job is released");
@@ -11587,8 +11663,82 @@ mod tests {
         // A live match opens exactly like Open Folder — the shared plan.
         let root = core.root.clone();
         let target = root.join("next-door");
-        feed(&mut core, root, Some(target));
+        feed(
+            &mut core,
+            root,
+            Some(crate::folder_tree::DiskTarget::Directory(target)),
+        );
         assert!(opened_dir(&core), "a found sibling opens as a dir scan");
+    }
+
+    /// Open Parent out of an archive lands the deck cursor on that archive's **door** when Show
+    /// Archives is on (so `space` continues past it), and on the folder's first item when it's
+    /// off (task #108 — the off case avoids the streaming-scan stall on a filtered-out target).
+    #[test]
+    fn open_parent_out_of_an_archive_lands_on_its_door_when_archives_shown() {
+        let door = std::env::temp_dir().join("deck.zip"); // archive_core's root/container
+        let begin_cursor = |core: &AppCore| {
+            core.effects.iter().find_map(|e| match e {
+                contract::CoreEffect::BeginDirScan { cursor, .. } => Some(cursor.clone()),
+                _ => None,
+            })
+        };
+
+        let mut shown = archive_core(ARCHIVE);
+        shown.settings.show_archives = true;
+        shown.effects.clear();
+        shown.open_parent_cmd();
+        assert_eq!(
+            begin_cursor(&shown),
+            Some(pb_core::open::Cursor::At(door.clone())),
+            "archives shown → land on the archive door"
+        );
+
+        let mut hidden = archive_core(ARCHIVE);
+        hidden.settings.show_archives = false;
+        hidden.effects.clear();
+        hidden.open_parent_cmd();
+        assert_eq!(
+            begin_cursor(&hidden),
+            Some(pb_core::open::Cursor::First),
+            "archives hidden → first item (no stall on a filtered-out door)"
+        );
+    }
+
+    /// `open_disk_target` (task #108): a `Directory` re-roots as a folder scan; an `Archive`
+    /// opens as its own deck (the door / File-open path), never a folder scan.
+    #[test]
+    fn open_disk_target_routes_folders_and_archives_apart() {
+        let mut core = test_core();
+        core.effects.clear();
+        core.open_disk_target(crate::folder_tree::DiskTarget::Archive(PathBuf::from(
+            "/p/a.zip",
+        )));
+        assert!(
+            core.effects.iter().any(|e| matches!(
+                e,
+                contract::CoreEffect::BeginArchiveOpen { path, .. } if *path == PathBuf::from("/p/a.zip")
+            )),
+            "an archive target opens the archive"
+        );
+        assert!(
+            !core
+                .effects
+                .iter()
+                .any(|e| matches!(e, contract::CoreEffect::BeginDirScan { .. })),
+            "an archive target is never a folder scan"
+        );
+
+        core.effects.clear();
+        core.open_disk_target(crate::folder_tree::DiskTarget::Directory(PathBuf::from(
+            "/p/dir",
+        )));
+        assert!(
+            core.effects
+                .iter()
+                .any(|e| matches!(e, contract::CoreEffect::BeginDirScan { .. })),
+            "a directory target re-roots as a folder scan"
+        );
     }
 
     #[test]

@@ -62,6 +62,13 @@ with any pre-release suffix carried only by the tag.
   labels, they give way to just their icons rather than truncating. The info inspector goes a
   touch narrower too, down to 260 pt (was 280 pt).
 
+### Added
+- **Move between archives like you move between folders.** With Show Archives on, `Alt+←/→`
+  (`⌘←/→`) at the top of an archive now steps to the previous / next archive in the same folder,
+  and pressing `Alt+↑` (`⌘↑`) to leave an archive drops you back on that archive in the folder —
+  so `space` carries on to the next one instead of restarting at the top. Stepping between an
+  archive's own internal folders is unchanged.
+
 ### Fixed
 - **Opening an archive no longer occasionally shows a blank screen until you resize.** The first
   image of a freshly opened archive is now decoded and shown immediately, the same way the app
