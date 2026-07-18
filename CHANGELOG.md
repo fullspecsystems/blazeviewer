@@ -63,6 +63,10 @@ with any pre-release suffix carried only by the tag.
   touch narrower too, down to 260 pt (was 280 pt).
 
 ### Fixed
+- **Opening an archive no longer occasionally shows a blank screen until you resize.** The first
+  image of a freshly opened archive is now decoded and shown immediately, the same way the app
+  paints the first photo at startup, instead of waiting on a background decode that could
+  intermittently get dropped and leave the deck blank until a window resize forced a redraw.
 - **Dialogs no longer let a keypress slip through to the photo (Windows).** When a message like
   "This archive has no images to show" appeared, pressing Enter or Space to dismiss it also
   advanced to the next photo. The dialog is now properly modal: the key that closes it does only

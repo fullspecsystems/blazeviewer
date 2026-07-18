@@ -1231,6 +1231,19 @@ impl AppCore {
             resolved.recursive,
             resolved.start,
         );
+        // Paint the first frame **synchronously**, the way startup (`initial_image`) and a
+        // resize/rotation (`load_current_sync`) do — so an archive deck never depends on the
+        // async prefetch decode landing to show anything. Without it there's an intermittent
+        // blank-deck race: a geometry-epoch bump (the window settling to its real size, the
+        // just-closed password/loading dialog) can land between `rebuild_playlist`'s prefetch
+        // request and that first decode, so the decode is dropped as stale (`drain_results`) and
+        // nothing re-issues it — the deck sits blank until a resize forces a sync re-decode
+        // (owner-reported, first-archive-in-a-session). The synchronous decode closes the window
+        // the race lives in; the async prefetch still upgrades neighbours. Guarded on a live
+        // renderer so headless / unit contexts (no renderer) skip the decode entirely.
+        if self.renderer.is_some() {
+            self.load_current_sync();
+        }
         // A fresh archive deck starts unscoped; the ⇧F tree / Go commands
         // re-scope by filtering this full source (never re-opening the file).
         // Stamp only if the rebuild actually installed (it refuses an empty deck).
