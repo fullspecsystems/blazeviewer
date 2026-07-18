@@ -25,6 +25,7 @@
 //! it unit-testable with no disk, and RAM-only (privacy #2 — folder paths + counts live in
 //! memory like `meta_cache`, dropped on exit, never serialized).
 
+use crate::folder_tree::DiskTarget;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
@@ -32,8 +33,11 @@ use std::path::{Path, PathBuf};
 /// leaf); `Node::default()` models that.
 #[derive(Default, Clone)]
 struct Node {
-    /// The folder's subfolders, sorted for display — `None` until `read_dir` lands.
-    children: Option<Vec<PathBuf>>,
+    /// The folder's navigable children — subfolders and (task #108, when Show Archives is on)
+    /// archive files — sorted for display, `None` until `read_dir` lands. A `Directory` child
+    /// gets its own `Node` and can expand; an `Archive` child is a leaf (never expanded, no
+    /// chevron, no children read).
+    children: Option<Vec<DiskTarget>>,
     /// Whether it's expanded right now (independent of whether children are loaded yet).
     expanded: bool,
     /// The user **pinned** it open via the chevron (vs. it being auto-revealed to show the
@@ -56,11 +60,14 @@ pub struct Row {
     /// Expanded but its children haven't been read yet (show a spinner).
     pub loading: bool,
     /// Worth a disclosure chevron: known to have subfolders, or unread (optimistic —
-    /// expanding an empty folder then clears it).
+    /// expanding an empty folder then clears it). Always `false` for an archive leaf.
     pub has_children: bool,
-    /// The current photo's folder ("you are here").
+    /// The current photo's folder ("you are here"). Never an archive.
     pub is_current: bool,
     pub count: Option<u64>,
+    /// This row is an **archive** file, not a folder (task #108): draw a zipper icon, and a
+    /// click opens the archive as its own deck (not a re-root). A leaf — never expandable.
+    pub is_archive: bool,
 }
 
 /// The resident folder tree: a `root` path, the per-folder [`Node`] map, and the current
@@ -69,6 +76,9 @@ pub struct FsTree {
     root: PathBuf,
     nodes: HashMap<PathBuf, Node>,
     current: Option<PathBuf>,
+    /// Whether this tree's reads include archive files (task #108). The shell rebuilds the tree
+    /// when the Show Archives setting no longer matches this, so a live toggle refreshes rows.
+    show_archives: bool,
 }
 
 /// The display name of a folder path: its file name, or the whole path for a root like `/`.
@@ -93,11 +103,23 @@ impl FsTree {
             root,
             nodes,
             current: None,
+            show_archives: false,
         }
     }
 
     pub fn root(&self) -> &Path {
         &self.root
+    }
+
+    /// Whether this tree was built to include archive rows (task #108).
+    pub fn show_archives(&self) -> bool {
+        self.show_archives
+    }
+
+    /// Record whether this tree includes archive rows — the shell sets it at construction so a
+    /// live Show Archives toggle triggers a rebuild (`ensure_fs_tree`).
+    pub fn set_show_archives(&mut self, v: bool) {
+        self.show_archives = v;
     }
 
     /// The display name of the root's parent, or `None` at the filesystem root — the label
@@ -117,15 +139,29 @@ impl FsTree {
             .is_some_and(|n| n.expanded && n.children.is_none())
     }
 
-    /// Install a folder's subfolders (an off-thread `read_dir` result). Sorted
-    /// case-insensitively for stable display; idempotent (a re-read just refreshes).
-    pub fn set_children(&mut self, path: &Path, mut children: Vec<PathBuf>) {
+    /// Whether `path` is an **archive** row (a leaf) in the resident tree (task #108) — the shell
+    /// consults this to open a clicked row as an archive vs. re-rooting as a folder. Uses the
+    /// typed child, so a directory named `foo.zip` (a `Directory` child) is never mistaken for an
+    /// archive.
+    pub fn is_archive_row(&self, path: &Path) -> bool {
+        self.nodes.values().any(|n| {
+            n.children.as_ref().is_some_and(|cs| {
+                cs.iter()
+                    .any(|c| matches!(c, DiskTarget::Archive(p) if p == path))
+            })
+        })
+    }
+
+    /// Install a folder's navigable children (an off-thread `read_dir` result — subfolders,
+    /// plus archives when Show Archives is on). Sorted case-insensitively for stable display,
+    /// folders and archives interleaved by name; idempotent (a re-read just refreshes).
+    pub fn set_children(&mut self, path: &Path, mut children: Vec<DiskTarget>) {
         children.sort_by(|a, b| {
             let (an, bn) = (
-                display_name(a).to_lowercase(),
-                display_name(b).to_lowercase(),
+                display_name(a.path()).to_lowercase(),
+                display_name(b.path()).to_lowercase(),
             );
-            an.cmp(&bn).then_with(|| a.cmp(b))
+            an.cmp(&bn).then_with(|| a.path().cmp(b.path()))
         });
         self.nodes.entry(path.to_path_buf()).or_default().children = Some(children);
     }
@@ -209,14 +245,17 @@ impl FsTree {
         true
     }
 
-    /// Flatten the expanded structure into display rows (depth-first, root first).
+    /// Flatten the expanded structure into display rows (depth-first, root first). The root is
+    /// always a directory.
     pub fn rows(&self) -> Vec<Row> {
         let mut out = Vec::new();
-        self.push_rows(&self.root, 0, &mut out);
+        self.push_dir_rows(&self.root, 0, &mut out);
         out
     }
 
-    fn push_rows(&self, path: &Path, depth: u32, out: &mut Vec<Row>) {
+    /// Emit the row for a directory `path` (and, if expanded, its children — folders recursing,
+    /// archives as leaves).
+    fn push_dir_rows(&self, path: &Path, depth: u32, out: &mut Vec<Row>) {
         let node = self.nodes.get(path);
         let children = node.and_then(|n| n.children.as_ref());
         let expanded = node.is_some_and(|n| n.expanded);
@@ -230,11 +269,27 @@ impl FsTree {
             has_children: children.is_none_or(|c| !c.is_empty()),
             is_current: self.current.as_deref() == Some(path),
             count: node.and_then(|n| n.count),
+            is_archive: false,
         });
         if expanded {
             if let Some(children) = children {
                 for child in children {
-                    self.push_rows(child, depth + 1, out);
+                    match child {
+                        // A subfolder recurses (its own Node holds expansion + children).
+                        DiskTarget::Directory(p) => self.push_dir_rows(p, depth + 1, out),
+                        // An archive is a leaf (task #108): no Node, no chevron, no children read.
+                        DiskTarget::Archive(p) => out.push(Row {
+                            path: p.clone(),
+                            name: display_name(p),
+                            depth: depth + 1,
+                            expanded: false,
+                            loading: false,
+                            has_children: false,
+                            is_current: false,
+                            count: None,
+                            is_archive: true,
+                        }),
+                    }
                 }
             }
         }
@@ -247,6 +302,11 @@ mod tests {
 
     fn p(s: &str) -> PathBuf {
         PathBuf::from(s)
+    }
+
+    /// A directory child, for `set_children` (task #108 typed children).
+    fn d(s: &str) -> DiskTarget {
+        DiskTarget::Directory(PathBuf::from(s))
     }
 
     #[test]
@@ -264,7 +324,7 @@ mod tests {
     fn children_show_sorted_and_indented_once_loaded() {
         let mut t = FsTree::new(p("/photos"));
         assert!(t.needs_children(&p("/photos")));
-        t.set_children(&p("/photos"), vec![p("/photos/Zoo"), p("/photos/alps")]);
+        t.set_children(&p("/photos"), vec![d("/photos/Zoo"), d("/photos/alps")]);
         assert!(!t.needs_children(&p("/photos")));
         let rows = t.rows();
         assert_eq!(rows.len(), 3);
@@ -278,7 +338,7 @@ mod tests {
     #[test]
     fn collapse_hides_children_expand_reveals_without_reread() {
         let mut t = FsTree::new(p("/a"));
-        t.set_children(&p("/a"), vec![p("/a/b")]);
+        t.set_children(&p("/a"), vec![d("/a/b")]);
         t.collapse(&p("/a"));
         assert_eq!(t.rows().len(), 1, "collapsed root hides its child");
         assert!(
@@ -292,7 +352,7 @@ mod tests {
     #[test]
     fn nested_expand_and_empty_folder_clears_its_chevron() {
         let mut t = FsTree::new(p("/a"));
-        t.set_children(&p("/a"), vec![p("/a/b")]);
+        t.set_children(&p("/a"), vec![d("/a/b")]);
         // /a/b is unread → optimistic chevron.
         assert!(t.rows()[1].has_children);
         t.expand(&p("/a/b"));
@@ -311,8 +371,8 @@ mod tests {
         // Nothing read yet; set_current expands the ancestor chain.
         t.set_current(p("/a/b/c"));
         // Load the chain so the rows materialize.
-        t.set_children(&p("/a"), vec![p("/a/b")]);
-        t.set_children(&p("/a/b"), vec![p("/a/b/c")]);
+        t.set_children(&p("/a"), vec![d("/a/b")]);
+        t.set_children(&p("/a/b"), vec![d("/a/b/c")]);
         t.set_children(&p("/a/b/c"), vec![]);
         let rows = t.rows();
         let names: Vec<&str> = rows.iter().map(|r| r.name.as_str()).collect();
@@ -324,9 +384,9 @@ mod tests {
     #[test]
     fn set_current_auto_collapses_left_branches_but_keeps_pinned_ones() {
         let mut t = FsTree::new(p("/a"));
-        t.set_children(&p("/a"), vec![p("/a/b"), p("/a/c")]);
-        t.set_children(&p("/a/b"), vec![p("/a/b/x")]);
-        t.set_children(&p("/a/c"), vec![p("/a/c/y")]);
+        t.set_children(&p("/a"), vec![d("/a/b"), d("/a/c")]);
+        t.set_children(&p("/a/b"), vec![d("/a/b/x")]);
+        t.set_children(&p("/a/c"), vec![d("/a/c/y")]);
         let names = |t: &FsTree| t.rows().iter().map(|r| r.name.clone()).collect::<Vec<_>>();
 
         // Into /a/b/x → reveals a→b→x; c stays collapsed.
@@ -346,15 +406,43 @@ mod tests {
     #[test]
     fn extend_root_up_hoists_the_root_keeping_the_old_subtree() {
         let mut t = FsTree::new(p("/a/b"));
-        t.set_children(&p("/a/b"), vec![p("/a/b/c")]);
+        t.set_children(&p("/a/b"), vec![d("/a/b/c")]);
         assert!(t.extend_root_up());
         assert_eq!(t.root(), p("/a"));
         // /a is expanded; its children unread until the shell reads them.
         assert!(t.needs_children(&p("/a")));
-        t.set_children(&p("/a"), vec![p("/a/b"), p("/a/x")]);
+        t.set_children(&p("/a"), vec![d("/a/b"), d("/a/x")]);
         let rows = t.rows();
         let names: Vec<&str> = rows.iter().map(|r| r.name.as_str()).collect();
         // a → (b expanded → c), x
         assert_eq!(names, ["a", "b", "c", "x"]);
+    }
+
+    /// Archive children (task #108) show as **leaf** zipper rows — marked `is_archive`, no
+    /// chevron, never expandable — interleaved with folders by name; `is_archive_row` recognises
+    /// them for activation and never mistakes a folder.
+    #[test]
+    fn archive_children_are_leaf_rows() {
+        let mut t = FsTree::new(p("/a"));
+        t.set_children(
+            &p("/a"),
+            vec![
+                DiskTarget::Directory(p("/a/sub")),
+                DiskTarget::Archive(p("/a/pack.zip")),
+            ],
+        );
+        let rows = t.rows();
+        // Interleaved by name: "pack.zip" < "sub", so root, pack.zip, sub.
+        assert_eq!(
+            rows.iter().map(|r| r.name.as_str()).collect::<Vec<_>>(),
+            ["a", "pack.zip", "sub"]
+        );
+        let arch = rows.iter().find(|r| r.name == "pack.zip").unwrap();
+        assert!(arch.is_archive, "archive row is marked");
+        assert!(!arch.has_children, "an archive is a leaf — no chevron");
+        assert!(!arch.expanded && !arch.loading);
+        assert!(!rows.iter().find(|r| r.name == "sub").unwrap().is_archive);
+        assert!(t.is_archive_row(&p("/a/pack.zip")));
+        assert!(!t.is_archive_row(&p("/a/sub")));
     }
 }

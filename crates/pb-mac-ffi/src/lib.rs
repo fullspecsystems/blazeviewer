@@ -166,6 +166,9 @@ struct TreeRowFfi {
     loading: bool,
     is_up: bool,
     has_target: bool,
+    /// An archive **leaf** row (task #108): draw a zipper icon, and a click opens the archive
+    /// (the core's `fs_tree_open` routes it). Always `false` for folders and the up/legacy rows.
+    is_archive: bool,
     path: std::path::PathBuf,
 }
 
@@ -570,6 +573,7 @@ impl AppCoreHandle {
                     loading: false,
                     is_up: true,
                     has_target: true,
+                    is_archive: false,
                     path: std::path::PathBuf::new(),
                 });
             }
@@ -584,6 +588,7 @@ impl AppCoreHandle {
                     loading: r.loading,
                     is_up: false,
                     has_target: true,
+                    is_archive: r.is_archive,
                     path: r.path,
                 });
             }
@@ -599,6 +604,7 @@ impl AppCoreHandle {
                     loading: false,
                     is_up: row.up,
                     has_target: p.targets.get(i).map(|t| t.is_some()).unwrap_or(false),
+                    is_archive: false,
                     path: std::path::PathBuf::new(),
                 });
             }
@@ -640,6 +646,14 @@ impl AppCoreHandle {
         self.tree_snapshot
             .get(i)
             .map(|r| r.has_children)
+            .unwrap_or(false)
+    }
+
+    /// An archive leaf row (task #108) — the host draws a zipper icon instead of a folder.
+    fn tree_row_is_archive(&self, i: usize) -> bool {
+        self.tree_snapshot
+            .get(i)
+            .map(|r| r.is_archive)
             .unwrap_or(false)
     }
 
@@ -4897,6 +4911,7 @@ mod ffi {
         fn tree_row_is_current(&self, i: usize) -> bool;
         fn tree_row_is_up(&self, i: usize) -> bool;
         fn tree_row_has_children(&self, i: usize) -> bool;
+        fn tree_row_is_archive(&self, i: usize) -> bool;
         fn tree_row_expanded(&self, i: usize) -> bool;
         fn tree_row_loading(&self, i: usize) -> bool;
         // The Thumbnails strip (task #83).

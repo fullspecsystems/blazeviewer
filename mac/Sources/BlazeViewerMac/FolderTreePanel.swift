@@ -21,6 +21,8 @@ struct FolderTreeRow: Identifiable {
     let loading: Bool
     let count: Int
     let hasTarget: Bool
+    /// An archive leaf row (task #108): draw a zipper icon; a click opens the archive.
+    let isArchive: Bool
 }
 
 /// The floating folder-tree card: a titled panel over a scrollable, indented row list.
@@ -158,6 +160,7 @@ struct FolderTreePanelView: View {
 
     private func icon(_ row: FolderTreeRow) -> String {
         if row.isUp { return "arrow.up.left" }
+        if row.isArchive { return "doc.zipper" }  // task #108: archives as zipper leaves
         if row.isCurrent { return "folder.fill" }
         return "folder"
     }

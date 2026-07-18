@@ -3179,10 +3179,17 @@ fn tree_row(ui: &mut egui::Ui, p: &Palette, row: &fs_tree::Row, actions: &mut Ve
         }
     }
 
-    // Folder icon in a fixed column.
+    // Folder (or archive) icon in a fixed column. An archive row (task #108) is a leaf drawn
+    // with a zipper glyph; clicking it opens the archive (the core's `fs_tree_open` routes it).
     let icon_x = chev_x + CHEVRON_W + 4.0;
     let open = row.is_current || row.expanded;
-    let icon = if open { Icon::FolderOpen } else { Icon::Folder };
+    let icon = if row.is_archive {
+        Icon::Archive
+    } else if open {
+        Icon::FolderOpen
+    } else {
+        Icon::Folder
+    };
     let tone = if row.is_current {
         Tone::Accent
     } else {

@@ -911,7 +911,8 @@ final class CoreModel {
                     expanded: core.tree_row_expanded(idx),
                     loading: core.tree_row_loading(idx),
                     count: Int(core.tree_row_count_badge(idx)),
-                    hasTarget: core.tree_row_has_target(idx)
+                    hasTarget: core.tree_row_has_target(idx),
+                    isArchive: core.tree_row_is_archive(idx)
                 ))
         }
         treeRows = rows

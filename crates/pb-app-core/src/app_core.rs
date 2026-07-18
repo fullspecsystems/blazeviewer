@@ -46,8 +46,8 @@ pub type FolderCounts = (PathBuf, usize, Arc<HashMap<PathBuf, u64>>);
 /// event loop so a dead share can't freeze a chevron. (The tree re-roots when the current
 /// folder falls outside its root — no stored basis needed.)
 pub struct FsTreeIo {
-    pub tx: std::sync::mpsc::Sender<(PathBuf, Vec<PathBuf>)>,
-    pub rx: Receiver<(PathBuf, Vec<PathBuf>)>,
+    pub tx: std::sync::mpsc::Sender<(PathBuf, Vec<crate::folder_tree::DiskTarget>)>,
+    pub rx: Receiver<(PathBuf, Vec<crate::folder_tree::DiskTarget>)>,
     pub pending: HashSet<PathBuf>,
 }
 

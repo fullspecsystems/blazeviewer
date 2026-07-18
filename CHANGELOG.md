@@ -68,6 +68,9 @@ with any pre-release suffix carried only by the tag.
   and pressing `Alt+↑` (`⌘↑`) to leave an archive drops you back on that archive in the folder —
   so `space` carries on to the next one instead of restarting at the top. Stepping between an
   archive's own internal folders is unchanged.
+- **Archives show in the folder tree.** With Show Archives on, the `⇧F` folder tree now lists
+  archives alongside folders, drawn with a zipper icon; clicking one opens the archive. Toggling
+  the setting updates the tree live.
 
 ### Fixed
 - **Opening an archive no longer occasionally shows a blank screen until you resize.** The first

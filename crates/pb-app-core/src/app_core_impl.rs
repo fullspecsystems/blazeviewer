@@ -2521,10 +2521,13 @@ impl AppCore {
             self.fs_tree_io = None;
             return;
         };
-        let rebuild = self
-            .fs_tree
-            .as_ref()
-            .is_none_or(|t| current.strip_prefix(t.root()).is_err());
+        // Rebuild when there's no tree, the current folder left its root, OR the Show Archives
+        // setting no longer matches what the tree was read with (task #108) — a live toggle then
+        // refreshes the rows (its already-loaded children were read under the old setting).
+        let show_archives = self.settings.show_archives;
+        let rebuild = self.fs_tree.as_ref().is_none_or(|t| {
+            current.strip_prefix(t.root()).is_err() || t.show_archives() != show_archives
+        });
         if rebuild {
             let root = self
                 .root
@@ -2533,7 +2536,9 @@ impl AppCore {
                 .map(Path::to_path_buf)
                 .unwrap_or_else(|| self.root.clone());
             let (tx, rx) = std::sync::mpsc::channel();
-            self.fs_tree = Some(crate::fs_tree::FsTree::new(root));
+            let mut tree = crate::fs_tree::FsTree::new(root);
+            tree.set_show_archives(show_archives);
+            self.fs_tree = Some(tree);
             self.fs_tree_io = Some(crate::app_core::FsTreeIo {
                 tx,
                 rx,
@@ -2552,7 +2557,7 @@ impl AppCore {
         }
         let mut changed = false;
         // 1. Install finished reads.
-        let done: Vec<(PathBuf, Vec<PathBuf>)> = self
+        let done: Vec<(PathBuf, Vec<crate::folder_tree::DiskTarget>)> = self
             .fs_tree_io
             .as_ref()
             .map(|io| io.rx.try_iter().collect())
@@ -2603,12 +2608,12 @@ impl AppCore {
             if let Some(io) = self.fs_tree_io.as_mut() {
                 io.pending.insert(path.clone());
                 let tx = io.tx.clone();
+                // Read subfolders always, and archive files too when Show Archives is on
+                // (task #108) — an archive shows as a leaf zipper row inside the folder.
+                let show_archives = self.settings.show_archives;
                 std::thread::spawn(move || {
-                    let subs = crate::folder_tree::subdirs(&path)
-                        .into_iter()
-                        .map(|n| path.join(n))
-                        .collect();
-                    let _ = tx.send((path, subs));
+                    let children = crate::folder_tree::dir_children(&path, show_archives);
+                    let _ = tx.send((path, children));
                 });
             }
         }
@@ -2632,10 +2637,20 @@ impl AppCore {
         }
     }
 
-    /// Open a folder from the tree (a name click) — load its photos (increment 3 adds the
-    /// keep-deck-until-photos safety; for now the shared recursive open).
+    /// Open a row from the tree (a name click): a folder re-roots the deck; an **archive** row
+    /// (task #108) opens the archive as its own deck (the door / File-open path). The row's
+    /// kind is taken from the resident tree — never re-classified from the extension, so a real
+    /// folder that happens to be named `foo.zip` still opens as a folder.
     pub fn fs_tree_open(&mut self, path: PathBuf) {
-        self.open_dir(path);
+        let is_archive = self
+            .fs_tree
+            .as_ref()
+            .is_some_and(|t| t.is_archive_row(&path));
+        if is_archive {
+            self.open_disk_target(crate::folder_tree::DiskTarget::Archive(path));
+        } else {
+            self.open_dir(path);
+        }
     }
 
     /// The up-affordance: re-root the tree one level higher (kicks its read next tick).

@@ -645,6 +645,7 @@ fn sample_frame(dark: bool, tab: InspectorTab, welcome: bool) -> PanelFrame {
             has_children: kids,
             is_current: cur,
             count,
+            is_archive: false,
         }
     };
     // Mirrors a real deck: nested years, long dated folder names (truncation), and a deep
