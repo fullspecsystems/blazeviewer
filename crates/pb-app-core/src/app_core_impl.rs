@@ -6317,15 +6317,25 @@ impl AppCore {
             None => true,
         };
         if !presented {
-            // The renderer kept the old frame. Our ring mirror and the renderer's ring have
-            // drifted, so resync BOTH (invalidate_content rebuilds each in lockstep, bumps the
-            // epoch to discard the stale in-flight decode, and moves the on-screen frame into the
-            // renderer's `held` so it keeps showing). The item stays un-resolved (pending), so
-            // `target_caught_up` is false and the prefetch/drain path re-decodes then re-presents
-            // it cleanly — never a false "presented" over the held photo. This branch only fires
-            // on a genuine desync; the in-sync photo hot path (slot verified via `display_slot`)
-            // always presents, so it is untouched.
-            self.invalidate_content();
+            // The renderer kept the old frame: our ring mirror says `item` is resident at `slot`
+            // but the renderer's ring doesn't hold it — the two have drifted. Resync BOTH by the
+            // *same* path a window resize takes (owner-confirmed to clear the stuck state):
+            // `invalidate_geometry` rebuilds each ring in lockstep at the current capacity, bumps
+            // the epoch to discard the stale in-flight decode, and moves the on-screen frame into
+            // the renderer's `held` so it keeps showing. (Not `invalidate_content` — the pixels
+            // didn't change, so there's no reason to purge the retained full-res tier.) The item
+            // stays un-resolved (pending), so `target_caught_up` is false and the prefetch/drain
+            // path re-decodes then re-presents it cleanly — never a false "presented" over the
+            // held photo, and never the permanent "titles advance but the view is frozen" hang.
+            // This branch only fires on a genuine desync; the in-sync photo hot path (slot
+            // verified via `display_slot`) always presents, so it is untouched.
+            if door_diag() {
+                eprintln!(
+                    "[door-diag] DESYNC present_slot({slot}) missed for item {item} (archive_kind={:?}); resyncing rings",
+                    self.item_archive_kind(item),
+                );
+            }
+            self.invalidate_geometry();
             self.request_prefetch();
             self.metrics.record("present", t0.elapsed());
             return;
