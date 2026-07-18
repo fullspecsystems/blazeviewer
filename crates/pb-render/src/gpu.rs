@@ -219,6 +219,23 @@ fn rolloff(v: f32, headroom: f32) -> f32 {
 
 @fragment
 fn fs_present(in: VsOut) -> @location(0) vec4<f32> {
+    // Dev-only present-liveness bar (PB_FRAME_COUNTER): a 24-bit binary readout in the top-left,
+    // repainted every presented frame. `params.w` carries the frame counter (0 = disabled). The
+    // low bit (leftmost cell) flickers every frame — if the on-screen bar is frozen while the
+    // logs advance, `Present` isn't reaching the compositor. `in.pos` is the framebuffer pixel,
+    // so the bar sits at a fixed screen spot regardless of the photo underneath.
+    let fc = u32(pr.params.w);
+    if (fc > 0u) {
+        let cell = 16.0;
+        let bar_h = 24.0;
+        if (in.pos.y < bar_h && in.pos.x < cell * 24.0) {
+            let bit = u32(floor(in.pos.x / cell));
+            if (((fc >> bit) & 1u) == 1u) {
+                return vec4<f32>(1.0, 1.0, 0.0, 1.0); // lit cell = bit set (yellow)
+            }
+            return vec4<f32>(0.04, 0.04, 0.04, 1.0);   // dark cell = bit clear
+        }
+    }
     let s = textureSample(tex, samp, in.uv);
     if (pr.params.z > 0.5) {
         // HDR/wide-gamut scRGB surface: the intermediate is already final scene-linear
@@ -2086,6 +2103,13 @@ pub struct WgpuRenderer {
     ring: Vec<Option<RingSlot>>,
     /// When `Some(i)`, `render` draws ring slot `i` instead of `bind_group`.
     present_idx: Option<usize>,
+    /// Dev-only present-liveness counter (`PB_FRAME_COUNTER=1`): bumped on every frame we
+    /// actually acquire+present, and drawn as a 24-bit binary bar in the tonemap pass. If the
+    /// on-screen bar freezes while the logs keep advancing, `Present` isn't reaching the
+    /// compositor (the silent DXGI/DWM/RDP drop) — the one thing our `Ok(true)` present signal
+    /// can't otherwise prove. Zero cost when off (the shader keys off a 0 in `params.w`).
+    frame_counter: u32,
+    frame_counter_overlay: bool,
     /// The frame that was on screen when the ring was last rebuilt (`reserve_ring` on a
     /// geometry change), moved out of the ring so it survives the rebuild. While the async
     /// re-decode is in flight, `render` draws this (GPU-refit to the new viewport) instead of
@@ -2166,6 +2190,32 @@ enum ReuseOutcome {
     Reused,
     /// Geometry/format changed: the slot was rebuilt and this is its new bind group.
     Rebuilt(wgpu::BindGroup),
+}
+
+/// Pick the swapchain present mode. Mailbox = low latency, no tearing; fall back to Fifo
+/// if unsupported. On a software (Cpu) adapter — lavapipe under WSLg — prefer Fifo even when
+/// Mailbox is advertised: its triple-buffering is unstable there while Fifo (plain vsync) is
+/// steadier. **`PB_PRESENT_FIFO=1` forces Fifo** — an A/B lever for the present-drop bug, since
+/// Mailbox's `Present(0,0)` is the DXGI/DWM/RDP path we suspect silently discards frames.
+fn preferred_present_mode(
+    caps: &wgpu::SurfaceCapabilities,
+    device_type: wgpu::DeviceType,
+) -> wgpu::PresentMode {
+    let force_fifo = std::env::var("PB_PRESENT_FIFO").is_ok_and(|v| v == "1");
+    let want_mailbox = !force_fifo
+        && caps.present_modes.contains(&wgpu::PresentMode::Mailbox)
+        && device_type != wgpu::DeviceType::Cpu;
+    if want_mailbox {
+        wgpu::PresentMode::Mailbox
+    } else if caps.present_modes.contains(&wgpu::PresentMode::Fifo) {
+        wgpu::PresentMode::Fifo
+    } else {
+        // Fifo is guaranteed by the spec, but be defensive on odd software surfaces.
+        caps.present_modes
+            .first()
+            .copied()
+            .unwrap_or(wgpu::PresentMode::Fifo)
+    }
 }
 
 impl WgpuRenderer {
@@ -2279,18 +2329,10 @@ impl WgpuRenderer {
                 .or_else(|| caps.formats.iter().copied().find(|f| !f.is_srgb()))
                 .unwrap_or(caps.formats[0])
         };
-        // Mailbox = low latency, no tearing; fall back to Fifo if unsupported. On a software
-        // (Cpu) adapter — lavapipe under WSLg — prefer Fifo even when Mailbox is advertised:
-        // its triple-buffering is unstable there (drawable timeouts / surface loss / the
-        // present-mode reconfigure panic) while Fifo (plain vsync) is lighter and steadier.
-        // Real GPUs (DX12 / Metal / Vulkan) keep Mailbox — the low-latency path is the point.
-        let want_mailbox = caps.present_modes.contains(&wgpu::PresentMode::Mailbox)
-            && adapter.get_info().device_type != wgpu::DeviceType::Cpu;
-        let present_mode = if want_mailbox {
-            wgpu::PresentMode::Mailbox
-        } else {
-            wgpu::PresentMode::Fifo
-        };
+        // See `preferred_present_mode` for the Mailbox/Fifo policy and the `PB_PRESENT_FIFO`
+        // A/B lever. Real GPUs (DX12 / Metal / Vulkan) keep Mailbox — the low-latency path is
+        // the point; software adapters and the forced-Fifo lever get plain vsync.
+        let present_mode = preferred_present_mode(&caps, adapter.get_info().device_type);
         let config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             format,
@@ -2376,6 +2418,8 @@ impl WgpuRenderer {
             upload,
             ring: Vec::new(),
             present_idx: None,
+            frame_counter: 0,
+            frame_counter_overlay: std::env::var("PB_FRAME_COUNTER").is_ok_and(|v| v == "1"),
             held: None,
             letterbox: [LETTERBOX[0], LETTERBOX[1], LETTERBOX[2]],
             content_top_inset: 0,
@@ -2442,11 +2486,10 @@ impl WgpuRenderer {
             return false;
         }
         if !caps.present_modes.contains(&self.config.present_mode) {
-            self.config.present_mode = if caps.present_modes.contains(&wgpu::PresentMode::Mailbox) {
-                wgpu::PresentMode::Mailbox
-            } else {
-                wgpu::PresentMode::Fifo
-            };
+            // Re-pick via the same policy the constructor used, so `PB_PRESENT_FIFO` still holds
+            // through a recovery (else a mode clamp could silently restore Mailbox mid-capture).
+            self.config.present_mode =
+                preferred_present_mode(&caps, self.adapter.get_info().device_type);
         }
         if !caps.formats.contains(&self.config.format) {
             self.config.format = caps.formats[0];
@@ -3205,28 +3248,47 @@ impl Renderer for WgpuRenderer {
             // the screen, and the caller must retry or the compositor keeps the stale
             // frame up indefinitely. The eprintln is deliberate — this is rare, and
             // its absence from a trace cost a debugging session (2026-07-04).
-            Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
-                // Re-query caps and clamp the present mode — a lost surface (WSLg/software) can
-                // report an empty/shrunken mode set, and a blind `configure` with the old mode
-                // panics. `reconfigure_surface` skips safely until the surface is usable again.
-                // NOTE: this only reconfigures at the CURRENT `config` size. If that size has
-                // drifted from the window (a fullscreen/DPI transition whose resize didn't reach
-                // us), the surface stays `Outdated` and every frame is dropped — a frozen display
-                // until a real resize. The shell's `heal_surface_if_dropped` re-asserts the true
-                // window size to break that loop; this log carries the size so it's diagnosable.
+            //
+            // `Lost` vs `Outdated` are logged separately (they mean different things — a
+            // genuinely lost surface may need *recreation*, not just reconfigure), and the log
+            // now reports what `reconfigure_surface` ACTUALLY did (it can bail without
+            // reconfiguring when the surface reports no usable caps) instead of always claiming
+            // "reconfigured". `reconfigure_surface` re-applies at the CURRENT `config` size; if
+            // that size has drifted from the window, the shell's `heal_surface_if_dropped`
+            // re-asserts the true size. See the surface-present-bug instrument bundle.
+            Err(err @ (wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated)) => {
+                let backend = self.adapter.get_info().backend;
+                let (w, h, mode) = (self.config.width, self.config.height, self.config.present_mode);
+                let reconfigured = self.reconfigure_surface();
                 eprintln!(
-                    "render: surface lost/outdated — config={}x{} present_mode={:?} — reconfigured, frame dropped",
-                    self.config.width, self.config.height, self.config.present_mode
+                    "render: surface {err:?} — backend={backend:?} config={w}x{h} present_mode={mode:?} — {}, frame dropped",
+                    if reconfigured { "reconfigured" } else { "NOT reconfigured (surface reported no usable caps)" },
                 );
-                self.reconfigure_surface();
                 return Ok(false);
             }
             Err(wgpu::SurfaceError::Timeout) => {
-                eprintln!("render: drawable timeout — frame dropped");
+                let backend = self.adapter.get_info().backend;
+                eprintln!(
+                    "render: drawable timeout — backend={backend:?} config={}x{} present_mode={:?} — frame dropped",
+                    self.config.width, self.config.height, self.config.present_mode
+                );
                 return Ok(false);
             }
             Err(wgpu::SurfaceError::OutOfMemory) => return Err(RenderError::OutOfMemory),
         };
+        // Present-liveness counter (PB_FRAME_COUNTER): we hold a real acquired frame now, so this
+        // draw *will* be submitted+presented. Bump the counter and poke it into the present
+        // uniform's spare 4th float (byte offset 12 — leaves peak/headroom/hdr untouched) so the
+        // tonemap pass can paint the binary bar. If the on-screen bar freezes while this keeps
+        // incrementing in the logs, `Present` is being silently discarded downstream.
+        if self.frame_counter_overlay {
+            self.frame_counter = self.frame_counter.wrapping_add(1);
+            self.queue.write_buffer(
+                &self.peak_buf,
+                12,
+                bytemuck::bytes_of(&(self.frame_counter as f32)),
+            );
+        }
         let view = frame
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
@@ -3270,11 +3332,15 @@ impl Renderer for WgpuRenderer {
             // problem — so the next occurrence is diagnosable, not guessed.
             if door_diag() {
                 eprintln!(
-                    "[door-diag] render source={source:?} present_idx={:?} ring_live={} held={} blank={}",
+                    "[door-diag] render source={source:?} present_idx={:?} ring_live={} held={} blank={} backend={:?} present_mode={:?} img={}x{}",
                     self.present_idx,
                     ring_slot.is_some(),
                     self.held.is_some(),
                     self.blank,
+                    self.adapter.get_info().backend,
+                    self.config.present_mode,
+                    self.img_w,
+                    self.img_h,
                 );
             }
             let (pipeline, bind_group) = match source {
