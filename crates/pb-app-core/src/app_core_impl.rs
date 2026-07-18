@@ -6768,12 +6768,19 @@ impl AppCore {
                 // clears the hold above and presents sharp); a preview for any *other* item, or the
                 // normal preview-first first frame of a fresh photo, is unaffected.
                 let hold_preview = img.is_preview && self.resize_hold == Some(item);
-                if rk == dk
-                    && self.target_item == Some(item)
-                    && !self.target_caught_up()
-                    && !hold_preview
-                {
-                    self.present_item(item, res.slot);
+                if rk == dk && self.target_item == Some(item) && !self.target_caught_up() {
+                    if hold_preview {
+                        // Keep the sharp held Original on screen instead of flashing this
+                        // preview — but the photo IS on screen (via the renderer's `held`), so it
+                        // must be marked resolved at the new epoch. Otherwise `target_pending`
+                        // stays true forever and the loading pie spins even though nothing is
+                        // loading (owner-reported "spinner that never clears"). No `present_item`:
+                        // the display stays the held Original; the full Fit upgrades it in place
+                        // when it lands (clearing `resize_hold`), a rebind at the same epoch.
+                        self.mark_resolved(item);
+                    } else {
+                        self.present_item(item, res.slot);
+                    }
                 }
             }
             // reserve == None (no longer wanted): the thumb store still gets the
