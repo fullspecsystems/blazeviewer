@@ -2899,10 +2899,21 @@ impl AppCore {
                 }
                 return;
             }
-            // At the archive **root**: step to the adjacent **archive on disk** (task #108) —
-            // anchor on the archive file (`self.root`), archives-only, off-thread (the containing
-            // folder's `read_dir` can stall on a share). Only when Show Archives is on; otherwise
-            // archives aren't surfaced and there's nothing to step to.
+            // At the archive **root** (the whole-archive deck): step through the archive's own
+            // internal folders first — jump the cursor to the next internal-folder boundary, like
+            // Go Next Folder on a disk deck (task #108). Only when there is **no more internal
+            // folder** that way do we step to the adjacent archive on disk.
+            if let Some(idx) = self.archive_adjacent_folder_item(dir) {
+                self.stop_playback();
+                self.playlist.jump_to(idx);
+                self.target_item = self.playlist.current();
+                self.try_present_target();
+                self.request_prefetch();
+                return;
+            }
+            // No more internal folders in that direction → the adjacent archive on disk (anchor on
+            // the archive file, archives-only, off-thread — the containing folder's `read_dir` can
+            // stall on a share). Only when Show Archives is on; otherwise nothing to step to.
             if self.settings.show_archives {
                 self.tree_io = Some(crate::folder_tree::spawn_sibling(
                     self.root.clone(),
@@ -2911,7 +2922,7 @@ impl AppCore {
                     true, // archives_only — flick archive → archive
                 ));
             } else {
-                self.show_toast("No more folders");
+                self.show_toast("No more folders with images");
             }
             return;
         }
@@ -2975,6 +2986,35 @@ impl AppCore {
             let prev = folder(s - 1)?.to_path_buf();
             let mut p = s - 1;
             while p > 0 && folder(p - 1) == Some(prev.as_path()) {
+                p -= 1;
+            }
+            Some(p)
+        }
+    }
+
+    /// The deck index at the next (`dir > 0`) / previous internal-folder boundary of an
+    /// **archive** deck — the archive analog of [`adjacent_folder_item`](Self::adjacent_folder_item),
+    /// grouping by the entry name's internal folder ([`folder_of`](crate::folder_tree::folder_of))
+    /// since archive entries have no filesystem path (task #108). `None` at the deck's first /
+    /// last internal folder — the caller then steps to an adjacent archive on disk.
+    fn archive_adjacent_folder_item(&self, dir: i32) -> Option<usize> {
+        let n = self.source.len();
+        let c = self.displayed_item.filter(|&c| c < n)?;
+        let folder = |i: usize| crate::folder_tree::folder_of(self.source.name(i)).to_string();
+        let cur = folder(c);
+        if dir > 0 {
+            (c + 1..n).find(|&i| folder(i) != cur)
+        } else {
+            let mut s = c;
+            while s > 0 && folder(s - 1) == cur {
+                s -= 1;
+            }
+            if s == 0 {
+                return None; // already in the archive's first internal folder
+            }
+            let prev = folder(s - 1);
+            let mut p = s - 1;
+            while p > 0 && folder(p - 1) == prev {
                 p -= 1;
             }
             Some(p)
@@ -7235,8 +7275,16 @@ impl AppCore {
     /// Allocation-free, unlike [`door_card`](Self::door_card), which builds Strings: a
     /// per-frame visibility gate must not allocate.
     pub fn door_presented(&self) -> bool {
-        self.displayed_item
-            .is_some_and(|i| self.item_archive_kind(i).is_some())
+        // Gate on the frame being **actually on screen** at the current epoch, not merely named:
+        // `rebuild_playlist` sets `displayed_item` to the new current index with
+        // `presented_epoch = None` (nothing presented yet — the renderer still holds the old
+        // frame). Without this check the door card would flash over that held photo the instant a
+        // door becomes the current item, before its own (transparent) frame is presented — the
+        // owner-reported "card on top of a photo" (and the archive-open card-with-no-image).
+        self.presented_epoch == Some(self.epoch)
+            && self
+                .displayed_item
+                .is_some_and(|i| self.item_archive_kind(i).is_some())
     }
 
     /// The **door card** to draw over the letterbox, or `None` when the presented item
@@ -7251,6 +7299,11 @@ impl AppCore {
     /// cursor, or the card would name an archive the viewer isn't looking at yet. Pure:
     /// no I/O, safe on the frame path.
     pub fn door_card(&self) -> Option<crate::app_core::DoorCard> {
+        // Only once the door's own frame is actually presented (see `door_presented`) — never over
+        // a still-held previous photo during a deck rebuild.
+        if !self.door_presented() {
+            return None;
+        }
         let item = self.displayed_item?;
         let kind = self.item_archive_kind(item)?;
         Some(crate::app_core::DoorCard {
@@ -11599,17 +11652,33 @@ mod tests {
     fn sibling_cmd_steps_scopes_in_ram_without_a_worker() {
         let mut core = archive_core(ARCHIVE);
         core.settings.show_archives = true;
-        // At the archive ROOT, ⌘←/→ now steps to the adjacent archive on disk (task #108) — a
-        // disk worker; the deck is unchanged until it lands.
+        // At the archive ROOT, ⌘←/→ steps the archive's own internal folders first — a cursor
+        // jump, no disk worker (task #108). Displayed on the first internal folder ("a/b") →
+        // jump to the next one ("a/b/c" at index 1).
+        core.displayed_item = Some(0);
         core.open_sibling_cmd(1);
-        assert_eq!(core.archive_scope.as_ref().unwrap().prefix, "");
+        assert_eq!(
+            core.playlist.current(),
+            Some(1),
+            "stepped to the next internal folder"
+        );
+        assert!(
+            core.tree_io.is_none(),
+            "an internal-folder step is a cursor jump, not a disk worker"
+        );
+
+        // Only past the LAST internal folder ("" at index 4) does the root step to the adjacent
+        // archive on disk (a worker).
+        core.displayed_item = Some(4);
+        core.open_sibling_cmd(1);
         assert!(
             core.tree_io.is_some(),
-            "archive root steps to the adjacent archive via a disk worker"
+            "no more internal folders → adjacent archive via a disk worker"
         );
         core.tree_io = None; // cancels the fire-and-forget probe
-                             // With Show Archives off there's nothing to step to at the root — no worker.
+                             // With Show Archives off, past the last internal folder there's nothing to step to.
         core.settings.show_archives = false;
+        core.displayed_item = Some(4);
         core.open_sibling_cmd(1);
         assert!(
             core.tree_io.is_none(),
@@ -15267,7 +15336,40 @@ mod tests {
         ]));
         core.rebuild_playlist(src, dir.to_path_buf(), Some(dir.to_path_buf()), false, 0);
         core.displayed_item = Some(1); // the door
+        core.presented_epoch = Some(core.epoch); // its frame is on screen (see `door_presented`)
         core
+    }
+
+    /// Regression: the door card must NOT flash over a still-held previous frame during a deck
+    /// rebuild. `rebuild_playlist` names the current item (a door) but leaves `presented_epoch`
+    /// None — the renderer still holds the old photo — so `door_presented`/`door_card` must be
+    /// false/None until the door's own (transparent) frame is actually presented. The
+    /// owner-reported "card on top of a photo" (and the archive-open card-with-no-image).
+    #[test]
+    fn door_card_waits_until_the_door_frame_is_presented() {
+        let dir = std::env::temp_dir().join("pb_door_card_wait");
+        let mut core = test_core();
+        let src: Arc<dyn ItemSource> = Arc::new(FsSource::new(vec![
+            dir.join("photo.jpg"),
+            dir.join("album.zip"),
+        ]));
+        // Rebuild with the cursor on the door (start index 1): it is the current item, but nothing
+        // is presented yet (the old frame is still held).
+        core.rebuild_playlist(src, dir.to_path_buf(), Some(dir.to_path_buf()), false, 1);
+        assert_eq!(core.displayed_item, Some(1), "the door is the current item");
+        assert!(
+            core.presented_epoch.is_none(),
+            "a rebuild presents nothing yet"
+        );
+        assert!(
+            !core.door_presented(),
+            "no card while the previous frame is still held"
+        );
+        assert!(core.door_card().is_none());
+        // Once the door's own frame is presented (its epoch resolves), the card appears.
+        core.presented_epoch = Some(core.epoch);
+        assert!(core.door_presented());
+        assert!(core.door_card().is_some());
     }
 
     /// The session password cache (session-archive-password-cache): harvest/promote via

@@ -64,15 +64,19 @@ with any pre-release suffix carried only by the tag.
 
 ### Added
 - **Move between archives like you move between folders.** With Show Archives on, `Alt+←/→`
-  (`⌘←/→`) at the top of an archive now steps to the previous / next archive in the same folder,
-  and pressing `Alt+↑` (`⌘↑`) to leave an archive drops you back on that archive in the folder —
-  so `space` carries on to the next one instead of restarting at the top. Stepping between an
-  archive's own internal folders is unchanged.
+  (`⌘←/→`) steps through an archive's own folders, and once you're past the last one it moves to
+  the previous / next archive in the same folder on disk. Pressing `Alt+↑` (`⌘↑`) to leave an
+  archive drops you back on that archive in the folder, so `space` carries on to the next one
+  instead of restarting at the top.
 - **Archives show in the folder tree.** With Show Archives on, the `⇧F` folder tree now lists
   archives alongside folders, drawn with a zipper icon; clicking one opens the archive. Toggling
   the setting updates the tree live.
 
 ### Fixed
+- **The archive "open" card no longer appears on top of a photo.** When you landed on an archive
+  (or opened a folder whose first item is one), the card that names the archive could flash over
+  the previous photo — the card was showing before the archive's own frame had been drawn. The
+  card now waits until the archive's frame is actually on screen.
 - **Opening an archive no longer occasionally shows a blank screen until you resize.** The first
   image of a freshly opened archive is now decoded and shown immediately, the same way the app
   paints the first photo at startup, instead of waiting on a background decode that could
