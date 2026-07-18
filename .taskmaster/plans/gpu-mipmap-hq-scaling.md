@@ -2,6 +2,40 @@
 
 **Status:** rev2 (Codex-reviewed 2026-07-18) · **Track:** rendering quality / #106.7 §6 follow-on
 
+## 0. Test findings — Phase 1 shipped + a surface-bug breakthrough (owner, 2026-07-18)
+
+**Phase 1 (mipmaps + trilinear) shipped (`d82df25f`) and owner-tested.** The *instant* fullscreen
+frame is visibly better, BUT the re-decode swap is **still clearly visible on high-frequency
+content** (grass, detailed fabric/patterns) — confirming Codex's warning that **box-mip trilinear
+≠ Lanczos-3**. So Phase D **cannot** just serve the mipped Original; it needs the escalation:
+**GPU-derive an exact-size Lanczos/Kaiser fit from the mipped Original texture** (task #110). The
+plain-mip path alone doesn't retire the re-decode.
+
+**BREAKTHROUGH: the "photo stuck on a blurry preview" and the "door card frozen over a photo" are
+the SAME root — the GPU surface DROPPING PRESENTS — not the sharpen/decode logic and not the
+door/deck logic.** Proven by a `PB_SHARP_DIAG` + `PB_DOOR_DIAG` capture on a plain **folder**
+(source-independent) at `sharp-diag.log`:
+- Sharpen works: **12/12** `full landed → UPGRADE (sharpen applied)`; the lone `NO sharpen` was a
+  correct `held_nav=true` (mid-blaze). The core DOES decode + apply the full.
+- The surface dropped **17** presents (`render: surface lost/outdated — … present_mode=Mailbox —
+  frame dropped`) + 40 frames drawn from `Held`, while the surface **config size fluctuated**:
+  `1117×882`, `1454×864`, `1454×884`. So a size change → dropped present; when a **sharpen** (or a
+  door frame) present is the one dropped, that frame never reaches the screen → stuck on the old
+  (blurry / wrong) frame until a resize/switch forces a fresh present.
+- My size-drift heal (`heal_surface_if_dropped`, `8b5dc30b`) **never fired** (no `surface heal` /
+  `size OK` lines) — the drops recover on the per-tick retry once the size settles, so
+  `redraw_pending` clears before the heal checks; a present dropped *mid-fluctuation* is stranded.
+- 🔎 Suspicious: `1454×884` ↔ `1454×864` is a **20px oscillation** — something may be toggling a
+  ~20px inset (docked toolbar / menu / info line?) and churning the surface avoidably. Worth
+  checking whether the client area is oscillating on its own (an app bug) vs the owner resizing.
+
+**⇒ The critical path is now surface robustness, NOT this scaling plan.** The surface-recreation /
+Lost-vs-Outdated split + resize-churn handling (Codex's DX12 guidance; task #110 §, and the
+[[archive-card-over-photo-bug]] memory's reserve fix) will collapse a whole class of "stuck" bugs
+at once (stuck-blurry, frozen-door, "titles advance but view frozen"). The mipmap Phase D and VRAM
+work stay queued behind it. Corpus for repro: `D:\Media\Pictures\…\Gill & JD's Wedding` (a folder;
+the archive was ruled out).
+
 ## 1. Problem
 
 Fitting a photo to the window is almost always a **downscale** (a 24 MP / 6000×4000 photo into
