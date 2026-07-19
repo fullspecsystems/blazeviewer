@@ -1,8 +1,9 @@
 # 112 — Performance profiles: hardware-sized budgets (Safe / Normal / High)
 
-_Status: **DESIGN DRAFT rev 3** (2026-07-19) — Codex rounds 1 + 2 folded (review log at the
-bottom); round 3 + owner sign-off pending. **Do not implement** until the owner green-lights the
-design._
+_Status: **DESIGN DRAFT rev 4** (2026-07-19) — Codex rounds 1–3 folded (review log at the
+bottom); owner sign-off pending (a round 4 is the owner's call — the loop is converging and the
+remaining items are implementation contracts the phase tests verify). **Do not implement** until
+the owner green-lights the design._
 
 ## The ask (owner, 2026-07-19)
 
@@ -38,7 +39,7 @@ Units: **GiB throughout** (the shipped constants are decimal-ish — 1 500 000 0
 
 | Knob | Today | Safe | Normal | High |
 |---|---|---|---|---|
-| VRAM ring (`RING_BUDGET_BYTES`, engine.rs:38) | 1.5 GB const | min(15% V, 1.5 GiB) | min(25% V, 12 GiB) | min(45% V, 20 GiB) |
+| VRAM ring (`RING_BUDGET_BYTES`, engine.rs:38) | 1.5 GB const | min(15% V, the 1.5 GB const) | min(25% V, 12 GiB) | min(45% V, 20 GiB) |
 | Ring slot cap (`ring_capacity` clamp, engine.rs:324) | 64 | 64 | 128 ⚠gated | 256 ⚠gated |
 | Decode pool RAM (`POOL_BUDGET_BYTES`, engine.rs:41) | 512 MiB const | 512 MiB | clamp(R/32, 512 MiB, 2 GiB) | clamp(R/16, 1 GiB, 8 GiB) |
 | Parked full-res radius clamp (`full_res_radius`, today ≤3) | 3 | 3 | 4 | 8 |
@@ -57,10 +58,11 @@ archive pre-flight (below) uses the same fields. Worked examples (ring):
 | 12 GB midrange | 1.5 GiB | 3 GiB | 5.4 GiB |
 | RTX 5090 (32 GB) | 1.5 GiB | 8 GiB | 14.4 GiB |
 
-On the owner's display a 7680×2160 RGBA8 Fit slot is 66 355 200 bytes, so Normal's 8 GiB holds
-~129 resident photos and High's 14.4 GiB ~233 (rev-2 said 121/218 — that was decimal-GB
-arithmetic) — both **byte-budget-bound** (233 < the 256 slot cap; the slot cap binds only when
-slots are small, e.g. over RDP, which is exactly why it scales with the profile).
+On the owner's display a 7680×2160 RGBA8 Fit slot is 66 355 200 bytes. Normal's 8 GiB holds 129
+such slots — one MORE than its 128 slot cap, so Normal is **slot-cap-bound** there (round 3;
+~128 resident photos is the intended outcome, stated honestly). High's 14.4 GiB ≈ 233 slots is
+**byte-budget-bound** (233 < 256). Unit honesty: the shipping constant is 1 500 000 000 B,
+~7.4% under a true 1.5 GiB — Safe's cap is **the constant itself**, so Safe ≡ today exactly.
 
 - **`full_res_radius`**: the profile moves the *clamp*, not the user's chosen value. Whether High
   should also raise the *default* radius (1 → 2) is an open question for the owner. ⚠ The clamp
@@ -117,9 +119,19 @@ VRAM. And because today's plumbing is a context-free global `ram_budget()` (arch
 7z even samples **twice** per open (scan.rs:762), while the pool's held-bytes counter excludes
 currently *executing* decodes (workers gate before decoding, charge on completion —
 decode_pool.rs:381), the design is: compute **one immutable `ReservationSnapshot`** at the open
-decision — `{pool_headroom = pool_budget − held − workers × largest_decode_bound, uma_ring_headroom,
-ram_available, commit_available}` — and thread it through `load_archive` and **every** pre-flight
-of that open, so all checks see the same numbers. The safety fraction and transient margin stay.
+decision — `{future_pool_claim, uma_ring_headroom, ram_available, commit_available}` — and
+thread it through `load_archive` and **every** pre-flight of that open, so all checks see the
+same numbers (created **above** `load_archive_with_cache` and reused across password attempts;
+7z samples the global twice per open today, scan.rs:762/:828). ⚠ Round 3 corrected the
+arithmetic: the term is the app's FUTURE claim, so active decodes **add** to it —
+`future_pool_claim = saturating_sub(pool_budget, held) + active_reserved` — and no sound
+per-decode bound exists today to derive `active_reserved` from (the 200 MP ceiling applies only
+when metadata is already cached — app_core_impl.rs:6207; HDR decodes are 8 B/px; `clamp_to_max`
+runs *after* the CPU decode; encoded-input clones and scratch sit outside the byte counter).
+So the pool gains **enforced per-active-job reservations**: a worker reserves a hard per-job
+ceiling (from the fit box / probed dims / a format cap) before decoding, and the snapshot reads
+the reserved sum — checked/saturating arithmetic throughout. The safety fraction and transient
+margin stay.
 (Quiescing the pool before an open was considered and rejected: an archive open during a blaze
 must not stall the blaze.)
 
@@ -188,22 +200,34 @@ The design, three parts:
 1. **Proactive sizing so the driver is never asked for more than measured headroom allows** — the
    ceiling model above. This is the primary defense and the normal operating mode; it's also the
    philosophy the ring already embodies (logical byte budget enforced before upload).
-2. **Fallible slot allocation, caught with NESTED scopes**: `upload_slot` becomes fallible
-   (`Result`), wrapping the slot `create_texture` in **both** an OutOfMemory scope and a
-   Validation scope, pushed tightly around the (pre-validated) descriptor so a Validation capture
-   there is attributable to allocation, and popped/checked **before** the texture is written to
-   or viewed. Escalation if the tight-scope attribution proves too coarse in practice:
-   vendor-patch wgpu-hal to preserve the HRESULT distinction (precedent exists — task #53 is
-   already a wgpu-hal vendor patch).
-3. **Rollback that matches each path, and eviction that actually frees VRAM** (round 2): the
-   *fresh-admission* path rolls back with `release_pending` (that IS its contract — it refuses
-   residents, ring.rs:561, which is correct there). The *in-place upgrade* path
+2. **Typed, fallible slot allocation — the wgpu-hal HRESULT patch is MANDATORY** (round 3):
+   tight scopes alone cannot attribute a DX12 failure, because wgpu-hal null-checks the resource
+   *before* processing the HRESULT (dx12/suballocation.rs:179 → `ResourceCreationFailed` →
+   classified Validation) — so the vendor patch processes the HRESULT first and surfaces
+   E_OUTOFMEMORY as a true `OutOfMemory` error. (Task #53 is the *planned* precedent for
+   carrying a wgpu-hal patch — it is pending, not applied; round 3 corrected rev-3's wording.)
+   `upload_slot` becomes fallible and **retries only a positively classified OOM**; a Validation
+   capture is an invariant bug — logged loudly, representation marked failed, NO retry (a retry
+   could mask a real error). Fallibility covers the **whole upload transaction**, not just
+   `create_texture`: the staging pool can `create_buffer` on a miss (upload.rs:156), and mip
+   generation, views, the uniform buffer, sampler, and bind group all allocate after the texture
+   (gpu.rs:1919) — each under the scopes, or preallocated. Claim narrowed accordingly: "no panic
+   on allocation failure in the ring upload path", not "never a crash".
+3. **Rollback that matches each path, and retirement that actually frees VRAM** (rounds 2+3):
+   the *fresh-admission* path rolls back with `release_pending` (that IS its contract — it
+   refuses residents, ring.rs:561, which is correct there). The *in-place upgrade* path
    (app_core_impl.rs:7212, after `make_room_for_upgrade`) must instead **preserve the old
    resident texture and its byte accounting on failure** — the photo keeps displaying the
-   preview it had. And evict-then-retry only helps if the GPU texture dies too: the `Renderer`
-   contract gains a per-slot **retire** method (CPU-ring eviction alone leaves the `RingSlot`
-   texture alive; dropping it is what returns the memory). One retry after retiring the victim;
-   repeated failure marks the item failed — never a crash.
+   preview it had. Eviction reporting becomes **complete**: `reserve_bytes` and
+   `make_room_for_upgrade` can each evict SEVERAL residents silently today (ring.rs:354, :461 —
+   both return only the immediate answer), so both APIs change to return **every** eviction
+   `(slot, item, RepKind)`, and the caller retires the corresponding GPU textures via a new
+   per-slot `Renderer` **retire** method on every ordinary admission/upgrade eviction — before
+   the next allocation attempt, not only after an OOM (CPU-side eviction alone leaves the
+   `RingSlot` texture alive; dropping it is what returns the memory). Repeated
+   upgrade-allocation failure is recorded **per representation**, never in the item-wide
+   `failed` set (which would also suppress the preserved preview's own re-decode if it were
+   later evicted — app_core_impl.rs:5791).
 
 **Honesty note on device loss** (round-2 correction): rev 2 claimed device loss "has an existing
 surface-recreation path" — wrong. Today's code reconfigures the surface only for
@@ -211,10 +235,12 @@ surface-recreation path" — wrong. Today's code reconfigures the surface only f
 is a pre-existing gap, out of scope for #112 (this design reduces the chance of triggering it;
 it does not add device recreation).
 
-**Test requirement**: a **real DX12 allocation-failure test** — an ignored/dev-gated test that
-drives `create_texture` to actual failure (absurd-size placed resource) under the nested scopes
-and asserts capture-not-panic, on both DX12 and Vulkan. The fake-renderer OOM-injection test
-remains for the rollback logic, but it cannot prove the capture property (round-2 finding 1).
+**Test requirement**: a **real allocation-failure test** on DX12 and Vulkan (ignored/dev-gated).
+⚠ Not an absurd-size descriptor — that fails *validation*, not allocation (round 3). Drive a
+**valid** descriptor to genuine exhaustion (repeated large-but-valid allocations under budget
+instrumentation) or use HAL fault injection, and assert typed-capture-not-panic. The
+fake-renderer OOM-injection test remains for the rollback logic, but it cannot prove the capture
+property.
 
 ## Plumbing: one `ResidencyLimits` seam, shared with 110c
 
@@ -260,13 +286,17 @@ deliberately purges every Fit, `compact_to` hardcodes survivor remaps as `RepKin
   **both** limits hold; the displayed item may remain as the sole oversized exception; pending
   reservations are kept-within-limits or explicitly cancelled; it returns survivors + evictions +
   remaps (both representations — no Fit purge).
-- **Two-phase CPU/GPU commit** (round-2 finding 3 — "atomic" spelled honestly): phase 1 computes
-  the plan (survivors/evictions/remaps) without mutating; phase 2 applies it to the `ResidentRing`,
-  calls `Renderer::remap_ring`, and **reconciles against its returned actually-moved list** — any
-  slot the renderer failed to move is demoted to evicted in the CPU mirror too, so the two sides
-  cannot disagree. Then **re-present the displayed survivor**: `WgpuRenderer::remap_ring`
-  unconditionally clears `present_idx` (gpu.rs:3709); the geometry path already shows the rebind
-  shape (app_core_impl.rs:5459).
+- **Two-phase CPU/GPU commit** (rounds 2+3 — "atomic" spelled honestly): phase 1 computes the
+  plan (survivors/evictions/remaps) without mutating; phase 2 applies it to the `ResidentRing`
+  and calls `Renderer::remap_ring`, whose return becomes a **structured outcome**
+  `{ moved, held_presented: bool }` — a bare moved-list cannot say whether an unmoved
+  *displayed* texture survived, because that happens only when it sat at `present_idx` and was
+  stashed into `held` (gpu.rs:3725). Reconcile: unmoved slots demote to evicted in the CPU
+  mirror; the displayed slot may demote **only when `held_presented`** (the screen keeps showing
+  the held frame) — otherwise clear the hold and immediately request/present the normal
+  fallback. Then **re-present the displayed survivor**: `remap_ring` unconditionally clears
+  `present_idx` (gpu.rs:3709); the geometry path already shows the rebind shape
+  (app_core_impl.rs:5459).
 - **`AppCore::reconfigure_residency(limits)`** — no epoch bump. Steps, in order: ring
   `reconfigure` two-phase as above; **recompute `ahead`/`behind` from the new capacity** (they are
   stored fields `request_prefetch` consumes — app_core_impl.rs:5708); pool budget setter;
@@ -278,9 +308,11 @@ deliberately purges every Fit, `compact_to` hardcodes survivor remaps as `RepKin
   `last_upgrade_set` is **recomputed** on the next tick, not pruned (it records the last *issued
   request set*, not resident state — app_core.rs:400); `preview_resident`/`upgrade_done`/
   `full_requested_at` prune to surviving residents; `compare_pin` is preserved (it re-enters
-  targets and re-decodes if evicted — that is its normal contract); `resize_hold` is preserved
-  while the displayed survivor or renderer-held fallback remains; **`Perf::full_seen` is
-  reset/pruned** so a reconfigure can't fake an `open→all-cached` perf event (perf.rs:64);
+  targets and re-decodes if evicted — that is its normal contract); `resize_hold` is preserved while the
+  displayed survivor remains — or, if it was demoted, only when the remap outcome reports
+  `held_presented`; **`Perf::full_seen` is intersected with the surviving full-resident set,
+  preserving the already-fired state** (a blanket reset would leave survivors never re-emitting
+  `full_resident`, wedging the all-cached metric incomplete forever — perf.rs:64/:136);
   active video state is untouched (outside the ring); poster outcomes are ordinary
   representation-aware pending work.
 - Used by: profile change, the post-renderer startup sizing (above), and budget-change
@@ -313,7 +345,8 @@ ones. One detection, two consumers; neither blocks the other.
 1. **WDDM demotion is silent** — the ceiling model + budget-change notifications + the measured
    VRAM trace; the fraction alone is NOT the defense.
 2. **Allocation failure panics today, and the capture is backend-dependent** — the three-part
-   design above; the nested-scope backstop and its real DX12 test must land **before** High ships.
+   design above; the typed-OOM design (mandatory wgpu-hal patch) and its real capture test must
+   land **before** High ships.
 3. **O(cap) and O(cap²) event-loop work at 128/256 slots** — beyond the targets/keep-list scans:
    outcome sorting does `targets.position()` per pending result (app_core_impl.rs:7154), leftover
    pending results re-scan `targets.contains()` every tick (app_core_impl.rs:7186), and ring
@@ -352,8 +385,9 @@ ones. One detection, two consumers; neither blocks the other.
 1. **Detection + `ResidencyLimits` + formulas + `PB_PERF_PROFILE`** — pure logic, fully tested,
    dark (fallback stays the default until phase 4 flips it). Includes the LUID adapter plumbing.
 2. **`ResidentRing::reconfigure` + the pool setter + `AppCore::reconfigure_residency`** + the
-   startup-sizing call; the archive `ReservationSnapshot`; fallible `upload_slot` + nested scopes
-   + the retire method + the DX12/Vulkan capture test.
+   startup-sizing call; the archive `ReservationSnapshot` + per-active-job pool reservations;
+   the fallible upload transaction (mandatory wgpu-hal HRESULT patch) + the retire /
+   complete-eviction-reporting plumbing + the capture test.
 3. **Window split rebalance** — independent, small, own A/B.
 4. **Slider UI** on General + settings field + computed description line; default → Normal.
 5. **Measure + ship**: the bench/A-B matrix above, CHANGELOG, manual-test-script addendum;
@@ -394,4 +428,21 @@ ones. One detection, two consumers; neither blocks the other.
   (129/233). Round 2 confirmed: the startup-ordering windows in both shells, the CurrentUsage
   ceiling, DeviceType classification, the slot-cap benchmark gate, and the separately-measured
   window split.
-- **Round 3: pending** — re-review of rev 3 before owner sign-off.
+- **Round 3 (2026-07-19, rev 3): NOT sign-off-ready.** 2×P0, 3×P1, 3×P2 — all folded into rev 4:
+  the nested-scope idea alone cannot attribute DX12 failures (null-check precedes the HRESULT) →
+  the wgpu-hal patch is now MANDATORY, retry only typed OOM, Validation = fatal, fallibility
+  widened to the whole upload transaction (staging/mips/views/bind groups), the capture test
+  re-specified (valid descriptor to real exhaustion / HAL fault injection — an absurd-size
+  descriptor only tests validation); the snapshot arithmetic had the active-decode term
+  backwards and no sound per-decode bound exists → enforced per-active-job pool reservations;
+  ring eviction APIs return every eviction and GPU textures retire on every ordinary eviction;
+  upgrade failures recorded per representation; the remap return became
+  `{moved, held_presented}` with the resize_hold rule tied to it; `Perf::full_seen`
+  intersect-not-reset; Normal is slot-cap-bound (129 > 128) on the owner's display; Safe's cap
+  is the shipping constant (1.5 GiB ≠ 1 500 000 000 B); task #53 is a *planned* wgpu-hal-patch
+  precedent, not an applied one. Round 3 confirmed closed: the device-loss retraction, the
+  startup windows, `commit_available`, the radius hard-clamp consumer, the bookkeeping matrix
+  (minus perf), and that one snapshot closes the 7z double-sample TOCTOU.
+- **Round 4: the owner's call.** The loop is converging (each round now finds implementation
+  contracts, not architecture); the phase tests are where the remaining risk lives. Sign-off can
+  proceed on rev 4, with or without a fourth pass.
