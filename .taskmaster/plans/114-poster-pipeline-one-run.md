@@ -434,6 +434,25 @@ All phases merge as one arc with one owner-testing round at the end.
 - **Owner sign-off 2026-07-19**: "implement the complete plan after your final review lands and
   you've implemented any important corrections" — rev 4 is those corrections; implementation
   begins on `feat/114-poster-pipeline`.
+- **Phases-2/3 implementation review (2026-07-19, e4c96edd..c26bad1a): no P0s, 5×P1 + 1×P2 —
+  all folded** in the follow-up commit: a stale Fit artifact no longer discards the choice
+  (Chosen survives; the emission hint-dance makes every recut a replay — contract tests
+  updated); replay enforces IDENTITY (only a frame reaching the stored timestamp within a
+  0.5 s rounding tolerance claims the locator; deadline/EOF/overshoot error out so the scored
+  walk runs instead of silently substituting pixels); `fit = None` (1:1/Fill-mode) selections
+  are native-class so fresh Original-mode walks respect `NATIVE_WALK_CAP`; the Original
+  install enforces the 4096-edge ceiling against the uncapped negotiation fallback (blocked +
+  memoized — the owner-accepted capped-native install stays); `absorb_results()` at the top of
+  every emission pass closes the sent-but-undrained channel window that could admit a second
+  scored walk; and the A/B harness gained counterbalanced ordering + failure exclusion — the
+  re-run CONFIRMED the verdict without the warm-cache bias (16 films: fitted 9 840 ms vs
+  native 9 986 ms, 0 pick mismatches, 0 failures). Review confirmed sound: native-slot
+  accounting balance, `synthetic_carved` arithmetic (zero-byte cases included), replay
+  cancellation, reader retirement, `content_hdr=false` on MF, synthetic Originals DO get mips
+  via the `rk == Original` upload flag, non-video routing untouched, privacy unchanged.
+- **Remaining**: phase 4 (retry state machine + typed invalid-position head-best fallback) and
+  optional phase 5 (`DecodeError::Cancelled`, macOS parity with #92.2); the P2-10 corpus
+  threshold re-validation rides the measure step.
 - **Phase-1 implementation review (2026-07-19, commits 2ab7d274..a3630382): no P0s, 7×P1 +
   3×P2 — all but one folded** in the follow-up commit: the artifact tag gained its `FitBox`
   half (a promoted thumb-only walk's ~thumb output could pass the epoch check into the display

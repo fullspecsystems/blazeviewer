@@ -225,15 +225,10 @@ fn cut_selection(
             let fitted = Some(cut(&img, f)?);
             (fitted, want_native.then_some(img))
         }
-        // Fill/Original mode: the native IS the display artifact. Clone only
-        // when the Original install wants its own copy too.
-        None => {
-            if want_native {
-                (Some(img.clone()), Some(img))
-            } else {
-                (Some(img), None)
-            }
-        }
+        // Fill/Original mode: the native IS the display artifact and installs
+        // as the display's Original rep directly — a second copy in `native`
+        // would be redundant bytes (phases-2/3 review f1b).
+        None => (Some(img), None),
     };
     Ok(crate::PosterSelection {
         choice,
@@ -313,8 +308,19 @@ pub fn decode_video_poster_replay(
                     break;
                 }
             }
-            let (rgba, _ts) =
+            // Replay IDENTITY (phases-2/3 review f2): only a frame that actually
+            // reached the stored timestamp — within a small tolerance for
+            // container rounding — may claim the locator. Deadline/EOF short of
+            // the target, or a sparse stream overshooting far past it, is an
+            // ERROR: the caller falls back to a fresh scored walk rather than
+            // silently attaching the choice to different pixels.
+            let (rgba, ts) =
                 last.ok_or_else(|| DecodeError::Corrupt("replay decoded no frames".into()))?;
+            if ts < target || ts.saturating_sub(target) > REPLAY_TOLERANCE_HNS {
+                return Err(DecodeError::Corrupt(
+                    "replay missed the chosen frame".into(),
+                ));
+            }
             let img = DecodedImage {
                 width: w,
                 height: h,
@@ -345,6 +351,12 @@ pub fn decode_video_poster_replay(
 /// Replay watchdog: a healthy replay decodes one GOP (well under a second);
 /// this only bounds hostile/corrupt indexes.
 const REPLAY_DEADLINE: Duration = Duration::from_secs(10);
+
+/// How far past the stored timestamp a replayed frame may land and still count
+/// as THE chosen frame (container timestamp rounding; half a second is far
+/// beyond any real rounding and far below any visually different scene cut
+/// being silently substituted).
+const REPLAY_TOLERANCE_HNS: i64 = 5_000_000;
 
 /// Source reader with the playback-identical configuration: advanced video
 /// processing (YUV→RGB + rotation), all streams deselected, video selected.
@@ -1155,41 +1167,58 @@ mod tests {
         files.sort();
         files.truncate(n);
         let cancel = AtomicBool::new(false);
-        let (mut sum_fitted, mut sum_native, mut mismatches) = (0u128, 0u128, 0usize);
-        for p in &files {
+        let (mut sum_fitted, mut sum_native) = (0u128, 0u128);
+        let (mut compared, mut mismatches, mut failures) = (0usize, 0usize, 0usize);
+        for (fi, p) in files.iter().enumerate() {
             let input = crate::VideoInput::Path(p.clone());
-            let mut ts = [0i64; 2];
+            let mut ts = [None::<i64>; 2];
+            let mut ok = [false; 2];
             let mut row = p.file_name().unwrap().to_string_lossy().to_string();
-            for (i, (label, native)) in [("fitted", false), ("native", true)].iter().enumerate() {
+            // Counterbalanced order (review p2/3 f6): alternate which variant
+            // gets the cold cache position, per file.
+            let order: [(&str, bool); 2] = if fi % 2 == 0 {
+                [("fitted", false), ("native", true)]
+            } else {
+                [("native", true), ("fitted", false)]
+            };
+            for (label, native) in order {
                 let t0 = Instant::now();
-                let r = decode_video_poster_select(&input, fit, thumb, *native, *native, &cancel);
+                let r = decode_video_poster_select(&input, fit, thumb, native, native, &cancel);
                 let ms = t0.elapsed().as_millis();
-                if *native {
-                    sum_native += ms;
-                } else {
-                    sum_fitted += ms;
-                }
+                let slot = usize::from(native);
                 match r {
                     Ok(sel) => {
-                        ts[i] = sel.choice.relative_hns;
+                        ok[slot] = true;
+                        ts[slot] = Some(sel.choice.relative_hns);
+                        // Failures never pollute the totals.
+                        if native {
+                            sum_native += ms;
+                        } else {
+                            sum_fitted += ms;
+                        }
                         row.push_str(&format!(
-                            " | {label}: {ms} ms ts={:.1}s native={}",
+                            " | {label}: {ms} ms ts={:.1}s",
                             sel.choice.relative_hns as f64 / 10_000_000.0,
-                            sel.native.is_some()
                         ));
                     }
-                    Err(e) => row.push_str(&format!(" | {label}: ERR {e} ({ms} ms)")),
+                    Err(e) => {
+                        failures += 1;
+                        row.push_str(&format!(" | {label}: ERR {e} ({ms} ms)"));
+                    }
                 }
             }
-            if ts[0] != ts[1] {
-                mismatches += 1;
-                row.push_str("  << PICK MISMATCH");
+            // A pick comparison is only meaningful when BOTH variants succeeded.
+            if ok[0] && ok[1] {
+                compared += 1;
+                if ts[0] != ts[1] {
+                    mismatches += 1;
+                    row.push_str("  << PICK MISMATCH");
+                }
             }
             eprintln!("{row}");
         }
         eprintln!(
-            "TOTAL fitted={sum_fitted} ms native={sum_native} ms over {} files, {mismatches} pick mismatches",
-            files.len()
+            "TOTAL fitted={sum_fitted} ms native={sum_native} ms | {compared} compared, {mismatches} pick mismatches, {failures} failed runs"
         );
     }
 }

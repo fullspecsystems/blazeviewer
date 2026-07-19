@@ -5718,7 +5718,31 @@ impl AppCore {
     /// aren't tied up on fulls you blaze past. (Pre-libheif this was a single on-screen
     /// full because WIC's HEVC decoder serialized; libheif decodes in parallel, so we
     /// now fill a VRAM-bounded ring of fulls around the cursor.)
+    /// Pull every finished result out of the channel and fan the SELECTION
+    /// payloads out immediately (phases-2/3 review f5): between a walk's send
+    /// and the next drain, the ledger still says Selecting-with-no-choice, and
+    /// an emission pass in that window would start a SECOND full walk (the pool
+    /// entry is already untracked). Ordinary outcomes just wait in
+    /// `pending_uploads` for the normal drain, exactly as before.
+    fn absorb_results(&mut self) {
+        while let Ok(o) = self.results.try_recv() {
+            self.pending_uploads.push(o);
+        }
+        let mut staged: Vec<crate::decode_pool::Outcome> = Vec::new();
+        let mut i = 0;
+        while i < self.pending_uploads.len() {
+            if self.pending_uploads[i].key.purpose == crate::decode_pool::Purpose::PosterSelect {
+                let o = self.pending_uploads.remove(i);
+                self.route_poster_selection(o, &mut staged);
+            } else {
+                i += 1;
+            }
+        }
+        self.pending_uploads.append(&mut staged);
+    }
+
     pub fn request_prefetch(&mut self) {
+        self.absorb_results();
         // While a folder scan is streaming in, the random deck regenerates on every batch,
         // so prefetching the random look-ahead would decode-then-evict photos the user never
         // sees (thrash). Use the sequential-only, no-wrap variant until the scan completes,
@@ -5855,7 +5879,9 @@ impl AppCore {
                     previews.push(
                         Job::poster_select(t, fit, self.content_gen, true)
                             .with_replay(hint)
-                            .with_native_class(crate::engine::poster_walk_native()),
+                            .with_native_class(
+                                crate::engine::poster_walk_native() || fit.is_none(),
+                            ),
                     );
                     continue;
                 }
@@ -5895,7 +5921,9 @@ impl AppCore {
                         head.push(
                             Job::poster_select(t, fit, self.content_gen, true)
                                 .with_replay(hint)
-                                .with_native_class(crate::engine::poster_walk_native()),
+                                .with_native_class(
+                                    crate::engine::poster_walk_native() || fit.is_none(),
+                                ),
                         );
                     }
                 } else {
@@ -5936,7 +5964,9 @@ impl AppCore {
                     fulls.push(
                         Job::poster_select(t, fit, self.content_gen, true)
                             .with_replay(hint)
-                            .with_native_class(crate::engine::poster_walk_native()),
+                            .with_native_class(
+                                crate::engine::poster_walk_native() || fit.is_none(),
+                            ),
                     );
                 }
                 continue;
@@ -7274,10 +7304,11 @@ impl AppCore {
                         }
                         _ => {
                             // Resized/mode-switched mid-walk: the artifact alone
-                            // is stale. Reopen so the next prefetch pass runs one
-                            // recut (phase 1; the phase-2 replay makes this a
-                            // single seek-decode instead).
-                            self.poster_sel.reopen(item);
+                            // is stale. The CHOICE survives (review p2/3 f1) —
+                            // the entry stays Chosen, and the next emission pass
+                            // captures it as a replay hint before reopening, so
+                            // the recut is a single seek-decode, never a fresh
+                            // scored walk.
                         }
                     }
                     // Phase 3: the native winner becomes the video's Original,
@@ -7293,6 +7324,13 @@ impl AppCore {
                             if native.color.enabled {
                                 // Mode-1: remember, so the parked pre-install
                                 // stops replaying this video forever.
+                                self.poster_sel.block_original(item);
+                            } else if native.width.max(native.height)
+                                > pb_decode::video::POSTER_NATIVE_CAP_EDGE
+                            {
+                                // The capped negotiation was rejected and the
+                                // walk fell back to full native above the
+                                // ceiling (review p2/3 f4): never admit it.
                                 self.poster_sel.block_original(item);
                             } else if self
                                 .ring
@@ -16076,13 +16114,10 @@ mod tests {
             core.ring.slot_for_rep(0, pb_core::RepKind::Fit).is_none(),
             "the thumb-sized artifact must not become the display poster"
         );
-        // Phase 1: the recut is a fresh walk, so the reopen drops the whole
-        // entry (the phase-2 replay will keep the choice and re-decode only).
-        assert!(
-            core.poster_sel
-                .want(0, crate::poster_select::Demand::Display),
-            "reopened for a recut at the display fit"
-        );
+        // The CHOICE survives the stale artifact (phases-2/3 review f1): the
+        // next emission pass captures it as a replay hint, so the recut is a
+        // single seek-decode, never a fresh scored walk.
+        assert!(core.poster_sel.choice(0).is_some(), "the choice survives");
     }
 
     #[test]
@@ -16136,14 +16171,13 @@ mod tests {
             core.ring.slot_for_rep(0, pb_core::RepKind::Fit).is_none(),
             "the old-viewport Fit never uploads"
         );
+        // The choice SURVIVES (phases-2/3 review f1) so the recut replays.
+        assert!(core.poster_sel.choice(0).is_some(), "the choice survives");
         assert!(
-            core.poster_sel.choice(0).is_none() && core.poster_sel.demands(0) == (false, false),
-            "reopened: the next want() starts one fresh walk"
-        );
-        assert!(
-            core.poster_sel
+            !core
+                .poster_sel
                 .want(0, crate::poster_select::Demand::Display),
-            "and it does want a fresh walk"
+            "Chosen: the emission dance (hint capture + reopen) owns the recut"
         );
     }
 
