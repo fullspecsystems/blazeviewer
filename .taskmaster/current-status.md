@@ -1,126 +1,114 @@
 # Blaze Viewer — Current Status (session handoff)
 
-_Last updated: 2026-07-18 (rev 16). **This handoff is the RENDERING-QUALITY track** — fullscreen /
-resize sharpness. The Windows **video/audio** track (#5/#4/#1), the **macOS #106** perf track, the
-**door gating** track (#105.2/#107), and the **macOS #109 port** run in parallel and are **preserved
-below** — don't lose them, they're just not this thread's job._
+_Last updated: 2026-07-18 (rev 17). **This handoff is the RENDERING-QUALITY track** — fullscreen /
+resize / scale-mode sharpness. The Windows **video/audio** track (#5/#4/#1), the **macOS #106** perf
+track, the **door gating** track (#105.2/#107), and the **macOS #109 port** run in parallel and are
+**preserved below** — don't lose them, they're just not this thread's job._
 
 ---
 
-# ▶️ START HERE — the #110 → item-6 rendering-quality roadmap (plans committed, on a branch)
+# ▶️ START HERE — building #110, under the ADR-024 north star, on a branch
 
-**The "stuck on a blurry preview" bug (#111) is FIXED and owner-verified. The rev-15 "surface drops
-presents" theory was WRONG — disproven by a live capture.** The current work is a two-plan
-rendering-quality roadmap; both plans are committed to `main` and Codex-reviewed, and implementation is
-staged on the branch **`feat/110-gpu-lanczos-from-original`** (checked out; `main` holds all planning).
+**Active line: branch `feat/110-gpu-lanczos-from-original` (you should be on it).** It contains
+everything — `main`'s history + this session's fixes + the #110 Phase-110a work. `main` itself holds only
+the planning docs + the two `main`-committed fixes (#111, the instrument bundle); the preview-into-native
+fix, **ADR-024**, the frame-counter removal, and all #110 code live **on the branch** and reach `main`
+when #110 merges. **Build from the branch.**
 
-## What was actually wrong (don't re-derive — it's measured)
-A `PB_FRAME_COUNTER` + `PB_SHARP_DIAG` capture (`counter.log`) on the wedding folder showed **zero**
-surface `Lost/Outdated/Timeout` errors and presents landing (the on-screen frame counter advanced on
-mouse-move) — so the surface never dropped presents. Backend is **Vulkan + Fifo** on the owner's
-physical RTX 5090 desktop (not DX12/Mailbox as rev 15 assumed). **Real root:** a fullscreen toggle's
-transient tiny viewport made `decode_fit()` ~256px, so a "full" (`is_preview=false`) decoded at that
-stale fit landed ~256px, was treated as the definitive full, cleared `preview_resident`, and the job
-loop then read the resident-but-untracked Fit slot as "already full" (`resident && !is_prev → continue`)
-and never re-decoded → stuck low-res until a resize/switch nudged it.
+## The north star: ADR-024 — two modes, one residency invariant
+(`.taskmaster/docs/decisions.md`, ADR-024.) The whole "stuck on a blurry preview / scale-swap shows a
+thumbnail / 1 s re-decode" bug class had **one root**: a single preview-first pipeline served two modes
+with opposite priorities, so the speed shortcut (a ~256 px preview) leaked into the tier where quality is
+the point. The fix is to split them:
+- **Blazing** (`held_nav().is_some()`): decode-to-fit **previews**, throwaway ring, speed-only. A preview
+  is *correct* here. Hot path untouched.
+- **Interacting / parked** (`held_nav().is_none()`): the current image ± a small neighbour window holds a
+  **mipmapped full-res `Original`**, and **every** display (Fit any size, Fill, 1:1, zoom) is a **pure GPU
+  derivation from that pyramid** — never a preview.
+- **Bounded + portable:** cap the pyramid L0 to **~display resolution** (not image res), so a 24 MP and a
+  100 MP photo cost the same resident footprint for viewing and it self-scales to a 4 GB laptop (small
+  screen = small pyramid). Budget = a fraction of detected RAM/VRAM; radius auto-drops. Gigapixel true-1:1
+  region-prefetch is a **named deferral**, not v1.
+- **#110 is the sampler** (pyramid → any-size-quality); **item-6** keeps the pyramid resident on nav.
 
-## The two remaining residuals (owner priority: #110 FIRST, then item-6)
-1. **Current photo on toggle: box-mip-instant → ~1s CPU-Lanczos re-decode** ("slightly fuzzy, then
-   sharpens after ~1s"). → **task #110**: GPU-derive an exact-size Lanczos Fit from the retained
-   **mipped Original** — no CPU decode, no SMB re-read. **Independent of item-6** (the current photo
-   always has a resident Original) and the **higher-value** change. Plan (v2, Codex-reviewed):
-   `.taskmaster/plans/110-gpu-lanczos-from-original.md` + `110-gpu-lanczos-SPEC-codex-review.md`.
-2. **Advance-after-toggle: a NEIGHBOUR shows its 256px preview for ~2s.** → **item-6 (retain/remap)**.
-   KEY correction: `invalidate_geometry` news up an empty ring → nukes the WHOLE ring **incl. Originals**;
-   only the CURRENT photo survives (via `resize()`-presents-Original-then-renderer-`held`), so neighbours
-   have nothing high-res. Fix = retain Originals across the toggle + a "Fit display may be satisfied by a
-   resident Original" rule on **NAV**. Hardened spec: `.taskmaster/plans/106.7-item6-retain-remap-SPEC.md`
-   (+ `-DRAFT.md` = Rachel's original, `-SPEC-codex-review.md` = Codex's review).
+## What's shipped vs. in-flight this session
+- **FIXED + owner-verified (`main`): #111 stuck-preview** (`327c3d0d`) — `decode_is_definitive_full()`
+  keeps an undersized "full" (a transient-tiny-viewport ~256 px decode) sharpen-eligible instead of
+  freezing on it. The rev-15 "surface drops presents" theory was **disproven** by a frame-counter capture
+  (zero surface errors; backend is **Vulkan + Fifo**, not DX12/Mailbox).
+- **FIXED + owner-verified (branch): preview-into-native-tier** (`100b3d3c`) — the prefetch only requests
+  a preview when decoding a Fit (`allow_preview = fit.is_some()`), so switching scale modes never lands a
+  thumbnail in the 1:1/native tier. This is the first enforcement of ADR-024.
+- **#110 Phase 110a — 2 of ~4 pieces done (branch):** scale-aware Lanczos coefficients (`resample.rs`,
+  6 CPU tests, `90f8c4a5`) + RingSlot owned-texture retention (`create_image_texture` →
+  `RingSlot.texture/was_clamped/mode`, `fa5b30ab`). Behaviour-neutral, 57 GPU tests green.
+- **Removed the `PB_FRAME_COUNTER` overlay** (`4b6fe022`) — it did its job (disproving the surface
+  theory); the dots were noise.
 
-## Next action: implement #110 Phase 110a
-On `feat/110-gpu-lanczos-from-original`. Per plan v2 §9: the `RingSlot`/`held` owned-texture bundle
-(uploaded dims, mip count, mode, hdr/scene-scale, `was_clamped`); the two scale-aware Lanczos pipelines
-(fp16 intermediate; RGBA8-sRGB + fp16 finals); coefficient precompute; the pure-CPU coefficient test +
-odd-dim MIPGEN regression. No behaviour change in 110a. **Read plan v2 §2 first — four P0 blockers Codex
-found** (mips are straight-alpha + mode-0 sRGB-encoded, NOT premult-linear; tap support = `a·max(s,1)`;
-the v1 source is `renderer.held` not a ring slot; a fp16 mode-0 Fit needs mode-2 sampling).
+## ⚠ Known open problem (queued, task #3): the lingering-preview watchdog
+A **rare, unreproducible** stress-test bug (outrun the ring → flip fullscreen → stuck on a preview until a
+resize). Cause: a lost key-up leaves `held_nav` stuck `Some`; the tick's sharpen re-issue (`3b`,
+`app_core_impl.rs:1608`) and `sharpen_now()` both gate on `held_nav().is_none()`, so the sharpen is
+suppressed until a focus change (fullscreen flip) fires the release net. **Fix (agreed, not built):**
+enforce ADR-024 with a **level-triggered safety net** — a displayed image that stays a resident preview
+past ~0.5 s gets its full requested regardless of `held_nav`. A real blaze never lingers that long → hot
+path untouched. Test-first (fake-clock). Because the race can't be reproduced, the safety net (self-
+correcting state) is the honest fix, not race-hunting.
+
+## Next action
+Either **task #3** (the watchdog — small, bulletproofs a known bug) or **task #4** (#110 110a WGSL
+pipelines — the derive shader). For #4, **read the #110 plan §3b first** (Codex's corrected colour chain:
+mips are stored straight-alpha + mode-0 sRGB-encoded, NOT premult-linear) and §2 (the four P0s). The
+coefficients are proven, so the shader is "apply known-good weights," not "invent the kernel."
 
 ## Prime directive held: MEASURE, don't guess.
-The surface theory (rev 15) was a wrong guess that the frame-counter instrument disproved in one capture.
-The stuck-preview fix was root-caused from the `counter.log` evidence and owner-verified before claiming
-victory. #110/item-6 both carry explicit "measure, don't assert" gates (the A/B harness, the P0 list).
+The surface theory was a wrong guess an instrument disproved in one capture. Every fix this session was
+root-caused from evidence and owner-verified. #110 carries explicit "measure, don't assert" gates (the A/B
+harness; the derive is a box+Lanczos composite, not a proven upgrade until measured).
 
-## Diag levers (env-gated, in the tree)
-- `PB_FRAME_COUNTER=1` — a 24-bit binary present-liveness counter painted in the tonemap pass (proves
-  whether presents reach the screen). `PB_PRESENT_FIFO=1` — force Fifo (A/B vs Mailbox).
-- `PB_SHARP_DIAG=1` — the preview→full "sharpen" lifecycle + `resize to SMALL viewport` +
-  `reserve upload …` + `upgrade got UNDERSIZED full … kept sharpen-eligible` (the #111 fix firing).
+## Diag levers (env-gated, in the tree; debug build only — release has no console)
+- `PB_SHARP_DIAG=1` — the preview→full "sharpen" lifecycle + `resize to SMALL viewport` + `reserve upload`
+  + `upgrade got UNDERSIZED full … kept sharpen-eligible` (the #111 fix firing).
 - `PB_DOOR_DIAG=1` — renderer draw source (`RingSlot`/`Held`/`Single`) + backend/present_mode/img dims +
-  the split `render: surface {Lost|Outdated|Timeout} …` line + core door/deck belief.
+  the split `render: surface {Lost|Outdated|Timeout}` line + core door/deck belief.
+- `PB_PRESENT_FIFO=1` — force Fifo (A/B vs Mailbox). (`PB_FRAME_COUNTER` was **removed** this session.)
+- Corpus: `D:\Media\Pictures\…\Gill & JD's Wedding`.
 
-Both need a **debug** build for a console (release has none). Corpus folder
-`D:\Media\Pictures\…\Gill & JD's Wedding`. The `counter.log` / `sharp-diag.log` captures are untracked in
-the tree.
-
----
-
-# ✅ SHIPPED this session (rendering — all on `main`, tests green)
-
-- **Stuck-preview fix (#111, `327c3d0d`, owner-verified).** `decode_is_definitive_full()` gates both the
-  reserve + upgrade paths in `drain_results`: an **undersized full** (downscaled below the current fit
-  while `orig_width/height` shows more source) stays **sharpen-eligible** so the real full re-decodes at
-  the current fit. Native-size photos + placeholders unaffected (no re-decode loop). 3 end-to-end
-  `drain_results` tests. Owner: "much better — no full reloads, no getting stuck on low-res."
-- **Instrument bundle (`3a0822ac`).** Env-gated dev tooling that ruled OUT the surface theory:
-  `PB_FRAME_COUNTER` binary counter in the tonemap pass; `render()` splits `Lost/Outdated/Timeout` with
-  a truthful reconfigure result + backend; `PB_PRESENT_FIFO` A/B toggle; backend/present_mode/img in the
-  door-diag render line. Zero cost when off.
-- **Plans committed to `main`:** the hardened item-6 spec (`80fd5ca6`), the #110 v2 plan (`1f37ddfe`),
-  and both Codex-review docs (`9f81b02a`, in `1f37ddfe`).
-- **Prior (still current):** #106.7 §6 instant SHARP resize/rebind (`bcd37ea6`/`792dfa9e`); Phase-1
-  mipmapped GPU downscaling (`d82df25f` — the Original rep gets a linear-light/premult mip chain; the
-  instant frame is sharp-ish but box-mips ≠ Lanczos, which is what #110 addresses).
-
-# 🔜 Tasks on this track (tasks.json)
-
-- **#110 — GPU-Lanczos-from-Original (NEXT).** Plan v2 is ready + Codex-reviewed. Phasing: 110a (plumbing
-  + tests, no behaviour change) → 110b (the derive + `ScalePolicy` seam, current photo only — *the phase
-  the owner feels*) → 110c (A/B harness + nv-flip + golden) → 110d defer (mode-1 fp16 pyramid; compose
-  with item-6). Also folds in the deferred Phase-1b VRAM accounting (mipped-Original ~4/3 undercount;
-  allocation-aware `full_res_eligible`; `make_room_for_upgrade`/eviction bug) and `clamp_to_max`
-  eligibility. `nv-flip` isn't a `pb-render` dep yet.
-- **item-6 — retain/remap the ring across a geometry change (AFTER #110).** Fixes the advance-after-toggle
-  neighbour preview. Hardened spec ready (Codex's 3 P0s baked in). Once #110 lands, its derive covers
-  neighbours automatically via `derive_fit(Ring(slot), …)`.
-- **#109 — macOS shell port + deeper hardening.** See the **📌 macOS TODO** at the very bottom. The core
-  guard already protects macOS from the severe form.
+## In-session task queue (Claude Code tasks)
+- **#3** — lingering-preview watchdog (above).
+- **#4** — #110 110a: WGSL two-pass Lanczos derive pipelines + colour chain.
+- **#5** — #110 110a: odd-dim MIPGEN regression test (mipgen drops the trailing odd row/col).
+- **#6** — #110 110b: wire `derive_fit` into the core (current photo) — *the phase the owner feels*.
+- **#7** — #110 110c: downscale-quality A/B/X harness + the ADR-024 display-capped-pyramid budget (Phase 1b VRAM).
+- **#8** — item-6: retain/remap the ring across a geometry change (after #110).
 
 # 📓 Load-bearing knowledge (don't re-derive)
 
-- **The rev-15 "surface drops presents" theory is DISPROVEN** — the frame-counter capture showed zero
-  surface errors and presents landing. The stuck bugs were a preview-tracking / undersized-full issue,
-  now fixed. Don't re-open the surface-recovery-seam theory for this. (Codex also debunked the DX12
-  "same-size configure is a no-op" premise: wgpu-hal DX12 `configure` always ResizeBuffers.)
-- **Backend is Vulkan + Fifo** on the owner's physical RTX 5090 desktop (not DX12/Mailbox). Relevant for
-  any present/queue reasoning.
+- **ADR-024 is the organizing principle** — previews are blazing-only; the interaction display is a pure
+  function of a resident, display-capped mipmapped Original. #110 + item-6 implement it.
+- **The rev-15 "surface drops presents" theory is DISPROVEN** (frame-counter capture: zero surface errors,
+  presents land). The stuck bugs were preview-tracking / undersized-full / preview-leak issues, now fixed.
+  Don't re-open the surface-recovery-seam theory. (Codex debunked the DX12 "same-size configure is a no-op"
+  premise too.)
+- **Backend is Vulkan + Fifo** on the owner's physical RTX 5090 desktop (not DX12/Mailbox).
 - **Mixed-DPI / RDP env** (`windows-display-rdp-env` memory): physical **7680×2160 @150% (RTX 5090)** vs
-  RDP **~1470×923 @100%**. A transient small viewport during a fullscreen transition is what fed the #111
-  bug (`resize to SMALL viewport` diag). Pin the active display for any DPI/render bug.
-- **Debug builds have a console** for `eprintln`/`PB_*` diag; **release does not**.
-- ⚠ **The owner drives the app while you work** — the running exe locks `target\debug\blazeviewer.exe`
-  (rebuild → "Access is denied"); that's THEM, don't kill it, they relaunch. `Get-Process blazeviewer`.
-  **A silently-failed rebuild = you're testing a stale binary.** Confirm the About-dialog build id.
-- **Single worktree** (`~/code/blazeviewer`); `git push origin main` works directly. **Stage explicit
-  paths, never `-a`/`-A`** — the owner edits concurrently. Commits are SSH-signed; **no
-  `Co-Authored-By`/AI trailer**. **Planning on `main`; implementation on a branch** (owner's rule).
-- **Repo:** `github.com/fullspecsystems/blazeviewer` (HTTPS). Product is **Blaze Viewer**
-  (blazeviewer.app); don't propagate the old "PhotoBlaze" name.
+  RDP **~1470×923 @100%**. A transient small viewport during a fullscreen transition fed the #111 bug.
+- **Git topology:** `main` = planning + #111 + instrument bundle (`3cf8790e`); **branch
+  `feat/110-gpu-lanczos-from-original`** = all of that + the preview fix + ADR-024 + frame-counter removal
+  + #110 110a. Some fixes + ADR-024 are **branch-only** until #110 merges. **Stage explicit paths, never
+  `-a`/`-A`** — the owner edits concurrently. Commits SSH-signed; **no `Co-Authored-By`/AI trailer**.
+  Planning on `main`; implementation on the branch (owner's rule).
+- **Debug builds have a console** for `PB_*` diag; release does not. ⚠ **The owner drives the app while you
+  work** — the running exe locks `target\debug\blazeviewer.exe`; a silently-failed rebuild = a stale
+  binary. Confirm the About-dialog build id.
+- **Repo:** `github.com/fullspecsystems/blazeviewer`. Product is **Blaze Viewer** (blazeviewer.app); don't
+  propagate the old "PhotoBlaze" name.
 
 ---
 
 # ⏸ PARALLEL TRACK — Windows video/audio (#5 / #4 / #1) — NOT this thread
 
-_The `feat/audio-track-selection` arc, all merged to main. Was the previous session's START HERE;
+_The `feat/audio-track-selection` arc, all merged to main. Was a previous session's START HERE;
 still real open work, just not the active thread._
 
 **Shipped:** FFmpeg-first film audio on Windows (MF can't decode AC-3/E-AC-3/DTS `0xC00D36B4`);
@@ -161,8 +149,8 @@ clock** while playing; a `Failed` clock is **terminal**. **Build:** `pwsh script
 
 Blueprint: `.taskmaster/plans/106-performance-archive-zoom.md` (rev2, Codex-reviewed). #106.7 (typed
 `Representation::Fit{epoch}|Original` + parked full-res tier) is now **substantially shipped and
-extended on the Windows/rendering side this session** (see SHIPPED above — the resize rebind, the
-mip work, the resize-hold). The mac host still owns its `PB_PERF` baselines. Shipped historically:
+extended on the Windows/rendering side this session** (the resize rebind, the mip work, the resize-hold,
+and now #110's texture retention). The mac host still owns its `PB_PERF` baselines. Shipped historically:
 door card (`d91666a0`), perf timers (`fdcedd16`), #106.2 read/decode split (`5d8eebe1`).
 
 # ⏸ PARALLEL TRACK — Windows door gating + Copy (#105.2 / #107)

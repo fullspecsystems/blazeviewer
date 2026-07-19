@@ -12,6 +12,13 @@
 
 ---
 
+> **PROGRESS (branch `feat/110-gpu-lanczos-from-original`, 2026-07-18):** 110a partly done — the
+> scale-aware Lanczos coefficients (`resample.rs`, 6 CPU tests, `90f8c4a5`) and the RingSlot owned-texture
+> retention (`create_image_texture` → `RingSlot.texture/was_clamped/mode`, `fa5b30ab`) are committed and
+> green. **Remaining 110a:** the two WGSL passes (§3a/§3b colour chain) + the odd-dim MIPGEN regression
+> test. Then **110b** wires the derive in (the felt phase). Also landed this session: **ADR-024** (the
+> two-mode invariant this plan serves) and the preview-into-native-tier fix (`100b3d3c`).
+
 ## 1. Problem & goal
 
 On a `[f]` toggle / resize the current photo is instantly re-shown by mip-trilinear downscaling of its

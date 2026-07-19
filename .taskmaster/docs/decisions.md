@@ -364,6 +364,15 @@ activates only when parked. The gut-check: the moment someone stops to scrutinis
 eyelashes, pore stipple, a capillary in the sclera — they get every pixel immediately, or the app has
 failed at the one thing it exists to do.
 
+**Enforcement (queued — the invariant must be level-triggered, not left to edge triggers + a correct
+`held_nav`).** A rare stress-test bug (outrun the ring, flip fullscreen → stuck on a preview until a
+resize) traced to `held_nav` sticking `Some` after a lost key-up, which suppresses the sharpen (both the
+tick's re-issue and `sharpen_now` gate on `held_nav().is_none()`). Because that race is unreproducible,
+the fix is a **safety net that enforces the invariant regardless of cause**: a displayed image that has
+stayed a resident *preview* past ~0.5 s gets its full requested even if `held_nav` claims blazing (a real
+blaze never lingers that long, so the hot path is untouched). "Converge to full or self-correct" is the
+enforceable form of this ADR; the bug is impossible by construction rather than chased per-race.
+
 ---
 
 ## Owner decisions (resolved 2026-06-26)
