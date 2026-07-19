@@ -1,7 +1,9 @@
 # 114 — One-run poster pipeline: choose once, keep an Original, derive everything else
 
-_Status: **DESIGN DRAFT rev 3** (2026-07-19) — Codex rounds 1 + 2 folded (review log at the
-bottom); round 3 + owner sign-off pending. **Do not implement** until green-lit._
+_Status: **rev 4 — IMPLEMENTATION-READY** (2026-07-19). Codex rounds 1–3 folded (review log at
+the bottom; round 3: "after those [six contract edits], rev 3 is ready to implement" — this rev
+IS those edits). Owner green-lit 2026-07-19 ("implement the complete plan after your final
+review lands"). Branch: `feat/114-poster-pipeline`._
 
 ## The ask (owner, 2026-07-19)
 
@@ -72,7 +74,13 @@ PosterSelection = Absent
     selection counts against the thumb admission cap (decode_pool.rs:391 — far-away movies must
     not occupy every worker), and when display demand joins, the job is **promoted** to display
     class without changing identity — never cancel/restart (the per-purpose dedup identity would
-    otherwise force exactly that).
+    otherwise force exactly that). **The promotion contract** (round 3): scheduling class is a
+    field on the QUEUED job, separate from purpose/consumer identity; promotion mutates that
+    field in `set_targets` and **notifies the condvar** — a bare priority change leaves the job
+    parked behind the thumb cap, because `pop_best` filters by class while the cap is full
+    (decode_pool.rs:485). An already-running selection is never touched: it keeps a
+    `took_thumb_slot` bit from admission so it releases exactly the slot it took
+    (decode_pool.rs:402/:461).
 - **A typed selection result** rides the outcome seam (the pool's `DecodeFn` returns one
   `DecodedImage` today, decode_pool.rs:57 — the selection outcome instead carries
   `PosterChoice + artifacts`), **matched at the top of `drain_results`** — before the thumb
@@ -83,12 +91,23 @@ PosterSelection = Absent
   routes. The display Fit is included even when Original admission is denied (§3), so the screen
   always gets its poster. The payload implements summed byte accounting
   (`OutcomePayload::bytes()`) — multiple pixel buffers must all count against the pool budget.
+  **The Fit artifact is geometry-tagged** (round 3): it carries the `(epoch, FitBox)` it was cut
+  for, because the selection itself survives a resize but its Fit is viewport-specific — normal
+  Fits are epoch-rejected in the drain (:7055) and staged results are cleared on rebuild
+  (:7493), and an untagged selection Fit would bypass both. A stale tag drops **only that
+  artifact** (choice/thumb/native survive); the poster then comes from deriving the admitted
+  Original, or — when no Original was admitted — a geometry-scoped recut (replay at the current
+  fit) is enqueued.
 - `PosterChoice` stores **the absolute backend seek locator** — `{ origin, relative_ts }` —
   because replay must seek `origin + relative_ts` exactly as playback does
   (mf_video_producer.rs:220/:326); MPEG-TS files have nonzero origins, so a bare
   session-relative PTS is the wrong replay coordinate (round 2 caught rev 2 claiming
   otherwise). The timestamp is captured from `ReadSample`'s output, which the walk currently
-  discards entirely (mf_poster.rs:368).
+  discards entirely (mf_poster.rs:368). **And the origin applies to the walk's OWN deep seeks**
+  (round 3): the head scan establishes the origin from its first sample, and every deep
+  `SetCurrentPosition` seeks `origin + offset` — today's bare-offset seeks (mf_poster.rs:457)
+  carry the same MPEG-TS coordinate bug, and without this the §5 invalid-position fallback would
+  merely mask it by returning the head frame.
 
 ### 2. Fixed-size judging + native-winner retention (one pass, no replay needed)
 
@@ -110,11 +129,15 @@ fuse into one contract, per backend:
     the winner once at the end via the decode-forward replay (one GOP cost, amortized).
   - The A/B records walk latency, candidates reached before the 15 s deadline, and CPU time
     over the movie corpus; the winner ships, the loser stays behind the seam.
-  - **Active native RAM is bounded by a permit** (round 2): during a native walk the retained
-    best + current candidate ≈ two native buffers coexist per selection, and the pool's
-    `inflight_bytes` only counts bytes AFTER a decode returns (decode_pool.rs:414) — eight UHD
-    walks ≈ 0.5 GiB invisible to the budget. Native-mode selections take a byte permit from the
-    pool budget up front (or a hard low concurrency cap, e.g. 2 native walks at once).
+  - **Active native RAM is bounded by a permit, at the SCHEDULER level** (rounds 2+3): during a
+    native walk the retained best + current candidate ≈ two native buffers coexist per
+    selection, and the pool's `inflight_bytes` only counts bytes AFTER a decode returns
+    (decode_pool.rs:414) — eight UHD walks ≈ 0.5 GiB invisible to the budget. The permit covers
+    **native-sized work in both variants** (Variant B's fitted output can equal native, its
+    winner replay always materializes a native frame, and the worker-side fp16 conversion peaks
+    on top), and it is part of the pool's **runnable/admission predicate** (the `pop_best`
+    layer, like the thumb cap): a native job without a permit stays queued while lighter work
+    runs. Never acquired inside the decode closure — that would park workers behind native jobs.
 - **FFmpeg (mac/Linux)**: already two-scale — replace its private 480-edge reduction
   (ffmpeg/poster.rs:337) with the shared judge constant; it retains the raw winning `AVFrame`
   and converts once at the end, which becomes "convert at native" — HW decode and the two-scale
@@ -152,12 +175,20 @@ Round 1 verified the core claim: **#110 derives videos with zero render changes*
   poster displays 1:1 and the cap only ever bites >4K sources. VRAM stays boring because
   admission is demand-gated — a folder of five hundred 4K movies holds parked-window-many poster
   Originals (~3–7 × 44 MB), never five hundred.
-- **Wide-gamut SDR (P3) posters need a derivable representation** (round 2 caught this): MF can
-  return an enabled P3 transform, which the renderer stores as **mode 1 — deliberately unmipped
-  and rejected as a derive source** (gpu.rs:1862/:3759), so those videos would silently miss the
-  promised resize path. Until 110d solves mode-1 derivation generally, a P3 poster installs as
-  **mode-2 fp16 scene-linear** (color-correct, mipped, derivable — 2× bytes; the conversion is
-  one frame at install time). An SDR-P3 resize regression test pins it.
+- **Wide-gamut SDR posters need a derivable representation AND a storage/content split**
+  (rounds 2+3): MF can return an enabled P3 transform, which the renderer stores as **mode 1 —
+  deliberately unmipped and rejected as a derive source** (gpu.rs:1862/:3759). The fix is
+  fp16 scene-linear — but naively that's wrong too, because `is_hdr` equates every `Rgba16F`
+  image with HDR *content* (engine.rs:352) and the renderer's single `hdr` boolean selects both
+  the fp16 storage mode and the HDR luminance scaling (gpu.rs:2932/:3679/:3705) — an SDR-P3
+  poster would present at the wrong brightness on an HDR desktop. So: **storage format and
+  content range split** (fp16 storage + `content_hdr = false`; the `RingSlot.content_hdr` field
+  from #110 is the seam), brightness keyed on content, format on storage. The conversion is
+  **baked on the worker** — the existing TRC + source→BT.709 matrix applied to scene-linear
+  scRGB fp16 (mode 2 accepts only canonical scRGB and ignores `ColorTransform`, gpu.rs:109) —
+  and it applies to **every enabled SDR matrix transform**, not a P3-labelled special case.
+  (thumb.rs:119 has the TRC/matrix math; its clamped sRGB8 bake is NOT reusable verbatim.) An
+  SDR-P3 resize regression test pins colors AND brightness.
 - **Format accounting** (round 1 correction): Windows MF posters are RGBA8 (PQ/HLG
   SDR-clamped by design, mf_video.rs:298) → 4K ≈ 44 MB mipped; FFmpeg HDR posters are fp16
   (ffmpeg/poster.rs:396) → 4K ≈ **88 MB**. Both count against the parked quota (and #112's
@@ -189,11 +220,23 @@ either loops or never schedules. Instead, per item:
   failure and re-present, so the healed image actually appears.
 - **Scope: all item kinds — photos included** (owner decision 2026-07-19): `thumbs.failed` and
   `AppCore::failed` gate photos exactly the same way, and a transient SMB read error on a photo
-  thumb is at least as common as on a movie poster. The state machine is kind-agnostic by
-  construction (it wraps the failed-set lifecycle, not the decoder), so photos ride for free —
-  and this is the leading suspect for the residual "stuck with no thumbnails" sightings (the
-  other suspect, the #109 deck-identity hole, stays separately tracked; this retry does not
-  cover it and a repro after this ships points squarely at #109).
+  thumb is at least as common as on a movie poster. This is the leading suspect for the residual
+  "stuck with no thumbnails" sightings (the other suspect, the #109 deck-identity hole, stays
+  separately tracked; a repro after this ships points squarely at #109). **But "kind-agnostic
+  for free" was too glib** (round 3) — the machinery is per-DOMAIN, not per-item:
+  - **Failure/demand domains are tracked separately for Display and Thumb** (separate gates at
+    :5791/:5872, separate inserts at :7046/:7097): a photo can leave display demand while
+    sitting in the much wider thumb window forever, so an item-level demand union would never go
+    absent and a display revisit would never retry. Each domain has its own absent→present edge;
+    one bounded item-level attempt budget spans both (no double-spend).
+  - **Resident-preview full-decode errors are exempt**: they stay on the existing
+    `upgrade_done` + watchdog path (:6013/:7086) and never enter `WaitingForReentry` — two
+    recovery mechanisms on one item would fight.
+  - **`load_current_sync` failures** (:7369/:7430) insert `failed` and stamp the target
+    resolved; recovery must clear that gate AND invalidate `presented_epoch` before normal
+    drain routing, or the healed image uploads without presenting.
+  - Startup `initial_image` never enters `failed` (:7575) — its pool fill is the ordinary first
+    attempt, no interaction.
 
 ### 5. Head-only fallback, at the layer that actually fails (round 1 narrowed this)
 
@@ -345,5 +388,18 @@ All phases merge as one arc with one owner-testing round at the end.
   gained its in-flight state; the impossible phase-1/2 split merged. Round 2 confirmed closed:
   the lifecycle correction, demand-gated admission + fp16 math, the retry concept, the
   invalid-position fallback, and the native-retention architecture itself.
-- **Round 3: pending** — re-review of rev 3 (which also bakes in the owner's four answers)
-  before implementation starts.
+- **Round 3 (2026-07-19, rev 3): no P0s, 6×P1 contract gaps — "after those, ready to
+  implement."** All six are rev 4: the selection's Fit artifact is `(epoch, FitBox)`-tagged
+  (stale drops only that artifact; derive-or-recut covers it); fp16 **storage** split from HDR
+  **content** (`content_hdr=false` + worker-side scRGB baking for every enabled SDR transform —
+  the single `hdr` boolean would have presented SDR-P3 posters too bright on an HDR desktop);
+  retry split into Display/Thumb failure+demand domains with one shared attempt budget, the
+  resident-preview/watchdog exemption, and the `load_current_sync` recovery contract; the
+  `{origin}` applied to the walk's own deep seeks (not just replay — today's bare-offset seeks
+  carry the MPEG-TS bug); the native-RAM permit widened to both variants and moved into the
+  scheduler's admission predicate; the promotion contract spelled (class field mutated on queued
+  jobs + condvar notify; running jobs keep `took_thumb_slot`). Round 3 confirmed: judge-256, the
+  one-arc structure, and the 4096 ceiling are sound.
+- **Owner sign-off 2026-07-19**: "implement the complete plan after your final review lands and
+  you've implemented any important corrections" — rev 4 is those corrections; implementation
+  begins on `feat/114-poster-pipeline`.
