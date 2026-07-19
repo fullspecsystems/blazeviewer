@@ -200,9 +200,15 @@ impl PosterWalk<'_> {
                 // ends the walk. HDR (scene-linear fp16) keeps the simple
                 // bright/not-bright split (contrast is hard to judge pre-tone-map).
                 let (score, good) = if self.walk_conv.output_format() == PixelFormat::Rgba16F {
-                    (scrgb_frame_score(&pixels), scrgb_frame_bright_enough(&pixels))
+                    (
+                        scrgb_frame_score(&pixels),
+                        scrgb_frame_bright_enough(&pixels),
+                    )
                 } else {
-                    (poster_frame_score(&pixels, w), poster_frame_is_good(&pixels, w))
+                    (
+                        poster_frame_score(&pixels, w),
+                        poster_frame_is_good(&pixels, w),
+                    )
                 };
                 // A good frame is the winner outright; return it, not whatever
                 // out-ranked it earlier. Otherwise rank it for the fallback.

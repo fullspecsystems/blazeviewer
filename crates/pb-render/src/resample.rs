@@ -57,7 +57,7 @@ pub fn lanczos_axis_kernel(src: u32, dst: u32, a: u32) -> AxisKernel {
     let ratio = src as f32 / dst as f32;
     let s = ratio.max(1.0);
     let support = a * s; // kernel radius in SOURCE pixels
-    // Fixed tap count covering the widest phase; boundary taps land at |x| = a where L = 0.
+                         // Fixed tap count covering the widest phase; boundary taps land at |x| = a where L = 0.
     let taps = (2.0 * support).ceil() as u32 + 1;
     let mut starts = Vec::with_capacity(dst as usize);
     let mut weights = vec![0.0f32; dst as usize * taps as usize];
@@ -100,7 +100,12 @@ mod tests {
     /// pixels (where taps clamp off the border — normalization over the full tap set handles it).
     #[test]
     fn weights_normalize_to_one_everywhere() {
-        for &(src, dst, a) in &[(6000u32, 1440u32, 3u32), (7360, 1440, 2), (100, 37, 3), (8, 4, 3)] {
+        for &(src, dst, a) in &[
+            (6000u32, 1440u32, 3u32),
+            (7360, 1440, 2),
+            (100, 37, 3),
+            (8, 4, 3),
+        ] {
             let k = lanczos_axis_kernel(src, dst, a);
             let taps = k.taps as usize;
             for d in 0..k.dst as usize {
@@ -125,9 +130,15 @@ mod tests {
                 let src_i = start + t as i32;
                 let w = k.weights[d * taps + t];
                 if src_i == d as i32 {
-                    assert!((w - 1.0).abs() < 1e-4, "identity: pixel {d} tap on itself w={w}");
+                    assert!(
+                        (w - 1.0).abs() < 1e-4,
+                        "identity: pixel {d} tap on itself w={w}"
+                    );
                 } else {
-                    assert!(w.abs() < 1e-4, "identity: pixel {d} off-tap {src_i} w={w} (want 0)");
+                    assert!(
+                        w.abs() < 1e-4,
+                        "identity: pixel {d} off-tap {src_i} w={w} (want 0)"
+                    );
                 }
             }
         }
@@ -140,9 +151,15 @@ mod tests {
         let t1 = lanczos_axis_kernel(64, 64, 3).taps; // 1x
         let t2 = lanczos_axis_kernel(128, 64, 3).taps; // 2x
         let t4 = lanczos_axis_kernel(256, 64, 3).taps; // 4x
-        assert!(t1 < t2 && t2 < t4, "taps must grow with ratio: {t1} < {t2} < {t4}");
+        assert!(
+            t1 < t2 && t2 < t4,
+            "taps must grow with ratio: {t1} < {t2} < {t4}"
+        );
         assert_eq!(t1, 7, "Lanczos-3 at 1x is a·2+1 = 7 taps");
-        assert!((12..=13).contains(&t2), "Lanczos-3 at 2x is ~12-13 taps, got {t2}");
+        assert!(
+            (12..=13).contains(&t2),
+            "Lanczos-3 at 2x is ~12-13 taps, got {t2}"
+        );
     }
 
     /// The kernel is correctly centered: its weighted-mean source index (centroid / first moment)
@@ -179,7 +196,10 @@ mod tests {
         for d in 0..k.dst as usize {
             let center = (d as f32 + 0.5) * (6000.0 / 1440.0) - 0.5;
             let row = &k.weights[d * taps..(d + 1) * taps];
-            assert!(row.iter().all(|w| w.is_finite()), "pixel {d} has a non-finite weight");
+            assert!(
+                row.iter().all(|w| w.is_finite()),
+                "pixel {d} has a non-finite weight"
+            );
             let (mut best_t, mut best_w) = (0usize, f32::NEG_INFINITY);
             for (t, &w) in row.iter().enumerate() {
                 if w > best_w {
@@ -200,6 +220,9 @@ mod tests {
     fn lanczos2_is_narrower_than_lanczos3() {
         let a2 = lanczos_axis_kernel(128, 64, 2).taps;
         let a3 = lanczos_axis_kernel(128, 64, 3).taps;
-        assert!(a2 < a3, "L2 ({a2} taps) should be narrower than L3 ({a3} taps)");
+        assert!(
+            a2 < a3,
+            "L2 ({a2} taps) should be narrower than L3 ({a3} taps)"
+        );
     }
 }

@@ -765,9 +765,15 @@ mod tests {
                 vignette[i..i + 4].copy_from_slice(&[v, v, v, 255]);
             }
         }
-        assert!(mean_luma_rgba8(&vignette, 8) > POSTER_LUMA_MIN, "it is bright");
+        assert!(
+            mean_luma_rgba8(&vignette, 8) > POSTER_LUMA_MIN,
+            "it is bright"
+        );
         let (_, vstd) = luma_stats_rgba8(&vignette, 8);
-        assert!(vstd > 0.05, "the gradient inflates std-dev like a real vignette");
+        assert!(
+            vstd > 0.05,
+            "the gradient inflates std-dev like a real vignette"
+        );
         assert!(
             luma_detail_rgba8(&vignette, w as u32) < POSTER_DETAIL_MIN,
             "but a smooth gradient has little detail ({})",
@@ -792,7 +798,10 @@ mod tests {
             "fine stripes carry real detail ({})",
             luma_detail_rgba8(&textured, w as u32)
         );
-        assert!(poster_frame_is_good(&textured, w as u32), "textured content is good");
+        assert!(
+            poster_frame_is_good(&textured, w as u32),
+            "textured content is good"
+        );
 
         // Pure black fails the brightness floor regardless of (zero) detail.
         assert!(!poster_frame_is_good(&vec![0u8; w * h * 4], w as u32));

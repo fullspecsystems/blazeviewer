@@ -302,7 +302,14 @@ unsafe fn poster_inner(
     let mut best = Best::new();
     // Phase 1 — the cheap head walk from the start. A clip that opens on content
     // settles here; a dark/logo/fade opening leaves `best` weak and falls through.
-    let good = scan(reader, (w, h, stride), POSTER_HEAD_FRAMES, &mut best, cancel, deadline)?;
+    let good = scan(
+        reader,
+        (w, h, stride),
+        POSTER_HEAD_FRAMES,
+        &mut best,
+        cancel,
+        deadline,
+    )?;
     // Phase 2 — seek past the intro (feature-film case), shallow → deep, stopping at
     // the first good frame so the poster is as early as the intro allows.
     if !good {
@@ -359,14 +366,7 @@ unsafe fn scan(
         let mut flags = 0u32;
         let mut sample = None;
         reader
-            .ReadSample(
-                video,
-                0,
-                None,
-                Some(&mut flags),
-                None,
-                Some(&mut sample),
-            )
+            .ReadSample(video, 0, None, Some(&mut flags), None, Some(&mut sample))
             .map_err(|e| DecodeError::Corrupt(mf_open_msg(e)))?;
         if flags & (MF_SOURCE_READERF_ENDOFSTREAM.0 as u32) != 0 {
             break;
@@ -425,7 +425,14 @@ unsafe fn deep_scan(
         let Ok((reader, w, h, stride)) = reopen_at_rgb32(input, dims, target) else {
             continue;
         };
-        let r = scan(&reader, (w, h, stride), POSTER_BURST_FRAMES, best, cancel, deadline);
+        let r = scan(
+            &reader,
+            (w, h, stride),
+            POSTER_BURST_FRAMES,
+            best,
+            cancel,
+            deadline,
+        );
         retire_reader(reader);
         if r? {
             return Ok(true);

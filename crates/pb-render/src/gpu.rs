@@ -3286,7 +3286,11 @@ impl Renderer for WgpuRenderer {
             // re-asserts the true size. See the surface-present-bug instrument bundle.
             Err(err @ (wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated)) => {
                 let backend = self.adapter.get_info().backend;
-                let (w, h, mode) = (self.config.width, self.config.height, self.config.present_mode);
+                let (w, h, mode) = (
+                    self.config.width,
+                    self.config.height,
+                    self.config.present_mode,
+                );
                 let reconfigured = self.reconfigure_surface();
                 eprintln!(
                     "render: surface {err:?} — backend={backend:?} config={w}x{h} present_mode={mode:?} — {}, frame dropped",
