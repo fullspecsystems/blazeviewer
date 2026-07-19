@@ -5610,6 +5610,17 @@ impl AppCore {
             return false;
         }
         let (fw, fh) = self.derive_fit_box(item, fit);
+        // VRAM admission BEFORE the risky allocation (Codex): at a full ring the derive's
+        // output + scratch would otherwise stack on top of an already-at-budget ring. The
+        // fp16 worst-case estimate over-evicts slightly; `set_slot_bytes` corrects after.
+        // A derive that then fails wastes at most one eviction pass — and only until the CPU
+        // sharpen lands (which ends the per-tick attempts).
+        self.ring.make_room_for_upgrade(
+            item,
+            pb_core::RepKind::Fit,
+            fw as u64 * fh as u64 * 8,
+            &self.targets,
+        );
         let derived = self.renderer.as_mut().and_then(|r| {
             r.derive_fit(
                 pb_render::DeriveSource::Ring(src),
@@ -5624,8 +5635,6 @@ impl AppCore {
             return false; // ineligible (clamped / mode 1 / headless) — CPU sharpen proceeds
         };
         // In-place upgrade bookkeeping, mirroring the CPU upgrade path in `drain_results`.
-        self.ring
-            .make_room_for_upgrade(item, pb_core::RepKind::Fit, d.bytes, &self.targets);
         self.ring
             .set_slot_bytes(item, pb_core::RepKind::Fit, d.bytes);
         self.preview_resident.remove(&item);
@@ -5645,10 +5654,16 @@ impl AppCore {
                 d.w, d.h
             );
         }
-        // Re-present so the renderer picks up the sharp texture's dims (the preview's stayed
-        // bound otherwise) — same reason the CPU upgrade path re-presents.
+        // Re-bind so the renderer picks up the sharp texture's dims — via `present_slot`
+        // directly, exactly like the CPU upgrade path: `present_item` would run `view_for`
+        // and RESET the user's zoom/pan (and re-stamp `last_present`, skewing slideshow
+        // dwell) — an in-place quality upgrade of the already-presented photo must not
+        // touch the view (Codex).
         if self.displayed_item == Some(item) {
-            self.present_item(item, dst);
+            if let Some(a) = self.renderer.as_mut() {
+                a.present_slot(dst);
+            }
+            self.draw();
         }
         true
     }
@@ -5731,7 +5746,10 @@ impl AppCore {
             .collect();
         let pending_items: HashSet<usize> = pending_reps.iter().map(|&(i, _)| i).collect();
         let sharpen = self.sharpen_now();
-        let ring: HashSet<usize> = self.prefetch_fulls().into_iter().collect();
+        // `ring_order` IS the fulls decode priority (nearest-first when parked) — the job list
+        // below must be built from THIS order, not from `self.targets` (Codex caught the sort
+        // being collected into a set and never reaching the decoder).
+        let ring_order: Vec<usize> = self.prefetch_fulls();
         // Stamp when each full was first requested, for the `sharpen` latency metric.
         if let Some(d) = sharpen {
             let first = !self.full_requested_at.contains_key(&d);
@@ -5754,7 +5772,7 @@ impl AppCore {
                 }
             }
         }
-        for &t in &ring {
+        for &t in &ring_order {
             self.full_requested_at.entry(t).or_insert_with(Instant::now);
         }
 
@@ -5789,10 +5807,17 @@ impl AppCore {
                 previews.push(Job::display(t, fit, fit.is_some()));
             } else if Some(t) == sharpen {
                 head.push(Job::display(t, fit, false));
-            } else if ring.contains(&t) {
+            }
+            // else: resident-preview fulls are queued below IN `ring_order` (their decode
+            // priority), not in `targets` order — "+1 never waits".
+        }
+        // The fulls tier, in `prefetch_fulls`' order (nearest-first when parked; window order
+        // while blazing / in Random mode). `ring_order` is already filtered to resident
+        // previews minus the sharpen; only the per-tick job guards repeat here.
+        for &t in &ring_order {
+            if !self.failed.contains(&t) && !pending_reps.contains(&(t, dk)) {
                 fulls.push(Job::display(t, fit, false));
             }
-            // else: resident preview not in the ring → leave it as a preview
         }
         let mut jobs = head;
         jobs.append(&mut previews);
@@ -6105,13 +6130,27 @@ impl AppCore {
         // not in the ahead-biased window order — after a forward blaze `targets` ranks the item
         // just BEHIND you ~10th, so backing up one within seconds of parking found a preview
         // still waiting on its full. The membership (budget prefix) is unchanged; only the
-        // decode ORDER changes, and only when parked (this list is priority-positional). The
-        // stable sort keeps ahead-of-cursor ahead of behind-of-cursor at equal distance.
-        // SEQUENTIAL travel only: in Random mode the likely next view is the next SHUFFLE item
-        // (already first in `targets` order) — sequential distance would misprioritize it.
-        if !matches!(self.playlist.last_direction(), pb_core::Direction::Random) {
+        // decode ORDER changes. The stable sort keeps ahead-of-cursor ahead of behind-of-cursor
+        // at equal distance. Three gates (Codex review of d443751f):
+        //  - PARKED only: mid-blaze the fulls should land AHEAD, where you're heading — the
+        //    window order already encodes that.
+        //  - Sequential travel only: in Random mode the likely next view is the next SHUFFLE
+        //    item (already first in window order) — sequential distance would misprioritize it.
+        //  - Wrap-aware distance: with wrap on, the last item is one Backspace from item 0.
+        if self.held_nav().is_none()
+            && !matches!(self.playlist.last_direction(), pb_core::Direction::Random)
+        {
             if let Some(cur) = self.playlist.current() {
-                ring.sort_by_key(|&i| i.abs_diff(cur));
+                let len = self.playlist.len();
+                let wraps = self.playlist.wraps() && len > 0;
+                ring.sort_by_key(|&i| {
+                    let d = i.abs_diff(cur);
+                    if wraps {
+                        d.min(len - d)
+                    } else {
+                        d
+                    }
+                });
             }
         }
         ring
@@ -7029,10 +7068,16 @@ impl AppCore {
                     //  - never a preview-request job (a failed preview — duplicate or not —
                     //    proves nothing about the full);
                     //  - never a non-Fit rep (`upgrade_done` is display-tier bookkeeping; a
-                    //    duplicate parked-Original erroring must not gate the Fit sharpen).
+                    //    duplicate parked-Original erroring must not gate the Fit sharpen);
+                    //  - only while the resident Fit IS still a preview (a late failed full
+                    //    after the GPU sharpen already replaced it would otherwise leave a
+                    //    stale flag on a sharp photo).
                     // And when it does poison, the fired watchdog re-arms (bounded) so a
                     // transient error converges instead of dying latched.
-                    if !o.preview && rk == pb_core::RepKind::Fit {
+                    if !o.preview
+                        && rk == pb_core::RepKind::Fit
+                        && self.preview_resident.contains(&item)
+                    {
                         if sharp_diag() && self.displayed_item == Some(item) {
                             eprintln!(
                                 "[sharp-diag] full landed item={item} ERROR ({e}) -> upgrade_done (watchdog retry if budget remains)"
@@ -16347,6 +16392,48 @@ mod tests {
             core.prefetch_fulls(),
             vec![6, 4, 7, 3, 8, 9],
             "fulls decode nearest-first (current excluded — it is the top-priority sharpen)"
+        );
+
+        // While BLAZING the window order stands — mid-blaze the fulls should land AHEAD,
+        // where the user is heading (and the current photo's full rides the ring since the
+        // sharpen tier is empty while a key is held).
+        core.held.insert(PbKey::Space, Action::Next);
+        assert_eq!(
+            core.prefetch_fulls(),
+            vec![5, 6, 7, 8, 9, 4, 3],
+            "blazing keeps the ahead-biased window order"
+        );
+        core.held.clear();
+    }
+
+    /// With wrap on (the default), the last item is one Backspace from item 0 — the parked
+    /// nearest-first distance must wrap too, or backing up across the deck seam waits.
+    #[test]
+    fn parked_fulls_distance_wraps_at_the_deck_seam() {
+        let mut core = test_core();
+        core.source = photos_named(&[
+            "a.jpg", "b.jpg", "c.jpg", "d.jpg", "e.jpg", "f.jpg", "g.jpg", "h.jpg", "i.jpg",
+            "j.jpg", "k.jpg", "l.jpg",
+        ]);
+        core.playlist = Playlist::new(12, 0).with_cursor(0);
+        core.ring = ResidentRing::new(8);
+        core.fit = Some(FitBox {
+            max_width: 100,
+            max_height: 100,
+        });
+        core.view.mode = ScaleMode::Fit;
+        core.displayed_item = Some(0);
+        core.target_item = Some(0);
+        core.targets = vec![0, 1, 2, 11];
+        let fit_rep = core.rep_of(pb_core::RepKind::Fit);
+        for &i in &[0usize, 1, 2, 11] {
+            make_resident(&mut core, i, fit_rep, &[0, 1, 2, 11]);
+            core.preview_resident.insert(i);
+        }
+        assert_eq!(
+            core.prefetch_fulls(),
+            vec![1, 11, 2],
+            "item 11 is wrap-distance 1 from cursor 0 — it beats the distance-2 item"
         );
     }
 
