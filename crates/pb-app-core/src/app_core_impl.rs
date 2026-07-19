@@ -5548,7 +5548,7 @@ impl AppCore {
             return false;
         };
         self.ring.mark_resident(item, res.slot, cg, rep);
-        self.retry.recover(item);
+        self.retry_recover(item);
         self.ring
             .set_slot_bytes(item, pb_core::RepKind::Fit, d.bytes);
         // The derived Fit is a definitive full: clear stale preview/upgrade bookkeeping so the
@@ -5722,6 +5722,39 @@ impl AppCore {
     /// aren't tied up on fulls you blaze past. (Pre-libheif this was a single on-screen
     /// full because WIC's HEVC decoder serialized; libheif decodes in parallel, so we
     /// now fill a VRAM-bounded ring of fulls around the cursor.)
+    /// Whether `item` sits in the thumb strip's CURRENT demand (the overscan
+    /// window plus the current±warm tier — review f4: the fill plan demands
+    /// both, so an edge computed from overscan alone was not a real
+    /// leave-and-return). False whenever the strip is closed.
+    fn thumb_demand_contains(&self, item: usize) -> bool {
+        if !(self.thumbs.enabled && self.thumbs_visible()) {
+            return false;
+        }
+        let Some(cur) = self.playlist.current() else {
+            return false;
+        };
+        let d = self.thumbs.demand(cur);
+        (item >= d.overscan.0 && item <= d.overscan.1) || item.abs_diff(d.current) <= d.warm
+    }
+
+    /// Record a real decode/selection failure against the retry budget, primed
+    /// with the item's demand membership RIGHT NOW (review f2).
+    fn retry_fail(&mut self, item: usize) {
+        let display_now = self.targets.contains(&item);
+        let thumb_now = self.thumb_demand_contains(item);
+        self.retry.fail(item, display_now, thumb_now);
+    }
+
+    /// A decode/selection landed for the item: clear the budget AND both
+    /// domains' failed gates (review f1: a thumb success clearing only the
+    /// ledger left `failed` stranded forever — no fail count means no edge can
+    /// ever lift it). Success anywhere proves the file decodes.
+    fn retry_recover(&mut self, item: usize) {
+        self.retry.recover(item);
+        self.failed.remove(&item);
+        self.thumbs.failed.remove(&item);
+    }
+
     /// Pull every finished result out of the channel and fan the SELECTION
     /// payloads out immediately (phases-2/3 review f5): between a walk's send
     /// and the next drain, the ledger still says Selecting-with-no-choice, and
@@ -5789,20 +5822,12 @@ impl AppCore {
                     self.presented_epoch = None;
                 }
             }
-            let thumb_window = (self.thumbs.enabled && self.thumbs_visible())
-                .then(|| self.playlist.current().map(|c| self.thumbs.demand(c)))
-                .flatten();
-            let retry = &mut self.retry;
-            let thumb_edges: Vec<usize> = self
-                .thumbs
-                .failed
-                .iter()
-                .copied()
+            let thumb_candidates: Vec<usize> = self.thumbs.failed.iter().copied().collect();
+            let thumb_edges: Vec<usize> = thumb_candidates
+                .into_iter()
                 .filter(|&it| {
-                    let present = thumb_window
-                        .as_ref()
-                        .is_some_and(|d| it >= d.overscan.0 && it <= d.overscan.1);
-                    retry.edge(it, crate::retry::Domain::Thumb, present)
+                    let present = self.thumb_demand_contains(it);
+                    self.retry.edge(it, crate::retry::Domain::Thumb, present)
                 })
                 .collect();
             for it in thumb_edges {
@@ -5905,6 +5930,12 @@ impl AppCore {
                     // A remembered choice makes the re-need a cheap replay
                     // (phase 3) instead of a fresh walk; the hint rides the
                     // want and the ledger reopens either way.
+                    // A Chosen selection whose artifact is already STAGED
+                    // (review f3): nothing to do — reopening would enqueue a
+                    // duplicate replay the untracked pool happily accepts.
+                    if pending_display && self.poster_sel.choice(t).is_some() {
+                        continue;
+                    }
                     let hint = self
                         .poster_sel
                         .choice(t)
@@ -5989,6 +6020,9 @@ impl AppCore {
                         crate::video::LibraryItemKind::Video(_)
                     )
                 {
+                    if pending_display && self.poster_sel.choice(t).is_some() {
+                        continue; // staged artifact incoming (review f3)
+                    }
                     let hint = self
                         .poster_sel
                         .choice(t)
@@ -6033,6 +6067,9 @@ impl AppCore {
                     crate::video::LibraryItemKind::Video(_)
                 )
             {
+                if pending_display && self.poster_sel.choice(t).is_some() {
+                    continue; // staged artifact incoming (review f3)
+                }
                 let hint = self
                     .poster_sel
                     .choice(t)
@@ -7363,7 +7400,7 @@ impl AppCore {
                 if !self.poster_sel.choose(item, gen, sel.choice) {
                     return;
                 }
-                self.retry.recover(item);
+                self.retry_recover(item);
                 if let Some(t) = sel.thumb_img {
                     // The cache's own deck generation fences the insert.
                     self.thumbs.offer(item, t);
@@ -7456,7 +7493,7 @@ impl AppCore {
                 if thumb_want {
                     self.thumbs.failed.insert(item);
                 }
-                self.retry.fail(item);
+                self.retry_fail(item);
                 self.poster_sel.forget(item);
             }
             None => {} // unreachable by construction (PosterSelect always carries it)
@@ -7505,13 +7542,13 @@ impl AppCore {
                 let item = o.key.item;
                 match o.into_image() {
                     Some(img) => {
-                        self.retry.recover(item);
+                        self.retry_recover(item);
                         self.thumbs.offer(item, img);
                     }
                     // A failed thumb fill gates the strip — with ONE bounded
                     // demand-re-entry second chance (phase 4).
                     None => {
-                        self.retry.fail(item);
+                        self.retry_fail(item);
                         self.thumbs.failed.insert(item);
                     }
                 }
@@ -7563,7 +7600,7 @@ impl AppCore {
                     return false;
                 }
                 eprintln!("decode failed for item {item}: {e}");
-                self.retry.fail(item);
+                self.retry_fail(item);
                 self.failed.insert(item);
                 // Unstick the gated loop: a corrupt target counts as "shown".
                 // (Deferred out of the closure — `present_failed` needs &mut self.)
@@ -7766,7 +7803,7 @@ impl AppCore {
                     self.metrics.record("upload", t0.elapsed());
                 }
                 self.ring.mark_resident(item, res.slot, cg, rep);
-                self.retry.recover(item);
+                self.retry_recover(item);
                 // `preview_resident` and the cache metrics track the DISPLAY texture only; a
                 // parked Original (rk != dk) is held silently and must not touch either.
                 if rk == dk {
@@ -7898,7 +7935,7 @@ impl AppCore {
             }
             Err(e) => {
                 eprintln!("decode failed: {}: {e}", self.source.name(idx));
-                self.retry.fail(idx);
+                self.retry_fail(idx);
                 self.failed.insert(idx);
                 // Keep the gate unstuck (count the bad file as "shown") and clear
                 // the stale frame's title/panel so they don't misreport it.
@@ -16115,7 +16152,7 @@ mod tests {
             max_height: 100,
         });
         // The failure event (as the drain records it): item 2 is in-window.
-        core.retry.fail(2);
+        core.retry.fail(2, true, true);
         core.failed.insert(2);
         core.request_prefetch();
         assert!(
@@ -16134,7 +16171,7 @@ mod tests {
             "the re-entry edge lifted the failed gate (the one retry)"
         );
         // The retry also fails: terminal — no further edges ever fire.
-        core.retry.fail(2);
+        core.retry.fail(2, true, true);
         core.failed.insert(2);
         core.playlist = core.playlist.clone().with_cursor(20);
         core.request_prefetch();

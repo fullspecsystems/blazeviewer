@@ -46,18 +46,17 @@ pub struct RetryLedger {
 }
 
 impl RetryLedger {
-    /// Record a real failure. Returns `true` while the item still has retry
-    /// budget (the caller keeps it in the failed set either way; the budget
-    /// only decides whether a future edge lifts the gate).
-    pub fn fail(&mut self, item: usize) -> bool {
+    /// Record a real failure, priming each domain with the item's demand
+    /// membership AT FAILURE TIME (phase-4 review f2: a failure that lands
+    /// after the user already navigated away must not read the very next
+    /// revisit as "still present" — that suppressed the exact edge the retry
+    /// exists for). Returns `true` while retry budget remains.
+    pub fn fail(&mut self, item: usize, display_now: bool, thumb_now: bool) -> bool {
         let n = self.fails.entry(item).or_insert(0);
         *n = n.saturating_add(1);
-        // The failure happened in-demand by construction (only demanded items
-        // decode), so prime BOTH domains "present": the retry requires a real
-        // leave-and-return, never the very next pass.
         let n = *n;
-        self.seen.insert((item, Domain::Display), true);
-        self.seen.insert((item, Domain::Thumb), true);
+        self.seen.insert((item, Domain::Display), display_now);
+        self.seen.insert((item, Domain::Thumb), thumb_now);
         n < MAX_FAILS
     }
 
@@ -95,7 +94,7 @@ mod tests {
     #[test]
     fn a_transient_failure_retries_on_the_reentry_edge_only() {
         let mut r = RetryLedger::default();
-        assert!(r.fail(5), "first failure leaves retry budget");
+        assert!(r.fail(5, true, true), "first failure leaves retry budget");
         // Still present (the failure happened in-demand): NO edge — that's the
         // bound against tight loops.
         assert!(!r.edge(5, Domain::Display, true));
@@ -107,10 +106,22 @@ mod tests {
     }
 
     #[test]
+    fn a_late_failure_retries_on_the_very_next_revisit() {
+        // Review f2: the outcome landed AFTER the user navigated away — the
+        // item is absent at failure time, so the next revisit IS the edge.
+        let mut r = RetryLedger::default();
+        r.fail(5, false, false);
+        assert!(
+            r.edge(5, Domain::Display, true),
+            "absent-at-failure -> the first revisit fires"
+        );
+    }
+
+    #[test]
     fn a_second_failure_is_terminal() {
         let mut r = RetryLedger::default();
-        r.fail(5);
-        assert!(!r.fail(5), "budget exhausted");
+        r.fail(5, true, true);
+        assert!(!r.fail(5, true, true), "budget exhausted");
         assert!(r.terminal(5));
         r.edge(5, Domain::Display, false);
         assert!(
@@ -122,7 +133,7 @@ mod tests {
     #[test]
     fn domains_have_independent_edges_but_one_budget() {
         let mut r = RetryLedger::default();
-        r.fail(5);
+        r.fail(5, true, true);
         // The item never leaves the wide thumb window but DOES leave display.
         assert!(!r.edge(5, Domain::Thumb, true));
         assert!(!r.edge(5, Domain::Display, false));
@@ -139,13 +150,13 @@ mod tests {
     #[test]
     fn recovery_clears_and_reset_wipes() {
         let mut r = RetryLedger::default();
-        r.fail(5);
+        r.fail(5, true, true);
         r.recover(5);
         assert!(!r.terminal(5));
         // A recovered item's next failure starts a fresh budget.
-        assert!(r.fail(5));
+        assert!(r.fail(5, true, true));
         r.reset();
         assert!(!r.terminal(5));
-        assert!(r.fail(5), "post-reset budgets are fresh");
+        assert!(r.fail(5, true, true), "post-reset budgets are fresh");
     }
 }

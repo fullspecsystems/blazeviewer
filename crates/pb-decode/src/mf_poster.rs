@@ -767,17 +767,28 @@ unsafe fn reopen_at_rgb32(
     origin_hns: i64,
 ) -> Result<(IMFSourceReader, u32, u32, i32), DecodeError> {
     let reader = open_video_reader(input)?;
-    let (w, h, stride) = negotiate_rgb32(&reader, Some(dims))
-        .or_else(|_| negotiate_rgb32(&reader, None))
-        .map_err(|e| DecodeError::Corrupt(mf_open_msg(e)))?;
-    // ABSOLUTE seek: origin + offset, exactly as playback seeks (task #114 —
-    // MPEG-TS streams start nonzero; a bare relative offset lands short there).
-    let hns = origin_hns.saturating_add((target.as_nanos() / 100) as i64);
-    let pos = propvariant_i8(hns.max(0));
-    reader
-        .SetCurrentPosition(&windows::core::GUID::zeroed(), &pos)
-        .map_err(map_read_err)?;
-    Ok((reader, w, h, stride))
+    let r = (|| {
+        let (w, h, stride) = negotiate_rgb32(&reader, Some(dims))
+            .or_else(|_| negotiate_rgb32(&reader, None))
+            .map_err(|e| DecodeError::Corrupt(mf_open_msg(e)))?;
+        // ABSOLUTE seek: origin + offset, exactly as playback seeks (task #114 —
+        // MPEG-TS streams start nonzero; a bare relative offset lands short).
+        let hns = origin_hns.saturating_add((target.as_nanos() / 100) as i64);
+        let pos = propvariant_i8(hns.max(0));
+        reader
+            .SetCurrentPosition(&windows::core::GUID::zeroed(), &pos)
+            .map_err(map_read_err)?;
+        Ok((w, h, stride))
+    })();
+    match r {
+        Ok((w, h, stride)) => Ok((reader, w, h, stride)),
+        Err(e) => {
+            // Every reader retires off-thread — including the seek-refusal path
+            // (an HEVC teardown blocks ~1 s; review f5).
+            retire_reader(reader);
+            Err(e)
+        }
+    }
 }
 
 pub(crate) unsafe fn negotiate_rgb32(
