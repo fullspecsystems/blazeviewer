@@ -1447,6 +1447,10 @@ impl AppCore {
         // Deferred crisp decode-to-fit + ring refill once the size settles (`self.now` is stamped
         // by the host at the start of the event). A resize caused by a discrete fullscreen
         // toggle settles fast — the 180 ms debounce exists for drag-resize streams (#110 §4).
+        // A transition that emits straggler size events >50 ms apart can settle more than once
+        // (Codex 110b review P2); that is tolerable BECAUSE item-6 retains the Original across
+        // each invalidation, so every extra settle is a ms-scale rebind+derive, never a CPU
+        // re-decode.
         let settle = if self
             .fullscreen_toggled_at
             .is_some_and(|t| self.now.saturating_duration_since(t) < Duration::from_millis(500))
@@ -5483,6 +5487,20 @@ impl AppCore {
         {
             return false; // already resident (e.g. the instant-toggle rebind path)
         }
+        // The box the derived pixels must fill (Codex 110b review P1): the photo is displayed
+        // into the content region BELOW the translucent top bar, and a 90°/270° view rotation
+        // swaps which viewport axis bounds the UNROTATED texture — deriving against the raw
+        // viewport would produce a texture the rotated display then UPSCALES ~1.41× (blurrier
+        // than the CPU fallback it replaces). Zoom is not a factor: `view_for` resets it on
+        // every present.
+        let mut fw = fit.max_width;
+        let mut fh = fit.max_height.saturating_sub(self.content_top_inset).max(1);
+        if matches!(
+            self.rotations.get(&item),
+            Some(Rotation::R90 | Rotation::R270)
+        ) {
+            std::mem::swap(&mut fw, &mut fh);
+        }
         // Source resolution BEFORE reserving (cheap miss, no rollback churn): the retained ring
         // Original, else the held fallback — which holds the last-PRESENTED photo's texture, so
         // it is a valid source ONLY when that photo is `item` (the settle case; `present_slot`
@@ -5493,21 +5511,14 @@ impl AppCore {
             None if self.displayed_item == Some(item) => pb_render::DeriveSource::Held,
             None => return false,
         };
-        let est = fit.max_width as u64 * fit.max_height as u64 * 8;
+        let est = fw as u64 * fh as u64 * 8;
         let rep = self.rep_of(pb_core::RepKind::Fit);
         let cg = self.content_gen;
         let Some(res) = self.ring.reserve_bytes(item, cg, rep, est, &self.targets) else {
             return false;
         };
         let derived = self.renderer.as_mut().and_then(|r| {
-            r.derive_fit(
-                source,
-                res.slot,
-                fit.max_width,
-                fit.max_height,
-                derive_kernel(),
-                derive_mip_bias(),
-            )
+            r.derive_fit(source, res.slot, fw, fh, derive_kernel(), derive_mip_bias())
         });
         let Some(d) = derived else {
             // Ineligible (headless / no held Original / clamped / mode 1): roll back so the
@@ -5520,9 +5531,14 @@ impl AppCore {
             .set_slot_bytes(item, pb_core::RepKind::Fit, d.bytes);
         // The derived Fit is a definitive full: clear stale preview/upgrade bookkeeping so the
         // sharpen loop doesn't CPU-decode what is already sharp, and release the
-        // quality-monotonic resize hold — this IS the fresh full it was waiting for.
+        // quality-monotonic resize hold — this IS the fresh full it was waiting for. The
+        // full-request stamp clears too (a cancelled in-flight CPU full must not leave a stale
+        // sharpen-latency anchor), and the perf tracker learns the item reached full residency
+        // (open→all-cached would otherwise never complete) — Codex 110b review P2.
         self.preview_resident.remove(&item);
         self.upgrade_done.remove(&item);
+        self.full_requested_at.remove(&item);
+        self.perf_note_full(item);
         if self.resize_hold == Some(item) {
             self.resize_hold = None;
         }

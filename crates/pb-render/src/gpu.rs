@@ -3768,6 +3768,16 @@ impl Renderer for WgpuRenderer {
         let (tw, th) = (src.texture.width(), src.texture.height());
         let (dw, dh) = contain_dims(tw, th, fit_w, fit_h);
         let level = select_derive_mip(tw, th, src.texture.mip_level_count(), dw, dh, mip_bias);
+        // Bound the transient fp16 H-intermediate (dst_w × source-mip height × 8B) — it is
+        // allocated OUTSIDE the ring budget for one submission, so an unbounded scratch could
+        // spike peak VRAM past a small GPU's headroom (Codex 110b review P1). ~236 MB covers
+        // the worst realistic case on the 7680-wide target (a display-res photo from L0); a
+        // refusal falls back to the CPU Fit, which needs no GPU scratch at all.
+        const DERIVE_SCRATCH_MAX: u64 = 256 * 1024 * 1024;
+        let src_mip_h = (th >> level).max(1);
+        if dw as u64 * src_mip_h as u64 * 8 > DERIVE_SCRATCH_MAX {
+            return None;
+        }
         let srgb_in = src.mode == 0.0;
         let content_hdr = src.content_hdr;
         let peak = src.peak;
