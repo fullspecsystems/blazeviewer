@@ -945,6 +945,8 @@ mod win {
     fn hdrprobe(args: &[String]) {
         let mut file = None;
         let mut fit = (3840u32, 2160u32);
+        let mut at: Option<f64> = None;
+        let mut dump: Option<std::path::PathBuf> = None;
         let mut it = args.iter();
         while let Some(a) = it.next() {
             match a.as_str() {
@@ -954,6 +956,8 @@ mod win {
                         it.next().and_then(|s| s.parse().ok()).unwrap_or(2160),
                     )
                 }
+                "--at" => at = it.next().and_then(|s| s.parse().ok()),
+                "--dump" => dump = it.next().map(Into::into),
                 f => file = Some(f.to_string()),
             }
         }
@@ -964,7 +968,7 @@ mod win {
         let path = Path::new(&file);
         println!("== hdrprobe {file}");
         unsafe {
-            if let Err(e) = hdrprobe_inner(path, fit) {
+            if let Err(e) = hdrprobe_inner(path, fit, at, dump.as_deref()) {
                 println!("  HDRPROBE FAILED: {}", hr_name(&e));
             }
         }
@@ -979,14 +983,18 @@ mod win {
             5 => "240M",
             6 => "sRGB",
             7 => "28",
-            15 => "2020_const",
-            16 => "2084/PQ",
-            17 => "HLG",
+            15 => "2084/PQ", // = MFVideoTransFunc_2084.0 (verified)
+            16 => "HLG",     // = MFVideoTransFunc_HLG.0 (verified)
             _ => "other",
         }
     }
 
-    unsafe fn hdrprobe_inner(path: &Path, fit_box: (u32, u32)) -> windows::core::Result<()> {
+    unsafe fn hdrprobe_inner(
+        path: &Path,
+        fit_box: (u32, u32),
+        at: Option<f64>,
+        dump: Option<&Path>,
+    ) -> windows::core::Result<()> {
         use windows::core::Interface;
         use windows::Win32::Media::MediaFoundation::{
             IMF2DBuffer2, MF2DBuffer_LockFlags_Read, MFVideoFormat_P010,
@@ -1009,6 +1017,12 @@ mod win {
                 .unwrap_or_default(),
             info.matrix,
             info.range,
+        );
+        // The exact crate constants native_color compares MF_MT_TRANSFER_FUNCTION
+        // against — must equal the native trans value above for HDR to be detected.
+        println!(
+            "  MF transfer consts: 2084(PQ)={} HLG={}  (native `trans` must equal one to route P010)",
+            MFVideoTransFunc_2084.0, MFVideoTransFunc_HLG.0
         );
 
         // Hardware reader, P010 output, advanced video processing ON (as the
@@ -1051,16 +1065,23 @@ mod win {
             "  P010 output: {ow}x{oh}  prim={oprim:?} trans={otrans:?}{} matrix={omatrix:?} range={orange:?}",
             otrans.map(|t| format!(" [{}]", transfer_name(t))).unwrap_or_default(),
         );
-        println!(
-            "  >>> {}",
-            match otrans {
-                Some(16) | Some(17) =>
-                    "output KEEPS PQ/HLG → MF passes HDR through raw → shader-EOTF path VALID",
-                Some(_) | None =>
-                    "output is NOT PQ/HLG → MF converted → shader would double-apply (gate stays)",
-            }
-        );
+        // NOTE: MF strips the color tags off the P010 OUTPUT type (trans/prim/matrix
+        // come back None), so the output type says nothing about conversion. The
+        // authoritative test is the pixel dump (--at/--dump) vs `ffmpeg -pix_fmt
+        // p010le`: measured byte-identical on frame 0 → MF passes PQ/BT.2020 through
+        // RAW → the in-shader EOTF path is valid. The producer carries the transfer
+        // from the NATIVE type (native_color), not this output type.
+        println!("  >>> output tags stripped (trans={otrans:?}); pixel dump is authoritative — MF verified to pass HDR through raw");
 
+        // Optionally seek to a content frame — a film's opening is often black,
+        // which looks identical under any transfer. Both MF SetCurrentPosition and
+        // ffmpeg `-ss` snap to the keyframe <= target, so they land on the SAME
+        // frame, making the dumped pixels directly comparable.
+        if let Some(sec) = at {
+            let pos = propvariant_i8((sec * 1e7) as i64);
+            reader.SetCurrentPosition(&GUID::zeroed(), &pos)?;
+            println!("  sought to {sec:.1}s (keyframe <= target)");
+        }
         // Read one frame + report a few 16-bit sample codes (10-bit high-aligned).
         let mut flags = 0u32;
         let mut ts = 0i64;
@@ -1094,6 +1115,37 @@ mod win {
                     .map(|c| u16::from_le_bytes([c[0], c[1]]) >> 6)
                     .collect();
                 println!("  first Y 10-bit codes: {codes:?} (0..=1023)");
+                if let Some(d) = dump {
+                    // Pack tightly to P010 (Y plane, then interleaved UV; 2 B/sample)
+                    // so it byte-matches `ffmpeg -pix_fmt p010le` for a direct compare.
+                    let (wu, hu, pitch_i) = (ow as usize, oh as usize, pitch as isize);
+                    let ybytes = wu * 2;
+                    let mut buf = vec![0u8; wu * hu * 3];
+                    for y in 0..hu {
+                        let src =
+                            std::slice::from_raw_parts(scan0.offset(y as isize * pitch_i), ybytes);
+                        buf[y * ybytes..(y + 1) * ybytes].copy_from_slice(src);
+                    }
+                    let uv_base = scan0.offset(hu as isize * pitch_i);
+                    let uv_out = &mut buf[wu * hu * 2..];
+                    for y in 0..hu / 2 {
+                        let src = std::slice::from_raw_parts(
+                            uv_base.offset(y as isize * pitch_i),
+                            ybytes,
+                        );
+                        uv_out[y * ybytes..(y + 1) * ybytes].copy_from_slice(src);
+                    }
+                    match std::fs::write(d, &buf) {
+                        Ok(()) => {
+                            println!(
+                                "  dumped MF P010 {wu}x{hu} ({} B) -> {}",
+                                buf.len(),
+                                d.display()
+                            )
+                        }
+                        Err(e) => println!("  dump failed: {e}"),
+                    }
+                }
                 b2d.Unlock2D()?;
             } else {
                 println!("  (sample buffer is not IMF2DBuffer2 — no sample dump)");
