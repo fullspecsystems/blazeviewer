@@ -5456,14 +5456,16 @@ impl AppCore {
         self.draw();
     }
 
-    /// #110 Phase 110b: satisfy a settled geometry change by GPU-deriving the current photo's
-    /// exact-size Fit from its retained Original (`renderer.held`) instead of the CPU re-decode.
-    /// Dispatched from the settle only — parked-only (`held_nav` none, §4), Fit display only
-    /// (Original/Fill decode at native res), current photo only, at most one derive per settle.
-    /// Reserve-then-derive (§4/§7): the destination Fit slot is reserved BEFORE dispatch with a
-    /// worst-case byte bound (fit box × fp16), corrected to the real size after; on any
-    /// ineligibility the reservation is released so the CPU fallback can take the very slot.
-    /// Returns whether the derived Fit is resident + presented.
+    /// #110 Phase 110b + item-6 6b: satisfy the TARGET photo's Fit display by GPU-deriving the
+    /// exact-size Fit from its retained Original instead of a CPU decode. Two callers: the
+    /// settle after a geometry change (the current photo — retires the ~1 s re-decode), and
+    /// `try_present_target` on a nav miss (a neighbour whose Original survived the last toggle
+    /// — advance-after-toggle stays sharp, never a preview). Parked-only (`held_nav` none, §4),
+    /// Fit display only, at most one dispatch per call site. Reserve-then-derive (§4/§7): the
+    /// destination Fit slot is reserved BEFORE dispatch with a worst-case byte bound (fit box ×
+    /// fp16), corrected to the real size after; on any ineligibility (headless / mode-1 /
+    /// clamped — the renderer re-checks) the reservation is released so the CPU fallback can
+    /// take the very slot. Returns whether the derived Fit is resident + presented.
     fn try_gpu_derive_fit(&mut self) -> bool {
         if !gpu_derive_enabled() || self.held_nav().is_some() {
             return false;
@@ -5471,9 +5473,6 @@ impl AppCore {
         let Some(item) = self.target_item else {
             return false;
         };
-        if self.displayed_item != Some(item) {
-            return false;
-        }
         let Some(fit) = self.decode_fit() else {
             return false;
         };
@@ -5484,17 +5483,21 @@ impl AppCore {
         {
             return false; // already resident (e.g. the instant-toggle rebind path)
         }
+        // Source resolution BEFORE reserving (cheap miss, no rollback churn): the retained ring
+        // Original, else the held fallback — which holds the last-PRESENTED photo's texture, so
+        // it is a valid source ONLY when that photo is `item` (the settle case; `present_slot`
+        // clears `held` on every later present, so held-exists ⟹ it is the displayed frame).
+        // On nav it would be the WRONG PHOTO's pixels — refuse instead.
+        let source = match self.ring.original_slot(item) {
+            Some(s) => pb_render::DeriveSource::Ring(s),
+            None if self.displayed_item == Some(item) => pb_render::DeriveSource::Held,
+            None => return false,
+        };
         let est = fit.max_width as u64 * fit.max_height as u64 * 8;
         let rep = self.rep_of(pb_core::RepKind::Fit);
         let cg = self.content_gen;
         let Some(res) = self.ring.reserve_bytes(item, cg, rep, est, &self.targets) else {
             return false;
-        };
-        // Source preference: the retained ring Original (item-6 keeps it across the geometry
-        // change) — else the held fallback (the presented Original that wasn't relocated).
-        let source = match self.ring.original_slot(item) {
-            Some(s) => pb_render::DeriveSource::Ring(s),
-            None => pb_render::DeriveSource::Held,
         };
         let derived = self.renderer.as_mut().and_then(|r| {
             r.derive_fit(
@@ -6790,6 +6793,13 @@ impl AppCore {
         }
         if let Some(slot) = self.display_slot(item) {
             self.present_item(item, slot);
+            true
+        } else if self.try_gpu_derive_fit() {
+            // item-6 6b: no Fit resident, but the target's Original survived the last geometry
+            // change (retain-and-remap) — the GPU derives + presents its exact-size Fit in a
+            // couple of milliseconds, so advancing right after a fullscreen toggle lands sharp
+            // instead of flashing the ~256 px preview for seconds. Parked-only by the derive's
+            // own gate; a blaze keeps the preview-first hold-don't-skip behaviour.
             true
         } else {
             false
@@ -15794,6 +15804,48 @@ mod tests {
         assert!(
             !core.ring.is_tracked_rep(0, pb_core::RepKind::Fit),
             "refused dispatches must not touch the ring"
+        );
+    }
+
+    /// item-6 6b: on a NAV-shaped dispatch (target ≠ displayed) the held fallback frame is the
+    /// PREVIOUS photo's texture and must never be used as a derive source — deriving item 1's
+    /// "Fit" from item 0's pixels would present the wrong photo. Without a retained ring
+    /// Original for the target, the derive refuses before touching the ring.
+    #[test]
+    fn a_nav_derive_never_sources_the_previous_photos_held_frame() {
+        let mut core = test_core();
+        core.source = photos_named(&["a.jpg", "b.jpg"]);
+        core.playlist = Playlist::new(2, 0).with_cursor(1);
+        core.ring = ResidentRing::new(4);
+        core.fit = Some(FitBox {
+            max_width: 800,
+            max_height: 600,
+        });
+        core.view.mode = ScaleMode::Fit;
+        core.targets = vec![1, 0];
+        core.displayed_item = Some(0); // still showing the old photo
+        core.target_item = Some(1); // navigating to its neighbour
+
+        assert!(
+            !core.try_gpu_derive_fit(),
+            "no ring Original for the target and held is the WRONG photo → refuse"
+        );
+        assert!(
+            !core.ring.is_tracked_rep(1, pb_core::RepKind::Fit),
+            "the refusal happens before any reservation"
+        );
+
+        // With the target's own Original retained, the source resolves to Ring — headless the
+        // derive still fails, but now via the reserve→release path (nothing left tracked).
+        make_resident(&mut core, 1, pb_core::Representation::Original, &[1, 0]);
+        assert!(!core.try_gpu_derive_fit(), "headless renderer can't derive");
+        assert!(
+            !core.ring.is_tracked_rep(1, pb_core::RepKind::Fit),
+            "the failed Ring-sourced derive rolled its reservation back"
+        );
+        assert!(
+            core.ring.original_slot(1).is_some(),
+            "the source Original is untouched"
         );
     }
 

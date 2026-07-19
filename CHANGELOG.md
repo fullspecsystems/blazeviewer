@@ -16,6 +16,11 @@ with any pre-release suffix carried only by the tag.
   reacts faster now (it no longer waits out the delay meant for window-edge dragging).
 
 ### Fixed
+- **Moving to the next photo right after a fullscreen change stays sharp.** Toggling
+  fullscreen used to throw away the high-quality copies of the neighbouring photos, so
+  pressing next/previous immediately afterwards showed a small blurry thumbnail for a couple
+  of seconds. The app now keeps those full-resolution copies across the change and produces
+  the sharp view from them instantly.
 - **A photo can no longer get stuck blurry.** In rare cases (a key-release the app never
   received, e.g. around a fullscreen flip while paging fast) a photo could stay on its
   low-res preview until you resized or refocused the window. The app now notices a photo
