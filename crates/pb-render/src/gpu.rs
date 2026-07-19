@@ -10,7 +10,10 @@ use bytemuck::{Pod, Zeroable};
 use wgpu::util::DeviceExt;
 
 use crate::upload::{StagingUpload, UploadStrategy};
-use crate::{ColorTransform, DerivedFit, PlanarPresentation, RenderError, Renderer, ViewTransform};
+use crate::{
+    ColorTransform, DeriveSource, DerivedFit, PlanarPresentation, RenderError, Renderer,
+    ViewTransform,
+};
 
 /// Background (letterbox) color, straight RGBA8.
 pub const LETTERBOX: [u8; 4] = [10, 10, 12, 255];
@@ -3703,8 +3706,41 @@ impl Renderer for WgpuRenderer {
         });
     }
 
-    fn derive_held_fit(
+    fn remap_ring(&mut self, new_capacity: usize, remaps: &[pb_core::SlotRemap]) -> Vec<usize> {
+        let mut old = std::mem::take(&mut self.ring);
+        let mut next: Vec<Option<RingSlot>> = (0..new_capacity).map(|_| None).collect();
+        let mut moved = Vec::new();
+        for r in remaps {
+            // Release-validated (not just debug-asserted): an out-of-range or duplicate `to`
+            // is a caller bug — skip the move (the slot stays empty; the re-present falls
+            // through to the held fallback / async decode) rather than panic or clobber.
+            if r.to >= new_capacity || next[r.to].is_some() {
+                continue;
+            }
+            if let Some(slot) = old.get_mut(r.from).and_then(Option::take) {
+                next[r.to] = Some(slot);
+                moved.push(r.to);
+            }
+        }
+        // Held fallback: the presented texture, when NOT itself relocated (already taken by a
+        // remap above), moves into `held` with img dims synced — exactly `reserve_ring`'s
+        // stash — so a no-retained-hit geometry change still shows the old frame, never blank.
+        if let Some(slot) = self
+            .present_idx
+            .and_then(|i| old.get_mut(i).and_then(Option::take))
+        {
+            self.img_w = slot.w;
+            self.img_h = slot.h;
+            self.held = Some(slot);
+        }
+        self.ring = next;
+        self.present_idx = None;
+        moved
+    }
+
+    fn derive_fit(
         &mut self,
+        source: DeriveSource,
         dst_slot: usize,
         fit_w: u32,
         fit_h: u32,
@@ -3714,27 +3750,32 @@ impl Renderer for WgpuRenderer {
         if dst_slot >= self.ring.len() || fit_w == 0 || fit_h == 0 {
             return None;
         }
-        let held = self.held.as_ref()?;
+        let src = match source {
+            DeriveSource::Held => self.held.as_ref()?,
+            // Deriving INTO the source slot would drop the Original mid-derive — refuse.
+            DeriveSource::Ring(s) if s == dst_slot => return None,
+            DeriveSource::Ring(s) => self.ring.get(s)?.as_ref()?,
+        };
         // Eligibility (#110 §6): a genuine mipped Original — only Originals are mipped, so the
         // chain length IS the rep check — never `clamp_to_max`'d (nearest-neighbour aliasing is
         // baked into every mip), never source-ICC mode 1 (its TRC isn't in the derive chain).
-        if held.was_clamped || held.mode == 1.0 || held.texture.mip_level_count() <= 1 {
+        if src.was_clamped || src.mode == 1.0 || src.texture.mip_level_count() <= 1 {
             return None;
         }
         // ACTUAL uploaded dims from the texture (RingSlot.w/h retain pre-clamp dims by
         // contract; a clamped slot was rejected above, but the texture stays the source of
         // truth for kernel geometry regardless).
-        let (tw, th) = (held.texture.width(), held.texture.height());
+        let (tw, th) = (src.texture.width(), src.texture.height());
         let (dw, dh) = contain_dims(tw, th, fit_w, fit_h);
-        let level = select_derive_mip(tw, th, held.texture.mip_level_count(), dw, dh, mip_bias);
-        let srgb_in = held.mode == 0.0;
-        let content_hdr = held.content_hdr;
-        let peak = held.peak;
+        let level = select_derive_mip(tw, th, src.texture.mip_level_count(), dw, dh, mip_bias);
+        let srgb_in = src.mode == 0.0;
+        let content_hdr = src.content_hdr;
+        let peak = src.peak;
         let out = derive_fit_texture(
             &self.device,
             &self.queue,
             &self.derive,
-            &held.texture,
+            &src.texture,
             level,
             srgb_in,
             dw,

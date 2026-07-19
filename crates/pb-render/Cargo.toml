@@ -12,6 +12,9 @@ wgpu = "22"
 bytemuck = { version = "1", features = ["derive"] }
 half = "2"
 pollster = "0.3"
+# item-6: `SlotRemap` — the ring-compaction move instructions `Renderer::remap_ring` executes.
+# pb-core is pure (no I/O/GPU), so no dependency cycle.
+pb-core = { path = "../pb-core" }
 
 # Query the display's HDR/wide-gamut state via DXGI (`display::primary_hdr`) to
 # choose the output path: an fp16 scRGB surface (wide gamut + HDR) vs SDR 8-bit.

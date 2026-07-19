@@ -92,7 +92,7 @@ impl Default for ColorTransform {
     }
 }
 
-/// Result of [`Renderer::derive_held_fit`]: the derived Fit's actual dimensions and VRAM
+/// Result of [`Renderer::derive_fit`]: the derived Fit's actual dimensions and VRAM
 /// footprint (`w*h*4` for a mode-0 RGBA8 final, `w*h*8` for a mode-2 fp16 final), reported so
 /// the core ring's byte accounting stays honest without the core knowing the storage format.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -100,6 +100,15 @@ pub struct DerivedFit {
     pub w: u32,
     pub h: u32,
     pub bytes: u64,
+}
+
+/// Where [`Renderer::derive_fit`] sources its Original (#110 §3d): a retained ring slot
+/// (item-6 — the compacted Original of the current or a neighbour photo) or the held fallback
+/// frame (the presented Original that was NOT relocated by the last geometry change).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeriveSource {
+    Held,
+    Ring(usize),
 }
 
 /// Horizontal placement of a bottom-anchored overlay layer (the info line's three
@@ -236,6 +245,20 @@ pub trait Renderer {
     /// `slot_h` are the intended slot size for the fixed-size variant; the v1
     /// image-sized implementation ignores them. Resets any existing ring.
     fn reserve_ring(&mut self, capacity: usize, slot_w: u32, slot_h: u32);
+
+    /// item-6: rebuild the GPU slot vector to `new_capacity`, RELOCATING retained textures per
+    /// `remaps` (`from` old slot → `to` new slot, from `ResidentRing::compact_to`) instead of
+    /// dropping them — a geometry change keeps resident Originals. The presented texture, when
+    /// it was NOT itself relocated, moves into the held fallback exactly as `reserve_ring` does
+    /// (the renderer knows its own presented slot, so no parameter is needed — a wrong caller
+    /// value could steal a relocated texture). `present_idx` clears; the caller re-presents via
+    /// `present_slot`. Returns the `to` indices that actually received a texture so a partial
+    /// remap is detectable. Default (headless/tests): behave like `reserve_ring` — drop all.
+    fn remap_ring(&mut self, new_capacity: usize, remaps: &[pb_core::SlotRemap]) -> Vec<usize> {
+        let _ = remaps;
+        self.reserve_ring(new_capacity, 0, 0);
+        Vec::new()
+    }
     /// Upload a decoded image into ring slot `slot`, baking its `color`/`hdr`/`peak`
     /// into the slot's bind group (see [`Renderer::set_image`] for the buffer layout).
     /// Runs during prefetch, off the keypress frame — so the later `present_slot`
@@ -255,17 +278,19 @@ pub trait Renderer {
         peak: f32,
         mip: bool,
     );
-    /// #110 (Phase 110b): derive an exact-size Fit from the currently-HELD frame's Original on
-    /// the GPU — no decode, no upload — and install it in ring slot `dst_slot`. The held frame
-    /// is the current photo's Original that survived the geometry change (`reserve_ring` stashes
-    /// the presented slot). Returns the derived Fit's actual dims + VRAM bytes for the core
-    /// ring's accounting, or `None` when ineligible — no held frame, not a mipped `Original`,
-    /// `clamp_to_max`'d (its nearest-neighbour aliasing is baked into every mip), or source-ICC
-    /// mode 1 (its TRC isn't in the derive's colour chain) — in which case the caller releases
-    /// its slot reservation and falls back to the CPU Fit decode. `kernel` = Lanczos lobes
-    /// (2 or 3); `mip_bias` = 0 (last eligible mip) or −1 (one level finer — the 110c A/B).
-    fn derive_held_fit(
+    /// #110 (Phase 110b) + item-6: derive an exact-size Fit from a retained Original on the GPU
+    /// — no decode, no upload — and install it in ring slot `dst_slot`. The source is either a
+    /// retained ring slot ([`DeriveSource::Ring`], item-6's compacted Original) or the held
+    /// fallback frame ([`DeriveSource::Held`], when the presented Original wasn't relocated).
+    /// Returns the derived Fit's actual dims + VRAM bytes for the core ring's accounting, or
+    /// `None` when ineligible — no such source, not a mipped `Original`, `clamp_to_max`'d (its
+    /// nearest-neighbour aliasing is baked into every mip), or source-ICC mode 1 (its TRC isn't
+    /// in the derive's colour chain) — in which case the caller releases its slot reservation
+    /// and falls back to the CPU Fit decode. `kernel` = Lanczos lobes (2 or 3); `mip_bias` = 0
+    /// (last eligible mip) or −1 (one level finer — the 110c A/B).
+    fn derive_fit(
         &mut self,
+        _source: DeriveSource,
         _dst_slot: usize,
         _fit_w: u32,
         _fit_h: u32,

@@ -4170,6 +4170,7 @@ dependencies = [
  "bytemuck",
  "half",
  "objc2 0.6.4",
+ "pb-core",
  "pollster",
  "wgpu",
  "windows 0.62.2",

@@ -702,13 +702,19 @@ impl AppCore {
                             self.preview_resident.remove(&idx);
                             self.upgrade_done.remove(&idx);
                         }
-                        // Refresh the view only if the reverted photo is the one on screen; if it
-                        // scrolled off (or is no longer in the deck), the cache drop above is
-                        // enough — it re-decodes reverted next time it's shown.
-                        if idx == self.displayed_item {
-                            // The reverted orientation rewrote the file's pixels → content change.
+                        // The reverted orientation rewrote the file's pixels → content change,
+                        // REGARDLESS of whether the photo is on screen (item-6 spec Part B): the
+                        // ring retains Originals across geometry changes now, so a navigated-away
+                        // neighbour's resident Original would otherwise keep the stale
+                        // orientation. (The pre-item-6 code only invalidated when displayed — a
+                        // latent hole that retention would have promoted to a visible bug.) The
+                        // purge + re-prefetch run for any in-deck photo; the synchronous reload
+                        // stays displayed-only.
+                        if idx.is_some() {
                             self.invalidate_content();
-                            self.load_current_sync();
+                            if idx == self.displayed_item {
+                                self.load_current_sync();
+                            }
                             self.target_item = self.playlist.current();
                             self.request_prefetch();
                         }
@@ -5428,10 +5434,22 @@ impl AppCore {
                 r.set_view(view);
             }
         }
+        // item-6 Part D: a RETAINED current Original re-presents immediately at the new epoch
+        // (the remap left the renderer's present cleared), so the frame stays live-and-sharp
+        // with zero decode. Canonical `present_item` path (title/pin/mark_resolved). Without a
+        // retained hit the old frame holds via the renderer's `held` fallback — today's
+        // behaviour for that one change.
+        if let Some(item) = self.target_item {
+            if self.displayed_item == Some(item) {
+                if let Some(slot) = self.ring.original_slot(item) {
+                    self.present_item(item, slot);
+                }
+            }
+        }
         // #110 Phase 110b: before queueing the CPU re-decode, try to GPU-derive the current
-        // photo's Fit from its retained Original (the frame `invalidate_geometry` just moved
-        // into the renderer's `held`). On success the Fit is resident + presented before the
-        // prefetch below runs, so the ~1 s CPU Lanczos re-decode never gets queued — the
+        // photo's Fit from its retained Original (the compacted ring slot, or the `held`
+        // fallback when it wasn't relocated). On success the Fit is resident + presented before
+        // the prefetch below runs, so the ~1 s CPU Lanczos re-decode never gets queued — the
         // owner-felt win. On any miss this is a no-op and the incumbent path proceeds.
         self.try_gpu_derive_fit();
         self.request_prefetch();
@@ -5472,8 +5490,15 @@ impl AppCore {
         let Some(res) = self.ring.reserve_bytes(item, cg, rep, est, &self.targets) else {
             return false;
         };
+        // Source preference: the retained ring Original (item-6 keeps it across the geometry
+        // change) — else the held fallback (the presented Original that wasn't relocated).
+        let source = match self.ring.original_slot(item) {
+            Some(s) => pb_render::DeriveSource::Ring(s),
+            None => pb_render::DeriveSource::Held,
+        };
         let derived = self.renderer.as_mut().and_then(|r| {
-            r.derive_held_fit(
+            r.derive_fit(
+                source,
                 res.slot,
                 fit.max_width,
                 fit.max_height,
@@ -5504,9 +5529,11 @@ impl AppCore {
                 d.w, d.h, d.bytes
             );
         }
-        // Present through the canonical target path so view/title/pie/perf behave exactly as
-        // if the decode had landed.
-        self.try_present_target();
+        // Present the derived Fit explicitly (canonical `present_item` path). Not
+        // `try_present_target`: item-6's Part D re-present may have already resolved the target
+        // with the ORIGINAL slot, and the caught-up shortcut would then leave the exact-size
+        // Lanczos Fit resident but never bound.
+        self.present_item(item, res.slot);
         true
     }
 
@@ -7151,35 +7178,60 @@ impl AppCore {
         self.draw();
     }
 
-    /// Bump the geometry epoch and rebuild the (now-invalid) ring. Called on resize
-    /// and fit/original toggle so in-flight decodes for the old size are discarded.
+    /// Bump the geometry epoch and rebuild the ring **retaining resident Originals** (item-6):
+    /// a resize / Fit↔1:1 toggle only invalidates `Fit` textures (sized for the old viewport) —
+    /// the full-res Originals are geometry-independent, so they compact into the new ring
+    /// (`drop_fit_slots` + `compact_to`) and the renderer relocates their textures
+    /// (`remap_ring`) instead of dropping them. This is what lets the settle re-present the
+    /// current photo's Original instantly and lets advance-after-toggle find a neighbour's
+    /// Original resident instead of re-decoding its preview. In-flight decodes for the old
+    /// geometry are discarded (epoch mismatch at drain); still-wanted Originals that were only
+    /// `Pending` are re-requested by the caller's follow-up `request_prefetch`.
     pub fn invalidate_geometry(&mut self) {
+        self.rebuild_ring(true);
+    }
+
+    /// A **content** change (as opposed to a bare geometry change): the pixels behind one or
+    /// more indices changed — a deck rebuild (indices reassigned), source replacement, a saved
+    /// EXIF rotation, delete/undo, or teardown. Bumps `content_gen` and **fully resets the
+    /// ring** — retention is geometry-only. INVARIANT (item-6 spec §4.1): this must never call
+    /// the retaining `invalidate_geometry`, or a stale Original crosses the content change and
+    /// index N shows another deck's pixels. Use this — not bare `invalidate_geometry` —
+    /// anywhere index `N` may now name different pixels.
+    pub fn invalidate_content(&mut self) {
+        self.content_gen = self.content_gen.wrapping_add(1);
+        self.rebuild_ring(false);
+    }
+
+    /// The shared geometry-rebuild tail: bump the epoch, size the new ring, then either RETAIN
+    /// (geometry change: keep + compact resident Originals, remap their GPU textures) or PURGE
+    /// (content change: everything goes). The retain keep-list is the parked full-res window
+    /// (current → compare-pin → neighbours) — the same priority order that decoded them.
+    fn rebuild_ring(&mut self, retain: bool) {
         self.epoch = self.epoch.wrapping_add(1);
         let fit = self.fit.unwrap_or(FitBox {
             max_width: 1,
             max_height: 1,
         });
         let cap = ring_capacity(self.slot_bytes_estimate());
-        self.ring = ResidentRing::new_with_budget(cap, RING_BUDGET_BYTES);
-        if let Some(a) = self.renderer.as_mut() {
-            a.reserve_ring(cap, fit.max_width, fit.max_height);
+        if retain {
+            self.ring.drop_fit_slots();
+            let keep = self.full_res_window(self.full_res_radius());
+            let remaps = self.ring.compact_to(cap, &keep);
+            if let Some(a) = self.renderer.as_mut() {
+                a.remap_ring(cap, &remaps);
+            }
+        } else {
+            self.ring = ResidentRing::new_with_budget(cap, RING_BUDGET_BYTES);
+            if let Some(a) = self.renderer.as_mut() {
+                a.reserve_ring(cap, fit.max_width, fit.max_height);
+            }
         }
         let (ahead, behind) = window_for_capacity(cap);
         self.ahead = ahead;
         self.behind = behind;
         // Drop decodes staged for the old geometry; they free their pool budget.
         self.pending_uploads.clear();
-    }
-
-    /// A **content** change (as opposed to a bare geometry change): the pixels behind one or
-    /// more indices changed — a deck rebuild (indices reassigned), source replacement, a saved
-    /// EXIF rotation, delete/undo, or teardown. Bumps `content_gen` (purging every retained
-    /// full-resolution `Original`, #106.7 §2) and then invalidates geometry as usual. Use this
-    /// — not bare `invalidate_geometry` — anywhere index `N` may now name different pixels; a
-    /// resize / scale toggle keeps `content_gen` so a retained Original survives it.
-    pub fn invalidate_content(&mut self) {
-        self.content_gen = self.content_gen.wrapping_add(1);
-        self.invalidate_geometry();
     }
 
     /// Start / stop the slideshow (task #23, the `S` key + View ▸ Slideshow). Starting
@@ -15586,6 +15638,103 @@ mod tests {
         assert!(
             core.preview_watchdog.is_none(),
             "indices were reassigned — the old fired state must not carry over"
+        );
+    }
+
+    /// item-6 6a: a GEOMETRY change retains resident Originals — the whole point of
+    /// retain-and-remap. The current photo's and an in-window neighbour's Originals must both
+    /// survive `invalidate_geometry` (Fit slots drop; Originals compact into the new ring).
+    #[test]
+    fn a_geometry_change_retains_resident_originals() {
+        let mut core = test_core();
+        core.source = photos_named(&["a.jpg", "b.jpg"]);
+        core.playlist = Playlist::new(2, 0).with_cursor(0);
+        core.ring = ResidentRing::new(6);
+        core.fit = Some(FitBox {
+            max_width: 800,
+            max_height: 600,
+        });
+        core.view.mode = ScaleMode::Fit;
+        core.targets = vec![0, 1];
+        core.displayed_item = Some(0);
+        core.target_item = Some(0);
+        let fit_rep = core.rep_of(pb_core::RepKind::Fit);
+        make_resident(&mut core, 0, fit_rep, &[0, 1]);
+        make_resident(&mut core, 0, pb_core::Representation::Original, &[0, 1]);
+        make_resident(&mut core, 1, pb_core::Representation::Original, &[0, 1]);
+
+        core.invalidate_geometry();
+
+        assert!(
+            core.ring.original_slot(0).is_some(),
+            "the current photo's Original survives a geometry change"
+        );
+        assert!(
+            core.ring.original_slot(1).is_some(),
+            "an in-window neighbour's Original survives too (the advance-after-toggle fix)"
+        );
+        assert!(
+            core.ring.slot_for_rep(0, pb_core::RepKind::Fit).is_none(),
+            "Fit slots are geometry-stale and must drop"
+        );
+    }
+
+    /// item-6 6a invariant (spec §4.1): a CONTENT change purges everything — a retained
+    /// Original crossing a content change would show another deck's pixels at index N.
+    #[test]
+    fn a_content_change_purges_retained_originals() {
+        let mut core = test_core();
+        core.source = photos_named(&["a.jpg"]);
+        core.playlist = Playlist::new(1, 0).with_cursor(0);
+        core.ring = ResidentRing::new(4);
+        core.fit = Some(FitBox {
+            max_width: 800,
+            max_height: 600,
+        });
+        core.targets = vec![0];
+        core.displayed_item = Some(0);
+        make_resident(&mut core, 0, pb_core::Representation::Original, &[0]);
+
+        core.invalidate_content();
+
+        assert!(
+            core.ring.original_slot(0).is_none(),
+            "content changes must never retain — geometry-only retention"
+        );
+    }
+
+    /// item-6 Part D: after the settle's geometry invalidation, a retained current Original is
+    /// re-presented at the NEW epoch — `target_caught_up` holds with zero decodes landed, so
+    /// there is no pie and no held-frame limbo. (Headless: `present_item` counts as presented.)
+    #[test]
+    fn the_settle_re_presents_a_retained_original() {
+        let mut core = test_core();
+        core.source = photos_named(&["a.jpg"]);
+        core.playlist = Playlist::new(1, 0).with_cursor(0);
+        core.ring = ResidentRing::new(4);
+        core.fit = Some(FitBox {
+            max_width: 800,
+            max_height: 600,
+        });
+        core.view.mode = ScaleMode::Fit;
+        core.targets = vec![0];
+        core.displayed_item = Some(0);
+        core.target_item = Some(0);
+        core.mark_resolved(0);
+        make_resident(&mut core, 0, pb_core::Representation::Original, &[0]);
+
+        // What the settle runs (tick 4d):
+        core.invalidate_geometry();
+        core.refresh_after_geometry_change();
+
+        assert!(
+            core.target_caught_up(),
+            "the retained Original re-presented at the new epoch — no decode needed"
+        );
+        assert_eq!(core.presented_epoch, Some(core.epoch));
+        assert!(
+            core.ring.original_slot(0).is_some(),
+            "and it is still resident in the compacted ring"
         );
     }
 
