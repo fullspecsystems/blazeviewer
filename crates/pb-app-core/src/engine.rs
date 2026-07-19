@@ -129,6 +129,12 @@ pub fn mip_chain_bytes(w: u32, h: u32, bpp: u64) -> u64 {
         .sum()
 }
 
+/// How many watchdog fires one photo gets per visit (see `PreviewWatchdog::retries`): a
+/// full-decode error after a fire re-arms the watchdog for another 2 s cycle, so a transient
+/// SMB hiccup converges to sharp — this caps a permanently-failing decode at a few attempts
+/// instead of an endless every-2 s retry while parked on it.
+pub const MAX_WATCHDOG_RETRIES: u8 = 3;
+
 /// How long a resize settle waits after a **discrete fullscreen toggle** before the crisp
 /// re-derive/re-decode (#110 §4). The standard 180 ms settle debounces interactive drag-resize
 /// streams; a toggle is ONE event, so waiting the full debounce just delays the sharp frame.

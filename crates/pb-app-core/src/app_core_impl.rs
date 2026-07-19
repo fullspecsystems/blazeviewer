@@ -1982,13 +1982,27 @@ impl AppCore {
         } else {
             None
         };
+        // The ADR-024 watchdog schedules its OWN deadline: parked on a poisoned photo nothing
+        // else keeps the loop ticking (`fulls_wanted` is empty → `sharpen_pending` false), and
+        // an armed-but-unfired watchdog would sleep straight past its 2 s (Codex P1 — the
+        // fake-clock tests tick manually and masked this).
+        let watchdog_wake = self
+            .preview_watchdog
+            .and_then(|w| (!w.fired).then(|| w.since + PREVIEW_WATCHDOG_AFTER));
         // The earliest of the viewer's poll, the animation's next-frame deadline, the eager-prep
-        // dwell, and the Live-Photo-revert deadline; `None` = idle. (The host mins in its own
-        // dialog-repaint clock.)
-        let wake = [base_wake, anim_wake, prep_wake, revert_wake, osd_wake]
-            .into_iter()
-            .flatten()
-            .min();
+        // dwell, the Live-Photo-revert deadline, and the watchdog's; `None` = idle. (The host
+        // mins in its own dialog-repaint clock.)
+        let wake = [
+            base_wake,
+            anim_wake,
+            prep_wake,
+            revert_wake,
+            osd_wake,
+            watchdog_wake,
+        ]
+        .into_iter()
+        .flatten()
+        .min();
         self.effects.push(contract::CoreEffect::SetWake(wake));
     }
 
@@ -5922,14 +5936,17 @@ impl AppCore {
                 if !w.fired && self.now.saturating_duration_since(w.since) >= PREVIEW_WATCHDOG_AFTER
                 {
                     w.fired = true;
+                    w.retries = w.retries.saturating_add(1);
                     let lingered = self.now.saturating_duration_since(w.since);
+                    let attempt = w.retries;
                     // Second chance (ADR-024 "converge or self-correct"): a lingering preview
                     // with `upgrade_done` set means the flag lied — clear it so the sharpen
-                    // path reopens. Once per arming cycle (see above).
+                    // path reopens. Once per arming cycle (see above); a post-fire decode
+                    // ERROR may re-arm, bounded by `retries` (`rearm_watchdog_after_error`).
                     let was_poisoned = self.upgrade_done.remove(&d);
                     if sharp_diag() {
                         eprintln!(
-                            "[sharp-diag] preview watchdog FIRED item={d} (lingered {lingered:?}, held_nav={}, cleared_upgrade_done={was_poisoned}) — forcing sharpen",
+                            "[sharp-diag] preview watchdog FIRED item={d} (lingered {lingered:?}, attempt {attempt}, held_nav={}, cleared_upgrade_done={was_poisoned}) — forcing sharpen",
                             self.held_nav().is_some(),
                         );
                     }
@@ -5942,8 +5959,25 @@ impl AppCore {
                     item: d,
                     since: self.now,
                     fired: false,
+                    retries: 0,
                 });
                 false
+            }
+        }
+    }
+
+    /// A full-decode ERROR just poisoned `upgrade_done` for `item` (the drain's Err branch). If
+    /// the watchdog already spent its fire on this arming cycle — e.g. it fired while that very
+    /// decode was still in flight, so the forced re-issue deduped into the job that then
+    /// errored — re-arm it for another cycle, bounded by [`MAX_WATCHDOG_RETRIES`]: a transient
+    /// SMB hiccup still converges to sharp instead of dying with the fire latched (Codex review
+    /// of the duplicate-preview fix), while a permanently corrupt full stops after a few
+    /// attempts. An unfired watchdog keeps its running clock untouched.
+    fn rearm_watchdog_after_error(&mut self, item: usize) {
+        if let Some(w) = &mut self.preview_watchdog {
+            if w.item == item && w.fired && w.retries < MAX_WATCHDOG_RETRIES {
+                w.fired = false;
+                w.since = self.now;
             }
         }
     }
@@ -6892,14 +6926,24 @@ impl AppCore {
             let resident = self.ring.slot_for_rep(item, rk).is_some();
             if let Err(ref e) = o.result {
                 if resident {
-                    // A full-upgrade decode failed, but the resident preview is fine
-                    // — keep it and stop retrying the upgrade.
-                    if sharp_diag() && self.displayed_item == Some(item) {
-                        eprintln!(
-                            "[sharp-diag] full landed item={item} ERROR ({e}) -> upgrade_done (preview stays blurry forever)"
-                        );
+                    // A full-upgrade decode failed while its preview is resident. Poisoning
+                    // `upgrade_done` stops a tight retry loop, but ONLY a genuine display-tier
+                    // full may do it (Codex review of the duplicate-preview fix):
+                    //  - never a preview-request job (a failed preview — duplicate or not —
+                    //    proves nothing about the full);
+                    //  - never a non-Fit rep (`upgrade_done` is display-tier bookkeeping; a
+                    //    duplicate parked-Original erroring must not gate the Fit sharpen).
+                    // And when it does poison, the fired watchdog re-arms (bounded) so a
+                    // transient error converges instead of dying latched.
+                    if !o.preview && rk == pb_core::RepKind::Fit {
+                        if sharp_diag() && self.displayed_item == Some(item) {
+                            eprintln!(
+                                "[sharp-diag] full landed item={item} ERROR ({e}) -> upgrade_done (watchdog retry if budget remains)"
+                            );
+                        }
+                        self.upgrade_done.insert(item);
+                        self.rearm_watchdog_after_error(item);
                     }
-                    self.upgrade_done.insert(item);
                     return false;
                 }
                 // A parked Original decode failing is not the display photo failing — the
@@ -16051,6 +16095,127 @@ mod tests {
             core.full_requested_at.contains_key(&0),
             "and the full was actually re-requested"
         );
+    }
+
+    /// Codex P1: parked on a poisoned photo NOTHING else keeps the loop ticking (the wanted-set
+    /// is empty), so the watchdog must schedule its own deadline or a sleeping event loop never
+    /// evaluates it. The tick's SetWake must carry (at latest) the watchdog deadline.
+    #[test]
+    fn an_armed_watchdog_schedules_its_own_wake() {
+        let mut core = stuck_preview_core();
+        core.held.clear(); // genuinely parked
+        core.upgrade_done.insert(0); // poisoned: no sharpen work keeps the loop awake
+        let t0 = core.now;
+        core.effects.clear();
+        core.tick(); // arms the watchdog
+        let wake = core
+            .effects
+            .iter()
+            .rev()
+            .find_map(|e| match e {
+                contract::CoreEffect::SetWake(w) => Some(*w),
+                _ => None,
+            })
+            .expect("tick emits SetWake");
+        let deadline = wake.expect("armed watchdog must not let the loop go idle");
+        assert!(
+            deadline <= t0 + PREVIEW_WATCHDOG_AFTER + core.frame_interval,
+            "the wake must land at (or before) the watchdog deadline"
+        );
+    }
+
+    /// Codex P1: the Err path must not recreate the poison from a PREVIEW-request job — a
+    /// failed preview (duplicate or otherwise) proves nothing about the full.
+    #[test]
+    fn an_error_from_a_preview_request_never_poisons_upgrade_done() {
+        let mut core = stuck_preview_core();
+        core.held.clear();
+        core.pending_uploads.push(
+            Outcome::synthetic(
+                0,
+                core.epoch,
+                pb_core::RepKind::Fit,
+                Err(pb_decode::DecodeError::Corrupt("smb hiccup".into())),
+            )
+            .from_preview_request(),
+        );
+        core.drain_results();
+        assert!(
+            !core.upgrade_done.contains(&0),
+            "a preview-request error is not an upgrade verdict"
+        );
+        assert_eq!(core.sharpen_now(), Some(0), "the sharpen stays open");
+    }
+
+    /// Codex P1: `upgrade_done` is DISPLAY-tier bookkeeping — a duplicate parked-Original
+    /// decode erroring (its first copy resident) must not gate the Fit preview's sharpen.
+    #[test]
+    fn an_original_error_never_poisons_the_fit_tier() {
+        let mut core = stuck_preview_core();
+        core.held.clear();
+        make_resident(&mut core, 0, pb_core::Representation::Original, &[0]);
+        core.pending_uploads.push(Outcome::synthetic(
+            0,
+            core.epoch,
+            pb_core::RepKind::Original,
+            Err(pb_decode::DecodeError::Corrupt("dup original".into())),
+        ));
+        core.drain_results();
+        assert!(
+            !core.upgrade_done.contains(&0),
+            "an Original-rep error must not poison the Fit sharpen"
+        );
+        assert_eq!(core.sharpen_now(), Some(0));
+    }
+
+    /// Codex P1: a full-decode ERROR after the fire latched used to kill the second chance
+    /// (fire → re-issue dedupes into the in-flight job → that job errors → poisoned with no
+    /// edges left). The error now re-arms the fired watchdog for another 2 s cycle, bounded by
+    /// `MAX_WATCHDOG_RETRIES` — transient errors converge, permanent ones stop retrying.
+    #[test]
+    fn a_full_error_rearms_a_fired_watchdog_boundedly() {
+        let mut core = stuck_preview_core();
+        core.held.clear();
+        core.targets = Vec::new(); // keep the real pool inert — errors are driven manually
+
+        let mut t = core.now;
+        for attempt in 1..=MAX_WATCHDOG_RETRIES {
+            core.tick(); // arm (or re-armed by the previous error)
+            t += PREVIEW_WATCHDOG_AFTER;
+            core.now = t;
+            core.tick(); // fire
+            assert_eq!(
+                core.sharpen_now(),
+                Some(0),
+                "attempt {attempt}: the fire reopened the sharpen"
+            );
+            // The re-issued full ERRORS.
+            core.pending_uploads.push(Outcome::synthetic(
+                0,
+                core.epoch,
+                pb_core::RepKind::Fit,
+                Err(pb_decode::DecodeError::Corrupt("persistent".into())),
+            ));
+            core.drain_results();
+            assert!(core.upgrade_done.contains(&0), "the error re-poisons");
+            let w = core.preview_watchdog.expect("still tracking the photo");
+            if attempt < MAX_WATCHDOG_RETRIES {
+                assert!(
+                    !w.fired,
+                    "attempt {attempt}: the error re-armed the watchdog"
+                );
+            } else {
+                assert!(
+                    w.fired,
+                    "the retry budget is spent — no endless every-2s retry loop"
+                );
+            }
+        }
+        // Well past any deadline, nothing changes: the photo keeps its (blurry) preview
+        // honestly rather than churning decodes forever.
+        core.now = t + PREVIEW_WATCHDOG_AFTER * 4;
+        core.tick();
+        assert_eq!(core.sharpen_now(), None, "no fourth attempt");
     }
 
     /// The deadline boundary: strictly-before stays armed-only; at the deadline it fires.

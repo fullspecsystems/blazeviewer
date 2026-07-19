@@ -201,6 +201,12 @@ pub struct PreviewWatchdog {
     /// Recorded as state so the fire is also a one-shot edge the tick can use to force a
     /// prefetch re-issue.
     pub fired: bool,
+    /// Fires spent on this photo without navigating away: a full-decode ERROR after a fire
+    /// re-arms the watchdog (`rearm_watchdog_after_error`) so a transient error still
+    /// converges, and this bounds that to
+    /// [`MAX_WATCHDOG_RETRIES`](crate::engine::MAX_WATCHDOG_RETRIES) attempts per visit —
+    /// a permanently corrupt full can't retry forever. Navigating away and back arms fresh.
+    pub retries: u8,
 }
 
 pub struct AppCore {
