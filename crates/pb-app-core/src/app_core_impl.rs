@@ -5829,6 +5829,13 @@ impl AppCore {
                             .want(t, crate::poster_select::Demand::Display);
                     }
                     sel_pushed.insert(t);
+                    // Phase 1e (owner feedback): the INSTANT tier first — a
+                    // synthesized placeholder (zero I/O) so landing on a film
+                    // never blocks navigation on the walk. Fit-scale only, like
+                    // every preview. The selection rides right behind it.
+                    if fit.is_some() {
+                        previews.push(Job::display(t, fit, true));
+                    }
                     previews.push(Job::poster_select(t, fit, self.content_gen, true));
                     continue;
                 }
@@ -5841,7 +5848,31 @@ impl AppCore {
                 // sync first-paint in `load_current_sync`, which stays preview-first on purpose).
                 previews.push(Job::display(t, fit, fit.is_some()));
             } else if Some(t) == sharpen {
-                head.push(Job::display(t, fit, false));
+                // A resident-placeholder VIDEO sharpens via its selection (the
+                // walk IS the full), never a bare display full (which would run
+                // the legacy walk beside it — the double-walk through a back
+                // door). Photos keep the normal sharpen full.
+                if crate::engine::poster_select_supported()
+                    && matches!(
+                        crate::video::item_kind(self.source.as_ref(), t),
+                        crate::video::LibraryItemKind::Video(_)
+                    )
+                {
+                    if !self
+                        .poster_sel
+                        .want(t, crate::poster_select::Demand::Display)
+                    {
+                        self.poster_sel.reopen(t);
+                        let _ = self
+                            .poster_sel
+                            .want(t, crate::poster_select::Demand::Display);
+                    }
+                    if sel_pushed.insert(t) {
+                        head.push(Job::poster_select(t, fit, self.content_gen, true));
+                    }
+                } else {
+                    head.push(Job::display(t, fit, false));
+                }
             }
             // else: resident-preview fulls are queued below IN `ring_order` (their decode
             // priority), not in `targets` order — "+1 never waits".
@@ -5850,9 +5881,31 @@ impl AppCore {
         // while blazing / in Random mode). `ring_order` is already filtered to resident
         // previews minus the sharpen; only the per-tick job guards repeat here.
         for &t in &ring_order {
-            if !self.failed.contains(&t) && !pending_reps.contains(&(t, dk)) {
-                fulls.push(Job::display(t, fit, false));
+            if self.failed.contains(&t) || pending_reps.contains(&(t, dk)) {
+                continue;
             }
+            // Resident-placeholder videos upgrade via their selection here too.
+            if crate::engine::poster_select_supported()
+                && matches!(
+                    crate::video::item_kind(self.source.as_ref(), t),
+                    crate::video::LibraryItemKind::Video(_)
+                )
+            {
+                if !self
+                    .poster_sel
+                    .want(t, crate::poster_select::Demand::Display)
+                {
+                    self.poster_sel.reopen(t);
+                    let _ = self
+                        .poster_sel
+                        .want(t, crate::poster_select::Demand::Display);
+                }
+                if sel_pushed.insert(t) {
+                    fulls.push(Job::poster_select(t, fit, self.content_gen, true));
+                }
+                continue;
+            }
+            fulls.push(Job::display(t, fit, false));
         }
         let mut jobs = head;
         jobs.append(&mut previews);
@@ -15665,6 +15718,68 @@ mod tests {
             !core.preview_resident.contains(&0),
             "a selected poster is a definitive full, never a preview"
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_video_preview_want_is_an_instant_upgradeable_placeholder() {
+        // Phase 1e (owner: "I get stuck if a poster hasn't landed"): a video's
+        // preview want returns the flat tile instantly (the nonexistent path
+        // proves zero I/O) and marked is_preview — so nav presents it at once
+        // and the selection's poster upgrades it in place.
+        let src = pb_source::FsSource::new(vec![PathBuf::from(r"C:\definitely\not\here\clip.mkv")]);
+        let img = crate::engine::decode_item_for(
+            &src,
+            0,
+            Some(FitBox {
+                max_width: 800,
+                max_height: 600,
+            }),
+            true,
+            crate::decode_pool::Purpose::Display,
+            &std::sync::atomic::AtomicBool::new(false),
+        )
+        .expect("the placeholder needs no read");
+        assert!(img.is_preview, "must stay upgradeable (never definitive)");
+        assert!(img.is_well_formed());
+    }
+
+    #[test]
+    fn a_selection_payload_upgrades_a_resident_placeholder_in_place() {
+        // The blaze shape: the placeholder presented instantly; the walk lands
+        // later and its fitted poster replaces the placeholder through the
+        // normal preview->full upgrade (same slot, preview_resident cleared).
+        let mut core = test_core();
+        core.source = photos_named(&["clip.mkv"]);
+        core.playlist = Playlist::new(1, 0);
+        core.fit = Some(FitBox {
+            max_width: 800,
+            max_height: 600,
+        });
+        core.targets = vec![0];
+        core.ring = ResidentRing::new(4); // headless cores start with 0 slots
+        let fit_rep = core.rep_of(pb_core::RepKind::Fit);
+        make_resident(&mut core, 0, fit_rep, &[0]);
+        core.preview_resident.insert(0);
+        core.poster_sel.reset(core.content_gen);
+        core.poster_sel
+            .want(0, crate::poster_select::Demand::Display);
+        core.pending_uploads.push(Outcome::synthetic_selection(
+            0,
+            core.content_gen,
+            core.epoch,
+            Ok(poster_payload(0, (800, 450))),
+        ));
+        core.drain_results();
+        assert!(
+            core.ring.slot_for_rep(0, pb_core::RepKind::Fit).is_some(),
+            "still resident after the in-place upgrade"
+        );
+        assert!(
+            !core.preview_resident.contains(&0),
+            "the fitted poster is the definitive full - placeholder retired"
+        );
+        assert!(core.poster_sel.choice(0).is_some());
     }
 
     #[test]

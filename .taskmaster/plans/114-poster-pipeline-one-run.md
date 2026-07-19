@@ -335,6 +335,18 @@ capture is a fiction, so the seam and the minimum walk changes land together.
    level-triggered re-emission, class promotion, lifecycle method), the typed fan-out result,
    and the walk changes that make the result real — timestamp/origin capture + judge-size
    scoring (256 px) + the FFmpeg judge-constant swap; corpus threshold re-validation.
+   **1e (owner feedback during phase-1 testing, 2026-07-19): placeholder-first video
+   presents.** Landing on a film whose walk hasn't finished used to HOLD navigation (the
+   "miss = hold, never skip" gate is invisible for photos' millisecond previews but a
+   multi-second wall for a poster walk). Fix: a video's preview want returns the existing
+   flat tile instantly (zero I/O) marked `is_preview`, so nav presents at once — blazing
+   streams placeholders — and the selection's fitted poster upgrades it in place through
+   the normal preview→full machinery. The sync first paint of a movie folder gets the same.
+   Skipping-not-ready-videos was considered and rejected: it breaks "space advances exactly
+   one" and spatial memory; placeholder-first removes the stall without touching semantics.
+   All three want tiers (previews / sharpen head / ring fulls) route resident-placeholder
+   videos to their selection, never a bare display full (the legacy walk through a back
+   door).
 2. **The MF variant A/B** (native walk vs fitted+winner-replay) + the scratch-reusing reducer +
    the native-RAM permit; the winner ships.
 3. **Original install + demand-gated admission + the 4096-edge ceiling + mode-2 P3 handling +

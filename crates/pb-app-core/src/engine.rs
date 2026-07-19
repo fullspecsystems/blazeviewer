@@ -579,6 +579,18 @@ pub fn decode_item_cancellable(
                     // visible, and the *play* attempt is where a precise error surfaces.
     match crate::video::item_kind(source, item) {
         crate::video::LibraryItemKind::Video(container) => {
+            // Task #114 phase 1e (owner feedback): a PREVIEW want for a video is
+            // the instant flat tile (task #79's placeholder — zero I/O), marked
+            // `is_preview` so the selection's fitted poster upgrades it in place
+            // exactly like a photo's blurry→sharp. Landing on a film — or the
+            // sync first paint of a movie folder — never blocks on the
+            // multi-second walk. Selection platforms only: the legacy platforms
+            // keep walking here so their behavior is unchanged until parity.
+            if allow_preview && poster_select_supported() {
+                let mut img = video_placeholder(container);
+                img.is_preview = true;
+                return Ok(img);
+            }
             #[cfg(any(windows, target_os = "macos"))]
             if let Some(path) = source.path(item) {
                 match pb_decode::decode_video_poster(path, fit, cancel) {
