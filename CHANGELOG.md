@@ -19,6 +19,12 @@ with any pre-release suffix carried only by the tag.
   right behind you used to be nearly last in line. And when a photo's full-resolution copy is
   already on hand, its sharp view is now produced directly on the graphics card in about a
   millisecond instead of re-processing the file from disk.
+- **Skipping around in a video lands faster, especially on 4K clips.** To reach the spot you
+  seek to, the app has to decode the frames leading up to it — but it used to fully process
+  (colour-convert and copy) every one of those in-between frames only to throw them away. It
+  now processes just the single frame you land on. Seeks that pass through many frames — big
+  jumps, and any seek on a hardware-decoded 4K video — are noticeably quicker (measured on a
+  4K60 clip: the skipped-over decode dropped from ~200 ms to ~80 ms).
 
 ### Fixed
 - **Moving to the next photo right after a fullscreen change stays sharp.** Toggling

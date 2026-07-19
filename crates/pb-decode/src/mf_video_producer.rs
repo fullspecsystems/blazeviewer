@@ -264,8 +264,8 @@ pub fn run_video_producer(
                     Err(_) => break 'outer,
                 }
                 let reader = active.as_ref().expect("reader set above");
-                match unsafe { read_one(reader, w, h, &mut kind) } {
-                    Ok(Read1::Eos) => {
+                match unsafe { read_raw(reader, w, h, &mut kind) } {
+                    Ok(Read1Raw::Eos) => {
                         // Sought at/near the end: the stream is over under the
                         // new generation; the reader is spent.
                         let _ = events.send(VideoProducerEvent::EndOfStream {
@@ -278,17 +278,28 @@ pub fn run_video_producer(
                         reader_pos = None;
                         break;
                     }
-                    Ok(Read1::Gap) => {}
-                    Ok(Read1::Frame { ts, pixels }) => {
+                    Ok(Read1Raw::Gap) => {}
+                    Ok(Read1Raw::Frame { ts, sample }) => {
                         // Every read advances the reader — track it even for discarded
                         // run-up frames, so a supersede mid-run-up leaves `reader_pos`
                         // truthful for the next hop decision.
                         reader_pos = Some(ts);
                         if ts >= abs_target {
+                            // The landing frame is the ONLY one read back/converted;
+                            // the run-up frames above dropped their samples unconverted
+                            // (task #4 — the recreate-seek stall was 30× this copy).
+                            let pixels = match unsafe { convert_sample(&sample, w, h, kind) } {
+                                Ok(p) => p,
+                                Err(e) => {
+                                    fail(e);
+                                    break 'outer;
+                                }
+                            };
                             landed = Some((ts, pixels));
                             break;
                         }
-                        // Keyframe→target run-up: discard, keep decoding forward.
+                        // Keyframe→target run-up: drop the raw sample (no readback, no
+                        // swizzle), keep decoding forward.
                         run_up_frames += 1;
                     }
                     Err(e) => {
@@ -424,12 +435,29 @@ enum Read1 {
     Gap,
 }
 
-unsafe fn read_one(
+/// The **un-converted** result of one `ReadSample` — the raw MF sample plus its
+/// timestamp, with the readback/swizzle deliberately *not* done yet. The seek
+/// run-up decodes forward through these and drops the discarded ones without ever
+/// touching their pixels: on the software path that skips the ~12 ms/frame BGRX→
+/// RGBA swizzle, on the hw path the ~5 ms/frame `Lock2DSize` readback — the whole
+/// recreate-seek stall (measured 347 ms → the landing frame alone at 4K60; the
+/// FFmpeg producer's convert-skip, mirrored here for task #4). Only the landing
+/// frame is converted via [`convert_sample`].
+enum Read1Raw {
+    Frame { ts: i64, sample: IMFSample },
+    Eos,
+    Gap,
+}
+
+/// `ReadSample` + the gap/EOS/size-change handling, returning the raw sample
+/// unconverted (see [`Read1Raw`]). Updates `kind`'s stride on a mid-stream
+/// media-type change so a later [`convert_sample`] uses the right pitch.
+unsafe fn read_raw(
     reader: &windows::Win32::Media::MediaFoundation::IMFSourceReader,
     w: u32,
     h: u32,
     kind: &mut OutKind,
-) -> Result<Read1, String> {
+) -> Result<Read1Raw, String> {
     let video = MF_SOURCE_READER_FIRST_VIDEO_STREAM.0 as u32;
     let mut flags = 0u32;
     let mut ts = 0i64;
@@ -445,7 +473,7 @@ unsafe fn read_one(
         )
         .map_err(mf_open_msg)?;
     if flags & (MF_SOURCE_READERF_ENDOFSTREAM.0 as u32) != 0 {
-        return Ok(Read1::Eos);
+        return Ok(Read1Raw::Eos);
     }
     // A mid-stream media-type change can move the stride (the size is fixed by
     // our negotiated output type); re-query it. NV12 reads its pitch per sample
@@ -461,16 +489,44 @@ unsafe fn read_one(
         }
     }
     let Some(sample) = sample else {
-        return Ok(Read1::Gap);
+        return Ok(Read1Raw::Gap);
     };
-    let pixels = match *kind {
+    Ok(Read1Raw::Frame { ts, sample })
+}
+
+/// Pack one raw sample into `pixels` per `OutKind` (RGBA8 swizzle, or the NV12
+/// `Lock2DSize` plane readback) — the per-frame cost the run-up avoids for every
+/// frame it discards.
+unsafe fn convert_sample(
+    sample: &IMFSample,
+    w: u32,
+    h: u32,
+    kind: OutKind,
+) -> Result<Vec<u8>, String> {
+    match kind {
         OutKind::Rgb32 { stride } => {
-            sample_to_rgba(&sample, w, h, stride).map_err(|e| format!("Media Foundation: {e}"))?
+            sample_to_rgba(sample, w, h, stride).map_err(|e| format!("Media Foundation: {e}"))
         }
-        OutKind::Nv12 => crate::mf_hw::sample_to_nv12(&sample, w, h)
-            .map_err(|e| format!("Media Foundation: {e}"))?,
-    };
-    Ok(Read1::Frame { ts, pixels })
+        OutKind::Nv12 => {
+            crate::mf_hw::sample_to_nv12(sample, w, h).map_err(|e| format!("Media Foundation: {e}"))
+        }
+    }
+}
+
+unsafe fn read_one(
+    reader: &windows::Win32::Media::MediaFoundation::IMFSourceReader,
+    w: u32,
+    h: u32,
+    kind: &mut OutKind,
+) -> Result<Read1, String> {
+    match read_raw(reader, w, h, kind)? {
+        Read1Raw::Eos => Ok(Read1::Eos),
+        Read1Raw::Gap => Ok(Read1::Gap),
+        Read1Raw::Frame { ts, sample } => {
+            let pixels = convert_sample(&sample, w, h, *kind)?;
+            Ok(Read1::Frame { ts, pixels })
+        }
+    }
 }
 
 /// Fresh reader for a seek landing: open + negotiate the SAME output kind and
