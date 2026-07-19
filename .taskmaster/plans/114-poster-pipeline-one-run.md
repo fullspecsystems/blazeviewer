@@ -415,3 +415,22 @@ All phases merge as one arc with one owner-testing round at the end.
 - **Owner sign-off 2026-07-19**: "implement the complete plan after your final review lands and
   you've implemented any important corrections" — rev 4 is those corrections; implementation
   begins on `feat/114-poster-pipeline`.
+- **Phase-1 implementation review (2026-07-19, commits 2ab7d274..a3630382): no P0s, 7×P1 +
+  3×P2 — all but one folded** in the follow-up commit: the artifact tag gained its `FitBox`
+  half (a promoted thumb-only walk's ~thumb output could pass the epoch check into the display
+  path); routing became representation-aware (Fill/1:1 displays the Original rep — the payload
+  was hardcoded to Fit and landed in the wrong slot); selector demand became per-pass live
+  union (`begin_pass`/`end_pass` — historical bits mis-classed jobs and poisoned the wrong
+  failed set); the payload's byte-budget now TRANSFERS to the synthetic display outcome
+  (`synthetic_from` — it was released while the Fit sat in `pending_uploads`); selections stay
+  tracked until their outcome is SENT (the untracked-channel window could double-walk); fresh
+  cores fence the selector to their starting `content_gen` (gen-0 vs gen-1 refused every
+  install); FFmpeg's judge reduction is width-anchored like the shared reducer (long-edge
+  judged portrait clips at a different scale than MF); `Thumbs.pending` marks tiles in the
+  derive queue (in-derive read as evicted → extra walk); thumb-cut resize errors propagate
+  (swallowed errors returned success-with-no-tile → eviction-loop walks). Confirmed correct by
+  the review: the pool's epoch exemption / generation replacement / promotion / thumb-slot
+  accounting / placeholder invariant, MF's ts+origin capture and origin-relative deep seeks,
+  the box reducer, Windows gating (non-Windows byte-identical), and privacy. **Deferred to the
+  measure phase (P2-10)**: the walk-level same-timestamp-at-every-size fixture test and the
+  corpus re-validation of `POSTER_DETAIL_MIN` at judge scale.

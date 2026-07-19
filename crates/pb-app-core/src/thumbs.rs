@@ -84,6 +84,11 @@ pub struct Thumbs {
     /// Offers sent minus results received — keeps the host pump polling while a
     /// derive is in flight.
     in_flight: usize,
+    /// Items with an accepted offer whose derived tile has not yet landed in
+    /// the cache (task #114, review f8): without this, a `Chosen` selection
+    /// whose tile is still in the derive queue reads as EVICTED to the fill
+    /// planner and triggers another full walk. Per-item, unlike `in_flight`.
+    pub pending: HashSet<usize>,
 }
 
 impl Default for Thumbs {
@@ -98,6 +103,7 @@ impl Default for Thumbs {
             tx: None,
             rx: None,
             in_flight: 0,
+            pending: HashSet::new(),
         }
     }
 }
@@ -181,6 +187,7 @@ impl Thumbs {
         };
         if tx.try_send(job).is_ok() {
             self.in_flight += 1;
+            self.pending.insert(item);
         }
     }
 
@@ -193,6 +200,7 @@ impl Thumbs {
         let mut landed = Vec::new();
         while let Ok(r) = rx.try_recv() {
             self.in_flight = self.in_flight.saturating_sub(1);
+            self.pending.remove(&r.item);
             landed.push(r);
         }
         let demand = self.demand(current);
@@ -233,6 +241,7 @@ impl Thumbs {
     pub fn clear_deck(&mut self) {
         self.cache.clear();
         self.failed.clear();
+        self.pending.clear();
         self.viewport = None;
         self.pending_scroll = None;
     }

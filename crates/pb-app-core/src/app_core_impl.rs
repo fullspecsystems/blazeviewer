@@ -104,7 +104,7 @@ impl AppCore {
         let (video_read_tx, video_read_rx) = std::sync::mpsc::channel();
         let source: Arc<dyn ItemSource> = Arc::new(FsSource::new(Vec::new()));
         let settings = settings::Settings::default();
-        AppCore {
+        let mut core = AppCore {
             now: Instant::now(),
             viewport,
             held: std::collections::HashMap::new(),
@@ -276,7 +276,12 @@ impl AppCore {
             settings,
             launch: LaunchOverrides::default(),
             effects: Vec::new(),
-        }
+        };
+        // The selector's fence must match the literal's starting content_gen
+        // (phase-1 review f6: a default selector at gen 0 against content gen 1
+        // refused every install and re-walked the first video forever).
+        core.poster_sel.reset(core.content_gen);
+        core
     }
 
     /// A **real, host-ready** `AppCore` for a native shell (the macOS SwiftUI host, NS1):
@@ -5795,8 +5800,10 @@ impl AppCore {
             (Vec::new(), Vec::new(), Vec::new());
         // Video items whose poster-selection want is already in this pass's list
         // (task #114): the thumb tier must union its demand into the ledger, not
-        // push a second want for the same identity.
+        // push a second want for the same identity. The pass brackets rebuild
+        // each selection's demand union from the LIVE consumers (review f3).
         let mut sel_pushed: HashSet<usize> = HashSet::new();
+        self.poster_sel.begin_pass();
         for &t in &self.targets {
             if self.failed.contains(&t) || pending_reps.contains(&(t, dk)) {
                 continue;
@@ -5973,6 +5980,11 @@ impl AppCore {
                             crate::video::LibraryItemKind::Video(_)
                         )
                     {
+                        // A tile still in the derive queue is NOT evicted
+                        // (review f8): skip until it lands or is dropped.
+                        if self.thumbs.pending.contains(&it) {
+                            continue;
+                        }
                         // `fill_plan` only yields items with no tile, so a
                         // `Chosen` here means the tile was evicted after the
                         // walk: phase-1 reopens for one fresh walk.
@@ -6002,6 +6014,9 @@ impl AppCore {
         // Parked full-res originals go LAST — below the display ladder and the thumb fills — so
         // they only ever decode in the pool's genuinely spare capacity (#106.7 §5).
         jobs.append(&mut parked);
+        // Selections no live consumer re-asked for this pass drop to Absent —
+        // their pool jobs die by level-triggered non-re-emission (review f3).
+        self.poster_sel.end_pass();
         self.pool.set_targets(self.epoch, &self.source, &jobs);
     }
 
@@ -7143,7 +7158,7 @@ impl AppCore {
     /// per-domain failed sets until the phase-4 retry machine lands.
     fn route_poster_selection(
         &mut self,
-        o: crate::decode_pool::Outcome,
+        mut o: crate::decode_pool::Outcome,
         ready: &mut Vec<crate::decode_pool::Outcome>,
     ) {
         let item = o.key.item;
@@ -7152,28 +7167,46 @@ impl AppCore {
             return; // another deck's walk — nothing here may touch this deck
         }
         let (thumb_want, display_want) = self.poster_sel.demands(item);
-        match o.selection {
+        let selection = o.selection.take();
+        match selection {
             Some(Ok(sel)) => {
-                let _ = self.poster_sel.choose(item, gen, sel.choice);
+                // The generation fence is AUTHORITATIVE (review f6): a refused
+                // install (e.g. a mis-fenced selector on a fresh core) must drop
+                // the payload wholesale, or pixels display while the ledger
+                // stays `Selecting` and re-walks forever.
+                if !self.poster_sel.choose(item, gen, sel.choice) {
+                    return;
+                }
                 if let Some(t) = sel.thumb_img {
                     // The cache's own deck generation fences the insert.
                     self.thumbs.offer(item, t);
                 }
                 if display_want {
+                    // BOTH halves of the artifact tag must match (review f1): the
+                    // epoch alone would admit a promoted thumb-only walk's
+                    // ~thumb-sized output as the display poster.
+                    let tag_fresh = o.fit_tag_epoch == self.epoch && o.fit_tag == self.decode_fit();
                     match sel.fit_img {
-                        Some(img) if o.fit_tag_epoch == self.epoch => {
-                            ready.push(crate::decode_pool::Outcome::synthetic(
+                        Some(img) if tag_fresh => {
+                            // Representation-aware (review f2): Fill/Original
+                            // mode displays the Original rep, and the fit=None
+                            // walk produced native pixels for exactly that. The
+                            // pool byte-budget rides along (review f4) so the
+                            // artifact keeps its backpressure while it waits in
+                            // pending_uploads.
+                            ready.push(crate::decode_pool::Outcome::synthetic_from(
+                                &mut o,
                                 item,
                                 self.epoch,
-                                pb_core::RepKind::Fit,
+                                self.display_kind(),
                                 Ok(img),
                             ));
                         }
                         _ => {
-                            // Resized mid-walk: the Fit artifact alone is stale.
-                            // Reopen so the next prefetch pass runs one recut
-                            // (phase 1; the phase-2 replay makes this a single
-                            // seek-decode instead).
+                            // Resized/mode-switched mid-walk: the artifact alone
+                            // is stale. Reopen so the next prefetch pass runs one
+                            // recut (phase 1; the phase-2 replay makes this a
+                            // single seek-decode instead).
                             self.poster_sel.reopen(item);
                         }
                     }
@@ -7183,7 +7216,7 @@ impl AppCore {
                 if e.is_cancelled() {
                     return; // belt-and-braces; the pool discards these upstream
                 }
-                // Legacy failure mapping per recorded demand domain (phase 4
+                // Legacy failure mapping per LIVE demand domain (phase 4
                 // replaces this with the WaitingForReentry retry machine).
                 if display_want {
                     eprintln!("poster selection failed for item {item}: {e}");
@@ -15706,6 +15739,7 @@ mod tests {
             0,
             core.content_gen,
             core.epoch,
+            core.decode_fit(),
             Ok(poster_payload(0, (800, 450))),
         ));
         core.drain_results();
@@ -15768,6 +15802,7 @@ mod tests {
             0,
             core.content_gen,
             core.epoch,
+            core.decode_fit(),
             Ok(poster_payload(0, (800, 450))),
         ));
         core.drain_results();
@@ -15783,6 +15818,53 @@ mod tests {
     }
 
     #[test]
+    fn a_fresh_core_fences_selections_to_its_starting_content_gen() {
+        // Review f6: a default (gen-0) selector against content_gen 1 refused
+        // every install and re-walked the first video forever.
+        let core = test_core();
+        assert_eq!(core.poster_sel.content_gen(), core.content_gen);
+    }
+
+    #[test]
+    fn a_thumb_sized_fit_artifact_never_lands_as_the_display_poster() {
+        // Review f1: a thumb-only walk promoted mid-flight has the RIGHT epoch
+        // but a ~thumb-sized Fit. Both tag halves must match; a mismatch drops
+        // the artifact and reopens for a recut at the display fit.
+        let mut core = test_core();
+        core.source = photos_named(&["clip.mkv"]);
+        core.playlist = Playlist::new(1, 0);
+        core.fit = Some(FitBox {
+            max_width: 800,
+            max_height: 600,
+        });
+        core.targets = vec![0];
+        core.ring = ResidentRing::new(4);
+        core.poster_sel.reset(core.content_gen);
+        core.poster_sel
+            .want(0, crate::poster_select::Demand::Display);
+        let thumb_fit = Some(crate::thumbs::thumb_fit()); // NOT the display fit
+        core.pending_uploads.push(Outcome::synthetic_selection(
+            0,
+            core.content_gen,
+            core.epoch, // epoch alone says "fresh" — the FitBox half must veto
+            thumb_fit,
+            Ok(poster_payload(0, (160, 90))),
+        ));
+        core.drain_results();
+        assert!(
+            core.ring.slot_for_rep(0, pb_core::RepKind::Fit).is_none(),
+            "the thumb-sized artifact must not become the display poster"
+        );
+        // Phase 1: the recut is a fresh walk, so the reopen drops the whole
+        // entry (the phase-2 replay will keep the choice and re-decode only).
+        assert!(
+            core.poster_sel
+                .want(0, crate::poster_select::Demand::Display),
+            "reopened for a recut at the display fit"
+        );
+    }
+
+    #[test]
     fn a_stale_deck_selection_payload_is_dropped_wholesale() {
         let mut core = test_core();
         core.source = photos_named(&["clip.mkv"]);
@@ -15795,6 +15877,7 @@ mod tests {
             0,
             stale_gen,
             core.epoch,
+            core.decode_fit(),
             Ok(poster_payload(0, (800, 450))),
         ));
         core.drain_results();
@@ -15824,6 +15907,7 @@ mod tests {
             0,
             core.content_gen,
             stale_epoch,
+            core.decode_fit(),
             Ok(poster_payload(0, (800, 450))),
         ));
         core.drain_results();
@@ -15855,6 +15939,7 @@ mod tests {
             0,
             core.content_gen,
             core.epoch,
+            core.decode_fit(),
             Err(pb_decode::DecodeError::Corrupt("truncated".into())),
         ));
         core.drain_results();

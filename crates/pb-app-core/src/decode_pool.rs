@@ -189,6 +189,11 @@ pub struct Outcome {
     /// staleness tag for selections (Codex #114 r3: a selection survives a
     /// resize, its cut Fit does not). Equals `key.epoch` for non-selections.
     pub fit_tag_epoch: u64,
+    /// The `FitBox` the job's artifacts were cut for — the OTHER half of the
+    /// artifact tag (phase-1 review finding 1: a thumb-only walk promoted to
+    /// display mid-flight has the right epoch but a ~thumb-sized Fit; the epoch
+    /// alone would admit it as the display poster).
+    pub fit_tag: Option<FitBox>,
     /// The JOB's `allow_preview` flag (not the image's `is_preview`). Load-bearing for the
     /// drain's upgrade bookkeeping: an `is_preview` image from a `preview: true` job landing on
     /// an already-resident preview is a DUPLICATE (the pool untracks a finished job before its
@@ -223,9 +228,28 @@ impl Outcome {
             result,
             selection: None,
             fit_tag_epoch: epoch,
+            fit_tag: None,
             preview: false, // a synthetic poster is a definitive full, not a preview request
             _budget: None,
         }
+    }
+
+    /// [`synthetic`](Self::synthetic) that additionally **inherits `donor`'s
+    /// pool byte-budget reservation** (phase-1 review finding 4): when a
+    /// selection's Fit artifact re-enters the drain as a display outcome, the
+    /// backpressure must follow the pixels — otherwise dropping the selection
+    /// outcome releases the whole summed charge while the Fit still sits in
+    /// `pending_uploads`.
+    pub fn synthetic_from(
+        donor: &mut Outcome,
+        item: usize,
+        epoch: u64,
+        rep_kind: pb_core::RepKind,
+        result: Result<DecodedImage, DecodeError>,
+    ) -> Self {
+        let mut o = Outcome::synthetic(item, epoch, rep_kind, result);
+        o._budget = donor._budget.take();
+        o
     }
 
     /// Mark this (synthetic/test) outcome as produced by an `allow_preview` job — the
@@ -242,6 +266,7 @@ impl Outcome {
         item: usize,
         gen: u64,
         fit_tag_epoch: u64,
+        fit_tag: Option<FitBox>,
         selection: Result<pb_decode::PosterSelection, DecodeError>,
     ) -> Self {
         Outcome {
@@ -254,6 +279,7 @@ impl Outcome {
             result: Err(DecodeError::Corrupt("poster-selection payload".into())),
             selection: Some(selection),
             fit_tag_epoch,
+            fit_tag,
             preview: false,
             _budget: None,
         }
@@ -632,11 +658,21 @@ fn worker_loop(shared: Arc<Shared>) {
 
         // Account for the result and stop tracking the item — unless it was
         // cancelled mid-decode, in which case discard the result entirely.
+        // A SELECTION keeps its dedup entry until the outcome has been SENT
+        // (phase-1 review finding 5): untracking before the send opens a window
+        // where a prefetch pass sees no tracked job while the payload sits
+        // undrained in the channel — and starts a second full walk.
+        let is_selection = job.key.purpose == Purpose::PosterSelect;
         {
             let mut inner = shared.inner.lock().unwrap();
-            untrack(&mut inner, &job);
+            if !is_selection {
+                untrack(&mut inner, &job);
+            }
             release_thumb_slot(&mut inner, took_thumb_slot);
             if job.cancel.load(Ordering::Acquire) {
+                if is_selection {
+                    untrack(&mut inner, &job);
+                }
                 drop(inner);
                 shared.cv.notify_all();
                 continue;
@@ -654,6 +690,7 @@ fn worker_loop(shared: Arc<Shared>) {
             result,
             selection,
             fit_tag_epoch: job.fit_tag_epoch,
+            fit_tag: job.fit,
             preview: job.preview,
             _budget: Some(BudgetGuard {
                 shared: shared.clone(),
@@ -662,6 +699,12 @@ fn worker_loop(shared: Arc<Shared>) {
         };
         if shared.results_tx.send(outcome).is_err() {
             return; // receiver gone; the guard frees the bytes as it drops
+        }
+        if is_selection {
+            let mut inner = shared.inner.lock().unwrap();
+            untrack(&mut inner, &job);
+            drop(inner);
+            shared.cv.notify_all();
         }
     }
 }

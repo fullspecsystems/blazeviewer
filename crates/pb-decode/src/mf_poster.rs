@@ -170,9 +170,13 @@ pub fn decode_video_poster_select(
 ) -> Result<crate::PosterSelection, DecodeError> {
     let (img, choice) = poster_selected_input(input, fit, cancel)?;
     // Cut the thumb from the SAME winner (worker-side; the fitted poster is
-    // >= thumb size in every real layout, and downscale never upscales).
+    // >= thumb size in every real layout, and downscale never upscales). A
+    // resize failure is a real failure — swallowing it would return a
+    // "successful" selection with no tile, which the thumb tier later reads as
+    // an eviction and re-walks (phase-1 review f9). The transient clone doubles
+    // the fitted buffer; the phase-2 native-RAM permit accounts that peak.
     let thumb_img = common::downscale_to_fit(img.pixels.clone(), img.width, img.height, thumb_fit)
-        .ok()
+        .map(Some)?
         .map(|(px, w, h)| DecodedImage {
             width: w,
             height: h,

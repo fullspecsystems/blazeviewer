@@ -977,6 +977,9 @@ impl App {
             launch: pb_app_core::LaunchOverrides::default(),
             effects: Vec::new(),
         };
+        // The selector's fence must match the starting content_gen (#114 review
+        // f6: a gen-0 selector against content gen 1 refused every install).
+        core.poster_sel.reset(core.content_gen);
         // Session-only CLI launch overrides → live state (never persisted); see the method.
         core.apply_launch_overrides(overrides);
         Self {

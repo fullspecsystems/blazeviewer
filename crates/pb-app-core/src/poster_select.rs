@@ -143,6 +143,36 @@ impl PosterSelector {
     pub fn reopen(&mut self, item: usize) {
         self.items.remove(&item);
     }
+
+    /// Start an emission pass: clear every `Selecting` entry's demand bits so
+    /// this pass's [`want`](Self::want) calls rebuild the union from the LIVE
+    /// consumers (phase-1 review finding 3: demand recorded once was historical
+    /// — a consumer that left kept its bit forever, mis-classing the job and
+    /// poisoning the wrong failed set on error).
+    pub fn begin_pass(&mut self) {
+        for sel in self.items.values_mut() {
+            if let Selection::Selecting { thumb, display } = sel {
+                *thumb = false;
+                *display = false;
+            }
+        }
+    }
+
+    /// End an emission pass: a `Selecting` entry whose demand union stayed
+    /// empty has NO live consumer — drop it to Absent so its (uncancellable
+    /// from here) pool job dies via level-triggered non-re-emission, and a
+    /// future consumer starts fresh.
+    pub fn end_pass(&mut self) {
+        self.items.retain(|_, sel| {
+            !matches!(
+                sel,
+                Selection::Selecting {
+                    thumb: false,
+                    display: false,
+                }
+            )
+        });
+    }
 }
 
 #[cfg(test)]
@@ -188,6 +218,29 @@ mod tests {
         assert!(!s.choose(5, 2, choice()), "old-deck payload refused");
         assert!(s.choice(5).is_none());
         assert!(s.want(5, Demand::Display), "still selecting");
+    }
+
+    #[test]
+    fn pass_brackets_rebuild_demand_from_live_consumers() {
+        // Review f3: demand recorded once was historical — a consumer that left
+        // kept its bit forever. The pass brackets rebuild the union each pass.
+        let mut s = PosterSelector::default();
+        s.want(5, Demand::Thumb);
+        s.want(5, Demand::Display);
+        assert_eq!(s.demands(5), (true, true));
+        // Next pass: only the thumb re-asks — display's bit must not linger.
+        s.begin_pass();
+        s.want(5, Demand::Thumb);
+        s.end_pass();
+        assert_eq!(s.demands(5), (true, false), "display demand left");
+        assert!(!s.display_class(5), "the job de-classes with it");
+        // A pass where NO consumer re-asks drops the entry entirely: the pool
+        // job dies by level-triggered non-re-emission and a future consumer
+        // starts fresh.
+        s.begin_pass();
+        s.end_pass();
+        assert_eq!(s.demands(5), (false, false));
+        assert!(s.want(5, Demand::Display), "absent again — fresh walk");
     }
 
     #[test]

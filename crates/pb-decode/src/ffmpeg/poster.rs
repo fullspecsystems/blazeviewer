@@ -331,22 +331,20 @@ fn poster_inner(
     assemble_poster(full_conv, best, walk.facts.codec, disp_w, disp_h)
 }
 
-/// The reduced scale to *score* candidates at: the shared judge width (task
+/// The reduced scale to *score* candidates at: the shared judge WIDTH (task
 /// #114, `video::POSTER_JUDGE_WIDTH`) so the MF and FFmpeg walks pick the SAME
 /// frame for the same clip — the judge is the resolution-independence contract,
-/// not a private optimization. Capped so small clips (test fixtures) walk at
-/// their native size unchanged.
+/// not a private optimization. Width-anchored like `poster_judge_frame`
+/// (phase-1 review f7: a long-edge reduction judged portrait clips at a
+/// different scale than MF, making the detail threshold backend-dependent).
+/// Small clips (test fixtures) walk at their native size unchanged.
 fn walk_dims(fw: u32, fh: u32) -> (u32, u32) {
     let walk_max = crate::video::POSTER_JUDGE_WIDTH;
-    let long = fw.max(fh);
-    if long <= walk_max {
+    if fw <= walk_max {
         return (fw, fh);
     }
-    let s = walk_max as f32 / long as f32;
-    (
-        ((fw as f32 * s).round() as u32).max(2) & !1,
-        ((fh as f32 * s).round() as u32).max(2) & !1,
-    )
+    let s = walk_max as f32 / fw as f32;
+    (walk_max & !1, ((fh as f32 * s).round() as u32).max(2) & !1)
 }
 
 /// Phase 2 of the walk: seek past the intro (feature-film case), shallow → deep,
