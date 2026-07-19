@@ -610,6 +610,12 @@ pub fn poster_judge(rgba: &[u8], w: u32, h: u32) -> (bool, f32) {
     )
 }
 
+/// The native-capped edge for poster Originals (task #114 phase 3, owner
+/// decision: 4096 — exactly native for a 4K film, which displays 1:1 at
+/// 3840×2160 on a 7680-wide screen; only >4K sources are reduced). The
+/// native-variant walk and the replay both negotiate within this box.
+pub const POSTER_NATIVE_CAP_EDGE: u32 = 4096;
+
 // --- Deep-seek walk policy (shared by every backend's poster) --------------
 // A feature film opens black/logo/fade for its first 30–90 s, so a head-only
 // walk hands back a black frame. When the head walk finds nothing good, seek

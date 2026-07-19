@@ -298,7 +298,9 @@ impl AppCore {
                 crate::engine::decode_item_for(src, item, fit, allow_preview, purpose, cancel)
             });
         let select: Arc<crate::decode_pool::SelectFn> =
-            Arc::new(|src, item, fit, cancel| crate::engine::select_item(src, item, fit, cancel));
+            Arc::new(|src, item, fit, display_class, replay, cancel| {
+                crate::engine::select_item(src, item, fit, display_class, replay, cancel)
+            });
         let (pool, results) = crate::decode_pool::DecodePool::new_with_select(
             crate::decode_pool::recommended_workers(),
             POOL_BUDGET_BYTES,
@@ -5826,6 +5828,13 @@ impl AppCore {
                         crate::video::LibraryItemKind::Video(_)
                     )
                 {
+                    // A remembered choice makes the re-need a cheap replay
+                    // (phase 3) instead of a fresh walk; the hint rides the
+                    // want and the ledger reopens either way.
+                    let hint = self
+                        .poster_sel
+                        .choice(t)
+                        .map(|c| (c.origin_hns, c.relative_hns));
                     if !self
                         .poster_sel
                         .want(t, crate::poster_select::Demand::Display)
@@ -5843,7 +5852,11 @@ impl AppCore {
                     if fit.is_some() {
                         previews.push(Job::display(t, fit, true));
                     }
-                    previews.push(Job::poster_select(t, fit, self.content_gen, true));
+                    previews.push(
+                        Job::poster_select(t, fit, self.content_gen, true)
+                            .with_replay(hint)
+                            .with_native_class(crate::engine::poster_walk_native()),
+                    );
                     continue;
                 }
                 // Preview-first (`allow_preview`) is a FIT-scale concept: an embedded ~256px
@@ -5865,6 +5878,10 @@ impl AppCore {
                         crate::video::LibraryItemKind::Video(_)
                     )
                 {
+                    let hint = self
+                        .poster_sel
+                        .choice(t)
+                        .map(|c| (c.origin_hns, c.relative_hns));
                     if !self
                         .poster_sel
                         .want(t, crate::poster_select::Demand::Display)
@@ -5875,7 +5892,11 @@ impl AppCore {
                             .want(t, crate::poster_select::Demand::Display);
                     }
                     if sel_pushed.insert(t) {
-                        head.push(Job::poster_select(t, fit, self.content_gen, true));
+                        head.push(
+                            Job::poster_select(t, fit, self.content_gen, true)
+                                .with_replay(hint)
+                                .with_native_class(crate::engine::poster_walk_native()),
+                        );
                     }
                 } else {
                     head.push(Job::display(t, fit, false));
@@ -5898,6 +5919,10 @@ impl AppCore {
                     crate::video::LibraryItemKind::Video(_)
                 )
             {
+                let hint = self
+                    .poster_sel
+                    .choice(t)
+                    .map(|c| (c.origin_hns, c.relative_hns));
                 if !self
                     .poster_sel
                     .want(t, crate::poster_select::Demand::Display)
@@ -5908,7 +5933,11 @@ impl AppCore {
                         .want(t, crate::poster_select::Demand::Display);
                 }
                 if sel_pushed.insert(t) {
-                    fulls.push(Job::poster_select(t, fit, self.content_gen, true));
+                    fulls.push(
+                        Job::poster_select(t, fit, self.content_gen, true)
+                            .with_replay(hint)
+                            .with_native_class(crate::engine::poster_walk_native()),
+                    );
                 }
                 continue;
             }
@@ -5940,11 +5969,50 @@ impl AppCore {
             if matches!(dk, pb_core::RepKind::Fit) || self.fit.is_some() {
                 let radius = self.full_res_radius();
                 for it in self.full_res_window(radius) {
-                    if self.failed.contains(&it)
-                        || pending_reps.contains(&(it, other_kind))
-                        || self.ring.is_tracked_rep(it, other_kind)
-                        || !self.full_res_eligible(it)
+                    if self.failed.contains(&it) || pending_reps.contains(&(it, other_kind)) {
+                        continue;
+                    }
+                    // Task #114 phase 3: a PARKED video with a chosen poster but
+                    // no resident Original pre-installs it via a cheap replay in
+                    // spare capacity — so the first fullscreen toggle GPU-derives
+                    // instantly, exactly like a photo. The A/B kept the browse
+                    // walks fitted (fastest time-to-poster); this is where the
+                    // native frame gets fetched for the photos you actually sit
+                    // on. Fit-mode only (Original mode already displays native).
+                    if matches!(dk, pb_core::RepKind::Fit)
+                        && crate::engine::poster_select_supported()
+                        && matches!(
+                            crate::video::item_kind(self.source.as_ref(), it),
+                            crate::video::LibraryItemKind::Video(_)
+                        )
                     {
+                        if self
+                            .ring
+                            .slot_for_rep(it, pb_core::RepKind::Original)
+                            .is_none()
+                            && !self.poster_sel.original_blocked(it)
+                        {
+                            let hint = self
+                                .poster_sel
+                                .choice(it)
+                                .map(|c| (c.origin_hns, c.relative_hns));
+                            if hint.is_some() {
+                                self.poster_sel.reopen(it);
+                            }
+                            let selecting = self
+                                .poster_sel
+                                .want(it, crate::poster_select::Demand::Display);
+                            if selecting && sel_pushed.insert(it) {
+                                parked.push(
+                                    Job::poster_select(it, fit, self.content_gen, true)
+                                        .with_replay(hint)
+                                        .with_native_class(true),
+                                );
+                            }
+                        }
+                        continue;
+                    }
+                    if self.ring.is_tracked_rep(it, other_kind) || !self.full_res_eligible(it) {
                         continue;
                     }
                     parked.push(Job::display(it, other_fit, false));
@@ -7190,16 +7258,18 @@ impl AppCore {
                         Some(img) if tag_fresh => {
                             // Representation-aware (review f2): Fill/Original
                             // mode displays the Original rep, and the fit=None
-                            // walk produced native pixels for exactly that. The
-                            // pool byte-budget rides along (review f4) so the
-                            // artifact keeps its backpressure while it waits in
-                            // pending_uploads.
-                            ready.push(crate::decode_pool::Outcome::synthetic_from(
+                            // walk produced native pixels for exactly that. Each
+                            // artifact carries its SHARE of the pool byte-budget
+                            // (review f4 + phase 3): backpressure follows the
+                            // pixels through pending_uploads.
+                            let bytes = img.pixels.len();
+                            ready.push(crate::decode_pool::Outcome::synthetic_carved(
                                 &mut o,
                                 item,
                                 self.epoch,
                                 self.display_kind(),
                                 Ok(img),
+                                bytes,
                             ));
                         }
                         _ => {
@@ -7208,6 +7278,37 @@ impl AppCore {
                             // recut (phase 1; the phase-2 replay makes this a
                             // single seek-decode instead).
                             self.poster_sel.reopen(item);
+                        }
+                    }
+                    // Phase 3: the native winner becomes the video's Original,
+                    // so a resize GPU-derives the new Fit like a photo (#110 —
+                    // the resize-spinner kill). Mode-0 only: an enabled color
+                    // transform would store mode-1 (deliberately unmipped and
+                    // derive-rejected, gpu.rs) — those posters keep the replay
+                    // path, color-correct; their fp16 bake lands with 110d.
+                    // Fill/Original mode already consumed the native as its
+                    // display artifact, so this is Fit-mode work.
+                    if self.display_kind() == pb_core::RepKind::Fit {
+                        if let Some(native) = sel.native {
+                            if native.color.enabled {
+                                // Mode-1: remember, so the parked pre-install
+                                // stops replaying this video forever.
+                                self.poster_sel.block_original(item);
+                            } else if self
+                                .ring
+                                .slot_for_rep(item, pb_core::RepKind::Original)
+                                .is_none()
+                            {
+                                let bytes = native.pixels.len();
+                                ready.push(crate::decode_pool::Outcome::synthetic_carved(
+                                    &mut o,
+                                    item,
+                                    self.epoch,
+                                    pb_core::RepKind::Original,
+                                    Ok(native),
+                                    bytes,
+                                ));
+                            }
                         }
                     }
                 }
@@ -15815,6 +15916,126 @@ mod tests {
             "the fitted poster is the definitive full - placeholder retired"
         );
         assert!(core.poster_sel.choice(0).is_some());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_parked_video_with_a_choice_preinstalls_its_original_via_replay() {
+        // Phase 3: parked on a film with a sharp poster but no Original — the
+        // parked tier asks for a replay pre-install (so the first fullscreen
+        // toggle derives instantly). A mode-1-blocked video never asks.
+        let mut core = test_core();
+        core.source = photos_named(&["clip.mkv"]);
+        core.playlist = Playlist::new(1, 0);
+        core.fit = Some(FitBox {
+            max_width: 800,
+            max_height: 600,
+        });
+        core.ring = ResidentRing::new(4);
+        let fit_rep = core.rep_of(pb_core::RepKind::Fit);
+        make_resident(&mut core, 0, fit_rep, &[0]); // sharp poster resident
+        core.poster_sel.reset(core.content_gen);
+        let choice = poster_payload(0, (8, 8)).choice;
+        assert!(core.poster_sel.choose(0, core.content_gen, choice));
+        core.request_prefetch();
+        assert_eq!(
+            core.poster_sel.demands(0),
+            (false, true),
+            "the parked tier reopened the selection for the Original pre-install"
+        );
+        // A blocked video (mode-1 native) must stay quiet.
+        let mut core = test_core();
+        core.source = photos_named(&["clip.mkv"]);
+        core.playlist = Playlist::new(1, 0);
+        core.fit = Some(FitBox {
+            max_width: 800,
+            max_height: 600,
+        });
+        core.ring = ResidentRing::new(4);
+        let fit_rep = core.rep_of(pb_core::RepKind::Fit);
+        make_resident(&mut core, 0, fit_rep, &[0]);
+        core.poster_sel.reset(core.content_gen);
+        assert!(core.poster_sel.choose(0, core.content_gen, choice));
+        core.poster_sel.block_original(0);
+        core.request_prefetch();
+        assert_eq!(
+            core.poster_sel.demands(0),
+            (false, false),
+            "a mode-1-blocked video never replays for an Original"
+        );
+    }
+
+    #[test]
+    fn a_native_winner_installs_as_the_videos_original_mode_0_only() {
+        // Phase 3: a mode-0 native winner rides the drain as the video's
+        // Original (so a resize GPU-derives like a photo); an enabled color
+        // transform (mode 1 = unmipped, derive-rejected) must NOT install.
+        let mut core = test_core();
+        core.source = photos_named(&["clip.mkv", "clip2.mkv"]);
+        core.playlist = Playlist::new(2, 0);
+        core.fit = Some(FitBox {
+            max_width: 800,
+            max_height: 600,
+        });
+        core.targets = vec![0, 1];
+        core.ring = ResidentRing::new(8);
+        core.poster_sel.reset(core.content_gen);
+        core.poster_sel
+            .want(0, crate::poster_select::Demand::Display);
+        core.poster_sel
+            .want(1, crate::poster_select::Demand::Display);
+        let native_img = |enabled: bool| {
+            let mut c = pb_decode::ColorTransform::srgb();
+            c.enabled = enabled;
+            pb_decode::DecodedImage {
+                width: 320,
+                height: 180,
+                orig_width: 3840,
+                orig_height: 2160,
+                codec: "HEVC",
+                format: pb_decode::PixelFormat::Rgba8,
+                pixels: vec![64; 320 * 180 * 4],
+                is_preview: false,
+                color: c,
+                peak: 1.0,
+                animated: None,
+            }
+        };
+        let mut p0 = poster_payload(0, (800, 450));
+        p0.native = Some(native_img(false)); // mode 0: installable
+        let mut p1 = poster_payload(1, (800, 450));
+        p1.native = Some(native_img(true)); // enabled transform: mode 1, skip
+        core.pending_uploads.push(Outcome::synthetic_selection(
+            0,
+            core.content_gen,
+            core.epoch,
+            core.decode_fit(),
+            Ok(p0),
+        ));
+        core.pending_uploads.push(Outcome::synthetic_selection(
+            1,
+            core.content_gen,
+            core.epoch,
+            core.decode_fit(),
+            Ok(p1),
+        ));
+        core.drain_results();
+        assert!(
+            core.ring.slot_for_rep(0, pb_core::RepKind::Fit).is_some(),
+            "the fitted poster landed"
+        );
+        assert!(
+            core.ring
+                .slot_for_rep(0, pb_core::RepKind::Original)
+                .is_some(),
+            "the mode-0 native installed as the Original (the resize fix)"
+        );
+        assert!(
+            core.ring
+                .slot_for_rep(1, pb_core::RepKind::Original)
+                .is_none(),
+            "an enabled-transform native must not install (mode-1 can't derive)"
+        );
     }
 
     #[test]

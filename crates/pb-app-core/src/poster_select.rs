@@ -51,6 +51,11 @@ pub enum Selection {
 pub struct PosterSelector {
     content_gen: u64,
     items: HashMap<usize, Selection>,
+    /// Items whose native winner can NOT install as an Original (an enabled
+    /// color transform — mode 1 is unmipped and derive-rejected). Stops the
+    /// parked pre-install from replaying such a video forever. Content-inherent:
+    /// survives `reopen` (artifact re-needs), cleared by `reset`/`forget`.
+    original_blocked: std::collections::HashSet<usize>,
 }
 
 impl PosterSelector {
@@ -63,6 +68,7 @@ impl PosterSelector {
     /// (deck rebuild, source replacement, teardown).
     pub fn reset(&mut self, content_gen: u64) {
         self.items.clear();
+        self.original_blocked.clear();
         self.content_gen = content_gen;
     }
 
@@ -70,6 +76,18 @@ impl PosterSelector {
     /// rotation path re-encodes pixels under the same index).
     pub fn forget(&mut self, item: usize) {
         self.items.remove(&item);
+        self.original_blocked.remove(&item);
+    }
+
+    /// Record that `item`'s native winner cannot install as an Original (mode-1
+    /// color) — the parked pre-install stops asking.
+    pub fn block_original(&mut self, item: usize) {
+        self.original_blocked.insert(item);
+    }
+
+    /// Whether the Original install is known-impossible for `item`.
+    pub fn original_blocked(&self, item: usize) -> bool {
+        self.original_blocked.contains(&item)
     }
 
     /// Record `demand` for `item` and say whether the selection WANT must be

@@ -135,20 +135,23 @@ pub fn decode_video_poster_input(
     fit: Option<FitBox>,
     cancel: &AtomicBool,
 ) -> Result<DecodedImage, DecodeError> {
-    poster_selected_input(input, fit, cancel).map(|(img, _)| img)
+    poster_selected_input(input, fit, false, cancel).map(|(img, _)| img)
 }
 
 /// The walk plus its choice — shared plumbing for the legacy poster entry
-/// points and the task-#114 selection.
+/// points and the task-#114 selection. `native_walk` (phase-2 variant A)
+/// negotiates within the [`POSTER_NATIVE_CAP_EDGE`] box instead of the display
+/// fit and returns the winner at that size (the caller cuts the artifacts).
 fn poster_selected_input(
     input: &crate::VideoInput,
     fit: Option<FitBox>,
+    native_walk: bool,
     cancel: &AtomicBool,
 ) -> Result<(DecodedImage, crate::PosterChoice), DecodeError> {
     ensure_mf();
     unsafe {
         let reader = open_video_reader(input)?;
-        let result = poster_inner(&reader, input, fit, cancel);
+        let result = poster_inner(&reader, input, fit, native_walk, cancel);
         // Mid-stream reader teardown blocks ~1 s on HEVC — retire off-thread so the
         // decode worker moves on to the next item immediately.
         retire_reader(reader);
@@ -166,37 +169,182 @@ pub fn decode_video_poster_select(
     input: &crate::VideoInput,
     fit: Option<FitBox>,
     thumb_fit: FitBox,
+    native_walk: bool,
+    want_native: bool,
     cancel: &AtomicBool,
 ) -> Result<crate::PosterSelection, DecodeError> {
-    let (img, choice) = poster_selected_input(input, fit, cancel)?;
-    // Cut the thumb from the SAME winner (worker-side; the fitted poster is
-    // >= thumb size in every real layout, and downscale never upscales). A
-    // resize failure is a real failure — swallowing it would return a
-    // "successful" selection with no tile, which the thumb tier later reads as
-    // an eviction and re-walks (phase-1 review f9). The transient clone doubles
-    // the fitted buffer; the phase-2 native-RAM permit accounts that peak.
-    let thumb_img = common::downscale_to_fit(img.pixels.clone(), img.width, img.height, thumb_fit)
-        .map(Some)?
-        .map(|(px, w, h)| DecodedImage {
+    let (img, choice) = poster_selected_input(input, fit, native_walk, cancel)?;
+    cut_selection(img, choice, fit, thumb_fit, native_walk, want_native)
+}
+
+/// Cut every consumer's artifact from one winning frame (`img` is at walk size:
+/// the fitted poster in the fitted variant, native-capped in the native variant
+/// and in a replay). Resize failures are REAL failures (phase-1 review f9) —
+/// a success-with-no-tile reads as an eviction later and re-walks. Transient
+/// clones (thumb cut, native-mode fit cut) are what the phase-2 native permit
+/// bounds.
+fn cut_selection(
+    img: DecodedImage,
+    choice: crate::PosterChoice,
+    fit: Option<FitBox>,
+    thumb_fit: FitBox,
+    native_walk: bool,
+    want_native: bool,
+) -> Result<crate::PosterSelection, DecodeError> {
+    let cut = |src: &DecodedImage, to: FitBox| -> Result<DecodedImage, DecodeError> {
+        let (px, w, h) = common::downscale_to_fit(src.pixels.clone(), src.width, src.height, to)?;
+        Ok(DecodedImage {
             width: w,
             height: h,
-            orig_width: img.orig_width,
-            orig_height: img.orig_height,
-            codec: img.codec,
+            orig_width: src.orig_width,
+            orig_height: src.orig_height,
+            codec: src.codec,
             format: PixelFormat::Rgba8,
             pixels: px,
             is_preview: false,
-            color: img.color,
-            peak: img.peak,
+            color: src.color,
+            peak: src.peak,
             animated: None,
+        })
+    };
+    let thumb_img = Some(cut(&img, thumb_fit)?);
+    if !native_walk {
+        // Fitted variant: the winner IS the display Fit; no native retained.
+        return Ok(crate::PosterSelection {
+            choice,
+            fit_img: Some(img),
+            thumb_img,
+            native: None,
         });
+    }
+    // Native variant / replay: the winner is native-capped. Cut the display Fit
+    // from it; keep the native only when the consumer union wants it (a
+    // thumb-only selection drops it — plan §3, demand-gated admission).
+    let (fit_img, native) = match fit {
+        Some(f) => {
+            let fitted = Some(cut(&img, f)?);
+            (fitted, want_native.then_some(img))
+        }
+        // Fill/Original mode: the native IS the display artifact. Clone only
+        // when the Original install wants its own copy too.
+        None => {
+            if want_native {
+                (Some(img.clone()), Some(img))
+            } else {
+                (Some(img), None)
+            }
+        }
+    };
     Ok(crate::PosterSelection {
         choice,
-        fit_img: Some(img),
+        fit_img,
         thumb_img,
-        native: None, // phase 3 (the Original install) materializes this
+        native,
     })
 }
+
+/// Decode-forward REPLAY of an already-chosen poster frame (task #114 phase 3):
+/// fresh reader, absolute seek to `origin + relative` (which lands on the
+/// preceding keyframe), then decode forward until the target timestamp — the
+/// playback seek algorithm, reproducing the SAME frame by timestamp match,
+/// never "first frame after seek". One GOP of decode at most in practice;
+/// deadline-capped for hostile indexes. The frame is negotiated native-capped
+/// so it can serve every artifact, including the Original install.
+pub fn decode_video_poster_replay(
+    input: &crate::VideoInput,
+    origin_hns: i64,
+    relative_hns: i64,
+    fit: Option<FitBox>,
+    thumb_fit: FitBox,
+    want_native: bool,
+    cancel: &AtomicBool,
+) -> Result<crate::PosterSelection, DecodeError> {
+    ensure_mf();
+    let deadline = Instant::now() + REPLAY_DEADLINE;
+    let target = origin_hns.saturating_add(relative_hns);
+    unsafe {
+        let reader = open_video_reader(input)?;
+        let result = (|| {
+            let info = stream_info(&reader)?;
+            let (disp_w, disp_h) = info.display_dims();
+            let cap = FitBox {
+                max_width: crate::video::POSTER_NATIVE_CAP_EDGE,
+                max_height: crate::video::POSTER_NATIVE_CAP_EDGE,
+            };
+            let dims = fit_dims(disp_w, disp_h, cap);
+            let (w, h, stride) = negotiate_rgb32(&reader, Some(dims))
+                .or_else(|_| negotiate_rgb32(&reader, None))
+                .map_err(|e| DecodeError::Corrupt(mf_open_msg(e)))?;
+            let pos = propvariant_i8(target.max(0));
+            reader
+                .SetCurrentPosition(&windows::core::GUID::zeroed(), &pos)
+                .map_err(|e| DecodeError::Corrupt(mf_open_msg(e)))?;
+            let video = MF_SOURCE_READER_FIRST_VIDEO_STREAM.0 as u32;
+            let mut last: Option<(Vec<u8>, i64)> = None;
+            loop {
+                if cancel.load(Ordering::Relaxed) {
+                    return Err(DecodeError::Corrupt("cancelled".into()));
+                }
+                if Instant::now() >= deadline {
+                    break; // hostile index: settle for the closest frame seen
+                }
+                let mut flags = 0u32;
+                let mut ts_hns = 0i64;
+                let mut sample = None;
+                reader
+                    .ReadSample(
+                        video,
+                        0,
+                        None,
+                        Some(&mut flags),
+                        Some(&mut ts_hns),
+                        Some(&mut sample),
+                    )
+                    .map_err(|e| DecodeError::Corrupt(mf_open_msg(e)))?;
+                if flags & (MF_SOURCE_READERF_ENDOFSTREAM.0 as u32) != 0 {
+                    break;
+                }
+                let Some(sample) = sample else { continue };
+                let rgba = sample_to_rgba(&sample, w, h, stride)
+                    .map_err(|e| DecodeError::Corrupt(format!("Media Foundation: {e}")))?;
+                let reached = ts_hns >= target;
+                last = Some((rgba, ts_hns));
+                if reached {
+                    break;
+                }
+            }
+            let (rgba, _ts) =
+                last.ok_or_else(|| DecodeError::Corrupt("replay decoded no frames".into()))?;
+            let img = DecodedImage {
+                width: w,
+                height: h,
+                orig_width: disp_w,
+                orig_height: disp_h,
+                codec: info.codec,
+                format: PixelFormat::Rgba8,
+                pixels: rgba,
+                is_preview: false,
+                color: info.color,
+                peak: 1.0,
+                animated: None,
+            };
+            let choice = crate::PosterChoice {
+                origin_hns,
+                relative_hns,
+                native_w: disp_w,
+                native_h: disp_h,
+                content_hdr: false,
+            };
+            cut_selection(img, choice, fit, thumb_fit, true, want_native)
+        })();
+        retire_reader(reader);
+        result
+    }
+}
+
+/// Replay watchdog: a healthy replay decodes one GOP (well under a second);
+/// this only bounds hostile/corrupt indexes.
+const REPLAY_DEADLINE: Duration = Duration::from_secs(10);
 
 /// Source reader with the playback-identical configuration: advanced video
 /// processing (YUV→RGB + rotation), all streams deselected, video selected.
@@ -336,6 +484,7 @@ unsafe fn poster_inner(
     reader: &IMFSourceReader,
     input: &crate::VideoInput,
     fit: Option<FitBox>,
+    native_walk: bool,
     cancel: &AtomicBool,
 ) -> Result<(DecodedImage, crate::PosterChoice), DecodeError> {
     let deadline = Instant::now() + POSTER_DEADLINE;
@@ -344,7 +493,21 @@ unsafe fn poster_inner(
 
     // Ask the MF video processor for fitted output (spike-verified). If the fitted
     // negotiation is rejected, fall back to native size and downscale ourselves.
-    let fitted = fit.map(|f| fit_dims(disp_w, disp_h, f));
+    // The native-variant walk (phase 2, task #114) negotiates within the
+    // POSTER_NATIVE_CAP_EDGE box instead: the winner comes out ready to BE the
+    // parked Original, and the caller cuts the display/thumb artifacts from it.
+    let fitted = if native_walk {
+        Some(fit_dims(
+            disp_w,
+            disp_h,
+            FitBox {
+                max_width: crate::video::POSTER_NATIVE_CAP_EDGE,
+                max_height: crate::video::POSTER_NATIVE_CAP_EDGE,
+            },
+        ))
+    } else {
+        fit.map(|f| fit_dims(disp_w, disp_h, f))
+    };
     let (w, h, stride) = match fitted {
         Some(dims) => match negotiate_rgb32(reader, Some(dims)) {
             Ok(n) => n,
@@ -395,10 +558,15 @@ unsafe fn poster_inner(
         .ok_or_else(|| DecodeError::Corrupt("video decoded no frames".into()))?;
 
     // If the processor already scaled, this fit is a no-op; the native-size
-    // fallback path pays one Lanczos here (posters are off the hot path).
-    let (rgba, fw, fh) = match fit {
-        Some(f) => common::downscale_to_fit(rgba, bw, bh, f)?,
-        None => (rgba, bw, bh),
+    // fallback path pays one Lanczos here (posters are off the hot path). The
+    // native walk returns the winner AT WALK SIZE — the caller cuts artifacts.
+    let (rgba, fw, fh) = if native_walk {
+        (rgba, bw, bh)
+    } else {
+        match fit {
+            Some(f) => common::downscale_to_fit(rgba, bw, bh, f)?,
+            None => (rgba, bw, bh),
+        }
     };
     let origin = origin.unwrap_or(0);
     let choice = crate::PosterChoice {
@@ -946,5 +1114,82 @@ mod tests {
                 }
             );
         }
+    }
+
+    /// The phase-2 walk-variant A/B (task #114 plan §2, "measure don't guess"):
+    /// run BOTH variants over real clips, print per-file walk latency + the
+    /// chosen timestamp (the shared judge should make the pick identical).
+    ///
+    ///   PB_POSTER_AB_DIR='\\beenas\media\Movies' cargo test -p pb-decode \
+    ///     --release -- --ignored ab_poster_walk --nocapture
+    #[test]
+    #[ignore]
+    fn ab_poster_walk() {
+        let Some(dir) = std::env::var_os("PB_POSTER_AB_DIR") else {
+            eprintln!("set PB_POSTER_AB_DIR to the corpus directory");
+            return;
+        };
+        let n: usize = std::env::var("PB_POSTER_AB_N")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(8);
+        let fit = Some(FitBox {
+            max_width: 2560,
+            max_height: 1440,
+        });
+        let thumb = FitBox {
+            max_width: 512,
+            max_height: 512,
+        };
+        let mut files: Vec<_> = std::fs::read_dir(dir)
+            .expect("corpus dir")
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| {
+                matches!(
+                    p.extension().and_then(|e| e.to_str()),
+                    Some("mkv" | "mp4" | "m4v" | "avi" | "webm")
+                )
+            })
+            .collect();
+        files.sort();
+        files.truncate(n);
+        let cancel = AtomicBool::new(false);
+        let (mut sum_fitted, mut sum_native, mut mismatches) = (0u128, 0u128, 0usize);
+        for p in &files {
+            let input = crate::VideoInput::Path(p.clone());
+            let mut ts = [0i64; 2];
+            let mut row = p.file_name().unwrap().to_string_lossy().to_string();
+            for (i, (label, native)) in [("fitted", false), ("native", true)].iter().enumerate() {
+                let t0 = Instant::now();
+                let r = decode_video_poster_select(&input, fit, thumb, *native, *native, &cancel);
+                let ms = t0.elapsed().as_millis();
+                if *native {
+                    sum_native += ms;
+                } else {
+                    sum_fitted += ms;
+                }
+                match r {
+                    Ok(sel) => {
+                        ts[i] = sel.choice.relative_hns;
+                        row.push_str(&format!(
+                            " | {label}: {ms} ms ts={:.1}s native={}",
+                            sel.choice.relative_hns as f64 / 10_000_000.0,
+                            sel.native.is_some()
+                        ));
+                    }
+                    Err(e) => row.push_str(&format!(" | {label}: ERR {e} ({ms} ms)")),
+                }
+            }
+            if ts[0] != ts[1] {
+                mismatches += 1;
+                row.push_str("  << PICK MISMATCH");
+            }
+            eprintln!("{row}");
+        }
+        eprintln!(
+            "TOTAL fitted={sum_fitted} ms native={sum_native} ms over {} files, {mismatches} pick mismatches",
+            files.len()
+        );
     }
 }

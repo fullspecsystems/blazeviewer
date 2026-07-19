@@ -464,6 +464,16 @@ pub fn poster_select_supported() -> bool {
     cfg!(windows)
 }
 
+/// The phase-2 walk-variant lever (`PB_POSTER_WALK=native|fitted`): variant A
+/// negotiates the selection reader at capped-native size (retaining the winner
+/// for the phase-3 Original install), variant B keeps the fitted negotiation.
+/// Default = fitted until the corpus A/B picks (plan §2; measure, don't guess).
+pub fn poster_walk_native() -> bool {
+    std::env::var("PB_POSTER_WALK")
+        .map(|v| v == "native")
+        .unwrap_or(false)
+}
+
 /// The pool's `PosterSelect` entry (task #114): the ONE scored walk for a video
 /// item — chooses the frame, remembers the absolute locator, cuts the fitted
 /// poster + thumb tile from the same winner on this worker. Only scheduled for
@@ -472,6 +482,8 @@ pub fn select_item(
     source: &dyn ItemSource,
     item: usize,
     fit: Option<FitBox>,
+    display_class: bool,
+    replay: Option<(i64, i64)>,
     cancel: &AtomicBool,
 ) -> Result<pb_decode::PosterSelection, DecodeError> {
     #[cfg(windows)]
@@ -489,11 +501,38 @@ pub fn select_item(
                 name: source.name(item).to_string(),
             },
         };
-        pb_decode::decode_video_poster_select(&input, fit, crate::thumbs::thumb_fit(), cancel)
+        let thumb_fit = crate::thumbs::thumb_fit();
+        // A replay hint (phase 3) is the cheap path: decode-forward straight to
+        // the already-chosen frame — one GOP at most, no scoring. A failed
+        // replay (edited file, bad index) falls back to a fresh scored walk;
+        // cancellation aborts outright.
+        if let Some((origin, rel)) = replay {
+            match pb_decode::decode_video_poster_replay(
+                &input,
+                origin,
+                rel,
+                fit,
+                thumb_fit,
+                display_class,
+                cancel,
+            ) {
+                Ok(sel) => return Ok(sel),
+                Err(e) if e.is_cancelled() => return Err(e),
+                Err(_) => {} // fall through to the walk
+            }
+        }
+        pb_decode::decode_video_poster_select(
+            &input,
+            fit,
+            thumb_fit,
+            poster_walk_native(),
+            display_class,
+            cancel,
+        )
     }
     #[cfg(not(windows))]
     {
-        let _ = (source, item, fit, cancel);
+        let _ = (source, item, fit, display_class, replay, cancel);
         Err(DecodeError::Unsupported)
     }
 }

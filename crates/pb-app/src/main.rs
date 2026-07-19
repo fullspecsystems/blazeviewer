@@ -747,8 +747,8 @@ impl App {
             },
         );
         let select: std::sync::Arc<pb_app_core::decode_pool::SelectFn> =
-            std::sync::Arc::new(|src, item, fit, cancel| {
-                pb_app_core::engine::select_item(src, item, fit, cancel)
+            std::sync::Arc::new(|src, item, fit, display_class, replay, cancel| {
+                pb_app_core::engine::select_item(src, item, fit, display_class, replay, cancel)
             });
         let (pool, results) =
             DecodePool::new_with_select(recommended_workers(), POOL_BUDGET_BYTES, decode, select);

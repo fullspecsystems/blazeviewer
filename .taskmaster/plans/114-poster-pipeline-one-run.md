@@ -349,8 +349,27 @@ capture is a fiction, so the seam and the minimum walk changes land together.
    door).
 2. **The MF variant A/B** (native walk vs fitted+winner-replay) + the scratch-reusing reducer +
    the native-RAM permit; the winner ships.
-3. **Original install + demand-gated admission + the 4096-edge ceiling + mode-2 P3 handling +
-   same-frame thumb** (kills the resize spinner); the replay path + its SMB benchmark.
+   **DONE + MEASURED (2026-07-19, 48 films over SMB, `ab_poster_walk`)**: fitted 32.1 s total
+   vs native 31.2 s — a wash at 1080p (identical negotiated dims), but native is **15–20%
+   slower on the 4K files** (Dune 1356→1597 ms, Love Actually 1444→1692, No Hard Feelings
+   2247→2622 — the per-candidate native conversion cost the review predicted). **0 pick
+   mismatches across all 48** — the shared judge makes the variants choose identical frames
+   (Ali Wong: ts=18.0 s, a real scene). **Verdict: `PB_POSTER_WALK` defaults to FITTED**
+   (fastest time-to-poster while browsing); the native frame arrives via the parked replay
+   pre-install below. The `NATIVE_WALK_CAP = 2` scheduler permit gates every native-class job
+   (native walks + all replays) at admission, so light work flows past them (pinned by test).
+3. **Original install + demand-gated admission + the 4096-edge ceiling + same-frame thumb +
+   the replay path** (kills the resize spinner). **DONE (2026-07-19)** with one honest scope
+   narrowing: **mode-0 only** — an enabled color transform (wide-gamut SDR) would store mode-1
+   (unmipped, derive-rejected), so those posters skip the Original install (recorded in the
+   selector's `original_blocked` memo so the parked tier never replay-loops them) and keep the
+   color-correct replay path; their fp16 mode-2 bake lands with 110d, NOT here (avoids
+   mid-arc pb-render upload surgery; the plan's storage/content split note stands for that
+   work). The missing piece the A/B exposed: with fitted walks the first resize would pay a
+   replay — so the **parked tier pre-installs a parked video's Original via replay in spare
+   capacity** (the photo parked-fulls pattern), making the first fullscreen toggle an instant
+   GPU derive. Replay = fresh reader + absolute seek (`origin + relative`) + decode-forward to
+   the target timestamp (the playback algorithm), deadline-capped.
 4. **Retry state machine (all kinds, photos included) + typed invalid-position head-best
    fallback.**
 5. _(Optional)_ `DecodeError::Cancelled`; macOS backend parity (with #92.2).

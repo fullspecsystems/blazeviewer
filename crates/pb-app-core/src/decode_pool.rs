@@ -115,7 +115,25 @@ pub struct Want {
     /// class. Mutating this across `set_targets` calls PROMOTES a queued
     /// selection in place (identity unchanged, no restart — Codex #114 r3).
     pub display_class: bool,
+    /// [`Purpose::PosterSelect`] only: the absolute replay locator
+    /// `(origin_hns, relative_hns)` of an already-chosen frame (task #114
+    /// phase 3). When set, the selection is a cheap decode-forward REPLAY of
+    /// that exact frame, not a fresh scored walk — how an evicted artifact is
+    /// re-obtained after resize/eviction.
+    pub replay: Option<(i64, i64)>,
+    /// [`Purpose::PosterSelect`] only: this job holds NATIVE-sized frame
+    /// buffers while it runs (a native-variant walk, or any replay — both
+    /// materialize a native frame). Capped at [`NATIVE_WALK_CAP`] concurrent by
+    /// the scheduler (phase-2 RAM permit): the pool's `inflight_bytes` counts
+    /// nothing until a decode RETURNS, so unbounded native walks would hold
+    /// ~2 native buffers each invisibly.
+    pub native_class: bool,
 }
+
+/// Max concurrent native-class selections (the phase-2 RAM permit: each holds
+/// up to ~2 native RGBA buffers — best-so-far + current candidate — before any
+/// byte is accounted).
+pub const NATIVE_WALK_CAP: usize = 2;
 
 impl Want {
     pub fn display(item: usize, fit: Option<FitBox>, preview: bool) -> Want {
@@ -126,6 +144,8 @@ impl Want {
             purpose: Purpose::Display,
             sel_gen: 0,
             display_class: true,
+            replay: None,
+            native_class: false,
         }
     }
 
@@ -139,6 +159,8 @@ impl Want {
             purpose: Purpose::Thumb,
             sel_gen: 0,
             display_class: false,
+            replay: None,
+            native_class: false,
         }
     }
 
@@ -158,7 +180,25 @@ impl Want {
             purpose: Purpose::PosterSelect,
             sel_gen: content_gen,
             display_class,
+            replay: None,
+            native_class: false,
         }
+    }
+
+    /// Attach a replay locator (phase 3): the selection becomes a decode-forward
+    /// replay of the already-chosen frame. Replays are native-class.
+    pub fn with_replay(mut self, replay: Option<(i64, i64)>) -> Want {
+        self.replay = replay;
+        if replay.is_some() {
+            self.native_class = true;
+        }
+        self
+    }
+
+    /// Mark the job native-class (the phase-2 native-walk variant).
+    pub fn with_native_class(mut self, native: bool) -> Want {
+        self.native_class = self.native_class || native;
+        self
     }
 }
 
@@ -252,6 +292,30 @@ impl Outcome {
         o
     }
 
+    /// Carve `bytes` of `donor`'s budget reservation into a new synthetic
+    /// outcome (phase 3: ONE selection payload fans into SEVERAL staged
+    /// outcomes - the Fit and the Original each carry their own share of the
+    /// backpressure; the remainder releases when the donor drops).
+    pub fn synthetic_carved(
+        donor: &mut Outcome,
+        item: usize,
+        epoch: u64,
+        rep_kind: pb_core::RepKind,
+        result: Result<DecodedImage, DecodeError>,
+        bytes: usize,
+    ) -> Self {
+        let mut o = Outcome::synthetic(item, epoch, rep_kind, result);
+        if let Some(g) = donor._budget.as_mut() {
+            let carved = bytes.min(g.bytes);
+            g.bytes -= carved;
+            o._budget = Some(BudgetGuard {
+                shared: g.shared.clone(),
+                bytes: carved,
+            });
+        }
+        o
+    }
+
     /// Mark this (synthetic/test) outcome as produced by an `allow_preview` job — the
     /// preview-first request shape, for tests exercising the duplicate-preview drain rule.
     pub fn from_preview_request(mut self) -> Self {
@@ -333,6 +397,10 @@ struct Job {
     /// promotion (`set_targets` with `display_class: true`) while queued;
     /// meaningless for other purposes (their class IS their purpose).
     thumb_class: bool,
+    /// The replay locator, when this selection is a decode-forward replay.
+    replay: Option<(i64, i64)>,
+    /// Native-RAM class (phase-2 permit): admission-gated by [`NATIVE_WALK_CAP`].
+    native_class: bool,
 }
 
 /// A tracked (queued or in-flight) job's dedup entry: the cancel flag plus the
@@ -354,6 +422,8 @@ struct Inner {
     inflight_bytes: usize,
     /// Thumb-purpose jobs currently decoding (the occupancy guard's counter).
     thumb_inflight: usize,
+    /// Native-class selections currently decoding (the phase-2 RAM permit).
+    native_inflight: usize,
     epoch: u64,
     shutdown: bool,
 }
@@ -382,6 +452,8 @@ pub type SelectFn = dyn Fn(
         &dyn ItemSource,
         usize,
         Option<FitBox>,
+        bool,               // display_class: whether the native winner is wanted
+        Option<(i64, i64)>, // replay locator: decode-forward instead of walking
         &AtomicBool,
     ) -> Result<pb_decode::PosterSelection, DecodeError>
     + Send
@@ -414,7 +486,7 @@ impl DecodePool {
             workers,
             byte_budget,
             decode,
-            Arc::new(|_: &dyn ItemSource, _, _, _: &AtomicBool| {
+            Arc::new(|_: &dyn ItemSource, _, _, _, _, _: &AtomicBool| {
                 Err(DecodeError::Corrupt("no selection fn installed".into()))
             }),
         )
@@ -436,6 +508,7 @@ impl DecodePool {
                 tracked: HashMap::new(),
                 inflight_bytes: 0,
                 thumb_inflight: 0,
+                native_inflight: 0,
                 epoch: 0,
                 shutdown: false,
             }),
@@ -532,6 +605,13 @@ impl DecodePool {
                     job.fit = w.fit;
                     job.fit_tag_epoch = epoch;
                     job.thumb_class = !w.display_class;
+                    // A hint is only ever GAINED by re-emission: a later pass
+                    // that lost sight of the choice (the ledger reopened) must
+                    // not strip a queued replay back into a full walk.
+                    if w.replay.is_some() {
+                        job.replay = w.replay;
+                    }
+                    job.native_class = w.native_class || job.replay.is_some();
                 }
             }
         }
@@ -575,6 +655,8 @@ impl DecodePool {
                 cancel: flag,
                 fit_tag_epoch: epoch,
                 thumb_class: w.purpose == Purpose::PosterSelect && !w.display_class,
+                replay: w.replay,
+                native_class: w.purpose == Purpose::PosterSelect && w.native_class,
             });
         }
 
@@ -611,6 +693,9 @@ fn worker_loop(shared: Arc<Shared>) {
                         if takes_thumb_slot(&job) {
                             inner.thumb_inflight += 1;
                         }
+                        if job.native_class {
+                            inner.native_inflight += 1;
+                        }
                         break job;
                     }
                 }
@@ -620,12 +705,14 @@ fn worker_loop(shared: Arc<Shared>) {
         // Class-at-admission (Codex #114 r3): the slot this job took is what it
         // releases, even if a promotion lands while it runs.
         let took_thumb_slot = takes_thumb_slot(&job);
+        let took_native_slot = job.native_class;
 
         // Cancelled before it ran: forget it and move on.
         if job.cancel.load(Ordering::Acquire) {
             let mut inner = shared.inner.lock().unwrap();
             untrack(&mut inner, &job);
             release_thumb_slot(&mut inner, took_thumb_slot);
+            release_native_slot(&mut inner, took_native_slot);
             drop(inner);
             shared.cv.notify_all();
             continue;
@@ -634,7 +721,14 @@ fn worker_loop(shared: Arc<Shared>) {
         // Dispatch by work kind: a poster selection runs the injected walk and
         // produces the typed payload; everything else is a plain image decode.
         let (result, selection, bytes) = if job.key.purpose == Purpose::PosterSelect {
-            let sel = (shared.select)(job.source.as_ref(), job.key.item, job.fit, &job.cancel);
+            let sel = (shared.select)(
+                job.source.as_ref(),
+                job.key.item,
+                job.fit,
+                !job.thumb_class,
+                job.replay,
+                &job.cancel,
+            );
             let bytes = sel.as_ref().map(|s| s.pixel_bytes()).unwrap_or(0);
             // The placeholder no consumer may read (the drain matches
             // PosterSelect before touching `result` — pinned by test).
@@ -669,6 +763,7 @@ fn worker_loop(shared: Arc<Shared>) {
                 untrack(&mut inner, &job);
             }
             release_thumb_slot(&mut inner, took_thumb_slot);
+            release_native_slot(&mut inner, took_native_slot);
             if job.cancel.load(Ordering::Acquire) {
                 if is_selection {
                     untrack(&mut inner, &job);
@@ -679,9 +774,9 @@ fn worker_loop(shared: Arc<Shared>) {
             }
             inner.inflight_bytes += bytes;
         }
-        // A freed thumb slot may unblock a parked worker even while the byte
-        // budget is unchanged.
-        if took_thumb_slot {
+        // A freed thumb/native slot may unblock a parked worker even while the
+        // byte budget is unchanged.
+        if took_thumb_slot || took_native_slot {
             shared.cv.notify_all();
         }
 
@@ -715,6 +810,12 @@ fn release_thumb_slot(inner: &mut Inner, took_thumb_slot: bool) {
     }
 }
 
+fn release_native_slot(inner: &mut Inner, took_native_slot: bool) {
+    if took_native_slot {
+        inner.native_inflight = inner.native_inflight.saturating_sub(1);
+    }
+}
+
 /// Whether a job occupies a thumb slot at admission: every Thumb-purpose job,
 /// plus a poster selection with **thumb-only demand** (task #114 — far-away
 /// movies must not occupy every worker; display-class selections schedule like
@@ -744,11 +845,16 @@ fn untrack(inner: &mut Inner, job: &Job) {
 /// runs immediately.
 fn pop_best(inner: &mut Inner, thumb_cap: usize) -> Option<Job> {
     let thumbs_blocked = inner.thumb_inflight >= thumb_cap;
+    let native_blocked = inner.native_inflight >= NATIVE_WALK_CAP;
     let idx = inner
         .queue
         .iter()
         .enumerate()
         .filter(|(_, j)| !(thumbs_blocked && takes_thumb_slot(j)))
+        // The phase-2 RAM permit: native-class selections hold native-sized
+        // buffers the byte budget can't see until they return — cap them at
+        // the ADMISSION level so lighter work keeps flowing past them.
+        .filter(|(_, j)| !(native_blocked && j.native_class))
         .min_by_key(|(_, j)| j.prio)
         .map(|(i, _)| i)?;
     Some(inner.queue.swap_remove(idx))
@@ -829,6 +935,7 @@ mod tests {
             tracked: HashMap::new(),
             inflight_bytes: 0,
             thumb_inflight: 0,
+            native_inflight: 0,
             epoch: 0,
             shutdown: false,
         };
@@ -848,6 +955,8 @@ mod tests {
             cancel: flag.clone(),
             fit_tag_epoch: 0,
             thumb_class: false,
+            replay: None,
+            native_class: false,
         };
         let k = (5, Purpose::Display, pb_core::RepKind::Original);
         // A fresh job (re-requested after an epoch change) now owns item 5.
@@ -977,7 +1086,7 @@ mod tests {
     #[test]
     fn a_selection_outcome_carries_the_typed_payload_and_tags() {
         let decode: Arc<DecodeFn> = Arc::new(|_s, item, _, _, _, _| Ok(image(item, 16)));
-        let select: Arc<SelectFn> = Arc::new(|_s, item, _, _| Ok(selection_output(item)));
+        let select: Arc<SelectFn> = Arc::new(|_s, item, _, _, _, _| Ok(selection_output(item)));
         let (pool, rx) = DecodePool::new_with_select(2, 1 << 20, decode, select);
         let src = source();
         pool.set_targets(7, &src, &[Want::poster_select(3, None, 42, true)]);
@@ -1013,7 +1122,7 @@ mod tests {
         let (release_tx, release_rx) = channel::<()>();
         let release_rx = StdMutex::new(release_rx);
         let decode: Arc<DecodeFn> = Arc::new(|_s, item, _, _, _, _| Ok(image(item, 16)));
-        let select: Arc<SelectFn> = Arc::new(move |_s, item, _, _| {
+        let select: Arc<SelectFn> = Arc::new(move |_s, item, _, _, _, _| {
             started_tx.send(()).unwrap();
             release_rx.lock().unwrap().recv().unwrap();
             Ok(selection_output(item))
@@ -1047,7 +1156,7 @@ mod tests {
         let (release_tx, release_rx) = channel::<()>();
         let release_rx = StdMutex::new(release_rx);
         let decode: Arc<DecodeFn> = Arc::new(|_s, item, _, _, _, _| Ok(image(item, 16)));
-        let select: Arc<SelectFn> = Arc::new(move |_s, item, _, _| {
+        let select: Arc<SelectFn> = Arc::new(move |_s, item, _, _, _, _| {
             started_tx.send(()).unwrap();
             release_rx.lock().unwrap().recv().unwrap();
             Ok(selection_output(item))
@@ -1074,7 +1183,7 @@ mod tests {
         let count = Arc::new(StdMutex::new(0usize));
         let c = count.clone();
         let decode: Arc<DecodeFn> = Arc::new(|_s, item, _, _, _, _| Ok(image(item, 16)));
-        let select: Arc<SelectFn> = Arc::new(move |_s, item, _, _| {
+        let select: Arc<SelectFn> = Arc::new(move |_s, item, _, _, _, _| {
             *c.lock().unwrap() += 1;
             if gate.swap(false, Ordering::SeqCst) {
                 started_tx.send(()).unwrap();
@@ -1113,7 +1222,7 @@ mod tests {
             }
             Ok(image(item, 16))
         });
-        let select: Arc<SelectFn> = Arc::new(|_s, item, _, _| Ok(selection_output(item)));
+        let select: Arc<SelectFn> = Arc::new(|_s, item, _, _, _, _| Ok(selection_output(item)));
         let (pool, rx) = DecodePool::new_with_select(3, 1 << 20, decode, select);
         let src = source();
         let thumb = Want::thumb(0, thumb_box());
@@ -1133,6 +1242,49 @@ mod tests {
         release_tx.send(()).unwrap();
         let o = rx.recv_timeout(Duration::from_secs(5)).unwrap();
         assert_eq!(o.key.item, 0, "the blocked thumb still lands");
+    }
+
+    #[test]
+    fn native_class_selections_park_at_the_permit_while_light_work_flows() {
+        // NATIVE_WALK_CAP = 2 (the phase-2 RAM permit): two blocking native
+        // walks fill it; a third native selection stays queued while ordinary
+        // display work flows past; a freed permit admits the third.
+        let (started_tx, started_rx) = channel::<()>();
+        let (release_tx, release_rx) = channel::<()>();
+        let release_rx = StdMutex::new(release_rx);
+        let decode: Arc<DecodeFn> = Arc::new(|_s, item, _, _, _, _| Ok(image(item, 16)));
+        let select: Arc<SelectFn> = Arc::new(move |_s, item, _, _, _, _| {
+            started_tx.send(()).unwrap();
+            release_rx.lock().unwrap().recv().unwrap();
+            Ok(selection_output(item))
+        });
+        let (pool, rx) = DecodePool::new_with_select(4, 1 << 20, decode, select);
+        let src = source();
+        let native = |i| Want::poster_select(i, None, 1, true).with_native_class(true);
+        pool.set_targets(
+            1,
+            &src,
+            &[
+                native(1),
+                native(2),
+                native(3),
+                Want::display(9, None, false),
+            ],
+        );
+        started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        started_rx.recv_timeout(Duration::from_secs(5)).unwrap(); // permit full
+        let o = rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert_eq!(
+            o.key.item, 9,
+            "light work flows past the parked native walk"
+        );
+        release_tx.send(()).unwrap(); // one walk finishes -> a permit frees
+        started_rx.recv_timeout(Duration::from_secs(5)).unwrap(); // third admits
+        release_tx.send(()).unwrap();
+        release_tx.send(()).unwrap();
+        let mut got = drain_n(&rx, 3);
+        got.sort();
+        assert_eq!(got, vec![1, 2, 3], "all three selections deliver");
     }
 
     #[test]
