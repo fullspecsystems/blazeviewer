@@ -552,6 +552,64 @@ pub fn poster_frame_score(pixels: &[u8], width: u32) -> f32 {
     luma_detail_rgba8(pixels, width) + 0.1 * std + 0.03 * mean
 }
 
+/// The fixed judge width (task #114, owner-locked at 256): every poster
+/// candidate is scored on an area-averaged reduction to this width, making the
+/// detail gate **resolution-independent**. Grain and vignette texture that
+/// survive a display-size decode (and used to sneak a white title card past
+/// [`poster_frame_is_good`]) average away here — exactly why the thumb-size
+/// walks' picks looked better than the display-size walks' for the same clip.
+/// Shared by the MF and FFmpeg backends so their picks can never diverge.
+pub const POSTER_JUDGE_WIDTH: u32 = 256;
+
+/// Area-average `rgba` (w×h) down to [`POSTER_JUDGE_WIDTH`] wide
+/// (aspect-preserved, never upscaling) **without consuming the source** — the
+/// walk retains the candidate buffer while scoring its reduction (the existing
+/// Lanczos helper consumes its input, which is exactly wrong here). A box
+/// filter is deliberate: averaging is the property that makes the judge blind
+/// to grain, and scoring needs statistics, not display pixels.
+pub fn poster_judge_frame(rgba: &[u8], w: u32, h: u32) -> (Vec<u8>, u32, u32) {
+    if w <= POSTER_JUDGE_WIDTH || w == 0 || h == 0 {
+        return (rgba.to_vec(), w, h);
+    }
+    let dw = POSTER_JUDGE_WIDTH;
+    let dh = ((h as u64 * dw as u64) / w as u64).max(1) as u32;
+    let mut out = Vec::with_capacity((dw * dh * 4) as usize);
+    for dy in 0..dh {
+        let y0 = (dy as u64 * h as u64 / dh as u64) as u32;
+        let y1 = (((dy as u64 + 1) * h as u64) / dh as u64).max(y0 as u64 + 1) as u32;
+        for dx in 0..dw {
+            let x0 = (dx as u64 * w as u64 / dw as u64) as u32;
+            let x1 = (((dx as u64 + 1) * w as u64) / dw as u64).max(x0 as u64 + 1) as u32;
+            let (mut r, mut g, mut b, mut a, mut n) = (0u64, 0u64, 0u64, 0u64, 0u64);
+            for y in y0..y1.min(h) {
+                let row = (y as usize * w as usize + x0 as usize) * 4;
+                for x in 0..(x1.min(w) - x0) as usize {
+                    let px = &rgba[row + x * 4..row + x * 4 + 4];
+                    r += px[0] as u64;
+                    g += px[1] as u64;
+                    b += px[2] as u64;
+                    a += px[3] as u64;
+                    n += 1;
+                }
+            }
+            let n = n.max(1);
+            out.extend_from_slice(&[(r / n) as u8, (g / n) as u8, (b / n) as u8, (a / n) as u8]);
+        }
+    }
+    (out, dw, dh)
+}
+
+/// Judge one candidate at the fixed judge size: `(is_good, fallback_score)` —
+/// the resolution-independent form of [`poster_frame_is_good`] +
+/// [`poster_frame_score`] every backend's walk scores with (task #114).
+pub fn poster_judge(rgba: &[u8], w: u32, h: u32) -> (bool, f32) {
+    let (judged, jw, _jh) = poster_judge_frame(rgba, w, h);
+    (
+        poster_frame_is_good(&judged, jw),
+        poster_frame_score(&judged, jw),
+    )
+}
+
 // --- Deep-seek walk policy (shared by every backend's poster) --------------
 // A feature film opens black/logo/fade for its first 30–90 s, so a head-only
 // walk hands back a black frame. When the head walk finds nothing good, seek
@@ -600,6 +658,80 @@ pub fn poster_deep_cap(duration: Duration) -> Duration {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A bright title card with a subtle vignette and film grain — the Ali Wong
+    /// opening. At full resolution the GRAIN alone clears the detail gate; the
+    /// judge reduction must average it away.
+    fn vignette_card(w: u32, h: u32) -> Vec<u8> {
+        let (cx, cy) = (w as f32 / 2.0, h as f32 / 2.0);
+        let max_d = (cx * cx + cy * cy).sqrt();
+        let mut px = Vec::with_capacity((w * h * 4) as usize);
+        for y in 0..h {
+            for x in 0..w {
+                let d = (((x as f32 - cx).powi(2) + (y as f32 - cy).powi(2)).sqrt()) / max_d;
+                // Deterministic per-pixel "grain": a cheap integer hash, ±12.
+                let n = ((x.wrapping_mul(31).wrapping_add(y.wrapping_mul(17))) % 25) as i32 - 12;
+                let v = (240.0 - 40.0 * d) as i32 + n;
+                let v = v.clamp(0, 255) as u8;
+                px.extend_from_slice(&[v, v, v, 255]);
+            }
+        }
+        px
+    }
+
+    /// A genuinely textured scene: mid-frequency blocks that survive averaging.
+    fn textured_scene(w: u32, h: u32) -> Vec<u8> {
+        let block = (w / 16).max(1);
+        let mut px = Vec::with_capacity((w * h * 4) as usize);
+        for y in 0..h {
+            for x in 0..w {
+                let v = if ((x / block) + (y / block)).is_multiple_of(2) {
+                    60u8
+                } else {
+                    180
+                };
+                px.extend_from_slice(&[v, v, v, 255]);
+            }
+        }
+        px
+    }
+
+    #[test]
+    fn the_judge_is_resolution_independent_where_raw_scoring_is_not() {
+        // The bug the judge fixes (#114 / the Ali Wong divergence): at display
+        // size the card's grain clears the raw detail gate...
+        let (w, h) = (2048u32, 1152u32);
+        let card = vignette_card(w, h);
+        assert!(
+            poster_frame_is_good(&card, w),
+            "precondition: raw full-size scoring is fooled by grain (if this \
+             fails, the synthetic card no longer models the failure)"
+        );
+        // ...but the judge rejects it at EVERY requested size, and accepts the
+        // real scene at every size — one verdict, any viewport.
+        for (w, h) in [(2048u32, 1152u32), (512, 288)] {
+            let (good, _) = poster_judge(&vignette_card(w, h), w, h);
+            assert!(!good, "the card must fail the judge at {w}x{h}");
+            let (good, score) = poster_judge(&textured_scene(w, h), w, h);
+            assert!(good, "the scene must pass the judge at {w}x{h}");
+            assert!(score > 0.05);
+        }
+    }
+
+    #[test]
+    fn judge_frame_reduces_without_consuming_and_preserves_small_frames() {
+        let (w, h) = (1024u32, 512u32);
+        let src = textured_scene(w, h);
+        let (out, ow, oh) = poster_judge_frame(&src, w, h);
+        assert_eq!(ow, POSTER_JUDGE_WIDTH);
+        assert_eq!(oh, 128);
+        assert_eq!(out.len(), (ow * oh * 4) as usize);
+        assert_eq!(src.len(), (w * h * 4) as usize, "source untouched");
+        // At or under the judge width: passthrough copy, same dims.
+        let (out, ow, oh) = poster_judge_frame(&src[..(200 * 4) as usize], 200, 1);
+        assert_eq!((ow, oh), (200, 1));
+        assert_eq!(out.len(), 800);
+    }
 
     fn frame(w: u32, h: u32) -> VideoFrame {
         VideoFrame {

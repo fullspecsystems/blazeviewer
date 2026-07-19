@@ -50,8 +50,8 @@ use windows::Win32::System::Variant::{VT_I8, VT_UI8};
 
 use crate::mf_video::{ensure_mf, native_color, sample_to_rgba};
 use crate::video::{
-    poster_deep_cap, poster_frame_is_good, poster_frame_score, POSTER_BURST_FRAMES,
-    POSTER_DEADLINE, POSTER_DEEP_MIN, POSTER_HEAD_FRAMES, POSTER_SEEK_OFFSETS,
+    poster_deep_cap, POSTER_BURST_FRAMES, POSTER_DEADLINE, POSTER_DEEP_MIN, POSTER_HEAD_FRAMES,
+    POSTER_SEEK_OFFSETS,
 };
 use crate::{common, DecodeError, DecodedImage, FitBox, PixelFormat};
 
@@ -135,6 +135,16 @@ pub fn decode_video_poster_input(
     fit: Option<FitBox>,
     cancel: &AtomicBool,
 ) -> Result<DecodedImage, DecodeError> {
+    poster_selected_input(input, fit, cancel).map(|(img, _)| img)
+}
+
+/// The walk plus its choice — shared plumbing for the legacy poster entry
+/// points and the task-#114 selection.
+fn poster_selected_input(
+    input: &crate::VideoInput,
+    fit: Option<FitBox>,
+    cancel: &AtomicBool,
+) -> Result<(DecodedImage, crate::PosterChoice), DecodeError> {
     ensure_mf();
     unsafe {
         let reader = open_video_reader(input)?;
@@ -144,6 +154,44 @@ pub fn decode_video_poster_input(
         retire_reader(reader);
         result
     }
+}
+
+/// The ONE scored walk per movie (task #114): choose the poster frame, remember
+/// WHERE it lives (`PosterChoice`, absolute locator), and cut every consumer's
+/// artifact from the same winner on this worker thread — the display-fit poster
+/// and the thumbnail tile. `fit` is the display fit (or the thumb fit for a
+/// thumb-only selection); the thumb is always cut so poster == thumb by
+/// construction.
+pub fn decode_video_poster_select(
+    input: &crate::VideoInput,
+    fit: Option<FitBox>,
+    thumb_fit: FitBox,
+    cancel: &AtomicBool,
+) -> Result<crate::PosterSelection, DecodeError> {
+    let (img, choice) = poster_selected_input(input, fit, cancel)?;
+    // Cut the thumb from the SAME winner (worker-side; the fitted poster is
+    // >= thumb size in every real layout, and downscale never upscales).
+    let thumb_img = common::downscale_to_fit(img.pixels.clone(), img.width, img.height, thumb_fit)
+        .ok()
+        .map(|(px, w, h)| DecodedImage {
+            width: w,
+            height: h,
+            orig_width: img.orig_width,
+            orig_height: img.orig_height,
+            codec: img.codec,
+            format: PixelFormat::Rgba8,
+            pixels: px,
+            is_preview: false,
+            color: img.color,
+            peak: img.peak,
+            animated: None,
+        });
+    Ok(crate::PosterSelection {
+        choice,
+        fit_img: Some(img),
+        thumb_img,
+        native: None, // phase 3 (the Original install) materializes this
+    })
 }
 
 /// Source reader with the playback-identical configuration: advanced video
@@ -244,6 +292,10 @@ pub(crate) unsafe fn stream_info(reader: &IMFSourceReader) -> Result<VideoStream
 struct Best {
     score: f32,
     frame: Option<(Vec<u8>, u32, u32)>,
+    /// The retained frame's RAW MF timestamp (100 ns units, absolute — the
+    /// stream's origin has NOT been subtracted). Task #114: this is what makes
+    /// the choice replayable.
+    ts_hns: i64,
 }
 
 impl Best {
@@ -251,25 +303,28 @@ impl Best {
         Self {
             score: f32::NEG_INFINITY,
             frame: None,
+            ts_hns: 0,
         }
     }
 
     /// Offer a scored frame for the *fallback* ranking; keep it if it beats the
     /// current best (first max wins — deterministic, so path and in-RAM posters
     /// stay bit-identical). Used only until a genuinely-good frame is found.
-    fn consider(&mut self, score: f32, rgba: Vec<u8>, w: u32, h: u32) {
+    fn consider(&mut self, score: f32, rgba: Vec<u8>, w: u32, h: u32, ts_hns: i64) {
         if self.frame.is_none() || score > self.score {
             self.score = score;
             self.frame = Some((rgba, w, h));
+            self.ts_hns = ts_hns;
         }
     }
 
     /// Take this frame as the winner outright — the walk found a genuinely-good
     /// poster and stops here, so it is the result regardless of what earlier
     /// frames out-*ranked* it (ranking only decides the all-bad fallback).
-    fn win(&mut self, rgba: Vec<u8>, w: u32, h: u32) {
+    fn win(&mut self, rgba: Vec<u8>, w: u32, h: u32, ts_hns: i64) {
         self.score = f32::INFINITY;
         self.frame = Some((rgba, w, h));
+        self.ts_hns = ts_hns;
     }
 }
 
@@ -278,7 +333,7 @@ unsafe fn poster_inner(
     input: &crate::VideoInput,
     fit: Option<FitBox>,
     cancel: &AtomicBool,
-) -> Result<DecodedImage, DecodeError> {
+) -> Result<(DecodedImage, crate::PosterChoice), DecodeError> {
     let deadline = Instant::now() + POSTER_DEADLINE;
     let info = stream_info(reader)?;
     let (disp_w, disp_h) = info.display_dims();
@@ -300,6 +355,11 @@ unsafe fn poster_inner(
     }
 
     let mut best = Best::new();
+    // The stream's first-sample timestamp — the ABSOLUTE origin every seek and
+    // the stored choice are anchored to (MPEG-TS files start nonzero; a bare
+    // relative offset seeks the wrong place there — task #114 / playback's
+    // `origin + relative` lesson).
+    let mut origin: Option<i64> = None;
     // Phase 1 — the cheap head walk from the start. A clip that opens on content
     // settles here; a dark/logo/fade opening leaves `best` weak and falls through.
     let good = scan(
@@ -307,15 +367,25 @@ unsafe fn poster_inner(
         (w, h, stride),
         POSTER_HEAD_FRAMES,
         &mut best,
+        &mut origin,
         cancel,
         deadline,
     )?;
     // Phase 2 — seek past the intro (feature-film case), shallow → deep, stopping at
     // the first good frame so the poster is as early as the intro allows.
     if !good {
-        deep_scan(input, (w, h), info.duration, &mut best, cancel, deadline)?;
+        deep_scan(
+            input,
+            (w, h),
+            info.duration,
+            &mut best,
+            origin.unwrap_or(0),
+            cancel,
+            deadline,
+        )?;
     }
 
+    let best_ts = best.ts_hns;
     let (rgba, bw, bh) = best
         .frame
         .ok_or_else(|| DecodeError::Corrupt("video decoded no frames".into()))?;
@@ -326,19 +396,32 @@ unsafe fn poster_inner(
         Some(f) => common::downscale_to_fit(rgba, bw, bh, f)?,
         None => (rgba, bw, bh),
     };
-    Ok(DecodedImage {
-        width: fw,
-        height: fh,
-        orig_width: disp_w,
-        orig_height: disp_h,
-        codec: info.codec,
-        format: PixelFormat::Rgba8,
-        pixels: rgba,
-        is_preview: false,
-        color: info.color,
-        peak: 1.0,
-        animated: None,
-    })
+    let origin = origin.unwrap_or(0);
+    let choice = crate::PosterChoice {
+        origin_hns: origin,
+        relative_hns: (best_ts - origin).max(0),
+        native_w: disp_w,
+        native_h: disp_h,
+        // MF posters are RGB32: PQ/HLG content is SDR-clamped by the processor
+        // by design (mf_video.rs) — the pixels here are never HDR scene values.
+        content_hdr: false,
+    };
+    Ok((
+        DecodedImage {
+            width: fw,
+            height: fh,
+            orig_width: disp_w,
+            orig_height: disp_h,
+            codec: info.codec,
+            format: PixelFormat::Rgba8,
+            pixels: rgba,
+            is_preview: false,
+            color: info.color,
+            peak: 1.0,
+            animated: None,
+        },
+        choice,
+    ))
 }
 
 /// Decode up to `limit` frames from `reader`'s current position, scoring each into
@@ -351,6 +434,7 @@ unsafe fn scan(
     size: (u32, u32, i32),
     limit: usize,
     best: &mut Best,
+    origin: &mut Option<i64>,
     cancel: &AtomicBool,
     deadline: Instant,
 ) -> Result<bool, DecodeError> {
@@ -364,25 +448,37 @@ unsafe fn scan(
             return Ok(false);
         }
         let mut flags = 0u32;
+        let mut ts_hns = 0i64;
         let mut sample = None;
         reader
-            .ReadSample(video, 0, None, Some(&mut flags), None, Some(&mut sample))
+            .ReadSample(
+                video,
+                0,
+                None,
+                Some(&mut flags),
+                Some(&mut ts_hns),
+                Some(&mut sample),
+            )
             .map_err(|e| DecodeError::Corrupt(mf_open_msg(e)))?;
         if flags & (MF_SOURCE_READERF_ENDOFSTREAM.0 as u32) != 0 {
             break;
         }
         let Some(sample) = sample else { continue };
+        // The head scan's first sample defines the stream origin (deep bursts
+        // arrive with it already set — get_or_insert keeps the first).
+        origin.get_or_insert(ts_hns);
         let rgba = sample_to_rgba(&sample, w, h, stride)
             .map_err(|e| DecodeError::Corrupt(format!("Media Foundation: {e}")))?;
-        // Stop on the first *genuinely good* frame — bright AND textured, so a
-        // white/vignette title card never ends the walk — and return THAT frame,
-        // not whatever out-ranked it earlier. Otherwise rank it for the fallback.
-        if poster_frame_is_good(&rgba, w) {
-            best.win(rgba, w, h);
+        // Judge at the fixed judge size (task #114): resolution-independent, so
+        // the pick is the same whether this walk serves a thumb or a 7680-wide
+        // display. Stop on the first genuinely-good frame — bright AND textured,
+        // so a white/vignette title card never ends the walk.
+        let (good, score) = crate::video::poster_judge(&rgba, w, h);
+        if good {
+            best.win(rgba, w, h, ts_hns);
             return Ok(true);
         }
-        let score = poster_frame_score(&rgba, w);
-        best.consider(score, rgba, w, h);
+        best.consider(score, rgba, w, h, ts_hns);
     }
     Ok(false)
 }
@@ -396,6 +492,7 @@ unsafe fn deep_scan(
     dims: (u32, u32),
     duration: Option<Duration>,
     best: &mut Best,
+    origin_hns: i64,
     cancel: &AtomicBool,
     deadline: Instant,
 ) -> Result<bool, DecodeError> {
@@ -422,14 +519,16 @@ unsafe fn deep_scan(
             return Ok(false);
         }
         // A seek that won't open (a bad offset) just moves to the next one.
-        let Ok((reader, w, h, stride)) = reopen_at_rgb32(input, dims, target) else {
+        let Ok((reader, w, h, stride)) = reopen_at_rgb32(input, dims, target, origin_hns) else {
             continue;
         };
+        let mut deep_origin = Some(origin_hns);
         let r = scan(
             &reader,
             (w, h, stride),
             POSTER_BURST_FRAMES,
             best,
+            &mut deep_origin,
             cancel,
             deadline,
         );
@@ -449,12 +548,15 @@ unsafe fn reopen_at_rgb32(
     input: &crate::VideoInput,
     dims: (u32, u32),
     target: Duration,
+    origin_hns: i64,
 ) -> Result<(IMFSourceReader, u32, u32, i32), DecodeError> {
     let reader = open_video_reader(input)?;
     let (w, h, stride) = negotiate_rgb32(&reader, Some(dims))
         .or_else(|_| negotiate_rgb32(&reader, None))
         .map_err(|e| DecodeError::Corrupt(mf_open_msg(e)))?;
-    let hns = (target.as_nanos() / 100) as i64;
+    // ABSOLUTE seek: origin + offset, exactly as playback seeks (task #114 —
+    // MPEG-TS streams start nonzero; a bare relative offset lands short there).
+    let hns = origin_hns.saturating_add((target.as_nanos() / 100) as i64);
     let pos = propvariant_i8(hns.max(0));
     reader
         .SetCurrentPosition(&windows::core::GUID::zeroed(), &pos)

@@ -331,16 +331,18 @@ fn poster_inner(
     assemble_poster(full_conv, best, walk.facts.codec, disp_w, disp_h)
 }
 
-/// The reduced scale to *score* candidates at — brightness is scale-invariant, so
-/// the same frame wins, but each scored frame is a tiny convert instead of a 4K
-/// one. Capped so small clips (test fixtures) walk at their native size unchanged.
+/// The reduced scale to *score* candidates at: the shared judge width (task
+/// #114, `video::POSTER_JUDGE_WIDTH`) so the MF and FFmpeg walks pick the SAME
+/// frame for the same clip — the judge is the resolution-independence contract,
+/// not a private optimization. Capped so small clips (test fixtures) walk at
+/// their native size unchanged.
 fn walk_dims(fw: u32, fh: u32) -> (u32, u32) {
-    const WALK_MAX_EDGE: u32 = 480;
+    let walk_max = crate::video::POSTER_JUDGE_WIDTH;
     let long = fw.max(fh);
-    if long <= WALK_MAX_EDGE {
+    if long <= walk_max {
         return (fw, fh);
     }
-    let s = WALK_MAX_EDGE as f32 / long as f32;
+    let s = walk_max as f32 / long as f32;
     (
         ((fw as f32 * s).round() as u32).max(2) & !1,
         ((fh as f32 * s).round() as u32).max(2) & !1,

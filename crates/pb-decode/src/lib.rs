@@ -190,8 +190,8 @@ pub use metadata::read_exif_fields;
 pub use mf_audio::{MfAudioDecoder, MfAudioFormat};
 #[cfg(windows)]
 pub use mf_poster::{
-    decode_video_poster, decode_video_poster_input, probe_video_details, probe_video_details_input,
-    probe_video_input, probe_video_stream,
+    decode_video_poster, decode_video_poster_input, decode_video_poster_select,
+    probe_video_details, probe_video_details_input, probe_video_input, probe_video_stream,
 };
 #[cfg(windows)]
 pub use mf_stream::mem_istream;
