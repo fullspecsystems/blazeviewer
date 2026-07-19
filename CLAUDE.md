@@ -1,74 +1,149 @@
-# Blaze Viewer — Project Guide
+# Blaze Viewer
 
-Blaze Viewer is an image viewer with exactly one obsession: **how fast you can flick
-through thousands of images.** No chrome, fit-to-screen, keyboard-driven, with images
-decoded ahead of time and held resident in GPU memory so the next frame is already
-there when you press a key.
+Blaze Viewer is an image and video viewer with an obsession: Make viewing as fast and smooth as possible.
+A key feature is "Blaze Mode": seeking through photos in a direction (forward, backwards, or 'randomly') as fast as a user wants, within the limits of the hardware.
+The feel and acceleration of this is customizable, but on a powerful computer with a 120Hz display, that means we can literally display 120 images per second in a way that is actually useful. When a user stops and parks on an image, operations like rescaling, toggling fullscreen, and playing videos are all feel instant.
 
-## Prime directive
+## Prime Directive
 
-> **Every architectural decision is answered by one question: "Will this make it
-> faster, or have basically zero performance impact?"** If it's neither, it
-> doesn't ship. Speed is the feature.
+**Every decision is answered by one question: "Does this make the user's next
+likely action feel closer to instant?"** If it serves that for no mode and isn't free,
+it doesn't ship. Speed is the feature — and speed is a property of
+*interactions*. What the next likely actions *are* depends on
+mode: blazing, it's the next items in the travel direction; parked, it's zoom,
+1:1, rotate, fullscreen, compare, play — operations on *this* item. On high-end,
+modern hardware "instant" is almost always achievable for our purposes.
 
-Corollary: **we do not guess about speed — we measure it.** Performance claims
-require numbers from the benchmark corpus. Architecture choices that affect the
-hot path are built behind swappable seams and A/B tested (see *Instrumentation*).
+Three corollaries:
 
-> ⚠️ **Before you report a licensing bug:** a dev build linking
-> `/opt/homebrew/opt/ffmpeg/...` (GPL) is **expected and correct** — dev and
-> release use different FFmpeg. This trips up almost every fresh reader. See
-> *Licensing* below before acting on it.
+1. **Anticipate.** Do the work before it's asked for. The prefetch ring is
+   the blaze-mode instance of a general rule: whatever the user plausibly
+   does next should already be resident when they do it. Every new feature
+   answers "what are its likely interactions, and what do we pre-arrange?"
+2. **Never repeat likely work.** Deterministic derived results — decodes,
+   scaled derivatives, posters — are retained within budget, so the second
+   time is a rebind, not a recompute. Toggling fullscreen twice must never
+   decode twice. (Greedy within enforced budgets, evicted by likelihood —
+   see *spend the hardware* below.)
+3. **Measure.** Perceived-speed claims require numbers from the corpus —
+   per-interaction latency, p50/p95/p99, never means. Non-obvious hot-path
+   choices go behind swappable seams and get A/B tested (*Instrumentation*).
+
+> ⚠️ The original reading of this directive — "faster" meant navigation
+> throughput — produced an app that blazed at 120 Hz and took seconds to
+> toggle fullscreen, every single time. That is the failure this wording
+> exists to prevent: optimizing one global metric while the user's actual
+> next action goes cold. As scope grows (video, archives, editing), the
+> question is never "is the app fast?" — it's "which interaction just became
+> likely, and is it instant?"
+
+## Second Directive: private by default
+
+Blaze Viewer is fast **and** private: **it keeps no record of what you
+viewed.** You should be able to look at anything and have nobody — later, on
+this machine or anywhere else — be able to tell. Privacy ranks just after
+performance, and it is why some "free" performance is deliberately left on
+the table: a persistent central thumbnail/pixel cache would speed cold starts
+*and* leak viewing history as an audit trace, so it doesn't exist. Every
+derived result we retain (the *never repeat likely work* corollary) lives in
+RAM/VRAM and dies with the process; any future on-disk cache must be
+**explicit opt-in and user-clearable**, never a default.
+
+Two hard rules follow:
+
+- **No involuntary traces of viewing.** No thumbnail DB, no MRU of photo
+  paths, no decoded-pixel temp files, no logs of viewed items. Explicit user
+  edits (delete, save rotation) are a separate, allowed category. The full
+  contract and its enforcement (the no-trace test, the static audit,
+  ADR-018/022) live in *Privacy guarantee* below.
+- **Nothing leaves the machine by default.** Any feature that sends content
+  or metadata to another system — AI descriptions, cloud OCR, anything
+  network-touching — is explicit opt-in, gated behind a clear warning that
+  says what goes where. Never on silently.
+
+> Licensing Note: A dev build linking `/opt/homebrew/opt/ffmpeg/...` (GPL) is 
+> **expected and correct** — dev and release use different FFmpeg.
 
 ## The performance model (read this before optimizing anything)
 
-The naive intuition is "tune the GPU rendering." That's wrong. Drawing one
-textured quad is microseconds; the GPU is never the bottleneck for display. The
-real wall is **decode throughput**, and the architecture exists to hide it:
+A real session alternates between two modes, and the architecture serves both:
 
-1. **Decode-to-fit.** Never decode more pixels than the display shows. On the
-   7680×3840 target, a 24 MP JPEG is decoded at a reduced scale (libjpeg-turbo
-   DCT scaling 1/2, 1/4, 1/8), often cutting decode several-fold. A major lever
-   in general — but **measured inert on this 7680-wide display for ≤24 MP photos**
-   (decode-spike: 0/200 triggered scaling), where full-decode throughput dominates
-   instead. Encoded in `pb-decode::FitBox`.
-2. **Preview-first, then refine.** Show the embedded thumbnail/preview (EXIF,
-   HEIC, RAW) instantly, swap in the scaled full decode when ready. Makes fast
-   scrubbing feel instant even when full decode lags.
-3. **Prefetch ring → resident VRAM.** A direction-biased window of neighbors is
-   decoded and uploaded *ahead* of the user into a ring of resident GPU
-   textures. **A keypress is a rebind, never a decode or an upload.**
-4. **Self-paced advance.** Holding a key advances to the newest *ready* frame
-   each vsync — so you blaze when decode keeps up and degrade gracefully (to
-   previews) when it can't. Capped at the monitor refresh rate.
+1. **Blazing** — flipping through items as fast as the brain can process them
+   (rate user-tunable). The budget: **keypress → photon ≤ one refresh interval**
+   (~8.3 ms @ 120 Hz). A direction-biased prefetch ring decodes right-sized
+   pixels ahead of the user into resident GPU textures, so **a keypress is a
+   rebind — never a decode, never an upload.** Holding a key self-paces to the
+   newest *ready* frame each vsync: blaze when decode keeps up, degrade to
+   previews when it can't. Throughput is capped at refresh — the job is "one
+   fresh frame per vsync with an instant preview fallback," not "infinite fps."
+   A video's poster frame is its blaze-mode face.
+2. **Parked** — the user settles on one item. Every interaction — fullscreen,
+   fit/fill/1:1, zoom, pan, rotate, compare, the metadata panel, starting
+   video playback — gets the same ≤-one-refresh budget, and quality is
+   **maximum**: original pixels, correct color, real metadata. The parked
+   metrics are **interaction → photon** and **time-to-max-quality after
+   parking**.
 
-The metric that matters is **keypress → photon** (input to the pixel actually
-scanning out), target ≤ one refresh interval (~8.3 ms @ 120 Hz). Throughput is
-capped by refresh: the job is "one fresh frame per vsync, with an instant preview
-fallback," not "infinite fps."
+The modes are not two code paths. They are two ends of one **cancellable
+refinement ladder**: embedded preview → decoded-to-fit → full quality. Blazing
+shows whatever rung is ready; parking just lets the ladder finish. Any nav
+input cancels in-flight refinement — cancellation is what makes generosity
+affordable.
+
+Two consequences that are easy to get wrong:
+
+- **Decode-to-purpose.** Each rung decodes only what its job needs: a blaze
+  frame needs display-fit pixels (`pb-decode::FitBox`; native scaled decode
+  like JPEG DCT scaling is the lever, though measured inert for ≤24 MP photos
+  on the 7680-wide target — full-decode throughput dominates there); a parked
+  1:1 view needs the original. Neither over-decodes for its purpose.
+- **The wall is decode throughput, not GPU draw.** Drawing a textured quad is
+  microseconds; the naive "tune the rendering" instinct is wrong. The
+  prefetch ring, preview-first, and the decode pool all exist to hide decode
+  latency. (The GPU does real work now — Lanczos derive, HDR, video — but it
+  is never the display bottleneck.)
+
+**Spend the hardware, inside measured budgets.** RAM and VRAM exist to be
+used: a 96 GB / RTX 5090 box should hold big resident rings and eager caches.
+But every cache has an enforced budget derived from what the machine actually
+has, and allocation is **refuse-before-reserve** — pre-flight the cost, then
+decline or degrade rather than thrash. Big machines feast; small machines
+degrade gracefully; nobody crashes or swaps.
 
 ## Architecture
 
 ```
 crates/
-  pb-core    pure nav / precomputed-random / prefetch / cache-residency
-             — no I/O, no GPU, deterministic, 100% unit-testable
-  pb-decode  decode abstraction (decode-to-fit + preview-first) + swappable backends
-  pb-source  ItemSource seam: "encoded bytes + name for item i" over a filesystem
-             listing (FsSource), a ZIP (ZipSource), or a 7z (SevenZSource) — RAM-only,
-             read-only on the view path; archive viewing lives here
-  pb-render  fit-to-screen geometry now; wgpu presenter (swapchain, ring, draw) later
-  pb-ui      the chrome design system: egui tokens + components (cards, toggle,
-             buttons, text fields) + a Windows-tracking light/dark theme. egui-only,
-             no app deps; powers the dialogs and the standalone component gallery
-  pb-app-core platform-neutral orchestration model (NS0/ADR-021): the action vocabulary,
-             the PbKey key model + keymap, slideshow + hold-to-blaze timing, the shared
-             config dir, and the CoreEvent/CoreEffect/MenuState/Modifiers/KeyResolution
-             contract. toml-only — no winit/egui/GPU — so the macOS SwiftUI shell and the
-             winit shell can drive the same core. The winit App re-exports its modules.
-  pb-app     the winit shell binary: event loop, decode thread pool, egui dialogs, wiring
-             over pb-app-core (still holds most orchestration until the NS0 AppCore-struct
-             inversion; the shell-neutral seams already live in pb-app-core)
+  pb-core     pure nav: playlist, precomputed-random shuffle, prefetch window, ring
+              residency, thumbs — no I/O, no GPU, deterministic, fully unit-testable
+  pb-decode   the refinement ladder (preview → fit → full) behind swappable backends:
+              stills (image / zune / jxl-oxide / resvg / raw / WIC / libheif / dav1d),
+              video + posters + metadata (Media Foundation + FFmpeg demux), subtitle cues
+  pb-source   ItemSource seam ("encoded bytes + name for item i"): FsSource or an
+              archive — ZIP / 7z / tar family / RAR4 / RAR5, lazy random-access vs
+              eager-to-RAM per kind; `archive_kind` is the one classifier. RAM-only,
+              read-only on the view path
+  pb-render   the wgpu presenter: swapchain + resident texture ring, view transforms
+              (fit/fill/1:1, zoom/pan/rotate), staging-ring uploads, GPU Lanczos
+              resample, fp16 scRGB color + HDR output, NV12/P010 video planes,
+              headless golden-image rendering
+  pb-hud      CPU overlay compositor (panels, toasts, pie, chips; fontdue text +
+              resvg FA icons) — shell-neutral, split from pb-app in NS0
+  pb-ui       the chrome design system: egui tokens + components + light/dark theme.
+              egui-only, no app deps; powers the dialogs and the gallery example
+  pb-app-core the orchestration core (NS0/ADR-021): AppCore + the engine turning
+              CoreEvents into CoreEffects — decode pool, scan, archive opens,
+              settings/keymap/config, slideshow + hold-to-blaze timing, the video
+              session, subtitles, poster selection, panels/undo/delete/save-rotation.
+              No UI toolkit (winit/egui/wgpu-free); filesystem allowed (config, scan)
+              — the boundary is "no shell," unlike strictly-pure pb-core
+  pb-cli      the clap flag surface as a library (→ LaunchOverrides), shared by every
+              shell; never calls process::exit (FFI-safe)
+  pb-app      the Windows/Linux winit shell binary: event loop, wgpu surface, egui
+              dialogs + overlay, muda menus, WASAPI audio, clipboard, self-update
+  pb-mac-ffi  swift-bridge staticlib exposing AppCore to the SwiftUI/AppKit host in
+              mac/ (events in via AppCoreHandle, CoreEffects drained on the main
+              actor). macOS ships the mac/ host and never links pb-app
 ```
 
 The crate boundaries *are* the A/B seams. Anything whose "is this faster?" answer
@@ -78,14 +153,20 @@ backend, cache/eviction policy, present mode, upload strategy.
 ### Threading
 - **Event-loop thread (winit):** input, swapchain, draw. Never blocks on I/O or
   decode. On keypress: advance index → rebind resident texture → present.
-- **Decode pool:** a dedicated worker pool with **priorities + cancellation**
-  (not bare rayon — work-stealing reorders prefetch and there are no priorities).
-  Pulls jobs from the prefetch scheduler, decodes-to-fit, hands off for upload.
+- **Decode pool (`pb-app-core::decode_pool`):** a dedicated worker pool with
+  **priorities + cancellation** (not bare rayon — work-stealing reorders prefetch
+  and there are no priorities). Pulls jobs from the prefetch scheduler,
+  decodes-to-fit, hands off for upload. Non-image work kinds (posters, poster
+  selection) ride the same pool under the same priority rules.
 - **Upload (`UploadStrategy` seam):** v1 uses a **persistent staging-buffer ring**
   (`copy_buffer_to_texture`) — measured ~48 GB/s, 3.4× the 120 Hz budget. Never
   `write_texture` (the trap: 60–75 fps on large frames). Uploads land in the
   resident ring during prefetch — **never on the keypress frame**. A zero-copy CUDA
   alias is the gated escalation behind the same seam.
+- **Other workers, same rule:** video playback runs a demand-driven MF reader
+  thread + a WASAPI audio engine (the audio clock is the master); archive opens,
+  container probes, and RAW demosaic (256 MB stack) get their own threads. All of
+  them report back as effects/messages — nothing ever blocks the event loop.
 
 ## Test-Driven Development (required)
 
@@ -332,7 +413,7 @@ deps a hard ship gate, not a chore. The rule, in one line:
 > filters (x264, x265, GPL avfilter) are irrelevant to a viewer — we don't encode
 > anything, so we give up nothing by excluding them.
 
-### 🪤 The Homebrew trap — the #1 false alarm in this repo
+### ⚠️ The Homebrew trap — the #1 false alarm in this repo
 
 **Dev and release link different FFmpeg. This is deliberate.**
 
@@ -535,10 +616,10 @@ pragmatic crate choices differ from the table above and are the current baseline
     request, so browsing past a door *never* decompresses. That — **not** the texture size — is
     why doors are safe where blending archive contents into the deck was not (the prefetch ring
     would have decompressed archives nobody clicked). Pinned by a panicking-`bytes()` source
-    driven through **every** decode entry point. 🪤 The tile's *size* has been argued from three
+    driven through **every** decode entry point. ⚠️ The tile's *size* has been argued from three
     times and been wrong three times; it only has to clear a comfort bar
     (`a_full_ring_of_doors_fits_the_byte_budget`).
-  - 🪤 **A new `LibraryItemKind` must opt *out* of byte reads, not into them.** The tree encodes a
+  - ⚠️ **A new `LibraryItemKind` must opt *out* of byte reads, not into them.** The tree encodes a
     two-kind world (video vs "everything else, therefore an image, therefore safe to read"). Guards
     written `!matches!(…, Video(_))` or `if let Video(_)` silently drop a new kind in the *image*
     bucket — which is how the thumbs strip and the `Shift+I` panel would each have `fs::read` every
@@ -737,7 +818,7 @@ binary) or the AppImage's directory isn't writable (installed read-only) — the
 > script refuses to run from a dirty tree; `scripts/release-preflight.sh` is the shared bash
 > gate (release-windows.ps1 mirrors it inline — PowerShell can't source bash).
 >
-> 🪤 **Why the gate is two-sided — a pre-flight `git status` is NOT enough.** Bumping
+> ⚠️ **Why the gate is two-sided — a pre-flight `git status` is NOT enough.** Bumping
 > `crates/pb-app/Cargo.toml` changes `pb-app`'s entry in `Cargo.lock`, but *nothing rewrites
 > the lockfile until a cargo command runs* — which is the release build itself. So a tree that
 > is genuinely clean when checked goes dirty **mid-build**, and the DMG ships
@@ -773,14 +854,14 @@ To cut a release:
    config's YubiKey `Match exec` hook has a Windows path that Git Bash mangles, so the upload fails
    `Permission denied (publickey)`. The build + sign + pack still succeed there; only the `-Upload`
    scp/rsync needs native PowerShell.
-   > 🪤 **A re-run is NOT upload-only.** `-Upload` is the last step of the *whole* pipeline, and
+   > ⚠️ **A re-run is NOT upload-only.** `-Upload` is the last step of the *whole* pipeline, and
    > `vpk pack` **hard-fails** on a second run — *"There is a release in channel win which is equal
    > or greater to the current version"* — because the version it just packed is sitting in
    > `dist\feed`. So if the pack succeeded and only the upload failed, do **not** re-run the script:
    > `scp` the already-signed feed yourself (`cd dist\feed; scp * jdlien.com:/var/www/downloads.blazeviewer.app/win/`).
    > Re-running means clearing `dist\feed` first, which re-signs everything for no gain (hit on 0.2.1).
 
-   > 🪤 **`dist\feed` is a *cumulative* feed, and `vpk` merges whatever it finds there — including a
+   > ⚠️ **`dist\feed` is a *cumulative* feed, and `vpk` merges whatever it finds there — including a
    > different product.** On 0.2.1 the dir still held the PhotoBlaze packages, so `releases.win.json`
    > advertised PhotoBlaze 0.1.0/0.1.1/0.2.0 *beside* BlazeViewer 0.2.1 and vpk built a delta **across
    > the packId rename** (PhotoBlaze 0.2.0 → BlazeViewer 0.2.1). Upload sends the whole directory, so
