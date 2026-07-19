@@ -334,8 +334,12 @@ fn fs_egui(in: VsOut) -> @location(0) vec4<f32> {
 /// transparent PNG/SVG edges halo), reading four explicit `textureLoad`s. `fs_srgb` decodes/encodes
 /// sRGB (SDR mode-0 `Rgba8Unorm`); `fs_linear` averages directly (HDR mode-2 `Rgba16Float`, already
 /// scene-linear). Source-ICC (mode 1) images are NOT mipped (stay L0) — their TRC isn't threaded
-/// here. Known Phase-1 limit: odd source dims use a clamped 2×2 box (the trailing texel is
-/// under-weighted, never dropped); a polyphase box is a later refinement.
+/// here. Known Phase-1 limit: on odd source dims the trailing row/column is **DROPPED** — the 2×2
+/// box for the last destination texel starts at `2*(dst-1)`, which never reaches source texel
+/// `2*dst` (the edge clamp only guards reads *past* the extent, it never pulls the orphan texel
+/// in). So each odd level loses ≤1 row/col and the mip phase is slightly biased; pinned by
+/// `odd_dims_drop_the_trailing_row_and_col` so the #110 derive can treat the bias as a known
+/// quantity. A polyphase (NPOT-correct) box is a later refinement — #110 plan §3b.
 const MIPGEN_WGSL: &str = r#"
 @vertex
 fn vs(@builtin(vertex_index) vi: u32) -> @builtin(position) vec4<f32> {
@@ -4094,6 +4098,143 @@ mod tests {
             px[0]
         );
         assert_eq!(px[3], 255, "opaque alpha preserved");
+    }
+
+    /// #110 plan §3b odd-dim caveat, pinned: `MIPGEN_WGSL`'s 2×2 box **drops** the trailing
+    /// row/column of an odd-dimension level — it does NOT clamp-and-under-weight it (the comment
+    /// used to claim that). A 5×3 L0 that is black everywhere except a white last column AND a
+    /// white last row must produce a pure-black 2×1 mip 1: the box for dst (1,0) reads source
+    /// columns 2–3 / rows 0–1 and never touches col 4 / row 2. If a future polyphase box starts
+    /// weighting the orphans in (the correct NPOT refinement), this test's expectation flips —
+    /// update the derive's mip-phase assumptions with it.
+    #[test]
+    fn odd_dims_drop_the_trailing_row_and_col() {
+        const W: u32 = 5;
+        const H: u32 = 3;
+        let mut texels = vec![[0u8, 0, 0, 255]; (W * H) as usize];
+        for y in 0..H {
+            texels[(y * W + (W - 1)) as usize] = [255, 255, 255, 255]; // last column white
+        }
+        for x in 0..W {
+            texels[((H - 1) * W + x) as usize] = [255, 255, 255, 255]; // last row white
+        }
+        let m1 = pollster::block_on(gen_mip1_srgb(W, H, &texels)); // mip 1 = 2×1
+        assert_eq!(
+            at(&m1, 2, 0, 0),
+            [0, 0, 0, 255],
+            "dst (0,0) averages src cols 0-1 / rows 0-1 — all black"
+        );
+        assert_eq!(
+            at(&m1, 2, 1, 0),
+            [0, 0, 0, 255],
+            "dst (1,0) averages src cols 2-3 / rows 0-1: the white col 4 and row 2 are DROPPED \
+             (any non-black here would mean the box now reaches the odd trailing texels)"
+        );
+    }
+
+    /// Generate mip 1 of a `w`×`h` sRGB L0 and read it back (rows tightly packed, RGBA8).
+    async fn gen_mip1_srgb(w: u32, h: u32, texels: &[[u8; 4]]) -> Vec<u8> {
+        let instance = instance();
+        let adapter = instance
+            .request_adapter(&wgpu::RequestAdapterOptions {
+                power_preference: wgpu::PowerPreference::HighPerformance,
+                force_fallback_adapter: false,
+                compatible_surface: None,
+            })
+            .await
+            .expect("no GPU adapter");
+        let (device, queue, _p010) = request_device_p010(&adapter).await;
+        let mipgen = build_mipgen(&device);
+
+        let tex = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("mip-odd-test"),
+            size: wgpu::Extent3d {
+                width: w,
+                height: h,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 2,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::COPY_DST
+                | wgpu::TextureUsages::COPY_SRC
+                | wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+        let l0: Vec<u8> = texels.iter().flatten().copied().collect();
+        queue.write_texture(
+            wgpu::ImageCopyTexture {
+                texture: &tex,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &l0,
+            wgpu::ImageDataLayout {
+                offset: 0,
+                bytes_per_row: Some(w * 4),
+                rows_per_image: Some(h),
+            },
+            wgpu::Extent3d {
+                width: w,
+                height: h,
+                depth_or_array_layers: 1,
+            },
+        );
+        generate_mips(&device, &queue, &mipgen, &tex, 2, true);
+
+        let (mw, mh) = ((w / 2).max(1), (h / 2).max(1));
+        let padded = (mw * 4).div_ceil(256) * 256; // wgpu: bytes_per_row multiple of 256
+        let readback = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("mip-odd-readback"),
+            size: (padded * mh) as u64,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("mip-odd-copy"),
+        });
+        encoder.copy_texture_to_buffer(
+            wgpu::ImageCopyTexture {
+                texture: &tex,
+                mip_level: 1,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::ImageCopyBuffer {
+                buffer: &readback,
+                layout: wgpu::ImageDataLayout {
+                    offset: 0,
+                    bytes_per_row: Some(padded),
+                    rows_per_image: Some(mh),
+                },
+            },
+            wgpu::Extent3d {
+                width: mw,
+                height: mh,
+                depth_or_array_layers: 1,
+            },
+        );
+        queue.submit(std::iter::once(encoder.finish()));
+
+        let slice = readback.slice(..);
+        let (tx, rx) = std::sync::mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |r| {
+            let _ = tx.send(r);
+        });
+        device.poll(wgpu::Maintain::Wait);
+        rx.recv().expect("map channel").expect("map readback");
+        let mapped = slice.get_mapped_range();
+        let mut out = Vec::with_capacity((mw * mh * 4) as usize);
+        for row in 0..mh {
+            let s = (row * padded) as usize;
+            out.extend_from_slice(&mapped[s..s + (mw * 4) as usize]);
+        }
+        drop(mapped);
+        readback.unmap();
+        out
     }
 
     /// Build a 2×2 sRGB texture, generate its single mip level, and read back the 1×1 result.
