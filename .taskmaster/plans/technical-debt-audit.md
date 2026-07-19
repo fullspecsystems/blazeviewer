@@ -154,9 +154,11 @@ return is now a loud diagnostic only, never a control-flow branch (`app_core_imp
 - The **renderer ring is identity-blind** — `RingSlot` holds only `{bind_group, w, h, peak}`
   (`gpu.rs:1754`), no item id / `content_gen`, so it *cannot* verify slot N holds the item the
   core believes. There is no reconciliation; drift surfaces only downstream.
-- The **fill is non-transactional**: `upload_slot` silently no-ops when `slot >= ring.len()`
-  (`gpu.rs:2910`) but `mark_resident` is called unconditionally after it, and its return is
-  ignored — the mirror can record residency the renderer lacks.
+- ✅ **The fill is transactional now (#109.4, landed 2026-07-19):** `upload_slot` returns
+  `bool` (a loud stderr refusal on out-of-bounds instead of a silent no-op), `mark_resident`
+  runs only after a successful upload and its return is checked; a refused upload rolls its
+  reservation back (reserve path) or leaves the preview bookkeeping untouched (upgrade path).
+  Both drain paths are pinned by regression tests (`a_refused_upload_*`).
 - **Epoch carries geometry identity but not deck identity**, so a cross-deck stale decode can
   dedup as current (task #109 item 3).
 - A **known-open hole** remains: `apply_scan_batch`'s `BOOTSTRAP` branch while
@@ -169,8 +171,7 @@ return is now a loud diagnostic only, never a control-flow branch (`app_core_imp
   - (#109.2) one **monotonic open generation** shared by both worker types, threaded through the
     contract, so any result whose generation ≠ latest is dropped in the core — the general,
     shell-neutral, race-proof fix that also closes mode B.
-  - (#109.4) `Renderer::upload_slot` → `bool`/`Result`; only `mark_resident` after success; check
-    its currently-ignored return; make an out-of-bounds upload a loud error.
+  - ✅ (#109.4) **landed 2026-07-19** — see the fill bullet above.
   - (#109.5) `present_item` returns success; `try_present_target`/`drain_results` propagate it; on a
     genuine miss, abort the drain and resync **once after the loop** (never mid-loop — that was the
     reverted repair).
@@ -254,9 +255,10 @@ MediaPlayer"; it has been WASAPI since `ae6f412`. Worth a one-line correction.
 
 1. **Split `app_core_impl.rs` into concern-scoped `impl AppCore` blocks.** Mechanical, low-risk,
    immediate relief to blast radius and merge conflicts. No behavior change.
-2. **Land task #109 items 4 & 5** (`upload_slot`→bool + gated `mark_resident`; `present_item`
-   result propagation with a once-after-loop resync). Small, and converts the ring bridge from
-   silent-drift to loud-failure — the durable close-out of the #3 bug class.
+2. **Land task #109 item 5** (`present_item` result propagation with a once-after-loop resync;
+   item 4 — the fail-loud `upload_slot` bridge — landed 2026-07-19). Small, and completes the
+   ring bridge's conversion from silent-drift to loud-failure — the durable close-out of the
+   #3 bug class.
 3. **Then the structural work:** finish the NS0 inversion so `AppCore` owns orchestration. This
    is the move that dissolves #1, #2, and the mirror-flag bug class together, and it unblocks
    collapsing the two shells (#2) and testing the shell (#6).
