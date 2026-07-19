@@ -1,6 +1,12 @@
 # Blaze Viewer
 
 Blaze Viewer is an image and video viewer with an obsession: Make viewing as fast and smooth as possible.
+
+> **Calibrate your sense of "old":** the repo was inited **2026-06-26** — the
+> entire project is weeks, not years, old, and it moves fast (1,000+ commits in
+> its first month). A "stale" claim in this file may be ten days stale; treat
+> dated notes as snapshots, and when code and doc disagree, the code wins —
+> then fix the doc.
 A key feature is "Blaze Mode": seeking through photos in a direction (forward, backwards, or 'randomly') as fast as a user wants, within the limits of the hardware.
 The feel and acceleration of this is customizable, but on a powerful computer with a 120Hz display, that means we can literally display 120 images per second in a way that is actually useful. When a user stops and parks on an image, operations like rescaling, toggling fullscreen, and playing videos are all feel instant.
 
@@ -407,6 +413,16 @@ is persisted unless the user deliberately invokes the action.
     overclaimed): this protects against *app-level* leaks (a stray `{:?}`, a settings write),
     **not** OS capture of live process RAM (a kernel crash dump, swap, hibernation) — the
     same exposure as the password while the user types it.
+- **AI describe/Ask (task #44) is the one network-touching feature, and it
+  follows the Second Directive exactly.** macOS uses the **on-device** Apple
+  Foundation Models backend (never Private Cloud Compute — cloud by Apple's
+  hand is still cloud); everywhere else the image goes **only to the
+  user-configured OpenAI-compatible endpoint URL** (LM Studio / Ollama —
+  `pb-app-core::describe`), only on an explicit command or the opt-in
+  auto-describe toggle, downscaled + JPEG-re-encoded first (the original
+  HEIC/RAW bytes never leave). Results are RAM-only like every other cache,
+  and the AI settings tab carries the privacy blurb (a custom endpoint means
+  your images upload to that URL — keep it local/trusted).
 - **On-disk I/O is read-only on every view/cache hot path.** The only files
   PhotoBlaze opens *while viewing* are the photos themselves, and only to *read*:
   directory scan (`read_dir`), decode (`fs::read`), and the panel's
@@ -531,9 +547,11 @@ A release .app must reference FFmpeg **only** via `@rpath/…` out of
   cost of the switch: **+0.8 MB**. `PB_VCPKG_STATIC=1` forces static linkage but is an A/B
   measurement escape hatch **only — never ship it**. (`dav1d` is BSD-2-Clause — static
   would be fine there, attribution only.)
-  > Task #77 is still open at the time of writing; the *linkage* half is done. Check it
-  > before shipping a paid Windows build, and trust `pb-decode/build.rs` over this
-  > paragraph — it was stale once already.
+  > Task #77 status (2026-07-19): the DLL linkage is done and **validated in shipped
+  > 0.2.1 packages on both x64 and ARM64** (dumpbin-verified import tables; licenses/ +
+  > the written offer ship in the payload). The one remaining item is the
+  > `cargo license`/`cargo about` sweep of the Rust dependency tree. Trust
+  > `pb-decode/build.rs` over this paragraph — it was stale once already.
 
 ### Distribution model
 
@@ -760,7 +778,8 @@ cargo test                 # unit + property + golden tests
 cargo llvm-cov --workspace # coverage (target >80%)
 cargo clippy --all-targets -- -D warnings
 cargo fmt --all
-cargo bench                # criterion microbenchmarks over the corpus
+# NOTE: no criterion bench harness is wired yet (benches/ is empty — see
+# Instrumentation); measure with --metrics, PB_PERF, and ab_report instead.
 ```
 
 **Running the viewer on Windows — use the build script, not a bare `cargo run`.**
