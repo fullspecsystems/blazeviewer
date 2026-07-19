@@ -14,6 +14,11 @@ with any pre-release suffix carried only by the tag.
   card from the full-resolution copy the app already holds, so the crisp image appears
   immediately and the second-long re-processing pause is gone. The fullscreen toggle also
   reacts faster now (it no longer waits out the delay meant for window-edge dragging).
+- **Stepping back (or forward) right after paging is sharp much sooner.** When you stop
+  paging, the app now readies the sharp versions of the photos *nearest* you first — the one
+  right behind you used to be nearly last in line. And when a photo's full-resolution copy is
+  already on hand, its sharp view is now produced directly on the graphics card in about a
+  millisecond instead of re-processing the file from disk.
 
 ### Fixed
 - **Moving to the next photo right after a fullscreen change stays sharp.** Toggling

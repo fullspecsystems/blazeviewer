@@ -1632,6 +1632,10 @@ impl AppCore {
         let watchdog_fired_now = self.update_preview_watchdog();
         let mut sharpen_pending = false;
         if self.held_nav().is_none() || self.preview_watchdog_fired() {
+            // Sharpen-via-derive first ("+1 never waits"): a displayed preview whose Original
+            // is resident sharpens on the GPU in ~a millisecond, right here — the CPU sharpen
+            // below then never gets queued for it (`fulls_wanted` sees the preview gone).
+            self.try_gpu_sharpen();
             let upgrade = self.fulls_wanted();
             if upgrade != self.last_upgrade_set || watchdog_fired_now {
                 self.last_upgrade_set = upgrade.clone();
@@ -5501,20 +5505,7 @@ impl AppCore {
         {
             return false; // already resident (e.g. the instant-toggle rebind path)
         }
-        // The box the derived pixels must fill (Codex 110b review P1): the photo is displayed
-        // into the content region BELOW the translucent top bar, and a 90°/270° view rotation
-        // swaps which viewport axis bounds the UNROTATED texture — deriving against the raw
-        // viewport would produce a texture the rotated display then UPSCALES ~1.41× (blurrier
-        // than the CPU fallback it replaces). Zoom is not a factor: `view_for` resets it on
-        // every present.
-        let mut fw = fit.max_width;
-        let mut fh = fit.max_height.saturating_sub(self.content_top_inset).max(1);
-        if matches!(
-            self.rotations.get(&item),
-            Some(Rotation::R90 | Rotation::R270)
-        ) {
-            std::mem::swap(&mut fw, &mut fh);
-        }
+        let (fw, fh) = self.derive_fit_box(item, fit);
         // Source resolution BEFORE reserving (cheap miss, no rollback churn): the retained ring
         // Original, else the held fallback — which holds the last-PRESENTED photo's texture, so
         // it is a valid source ONLY when that photo is `item` (the settle case; `present_slot`
@@ -5567,6 +5558,98 @@ impl AppCore {
         // with the ORIGINAL slot, and the caught-up shortcut would then leave the exact-size
         // Lanczos Fit resident but never bound.
         self.present_item(item, res.slot);
+        true
+    }
+
+    /// The box the derived pixels must fill (Codex 110b review P1): the photo displays into
+    /// the content region BELOW the translucent top bar, and a 90°/270° view rotation swaps
+    /// which viewport axis bounds the UNROTATED texture — deriving against the raw viewport
+    /// would produce a texture the rotated display then UPSCALES ~1.41× (blurrier than the
+    /// CPU path it replaces). Zoom is not a factor: `view_for` resets it on every present.
+    fn derive_fit_box(&self, item: usize, fit: FitBox) -> (u32, u32) {
+        let mut fw = fit.max_width;
+        let mut fh = fit.max_height.saturating_sub(self.content_top_inset).max(1);
+        if matches!(
+            self.rotations.get(&item),
+            Some(Rotation::R90 | Rotation::R270)
+        ) {
+            std::mem::swap(&mut fw, &mut fh);
+        }
+        (fw, fh)
+    }
+
+    /// Sharpen-via-derive — the "+1 never waits" rule (owner, 2026-07-19): when the displayed
+    /// photo is a resident PREVIEW and its full-res `Original` is also resident (the parked
+    /// tier held it), the sharp Fit is a millisecond GPU derive — so replace the CPU sharpen
+    /// (a full decode + an SMB re-read, 100s of ms) entirely. This is what makes backing up
+    /// one right after a blaze land sharp within a frame or two instead of showing the preview
+    /// while a decode grinds. In-place upgrade semantics (mirrors the CPU upgrade path): the
+    /// derive writes over the item's EXISTING Fit slot, then the preview bookkeeping clears
+    /// and the slot re-presents at its new dims. The transient byte overshoot between the
+    /// derive and `make_room_for_upgrade` is at most one Fit texture for under a tick.
+    /// Falls back silently (returns false) whenever ineligible — the CPU sharpen proceeds.
+    fn try_gpu_sharpen(&mut self) -> bool {
+        if !gpu_derive_enabled() {
+            return false;
+        }
+        // `sharpen_now` bakes the gates: parked (or watchdog-fired), displayed, a resident
+        // preview, not `upgrade_done`.
+        let Some(item) = self.sharpen_now() else {
+            return false;
+        };
+        let Some(fit) = self.decode_fit() else {
+            return false;
+        };
+        let Some(dst) = self.ring.slot_for_rep(item, pb_core::RepKind::Fit) else {
+            return false;
+        };
+        let Some(src) = self.ring.original_slot(item) else {
+            return false; // no resident Original → the CPU sharpen path handles it
+        };
+        if src == dst {
+            return false;
+        }
+        let (fw, fh) = self.derive_fit_box(item, fit);
+        let derived = self.renderer.as_mut().and_then(|r| {
+            r.derive_fit(
+                pb_render::DeriveSource::Ring(src),
+                dst,
+                fw,
+                fh,
+                derive_kernel(),
+                derive_mip_bias(),
+            )
+        });
+        let Some(d) = derived else {
+            return false; // ineligible (clamped / mode 1 / headless) — CPU sharpen proceeds
+        };
+        // In-place upgrade bookkeeping, mirroring the CPU upgrade path in `drain_results`.
+        self.ring
+            .make_room_for_upgrade(item, pb_core::RepKind::Fit, d.bytes, &self.targets);
+        self.ring
+            .set_slot_bytes(item, pb_core::RepKind::Fit, d.bytes);
+        self.preview_resident.remove(&item);
+        if self.resize_hold == Some(item) {
+            self.resize_hold = None;
+        }
+        let t0 = self.full_requested_at.remove(&item);
+        if self.displayed_item == Some(item) {
+            if let Some(t0) = t0 {
+                self.metrics.record("sharpen", t0.elapsed());
+            }
+        }
+        self.perf_note_full(item);
+        if sharp_diag() {
+            eprintln!(
+                "[sharp-diag] GPU-sharpened item={item} {}x{} from its resident Original — CPU sharpen skipped",
+                d.w, d.h
+            );
+        }
+        // Re-present so the renderer picks up the sharp texture's dims (the preview's stayed
+        // bound otherwise) — same reason the CPU upgrade path re-presents.
+        if self.displayed_item == Some(item) {
+            self.present_item(item, dst);
+        }
         true
     }
 
@@ -6003,7 +6086,7 @@ impl AppCore {
     pub fn prefetch_fulls(&self) -> Vec<usize> {
         let full_bytes = self.slot_bytes_estimate();
         let sharpen = self.sharpen_now();
-        full_ring(
+        let mut ring: Vec<usize> = full_ring(
             &self.targets,
             full_bytes,
             RING_BUDGET_BYTES,
@@ -6017,7 +6100,21 @@ impl AppCore {
                 && !self.upgrade_done.contains(&i)
                 && !self.is_raw_item(i)
         })
-        .collect()
+        .collect();
+        // "+1 never waits" (owner, 2026-07-19): fulls decode NEAREST-first around the cursor,
+        // not in the ahead-biased window order — after a forward blaze `targets` ranks the item
+        // just BEHIND you ~10th, so backing up one within seconds of parking found a preview
+        // still waiting on its full. The membership (budget prefix) is unchanged; only the
+        // decode ORDER changes, and only when parked (this list is priority-positional). The
+        // stable sort keeps ahead-of-cursor ahead of behind-of-cursor at equal distance.
+        // SEQUENTIAL travel only: in Random mode the likely next view is the next SHUFFLE item
+        // (already first in `targets` order) — sequential distance would misprioritize it.
+        if !matches!(self.playlist.last_direction(), pb_core::Direction::Random) {
+            if let Some(cur) = self.playlist.current() {
+                ring.sort_by_key(|&i| i.abs_diff(cur));
+            }
+        }
+        ring
     }
 
     /// Whether `item`'s full decode is a slow RAW demosaic (seconds, and once started
@@ -16216,6 +16313,69 @@ mod tests {
         core.now = t + PREVIEW_WATCHDOG_AFTER * 4;
         core.tick();
         assert_eq!(core.sharpen_now(), None, "no fourth attempt");
+    }
+
+    /// "+1 never waits" (owner, 2026-07-19): after a FORWARD blaze the window order ranks the
+    /// item just behind the cursor ~10th, so its full decoded seconds after parking — backing
+    /// up one found a preview. Parked fulls must decode nearest-the-cursor-first (stable:
+    /// ahead beats behind at equal distance), same membership.
+    #[test]
+    fn parked_fulls_decode_nearest_first_after_a_forward_blaze() {
+        let mut core = test_core();
+        core.source = photos_named(&[
+            "a.jpg", "b.jpg", "c.jpg", "d.jpg", "e.jpg", "f.jpg", "g.jpg", "h.jpg", "i.jpg",
+            "j.jpg", "k.jpg", "l.jpg",
+        ]);
+        core.playlist = Playlist::new(12, 0).with_cursor(5);
+        core.ring = ResidentRing::new(8);
+        core.fit = Some(FitBox {
+            max_width: 100,
+            max_height: 100,
+        });
+        core.view.mode = ScaleMode::Fit;
+        core.displayed_item = Some(5);
+        core.target_item = Some(5);
+        // The post-forward-blaze window shape: ahead-biased, behind items last.
+        core.targets = vec![5, 6, 7, 8, 9, 4, 3];
+        let fit_rep = core.rep_of(pb_core::RepKind::Fit);
+        for &i in &[5usize, 6, 7, 8, 9, 4, 3] {
+            make_resident(&mut core, i, fit_rep, &[5, 6, 7, 8, 9, 4, 3]);
+            core.preview_resident.insert(i);
+        }
+
+        assert_eq!(
+            core.prefetch_fulls(),
+            vec![6, 4, 7, 3, 8, 9],
+            "fulls decode nearest-first (current excluded — it is the top-priority sharpen)"
+        );
+    }
+
+    /// Sharpen-via-derive gating: a failed/ineligible GPU sharpen (headless here) must leave
+    /// every piece of preview bookkeeping intact so the CPU sharpen path proceeds unharmed.
+    #[test]
+    fn a_gpu_sharpen_failure_leaves_the_preview_bookkeeping_intact() {
+        let mut core = stuck_preview_core();
+        core.held.clear(); // parked
+        make_resident(&mut core, 0, pb_core::Representation::Original, &[0]);
+        assert_eq!(core.sharpen_now(), Some(0), "eligible to sharpen");
+
+        assert!(
+            !core.try_gpu_sharpen(),
+            "headless renderer can't derive — falls back"
+        );
+        assert!(
+            core.preview_resident.contains(&0),
+            "the preview tracking is untouched"
+        );
+        assert!(
+            core.ring.original_slot(0).is_some(),
+            "the source Original is untouched"
+        );
+        assert_eq!(
+            core.sharpen_now(),
+            Some(0),
+            "the CPU sharpen path is still open"
+        );
     }
 
     /// The deadline boundary: strictly-before stays armed-only; at the deadline it fires.
