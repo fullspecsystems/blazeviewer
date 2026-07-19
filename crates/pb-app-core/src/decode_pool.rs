@@ -41,6 +41,14 @@ use pb_source::ItemSource;
 pub enum Purpose {
     Display,
     Thumb,
+    /// A poster-selection walk (task #114): the ONE scored walk per movie that
+    /// chooses the poster frame and cuts every consumer's artifact from it.
+    /// Geometry-NEUTRAL — keyed by content generation, exempt from the epoch
+    /// cancel in [`DecodePool::set_targets`] (a resize must not kill a
+    /// multi-second walk whose choice is viewport-independent) — and
+    /// class-mutable (thumb-cap occupancy until display demand joins; see
+    /// `Want::poster_select`).
+    PosterSelect,
 }
 
 /// The injected decode step (resolves the item's bytes from the source, then
@@ -98,6 +106,15 @@ pub struct Want {
     pub fit: Option<FitBox>,
     pub preview: bool,
     pub purpose: Purpose,
+    /// [`Purpose::PosterSelect`] only: the CONTENT generation this selection is
+    /// for (its `DecodeKey.epoch` — selections are deck-scoped, not
+    /// geometry-scoped). Ignored for other purposes.
+    pub sel_gen: u64,
+    /// [`Purpose::PosterSelect`] only: whether display demand exists. `false` =
+    /// thumb-only, scheduled under the thumb occupancy cap; `true` = display
+    /// class. Mutating this across `set_targets` calls PROMOTES a queued
+    /// selection in place (identity unchanged, no restart — Codex #114 r3).
+    pub display_class: bool,
 }
 
 impl Want {
@@ -107,6 +124,8 @@ impl Want {
             fit,
             preview,
             purpose: Purpose::Display,
+            sel_gen: 0,
+            display_class: true,
         }
     }
 
@@ -118,7 +137,38 @@ impl Want {
             fit: Some(fit),
             preview: true,
             purpose: Purpose::Thumb,
+            sel_gen: 0,
+            display_class: false,
         }
+    }
+
+    /// A poster-selection walk (task #114). `fit` is the display fit the Fit
+    /// artifact should be cut for (the pool tags that artifact with the geometry
+    /// epoch at enqueue — it alone goes stale on resize; the choice does not).
+    pub fn poster_select(
+        item: usize,
+        fit: Option<FitBox>,
+        content_gen: u64,
+        display_class: bool,
+    ) -> Want {
+        Want {
+            item,
+            fit,
+            preview: false,
+            purpose: Purpose::PosterSelect,
+            sel_gen: content_gen,
+            display_class,
+        }
+    }
+}
+
+/// The dedup identity of a want/job. Selections force `RepKind::Fit` so their
+/// identity is stable regardless of the display mode's fit (`fit: None` in
+/// Original mode would otherwise flip the rep and split the identity).
+fn want_key(w: &Want) -> (usize, Purpose, pb_core::RepKind) {
+    match w.purpose {
+        Purpose::PosterSelect => (w.item, w.purpose, pb_core::RepKind::Fit),
+        _ => (w.item, w.purpose, rep_kind_of(&w.fit)),
     }
 }
 
@@ -127,7 +177,18 @@ impl Want {
 /// lets workers proceed.
 pub struct Outcome {
     pub key: DecodeKey,
+    /// The decoded image for `Display`/`Thumb` outcomes. INVARIANT: for a
+    /// [`Purpose::PosterSelect`] outcome this is a placeholder `Err` no consumer
+    /// may read — the drain matches `PosterSelect` FIRST and consumes
+    /// [`selection`](Self::selection) instead (pinned by test).
     pub result: Result<DecodedImage, DecodeError>,
+    /// The typed poster-selection payload (task #114). `Some` iff
+    /// `key.purpose == PosterSelect`; its `key.epoch` is the CONTENT generation.
+    pub selection: Option<Result<pb_decode::PosterSelection, DecodeError>>,
+    /// The geometry epoch the job's `fit` was taken from — the Fit ARTIFACT's
+    /// staleness tag for selections (Codex #114 r3: a selection survives a
+    /// resize, its cut Fit does not). Equals `key.epoch` for non-selections.
+    pub fit_tag_epoch: u64,
     /// The JOB's `allow_preview` flag (not the image's `is_preview`). Load-bearing for the
     /// drain's upgrade bookkeeping: an `is_preview` image from a `preview: true` job landing on
     /// an already-resident preview is a DUPLICATE (the pool untracks a finished job before its
@@ -160,6 +221,8 @@ impl Outcome {
                 rep_kind,
             },
             result,
+            selection: None,
+            fit_tag_epoch: epoch,
             preview: false, // a synthetic poster is a definitive full, not a preview request
             _budget: None,
         }
@@ -211,14 +274,32 @@ struct Job {
     preview: bool,
     prio: u32,
     cancel: Arc<AtomicBool>,
+    /// The geometry epoch `fit` was taken from (selections: the Fit artifact's
+    /// staleness tag; others: == key.epoch). Updated in place when a QUEUED
+    /// selection is re-emitted after a resize.
+    fit_tag_epoch: u64,
+    /// Scheduling class for [`Purpose::PosterSelect`] jobs: `true` = thumb-only
+    /// demand, counted under the thumb occupancy cap. Mutated in place by
+    /// promotion (`set_targets` with `display_class: true`) while queued;
+    /// meaningless for other purposes (their class IS their purpose).
+    thumb_class: bool,
+}
+
+/// A tracked (queued or in-flight) job's dedup entry: the cancel flag plus the
+/// job's `key.epoch` (geometry epoch, or content generation for selections) so
+/// `set_targets` can cancel a stale-generation selection whose replacement wants
+/// the same identity (in-flight jobs aren't visible in `queue`).
+struct TrackedEntry {
+    flag: Arc<AtomicBool>,
+    gen: u64,
 }
 
 struct Inner {
     queue: Vec<Job>,
-    /// (item, purpose, rep_kind) -> cancel flag, for every queued OR in-flight job
+    /// (item, purpose, rep_kind) -> entry, for every queued OR in-flight job
     /// (the dedup set). Purpose-keyed so consumers can't cancel each other (task #83);
     /// rep_kind-keyed so a Fit and an Original want for the same item coexist (#106.7).
-    tracked: HashMap<(usize, Purpose, pb_core::RepKind), Arc<AtomicBool>>,
+    tracked: HashMap<(usize, Purpose, pb_core::RepKind), TrackedEntry>,
     /// Decoded-but-not-yet-drained bytes (the backpressure counter).
     inflight_bytes: usize,
     /// Thumb-purpose jobs currently decoding (the occupancy guard's counter).
@@ -231,12 +312,30 @@ struct Shared {
     inner: Mutex<Inner>,
     cv: Condvar,
     decode: Arc<DecodeFn>,
+    /// The poster-selection walk (task #114) — runs the ONE scored walk for a
+    /// movie and returns the typed choice + artifacts. Injected like `decode`;
+    /// the default (plain [`DecodePool::new`]) refuses, for callers/tests that
+    /// never schedule selections.
+    select: Arc<SelectFn>,
     results_tx: Sender<Outcome>,
     byte_budget: usize,
     /// Max concurrent thumb-purpose decodes: `max(1, workers - 2)`, so display
     /// jobs always find a free worker (the anti-inversion guard, task #83).
     thumb_cap: usize,
 }
+
+/// The injected poster-selection step (task #114): run the scored walk for
+/// `item`, cutting artifacts for `fit` (the display fit, or the thumb fit for a
+/// thumb-only selection). Long-running — MUST check the cancel flag between
+/// samples, like the poster walk it wraps.
+pub type SelectFn = dyn Fn(
+        &dyn ItemSource,
+        usize,
+        Option<FitBox>,
+        &AtomicBool,
+    ) -> Result<pb_decode::PosterSelection, DecodeError>
+    + Send
+    + Sync;
 
 /// A capped worker count: leave a core for the event loop, but never spin up the
 /// dozens a 16–32 core box would otherwise (each worker holds a full decode +
@@ -261,6 +360,24 @@ impl DecodePool {
         byte_budget: usize,
         decode: Arc<DecodeFn>,
     ) -> (Self, Receiver<Outcome>) {
+        Self::new_with_select(
+            workers,
+            byte_budget,
+            decode,
+            Arc::new(|_: &dyn ItemSource, _, _, _: &AtomicBool| {
+                Err(DecodeError::Corrupt("no selection fn installed".into()))
+            }),
+        )
+    }
+
+    /// [`new`](Self::new) plus the poster-selection walk (task #114). The app
+    /// composes both; plain `new` keeps every selection-free caller/test intact.
+    pub fn new_with_select(
+        workers: usize,
+        byte_budget: usize,
+        decode: Arc<DecodeFn>,
+        select: Arc<SelectFn>,
+    ) -> (Self, Receiver<Outcome>) {
         let workers = workers.max(1);
         let (results_tx, results_rx) = channel();
         let shared = Arc::new(Shared {
@@ -274,6 +391,7 @@ impl DecodePool {
             }),
             cv: Condvar::new(),
             decode,
+            select,
             results_tx,
             byte_budget: byte_budget.max(1),
             thumb_cap: workers.saturating_sub(2).max(1),
@@ -296,67 +414,117 @@ impl DecodePool {
         let mut inner = self.shared.inner.lock().unwrap();
 
         if epoch != inner.epoch {
-            // Geometry changed: every queued/in-flight job is for the old size.
-            for flag in inner.tracked.values() {
-                flag.store(true, Ordering::Release);
+            // Geometry changed: every queued/in-flight job is for the old size —
+            // EXCEPT poster selections (task #114): a selection's choice is
+            // viewport-independent and keyed by content generation, so a resize
+            // must not kill a multi-second walk. Its Fit ARTIFACT carries its own
+            // staleness tag (`fit_tag_epoch`) instead.
+            for (key, entry) in inner.tracked.iter() {
+                if key.1 != Purpose::PosterSelect {
+                    entry.flag.store(true, Ordering::Release);
+                }
             }
-            inner.queue.clear();
-            inner.tracked.clear();
+            inner
+                .queue
+                .retain(|j| j.key.purpose == Purpose::PosterSelect);
+            inner
+                .tracked
+                .retain(|key, _| key.1 == Purpose::PosterSelect);
             inner.epoch = epoch;
         }
 
-        let wanted: HashMap<(usize, Purpose, pb_core::RepKind), u32> = prioritized
-            .iter()
-            .enumerate()
-            .map(|(i, w)| ((w.item, w.purpose, rep_kind_of(&w.fit)), i as u32))
-            .collect();
+        // Want lookup: priority + the want itself, LAST duplicate wins (the
+        // preview/full pair for one item shares an identity; parity with the old
+        // collect() behavior). A selection want also carries its content
+        // generation: a tracked selection from the previous deck must be
+        // cancelled and replaced, never deduped against.
+        let mut wanted: HashMap<(usize, Purpose, pb_core::RepKind), (u32, &Want)> =
+            HashMap::with_capacity(prioritized.len());
+        for (i, w) in prioritized.iter().enumerate() {
+            wanted.insert(want_key(w), (i as u32, w));
+        }
+        let gen_ok = |key: &(usize, Purpose, pb_core::RepKind), gen: u64| match wanted.get(key) {
+            Some((_, w)) if key.1 == Purpose::PosterSelect => w.sel_gen == gen,
+            Some(_) => true,
+            None => false,
+        };
 
-        // Cancel anything no longer wanted; drop those still queued.
-        for (key, flag) in inner.tracked.iter() {
-            if !wanted.contains_key(key) {
-                flag.store(true, Ordering::Release);
+        // Cancel anything no longer wanted (or wanted at a different selection
+        // generation); drop those still queued.
+        for (key, entry) in inner.tracked.iter() {
+            if !gen_ok(key, entry.gen) {
+                entry.flag.store(true, Ordering::Release);
             }
         }
         inner
             .queue
-            .retain(|j| wanted.contains_key(&(j.key.item, j.key.purpose, j.key.rep_kind)));
+            .retain(|j| gen_ok(&(j.key.item, j.key.purpose, j.key.rep_kind), j.key.epoch));
         let live: std::collections::HashSet<(usize, Purpose, pb_core::RepKind)> = inner
             .queue
             .iter()
             .map(|j| (j.key.item, j.key.purpose, j.key.rep_kind))
             .collect();
-        inner.tracked.retain(|key, flag| {
-            wanted.contains_key(key) && (live.contains(key) || !flag.load(Ordering::Acquire))
+        inner.tracked.retain(|key, entry| {
+            gen_ok(key, entry.gen) && (live.contains(key) || !entry.flag.load(Ordering::Acquire))
         });
 
-        // Re-prioritize jobs still queued.
+        // Re-prioritize jobs still queued. A queued selection also refreshes its
+        // Fit-artifact target + geometry tag, and its scheduling class in place —
+        // PROMOTION (Codex #114 r3): flipping thumb_class -> display is what
+        // unparks it from the thumb cap (the trailing notify_all wakes workers);
+        // an already-RUNNING selection is deliberately untouched (it keeps the
+        // slot it was admitted with — `took_thumb_slot`).
         for job in inner.queue.iter_mut() {
-            if let Some(&prio) = wanted.get(&(job.key.item, job.key.purpose, job.key.rep_kind)) {
+            if let Some(&(prio, w)) = wanted.get(&(job.key.item, job.key.purpose, job.key.rep_kind))
+            {
                 job.prio = prio;
+                if job.key.purpose == Purpose::PosterSelect {
+                    job.fit = w.fit;
+                    job.fit_tag_epoch = epoch;
+                    job.thumb_class = !w.display_class;
+                }
             }
         }
 
-        // Enqueue newly-wanted items (dedup against queued + in-flight).
+        // Enqueue newly-wanted items (dedup against queued + in-flight; a
+        // selection dedups only against its own generation).
         for w in prioritized {
-            let key = (w.item, w.purpose, rep_kind_of(&w.fit));
-            if inner.tracked.contains_key(&key) {
+            let key = want_key(w);
+            let job_gen = if w.purpose == Purpose::PosterSelect {
+                w.sel_gen
+            } else {
+                epoch
+            };
+            if inner
+                .tracked
+                .get(&key)
+                .is_some_and(|e| key.1 != Purpose::PosterSelect || e.gen == job_gen)
+            {
                 continue;
             }
             let flag = Arc::new(AtomicBool::new(false));
-            inner.tracked.insert(key, flag.clone());
-            let prio = wanted[&key];
+            inner.tracked.insert(
+                key,
+                TrackedEntry {
+                    flag: flag.clone(),
+                    gen: job_gen,
+                },
+            );
+            let prio = wanted[&key].0;
             inner.queue.push(Job {
                 key: DecodeKey {
                     item: w.item,
-                    epoch,
+                    epoch: job_gen,
                     purpose: w.purpose,
-                    rep_kind: rep_kind_of(&w.fit),
+                    rep_kind: key.2,
                 },
                 source: source.clone(),
                 fit: w.fit,
                 preview: w.preview,
                 prio,
                 cancel: flag,
+                fit_tag_epoch: epoch,
+                thumb_class: w.purpose == Purpose::PosterSelect && !w.display_class,
             });
         }
 
@@ -390,7 +558,7 @@ fn worker_loop(shared: Arc<Shared>) {
                 }
                 if inner.inflight_bytes < shared.byte_budget {
                     if let Some(job) = pop_best(&mut inner, shared.thumb_cap) {
-                        if job.key.purpose == Purpose::Thumb {
+                        if takes_thumb_slot(&job) {
                             inner.thumb_inflight += 1;
                         }
                         break job;
@@ -399,29 +567,43 @@ fn worker_loop(shared: Arc<Shared>) {
                 inner = shared.cv.wait(inner).unwrap();
             }
         };
-        let is_thumb = job.key.purpose == Purpose::Thumb;
+        // Class-at-admission (Codex #114 r3): the slot this job took is what it
+        // releases, even if a promotion lands while it runs.
+        let took_thumb_slot = takes_thumb_slot(&job);
 
         // Cancelled before it ran: forget it and move on.
         if job.cancel.load(Ordering::Acquire) {
             let mut inner = shared.inner.lock().unwrap();
             untrack(&mut inner, &job);
-            release_thumb_slot(&mut inner, is_thumb);
+            release_thumb_slot(&mut inner, took_thumb_slot);
             drop(inner);
             shared.cv.notify_all();
             continue;
         }
 
-        let result = (shared.decode)(
-            job.source.as_ref(),
-            job.key.item,
-            job.fit,
-            job.preview,
-            job.key.purpose,
-            &job.cancel,
-        );
-        let bytes = match &result {
-            Ok(img) => img.pixels.len(),
-            Err(_) => 0,
+        // Dispatch by work kind: a poster selection runs the injected walk and
+        // produces the typed payload; everything else is a plain image decode.
+        let (result, selection, bytes) = if job.key.purpose == Purpose::PosterSelect {
+            let sel = (shared.select)(job.source.as_ref(), job.key.item, job.fit, &job.cancel);
+            let bytes = sel.as_ref().map(|s| s.pixel_bytes()).unwrap_or(0);
+            // The placeholder no consumer may read (the drain matches
+            // PosterSelect before touching `result` — pinned by test).
+            let placeholder = Err(DecodeError::Corrupt("poster-selection payload".into()));
+            (placeholder, Some(sel), bytes)
+        } else {
+            let result = (shared.decode)(
+                job.source.as_ref(),
+                job.key.item,
+                job.fit,
+                job.preview,
+                job.key.purpose,
+                &job.cancel,
+            );
+            let bytes = match &result {
+                Ok(img) => img.pixels.len(),
+                Err(_) => 0,
+            };
+            (result, None, bytes)
         };
 
         // Account for the result and stop tracking the item — unless it was
@@ -429,7 +611,7 @@ fn worker_loop(shared: Arc<Shared>) {
         {
             let mut inner = shared.inner.lock().unwrap();
             untrack(&mut inner, &job);
-            release_thumb_slot(&mut inner, is_thumb);
+            release_thumb_slot(&mut inner, took_thumb_slot);
             if job.cancel.load(Ordering::Acquire) {
                 drop(inner);
                 shared.cv.notify_all();
@@ -439,13 +621,15 @@ fn worker_loop(shared: Arc<Shared>) {
         }
         // A freed thumb slot may unblock a parked worker even while the byte
         // budget is unchanged.
-        if is_thumb {
+        if took_thumb_slot {
             shared.cv.notify_all();
         }
 
         let outcome = Outcome {
             key: job.key,
             result,
+            selection,
+            fit_tag_epoch: job.fit_tag_epoch,
             preview: job.preview,
             _budget: Some(BudgetGuard {
                 shared: shared.clone(),
@@ -458,10 +642,18 @@ fn worker_loop(shared: Arc<Shared>) {
     }
 }
 
-fn release_thumb_slot(inner: &mut Inner, is_thumb: bool) {
-    if is_thumb {
+fn release_thumb_slot(inner: &mut Inner, took_thumb_slot: bool) {
+    if took_thumb_slot {
         inner.thumb_inflight = inner.thumb_inflight.saturating_sub(1);
     }
+}
+
+/// Whether a job occupies a thumb slot at admission: every Thumb-purpose job,
+/// plus a poster selection with **thumb-only demand** (task #114 — far-away
+/// movies must not occupy every worker; display-class selections schedule like
+/// display work).
+fn takes_thumb_slot(j: &Job) -> bool {
+    j.key.purpose == Purpose::Thumb || (j.key.purpose == Purpose::PosterSelect && j.thumb_class)
 }
 
 /// Remove the dedup entry for the job's `(item, purpose)` only if it still maps
@@ -473,22 +665,23 @@ fn untrack(inner: &mut Inner, job: &Job) {
     if inner
         .tracked
         .get(&key)
-        .is_some_and(|f| Arc::ptr_eq(f, &job.cancel))
+        .is_some_and(|e| Arc::ptr_eq(&e.flag, &job.cancel))
     {
         inner.tracked.remove(&key);
     }
 }
 
-/// Remove and return the highest-priority (lowest `prio`) *runnable* job: thumb
-/// jobs are skipped while the occupancy cap is reached, so a display job behind
-/// a queue of thumbs still runs immediately.
+/// Remove and return the highest-priority (lowest `prio`) *runnable* job:
+/// thumb-slot jobs (thumb fills + thumb-only selections) are skipped while the
+/// occupancy cap is reached, so a display job behind a queue of thumbs still
+/// runs immediately.
 fn pop_best(inner: &mut Inner, thumb_cap: usize) -> Option<Job> {
     let thumbs_blocked = inner.thumb_inflight >= thumb_cap;
     let idx = inner
         .queue
         .iter()
         .enumerate()
-        .filter(|(_, j)| !(thumbs_blocked && j.key.purpose == Purpose::Thumb))
+        .filter(|(_, j)| !(thumbs_blocked && takes_thumb_slot(j)))
         .min_by_key(|(_, j)| j.prio)
         .map(|(i, _)| i)?;
     Some(inner.queue.swap_remove(idx))
@@ -586,10 +779,18 @@ mod tests {
             preview: false,
             prio: 0,
             cancel: flag.clone(),
+            fit_tag_epoch: 0,
+            thumb_class: false,
         };
         let k = (5, Purpose::Display, pb_core::RepKind::Original);
         // A fresh job (re-requested after an epoch change) now owns item 5.
-        inner.tracked.insert(k, new.clone());
+        inner.tracked.insert(
+            k,
+            TrackedEntry {
+                flag: new.clone(),
+                gen: 0,
+            },
+        );
         // The old, cancelled job finishing must NOT drop the new job's entry.
         untrack(&mut inner, &job(&old));
         assert!(inner.tracked.contains_key(&k));
@@ -689,6 +890,182 @@ mod tests {
         pool.set_targets(7, &src, &targets(&[0]));
         let o = rx.recv_timeout(Duration::from_secs(5)).unwrap();
         assert_eq!(o.key.epoch, 7);
+    }
+
+    fn selection_output(item: usize) -> pb_decode::PosterSelection {
+        pb_decode::PosterSelection {
+            choice: pb_decode::PosterChoice {
+                origin_hns: 0,
+                relative_hns: item as i64 * 10_000_000,
+                native_w: 1920,
+                native_h: 1080,
+                content_hdr: false,
+            },
+            fit_img: Some(image(item, 32)),
+            thumb_img: Some(image(item, 8)),
+            native: None,
+        }
+    }
+
+    #[test]
+    fn a_selection_outcome_carries_the_typed_payload_and_tags() {
+        let decode: Arc<DecodeFn> = Arc::new(|_s, item, _, _, _, _| Ok(image(item, 16)));
+        let select: Arc<SelectFn> = Arc::new(|_s, item, _, _| Ok(selection_output(item)));
+        let (pool, rx) = DecodePool::new_with_select(2, 1 << 20, decode, select);
+        let src = source();
+        pool.set_targets(7, &src, &[Want::poster_select(3, None, 42, true)]);
+        let o = rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert_eq!(o.key.purpose, Purpose::PosterSelect);
+        assert_eq!(
+            o.key.epoch, 42,
+            "a selection's key carries the CONTENT generation"
+        );
+        assert_eq!(
+            o.fit_tag_epoch, 7,
+            "the Fit artifact is tagged with the geometry epoch"
+        );
+        let sel = o
+            .selection
+            .as_ref()
+            .expect("typed payload present")
+            .as_ref()
+            .expect("selection ok");
+        assert_eq!(sel.choice.native_w, 1920);
+        assert_eq!(sel.pixel_bytes(), 32 + 8, "summed artifact bytes");
+        assert!(
+            o.result.is_err(),
+            "the image slot is a placeholder no consumer may read"
+        );
+    }
+
+    #[test]
+    fn a_selection_survives_a_geometry_epoch_change() {
+        // The walk blocks in-flight; a geometry epoch change (resize) cancels
+        // ordinary jobs but the selection completes and delivers its payload.
+        let (started_tx, started_rx) = channel::<()>();
+        let (release_tx, release_rx) = channel::<()>();
+        let release_rx = StdMutex::new(release_rx);
+        let decode: Arc<DecodeFn> = Arc::new(|_s, item, _, _, _, _| Ok(image(item, 16)));
+        let select: Arc<SelectFn> = Arc::new(move |_s, item, _, _| {
+            started_tx.send(()).unwrap();
+            release_rx.lock().unwrap().recv().unwrap();
+            Ok(selection_output(item))
+        });
+        let (pool, rx) = DecodePool::new_with_select(1, 1 << 20, decode, select);
+        let src = source();
+        pool.set_targets(
+            1,
+            &src,
+            &[
+                Want::poster_select(5, None, 1, true),
+                Want::display(9, None, false),
+            ],
+        );
+        started_rx.recv_timeout(Duration::from_secs(5)).unwrap(); // walk in flight
+                                                                  // Resize: new epoch, selection re-emitted (level-triggered), item 9 gone.
+        pool.set_targets(2, &src, &[Want::poster_select(5, None, 1, true)]);
+        release_tx.send(()).unwrap();
+        let o = rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert_eq!(o.key.purpose, Purpose::PosterSelect, "the walk survived");
+        assert!(o.selection.is_some());
+        // No duplicate selection, and item 9's job died with its epoch.
+        assert!(rx.recv_timeout(Duration::from_millis(200)).is_err());
+    }
+
+    #[test]
+    fn a_selection_not_re_emitted_is_cancelled() {
+        // Level-triggered contract: a set_targets WITHOUT the selection cancels
+        // it, and the finished walk's payload is discarded.
+        let (started_tx, started_rx) = channel::<()>();
+        let (release_tx, release_rx) = channel::<()>();
+        let release_rx = StdMutex::new(release_rx);
+        let decode: Arc<DecodeFn> = Arc::new(|_s, item, _, _, _, _| Ok(image(item, 16)));
+        let select: Arc<SelectFn> = Arc::new(move |_s, item, _, _| {
+            started_tx.send(()).unwrap();
+            release_rx.lock().unwrap().recv().unwrap();
+            Ok(selection_output(item))
+        });
+        let (pool, rx) = DecodePool::new_with_select(1, 1 << 20, decode, select);
+        let src = source();
+        pool.set_targets(1, &src, &[Want::poster_select(5, None, 1, true)]);
+        started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        pool.set_targets(1, &src, &targets(&[9])); // selection absent -> cancelled
+        release_tx.send(()).unwrap();
+        let o = rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert_eq!(o.key.item, 9, "only the live display job delivers");
+        assert!(rx.recv_timeout(Duration::from_millis(200)).is_err());
+    }
+
+    #[test]
+    fn a_new_content_generation_replaces_a_tracked_selection() {
+        // A deck swap re-emits the selection at a new content generation: the
+        // old walk is cancelled (payload discarded), the new one runs fresh.
+        let (started_tx, started_rx) = channel::<()>();
+        let (release_tx, release_rx) = channel::<()>();
+        let gate = Arc::new(AtomicBool::new(true)); // only the first walk blocks
+        let release_rx = StdMutex::new(release_rx);
+        let count = Arc::new(StdMutex::new(0usize));
+        let c = count.clone();
+        let decode: Arc<DecodeFn> = Arc::new(|_s, item, _, _, _, _| Ok(image(item, 16)));
+        let select: Arc<SelectFn> = Arc::new(move |_s, item, _, _| {
+            *c.lock().unwrap() += 1;
+            if gate.swap(false, Ordering::SeqCst) {
+                started_tx.send(()).unwrap();
+                release_rx.lock().unwrap().recv().unwrap();
+            }
+            Ok(selection_output(item))
+        });
+        let (pool, rx) = DecodePool::new_with_select(1, 1 << 20, decode, select);
+        let src = source();
+        pool.set_targets(1, &src, &[Want::poster_select(5, None, 1, true)]);
+        started_rx.recv_timeout(Duration::from_secs(5)).unwrap(); // gen-1 walk in flight
+        pool.set_targets(1, &src, &[Want::poster_select(5, None, 2, true)]); // new deck
+        release_tx.send(()).unwrap();
+        let o = rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert_eq!(o.key.epoch, 2, "only the new generation's payload delivers");
+        assert!(rx.recv_timeout(Duration::from_millis(200)).is_err());
+        assert_eq!(
+            *count.lock().unwrap(),
+            2,
+            "both walks ran; the stale one was discarded"
+        );
+    }
+
+    #[test]
+    fn a_thumb_only_selection_waits_behind_the_thumb_cap_until_promoted() {
+        // workers=3 => thumb_cap=1. A blocking thumb decode fills the cap; a
+        // thumb-only selection stays parked; PROMOTION (display demand joins,
+        // same identity) unparks it while the thumb still blocks.
+        let (started_tx, started_rx) = channel::<()>();
+        let (release_tx, release_rx) = channel::<()>();
+        let release_rx = StdMutex::new(release_rx);
+        let decode: Arc<DecodeFn> = Arc::new(move |_s, item, _, _, purpose, _| {
+            if purpose == Purpose::Thumb && item == 0 {
+                started_tx.send(()).unwrap();
+                release_rx.lock().unwrap().recv().unwrap();
+            }
+            Ok(image(item, 16))
+        });
+        let select: Arc<SelectFn> = Arc::new(|_s, item, _, _| Ok(selection_output(item)));
+        let (pool, rx) = DecodePool::new_with_select(3, 1 << 20, decode, select);
+        let src = source();
+        let thumb = Want::thumb(0, thumb_box());
+        pool.set_targets(1, &src, &[thumb, Want::poster_select(5, None, 1, false)]);
+        started_rx.recv_timeout(Duration::from_secs(5)).unwrap(); // cap (1) is full
+        assert!(
+            rx.recv_timeout(Duration::from_millis(200)).is_err(),
+            "a thumb-only selection is parked behind the thumb cap"
+        );
+        pool.set_targets(1, &src, &[thumb, Want::poster_select(5, None, 1, true)]);
+        let o = rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert_eq!(
+            o.key.purpose,
+            Purpose::PosterSelect,
+            "promotion unparked the selection without a restart"
+        );
+        release_tx.send(()).unwrap();
+        let o = rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert_eq!(o.key.item, 0, "the blocked thumb still lands");
     }
 
     #[test]

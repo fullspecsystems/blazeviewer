@@ -426,6 +426,59 @@ pub struct DecodeRequest<'a> {
     pub allow_preview: bool,
 }
 
+/// Where a chosen poster frame lives in its clip, plus the facts the residency
+/// layer needs before any pixels move (task #114). The locator is **absolute**:
+/// `origin_hns + relative_hns` is what a replay reader seeks (`SetCurrentPosition`
+/// / FFmpeg equivalent) — MPEG-TS files have nonzero origins, so the relative
+/// timestamp alone is not a seek coordinate. RAM-only, never serialized (a poster
+/// choice is a viewing-derived datum — the no-trace charter).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PosterChoice {
+    /// The clip's first-sample timestamp in 100 ns units (the MPEG-TS origin; 0
+    /// for most containers).
+    pub origin_hns: i64,
+    /// The chosen frame's timestamp relative to `origin_hns`, in 100 ns units.
+    pub relative_hns: i64,
+    /// The clip's display dimensions (rotation applied) — the ceiling check and
+    /// byte accounting run on these before any native decode is attempted.
+    pub native_w: u32,
+    pub native_h: u32,
+    /// Whether the chosen frame's pixels carry HDR *content* (PQ/HLG scene
+    /// values). Distinct from fp16 *storage*: an SDR wide-gamut poster is baked
+    /// to fp16 scRGB but must present at SDR brightness (`content_hdr = false`).
+    pub content_hdr: bool,
+}
+
+/// The typed result of ONE poster-selection walk (task #114): the choice plus
+/// whatever artifacts the worker cut from the winning frame. Every consumer of a
+/// clip's poster (thumb tile, display Fit, the parked Original) is fanned out
+/// from this single value — the "one run per movie" contract. Artifacts are cut
+/// on the decode worker, never the event loop.
+pub struct PosterSelection {
+    pub choice: PosterChoice,
+    /// The winner scaled to the display fit it was requested at. Tagged by the
+    /// pool with the geometry epoch + fit it was cut for (a selection survives a
+    /// resize; this artifact alone goes stale).
+    pub fit_img: Option<DecodedImage>,
+    /// The winner cut to the thumbnail tile size.
+    pub thumb_img: Option<DecodedImage>,
+    /// The winner at native resolution (capped edge), for the Original install —
+    /// only materialized when admission wants it (phase 3).
+    pub native: Option<DecodedImage>,
+}
+
+impl PosterSelection {
+    /// Summed pixel bytes across every carried artifact — the pool's byte budget
+    /// must account for ALL of them, not the largest (Codex #114 round 2).
+    pub fn pixel_bytes(&self) -> usize {
+        [&self.fit_img, &self.thumb_img, &self.native]
+            .into_iter()
+            .flatten()
+            .map(|i| i.pixels.len())
+            .sum()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DecodeError {
     /// This backend does not handle the given bytes.
