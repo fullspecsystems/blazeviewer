@@ -5761,6 +5761,12 @@ mod tests {
                 SeekGeneration::FIRST,
                 io.events,
                 io.msgs,
+                // The smoke exercises the classic RGBA path; the planar (NV12/
+                // P010) route has its own coverage (79.10).
+                pb_decode::VideoProducerOptions {
+                    planar: false,
+                    supports_p010: false,
+                },
             );
         });
         let t0 = Instant::now();
