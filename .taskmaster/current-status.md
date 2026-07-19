@@ -1,203 +1,107 @@
 # Blaze Viewer — Current Status (session handoff)
 
-_Last updated: 2026-07-19 (rev 19). **This handoff is the RENDERING-QUALITY track** — fullscreen /
-resize / scale-mode sharpness. The Windows **video/audio** track, the **macOS #106** perf track,
-the **door gating** track (#105.2/#107), and the **macOS ports** (#113, #109) run in parallel and
-are **preserved below** — don't lose them, they're just not this thread's job._
+_Last updated: 2026-07-19 (rev 20). Two major arcs MERGED to `main` + pushed this session:
+the **#114 one-run poster pipeline** (this thread) and **79.10 NVDEC hardware decode** (the
+parallel wt1 agent). The macOS ports (#113, #109) and the #112 profiles design are the open
+threads._
 
 ---
 
-# ▶️ START HERE — the whole rendering arc is MERGED TO MAIN (2026-07-19)
+# ▶️ START HERE — #114 is DONE and on main (`a987d0d6` tip)
 
-**`feat/110-gpu-lanczos-from-original` fast-forwarded into `main` (22 commits) and pushed on
-2026-07-19.** The branch ref is kept for a few days as a rollback handle (it is not >2 days old;
-the owner's cleanup rule). Merged-and-stale branches `feat/rar4-viewing`, `feat/enhanced-archives`,
-`feat/media-track-catalog`, `feat/subtitle-display` were deleted local+remote;
-`feat/audio-track-selection` (fully merged, ~1.7 days old) survives one more sweep.
+**The poster pipeline** (task #114, plan: `.taskmaster/plans/114-poster-pipeline-one-run.md`
+rev 4 + its review log — 3 design review rounds + 3 implementation review rounds, all folded):
 
-The arc, every phase Codex-reviewed with findings folded in:
+1. **One judged walk per movie per session.** The `PosterSelect` pool work kind (geometry-
+   neutral, content-gen-keyed, level-triggered, thumb-cap→display class promotion) + the
+   `PosterSelector` ledger on AppCore. Every consumer (display Fit, strip tile, parked
+   Original) fans out from ONE typed payload.
+2. **Fixed-size judging** (`POSTER_JUDGE_WIDTH` 256): the detail gate is resolution-
+   independent for the grain/white-title-card class (the Ali Wong fix). ⚠ HONEST LIMIT
+   (probed on The Holdovers): real MF-scaled pixels can still flip borderline picks between
+   different-fit walks (39.29 s vs 81.0 s) — the ARCHITECTURE (one walk + surviving choice +
+   replay) is the consistency guarantee, not the judge.
+3. **The choice is a replayable locator** (`PosterChoice`, absolute `origin + relative` —
+   MPEG-TS-correct, applied to the walk's own deep seeks too). Replay = fresh reader +
+   decode-forward with identity enforcement (miss ⇒ error ⇒ scored-walk fallback). Measured:
+   **273 ms** at 4K DoVi over SMB vs a 1.2–2.6 s walk.
+4. **Walk variants A/B'd on the corpus** (48 films, counterbalanced): fitted vs native a wash
+   at 1080p, native 15–20% slower at 4K, 0 pick mismatches ⇒ **fitted is the default**
+   (`PB_POSTER_WALK=native` = the lever). `NATIVE_WALK_CAP` = 2 admission permits for
+   native-class jobs (native walks + all replays).
+5. **Videos resize like photos**: the native winner installs as `RepKind::Original` (mode-0
+   only; mode-1/P3 memoized in `original_blocked`, their fp16 bake rides 110d) — parked
+   videos pre-install via replay in spare capacity, then fullscreen/1:1 GPU-derives.
+6. **Nav never blocks on a poster**: instant tile (the strip's own cached tile, staged
+   straight into the upload queue) or the flat placeholder, upgraded in place. The
+   selection's ready-made tile also lands DIRECTLY in the thumb cache the same tick as the
+   poster (`a987d0d6` — the derive queue drops under burst and used to throw it away).
+7. **Bounded retry** (all item kinds): one demand-re-entry second chance per failed item per
+   session (`retry.rs`); recovery clears BOTH domains' gates. The old "one SMB hiccup blanks
+   a tile forever" behavior is gone.
+8. **BDMV `.m2ts` posters**: `MF_E_INVALID_POSITION` typed at the COM layer; the deep walk
+   returns its head best instead of discarding it.
 
-1. **The ADR-024 watchdog** (`21c9df9a` + review fixes): a displayed photo lingering as a resident
-   preview past 2 s gets its full force-requested regardless of a stuck `held_nav` — level-
-   triggered, armed only when caught-up + image + non-RAW, disarmed on deck rebuild.
-2. **#110 110a** (`c06e3d51`, `e6b49a94`): the odd-dim MIPGEN regression + the two-pass
-   scale-aware Lanczos derive (`DERIVE_WGSL`) with the §3b colour chain (unclamped-alpha
-   un-premultiply, fp16 Inf/NaN containment — both Codex catches, regression-tested).
-3. **#110 110b** (`c4013e6d`, `38126061`): settled resize/toggle GPU-derives the exact Fit from
-   the retained Original — **the ~1 s CPU re-decode is gone**. Reserve-then-derive with rollback;
-   rotation/inset-aware; `FULLSCREEN_SETTLE` 50 ms. Levers: `PB_SCALE_POLICY=cpu`,
-   `PB_DERIVE_KERNEL`, `PB_DERIVE_MIP_BIAS`.
-4. **item-6 6a+6b** (`2a4b163b`, `9004ca4d`): `invalidate_geometry` retains + remaps resident
-   Originals; content changes still purge (§4.1 invariant); nav derives a missing Fit from a
-   retained neighbour Original — advance-after-toggle lands sharp.
-5. **#110 110c** (`a9f1f11b`): the A/B/X harness (nv-flip FLIP + linear RMSE + detail ratio).
-   **Data picked the defaults: Lanczos-3 + mip_bias −1.** Two always-run regressions pin
-   derive-beats-trilinear and derive≡Lanczos-at-L0.
-6. **The owner's stuck-blurry repro root-caused + fixed** (`66e5f7c3`): the pool untracks finished
-   jobs before their outcomes drain, so a blaze re-issued duplicate previews and the *second*
-   preview outcome was misread as "the full came back as a preview" — poisoning `upgrade_done`,
-   gating off both the sharpen and the watchdog. Fix: `Outcome.preview` carries the JOB's
-   allow_preview flag; a duplicate (`is_prev && img.is_preview && o.preview`) is dropped with no
-   verdict.
-7. **Watchdog second-chance hardening** (`89d457cb`): arms despite `upgrade_done` (fire-edge
-   clears it), schedules its own wake (`watchdog_wake` in the SetWake min-list — fake-clock tests
-   masked its absence once), bounded re-arm on post-fire errors (`MAX_WATCHDOG_RETRIES` = 3).
-8. **"+1 never waits"** (`d443751f` + `dac0a9d1` review fixes): parked GPU **sharpen-via-derive**
-   replaces the CPU re-decode when a mipped Original is resident (re-binds via `present_slot` +
-   `draw`, never `present_item` — zoom/pan + slideshow timing preserved); parked fulls decode
-   **nearest-first** (wrap-aware at the deck seam, parked-only) so back-up-one is second in line.
-   Codex caught the sort being collected into a set and never reaching the decoder — the fulls
-   tier is now built from `prefetch_fulls()`'s returned order, and the test pins the order the
-   pool actually receives.
+**Owner verdict:** "a good improvement — not perfect, sometimes still slow to load, but
+limited by SMB over network among other things." ACCEPTED residual: first-visit walks over
+SMB are 1–2.5 s by nature (once per movie per session); a cross-session on-disk poster cache
+would fix cold starts but is a PRIVACY-CHARTER amendment (viewing-derived persistence,
+ADR-018) — owner's call, deliberately not implemented.
 
-**Owner verification so far (RDP):** fullscreen toggle instant; can't outrun the ring during a
-forward blaze; the direction-flip eviction observation became the #112 design (below). Still owed:
-the physical-display pass + rotation/HDR/ICC edges from
-`.taskmaster/docs/110-manual-test-script.md`, and a deliberate re-test of the old blaze → stop →
-back-one repro.
-
-**State:** pb-app-core 757 tests, workspace green, clippy `-D warnings` clean, ship-feature build
-green, CHANGELOG updated.
+**Also merged this session (earlier):** the whole #110/item-6/watchdog rendering arc (rev-19
+notes), the branch cleanup (four stale branches deleted), and **79.10 NVDEC** from the wt1
+worktree (seek convert-skip + HDR P010; its status note rode its own commits). The 79.10
+rebase integration exposed + fixed a broken `run_video_producer` test call site
+(`6b08e44a`).
 
 ## Next actions
-1. **Finish owner manual verification** on the physical display (script above).
-2. **#112 performance profiles (Safe / Normal / High slider)** — design draft **rev 2** at
-   `.taskmaster/plans/112-performance-profiles.md`. Codex round 1: NOT sign-off-ready (1×P0 —
-   the reserve_ring recovery idea was based on a false model; textures allocate lazily in
-   `upload_slot` and an OOM panics via wgpu's uncaptured handler — plus 8×P1); **all findings
-   folded into rev 2** (two-layer allocation design, `reconfigure_residency` + transactional ring
-   `reconfigure`, CurrentUsage-aware WDDM ceiling, LUID-exact adapter match, dynamic archive
-   pre-flight, `ResidencyLimits` seam shared with Phase-1b). Round-2 review + owner sign-off on
-   the open questions pending. **Do not implement before sign-off.** Motivating repro: blaze →
-   flip direction → just-passed photos already evicted (the 1.5 GB ring keeps ~5 behind on the
-   7680 display). The window-split rebalance (4/5→2/3 ahead) rides along as its own phase.
-3. **Phase 1b (110c display-capped pyramid)** — reviewed design draft at
-   `.taskmaster/plans/110c-phase1b-display-capped-pyramid.md`, owner sign-off pending; its
-   per-machine budget hook now lands in #112's shared `ResidencyLimits` seam.
-4. **110d (deferred, own plan):** mode-1 ICC → fp16-pyramid conversion so ICC photos join the
-   derive.
-5. **#113 macOS on-device verify (NEW task).** Rev-18's "the mac shell uses the drop-all trait
-   default for `remap_ring`" claim was **stale**: the mac shell constructs the shared
-   `WgpuRenderer` directly (`pb-mac-ffi/src/lib.rs` ~2437 `new_from_ca_layer`), so `remap_ring`,
-   `derive_fit`, and the whole arc ride free at the next mac build via wgpu's Metal backend —
-   **unverified until run on-device**. #113 also carries the #109 item-1 shell parity edits.
-6. **Blank thumbnails: downgraded from active-bug to hardening.** The owner can no longer easily
-   reproduce it; most plausible reason is the cross-deck open-race fix (`8293a662`) plus this
-   branch's drain hardening closing the practical window. The **structural hole remains**:
-   `DecodeKey` = item/epoch/purpose/rep_kind with **no deck identity** (`decode_pool.rs:76`), so a
-   stale in-flight decode can still dedup a fresh same-index want across a deck swap. #109 item
-   (3) (content_gen/deck_gen in the key) is the definitive close. Failing-to-repro is not proof.
+1. **Owner continues smoking main** (rebuild!). Known-accepted: SMB-bound first walks.
+2. **#112 performance profiles** — design rev 4 IMPLEMENTATION-READY per its review log, but
+   paused at owner sign-off (3 Codex rounds folded); do not implement without the go.
+3. **#113 macOS on-device verify** (+ #109 item-1 parity edits) — the rendering arc rides the
+   shared `WgpuRenderer`, unverified on Metal. #114 phase 5 (optional: `DecodeError::Cancelled`
+   variant, mac poster parity via the shared walk constants) belongs to this trip.
+4. **#102 fuzz/bench subtask, #92 macOS poster half, door gating #105.2/#107** — the smaller
+   owed items (rev-19 audit stands).
 
-## Prime directive held: MEASURE, don't guess
-Every quality claim above has a number (the ab_report matrix) or a regression test. Kernel/bias
-defaults were picked from measured FLIP data. Codex reviewed every phase and both #112 design
-revisions; all P0/P1 findings are folded in and cited in commit messages.
-
-## Diag levers (env-gated, debug build only — release has no console)
-- `PB_SHARP_DIAG=1` — sharpen lifecycle + `GPU-derived Fit item=…` + `GPU-sharpened item=…` +
-  `preview watchdog FIRED` + `parked on item=… as a resident PREVIEW: …` (names the gate if a
-  photo ever parks blurry).
-- `PB_DOOR_DIAG=1` — draw source / backend / present diags. `PB_PRESENT_FIFO=1` — force Fifo.
-- `PB_SCALE_POLICY=cpu` · `PB_DERIVE_KERNEL=2|3` · `PB_DERIVE_MIP_BIAS=0|-1` — the #110 A/B levers.
-- `PB_PERF=1` — open→first-photo / resize→on-screen ms. Corpus: `D:\Media\Pictures\…\Wedding`.
+## Diag levers (debug console only)
+`PB_SHARP_DIAG`, `PB_DOOR_DIAG`, `PB_PERF`, `PB_SCALE_POLICY=cpu`, `PB_DERIVE_KERNEL`,
+`PB_DERIVE_MIP_BIAS`, `PB_POSTER_WALK=native|fitted`, `PB_AUDIO_TRACE`, `PB_VIDEO_DIAG`,
+`PB_AV_SYNC`. Probes: `probe_one_file` / `ab_poster_walk` (ignored tests, pb-decode;
+`PB_PROBE_FILE` / `PB_POSTER_AB_DIR`). Corpus: `\\beenas\Media\Movies`,
+`D:\Media\Pictures\…\Wedding`.
 
 # 📓 Load-bearing knowledge (don't re-derive)
 
-- **ADR-024 is the organizing principle** — previews are blazing-only; the interaction display is a
-  pure function of a resident Original pyramid. Sampler (#110) + residency (item-6) + enforcement
-  (watchdog + sharpen-via-derive) all exist and are on main.
-- **The derive's colour chain is load-bearing** (gpu.rs `DERIVE_WGSL` doc): mips are straight-alpha,
-  mode-0 sRGB-encoded; premultiply after EOTF; fp16 premult-linear intermediate; un-premultiply
-  ONCE by the UNCLAMPED filtered alpha; straight-alpha finals. Don't "simplify" any of it.
-- **The Held derive source is only valid for the displayed photo** (pinned by
-  `a_nav_derive_never_sources_the_previous_photos_held_frame`).
-- **Retain iff `content_gen` unchanged** — geometry retains Originals, content purges everything;
-  `invalidate_content` must NEVER call the retaining path.
-- **`Outcome.preview` is the job's flag, `img.is_preview` the image's** — the duplicate-preview
-  verdict needs both; don't collapse them.
-- **The GPU sharpen re-binds via `present_slot` + `draw`, never `present_item`** (zoom/pan +
-  `last_present`).
-- **`prefetch_fulls()`'s returned order IS the fulls decode priority** — `request_prefetch` must
-  build the fulls tier from it (Codex caught it collected into a HashSet and discarded, once).
-- **The rev-15 "surface drops presents" theory stays DISPROVEN**; backend is **Vulkan + Fifo** on
-  the owner's RTX 5090. Mixed-DPI/RDP memory applies to any fullscreen/DPI bug.
-- **Git topology:** the arc is on `main` and pushed. **Stage explicit paths, never `-a`/`-A`**
-  (owner edits concurrently). SSH-signed commits, no AI trailers.
-- **Codex CLI reviews are part of the loop** (owner instruction 2026-07-18): `codex exec
-  --sandbox read-only "<scoped prompt>"` at each section boundary + for complex plans; long
-  reviews run in background (10 min+ is normal). The owner expects verified anchors and multiple
-  rounds on complex plans.
-- ⚠ **The owner drives the app while you work** — a running exe locks `target\debug\blazeviewer.exe`;
-  confirm the About build id after any rebuild. Debug builds have a console; release does not.
-- **Repo:** `github.com/fullspecsystems/blazeviewer`; product name **Blaze Viewer**.
+- **ADR-024 + #114 together**: previews/placeholders are transient; the display converges to
+  a resident-Original derivation (photos AND parked videos now). The selection ledger is
+  content-gen-fenced; its Fit artifact is `(epoch, FitBox)`-tagged; budget guards are CARVED
+  per artifact (`synthetic_carved`).
+- **The pool's selection contracts** (decode_pool.rs): epoch-exempt, gen-replaced,
+  level-triggered (absorb_results at the top of every emission pass closes the
+  sent-but-undrained double-walk window), promotion mutates queued class + notifies,
+  `took_thumb_slot`/native permits are class-at-admission.
+- **Replay identity is strict** (tolerance 0.5 s): a miss errors into a scored-walk fallback
+  — never silently different pixels under the same locator.
+- **`Outcome.preview` vs `img.is_preview`**, **present_slot-not-present_item for in-place
+  upgrades**, **`prefetch_fulls()` order IS the decode priority** — all rev-19 rules stand.
+- **Mode-1 (enabled-transform 8-bit) textures are unmipped and underive-able** by renderer
+  design — anything wanting to derive must install mode-0 or fp16 mode-2 (110d).
+- **Git:** everything is on `main`, pushed. Stage explicit paths, never `-a`. SSH-signed, no
+  AI trailers. Codex review loop at section boundaries (owner expects verified anchors,
+  multiple rounds). The owner drives the app while you work — confirm the About build id.
 
----
+# ⏸ PARALLEL TRACK — Windows video/audio
 
-# ⏸ PARALLEL TRACK — Windows video/audio — NOT this thread
+79.10 NVDEC **shipped** (this session, wt1). Older notes stand: poster deep-walk done +
+good-enough (#92.1; macOS half open); the pause/play audio gap was Bluetooth (NOT the app);
+the FFmpeg→MF locator bridge stays dead. Diag + build rules unchanged (`build-windows.ps1
+-Run`; a bare `cargo run` ships silent AC-3/DTS).
 
-_The `feat/audio-track-selection` arc, all merged to main._
+# 📌 macOS TODO — #113 (verify the rendering + poster arcs) + #109 item 1
 
-**Shipped:** FFmpeg-first film audio on Windows (MF can't decode AC-3/E-AC-3/DTS `0xC00D36B4`);
-audio-track selection (`A`/`Shift+A` + Playback ▸ Audio Track); `WAVEFORMATEXTENSIBLE` speaker-mask
-sinks; off-thread track switches; short-forward-hop seeks; adaptive audio-seek settle. **⚠ The
-FFmpeg→MF locator "bridge" was a MISTAKE, DELETED** (regression test
-`audio_rows_keep_their_ffmpeg_locators`) — do NOT reintroduce.
-
-**Track status (corrected rev 19):**
-- **Pause/play audio gap: RESOLVED — NOT the app.** Root cause was the owner's AirPods Max
-  Bluetooth A2DP link idle-sleeping (~1 s off-head); reproduced wired = gone. Trap comment at
-  `wasapi_audio.rs` pause/resume (`6b4e958f`). Rev-18 listed this open/HIGH — struck.
-- **Poster deep-walk: DONE + owner-flagged GOOD ENOUGH FOR NOW** (`267b1e9b`, on main): pure-black
-  posters resolved. Accepted quirk: some Netflix specials (e.g. Ali Wong) that previously looked
-  good now pick white-ish frames — likely the blank-title-card skip trading black leads for white
-  cards. tasks.json **#92.1 done**; the macOS AVFoundation half (#92.2) remains open.
-- **79.10 NVDEC hardware decode — SHIPPED (2026-07-19), branch `feat/79.10-nvdec-hw-decode`.**
-  Phases A–C (NVDEC + NV12 + in-shader YUV) landed 07-11; this session added the **seek run-up
-  convert-skip** (task #4 — recreate-seek run-up 200 ms → 81 ms on the 4K60 NVDEC path; 494 →
-  369 ms software) and **HDR → P010 (Track B)** — HDR films/clips now play in real HDR instead
-  of SDR-clamped, the HDR gate lifted (MF verified to pass PQ/BT.2020 through P010 raw). The
-  10 s Shift-seek gap is largely absorbed: the run-up is near-free on the hardware path now;
-  the residual is the reader reopen (~80 ms local / ~220 ms SMB), which frame-skipping can't
-  touch. A **keyframe-deliver** enhancement (land big seeks on the keyframe, no run-up) is
-  designed + parked (trigger: a NAS film feeling laggy on a big seek). Plan rev3 (shipped):
-  `.taskmaster/plans/79.10-nvdec-hw-decode.md`. **Owner smoke on the physical display still
-  owed:** full-screen 4K60 SDR + a real HDR film (`\\beenas\Media\Movies` has clean HDR10:
-  Past Lives, Tenet, Top Gun Maverick).
-
-**Load-bearing:** WASAPI reseek ~10 ms; MF and FFmpeg enumerate audio streams in different orders
-(the `ff`/`mf` two-currency locators); Windows audio is the master clock while playing; a `Failed`
-clock is terminal. **Build:** `pwsh scripts/build-windows.ps1 -Run` — a plain `cargo run` omits
-`ffprobe` → AC-3/E-AC-3/DTS films play SILENT. Diag: `PB_AUDIO_TRACE`, `PB_VIDEO_DIAG`,
-`PB_AV_SYNC`.
-
-# ⏸ PARALLEL TRACK — macOS #106 performance (NOT this thread)
-
-Blueprint: `.taskmaster/plans/106-performance-archive-zoom.md` (rev2, Codex-reviewed). The
-Windows/rendering side of #106.7 is far ahead (item-6 retain/remap + the #110 derive, now on
-main). The mac host still owns its `PB_PERF` baselines. Shipped historically: door card
-(`d91666a0`), perf timers (`fdcedd16`), #106.2 read/decode split (`5d8eebe1`).
-
-# ⏸ PARALLEL TRACK — Windows door gating + Copy (#105.2 / #107)
-
-Door renders correctly. Owed: gate OCR/Describe/Compare **off** on a door (`MenuState._enabled`);
-#107 relabel "Copy Image"→"Copy" + emit file-only on a door; interactive smoke tests.
-
----
-
-# 📌 macOS TODO — #113 (verify the rendering arc) + #109 item 1 (open-race parity)
-
-**For a macOS agent, after pulling main.** Full task description in tasks.json **#113**. Summary:
-the arc should ride free via the shared `WgpuRenderer`; verify on-device (`PB_SHARP_DIAG`
-`GPU-derived`/`GPU-sharpened` lines, the 110 manual script, the DERIVE shader on Metal), and while
-in there do the **#109 item-1** shell edits in `crates/pb-mac-ffi/src/lib.rs` (inspection-anchored
-in task #109; authoritative reference `git show 8293a662 -- crates/pb-app/src/main.rs`):
-
-1. **`begin_archive_open`** (~2877): after it cancels a prior archive (~2891), also
-   `self.cancel_dir_scan();`.
-2. **`begin_dir_scan`** (~2744): after the `Source::Scan` match,
-   `if let Some(prev) = self.archive_load.take() { prev.progress.request_cancel(); }`.
-
-**Deeper #109 hardening (deferred, both shells, Codex-recommended):** one shared open generation;
-`content_gen`/`deck_gen` in `DecodeKey` (**also the definitive blank-thumbnails close — see Next
-actions #6**); `upload_slot`/`mark_resident` return-checked; `present_item` returning success +
-abort-drain-then-resync-once.
+Full details in tasks.json #113 + rev-19's section (in git history). Everything since (the
+#114 arc) is ALSO shared-code: pb-app-core orchestration + `WgpuRenderer` + the shared walk
+policy constants — EXCEPT `engine::poster_select_supported()` gates selection to Windows, so
+macOS keeps legacy poster behavior until the parity pass (#114 phase 5) flips it after
+on-device verification.
