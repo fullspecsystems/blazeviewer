@@ -12,6 +12,7 @@
 pub mod display;
 pub mod fit;
 pub mod gpu;
+pub mod resample;
 pub mod upload;
 pub mod view;
 pub mod yuv;
