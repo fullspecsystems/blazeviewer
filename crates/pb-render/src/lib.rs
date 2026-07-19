@@ -92,6 +92,16 @@ impl Default for ColorTransform {
     }
 }
 
+/// Result of [`Renderer::derive_held_fit`]: the derived Fit's actual dimensions and VRAM
+/// footprint (`w*h*4` for a mode-0 RGBA8 final, `w*h*8` for a mode-2 fp16 final), reported so
+/// the core ring's byte accounting stays honest without the core knowing the storage format.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DerivedFit {
+    pub w: u32,
+    pub h: u32,
+    pub bytes: u64,
+}
+
 /// Horizontal placement of a bottom-anchored overlay layer (the info line's three
 /// positions). `margin` is the inset from the chosen edge; `Center` ignores it
 /// horizontally.
@@ -245,6 +255,26 @@ pub trait Renderer {
         peak: f32,
         mip: bool,
     );
+    /// #110 (Phase 110b): derive an exact-size Fit from the currently-HELD frame's Original on
+    /// the GPU — no decode, no upload — and install it in ring slot `dst_slot`. The held frame
+    /// is the current photo's Original that survived the geometry change (`reserve_ring` stashes
+    /// the presented slot). Returns the derived Fit's actual dims + VRAM bytes for the core
+    /// ring's accounting, or `None` when ineligible — no held frame, not a mipped `Original`,
+    /// `clamp_to_max`'d (its nearest-neighbour aliasing is baked into every mip), or source-ICC
+    /// mode 1 (its TRC isn't in the derive's colour chain) — in which case the caller releases
+    /// its slot reservation and falls back to the CPU Fit decode. `kernel` = Lanczos lobes
+    /// (2 or 3); `mip_bias` = 0 (last eligible mip) or −1 (one level finer — the 110c A/B).
+    fn derive_held_fit(
+        &mut self,
+        _dst_slot: usize,
+        _fit_w: u32,
+        _fit_h: u32,
+        _kernel: u32,
+        _mip_bias: i32,
+    ) -> Option<DerivedFit> {
+        None
+    }
+
     /// Select ring slot `slot` as the displayed image (the keypress fast path: a
     /// rebind, no decode or upload). Returns `true` when the slot was live and is now
     /// on screen; `false` when the slot isn't uploaded yet (the previous frame is kept),

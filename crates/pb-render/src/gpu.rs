@@ -10,7 +10,7 @@ use bytemuck::{Pod, Zeroable};
 use wgpu::util::DeviceExt;
 
 use crate::upload::{StagingUpload, UploadStrategy};
-use crate::{ColorTransform, PlanarPresentation, RenderError, Renderer, ViewTransform};
+use crate::{ColorTransform, DerivedFit, PlanarPresentation, RenderError, Renderer, ViewTransform};
 
 /// Background (letterbox) color, straight RGBA8.
 pub const LETTERBOX: [u8; 4] = [10, 10, 12, 255];
@@ -388,6 +388,135 @@ fn fs_srgb(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
 @fragment
 fn fs_linear(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
     return box2x(pos, false);
+}
+"#;
+
+/// #110 Phase 110a: the two-pass scale-aware Lanczos derive (mip-assisted separable resample of a
+/// retained `Original` into an exact-size Fit). Coefficients are precomputed on the CPU
+/// ([`crate::resample::lanczos_axis_kernel`] — already normalized per destination coordinate) and
+/// read from storage buffers; the shader only applies them.
+///
+/// **Colour/alpha chain (the #110 plan §3b load-bearing sequence).** Mips store STRAIGHT alpha,
+/// and mode-0 mips are sRGB-ENCODED — so the H pass re-linearizes (mode 0 only) and
+/// re-premultiplies on load, accumulates *signed* premultiplied-linear (Lanczos lobes go
+/// negative), and the intermediate stays **premultiplied-linear fp16 — no un-premultiply between
+/// passes**. The V pass filters those values as-is, then the final store un-premultiplies ONCE
+/// (α > ε, else RGB = 0) and encodes:
+///   - `fs_v_srgb` (mode-0 final): clamp + sRGB OETF → straight `Rgba8Unorm` — what the scene
+///     shader's mode-0 sampler expects (straight alpha + `ALPHA_BLENDING`; a premultiplied Fit
+///     would double-apply α and darken edges).
+///   - `fs_v_linear` (mode-2 final): straight scene-linear `Rgba16Float`, **unclamped** — scRGB
+///     wide-gamut negatives and HDR >1 ride through, same no-clamp policy as the scene pass
+///     (Lanczos ringing shares that latitude; the A/B harness judges it).
+///
+/// Taps clamp to the source extent (clamp-to-edge, matching the kernel's normalization contract).
+/// The H pass binds ONE mip level of the Original as a single-level view — no mip of the source is
+/// ever a render attachment during the derive (the intermediate/final are separate textures), so
+/// the `generate_mips` view-aliasing rule holds by construction.
+const DERIVE_WGSL: &str = r#"
+@vertex
+fn vs(@builtin(vertex_index) vi: u32) -> @builtin(position) vec4<f32> {
+    let uv = vec2<f32>(f32((vi << 1u) & 2u), f32(vi & 2u));
+    return vec4<f32>(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0, 0.0, 1.0);
+}
+
+@group(0) @binding(0) var src: texture_2d<f32>;
+struct DeriveParams {
+    taps: u32,
+    srgb_in: u32,   // 1 = mode-0 source (sRGB-encoded): EOTF each tap; 0 = already linear
+    _pad0: u32,
+    _pad1: u32,
+};
+@group(0) @binding(1) var<uniform> params: DeriveParams;
+@group(0) @binding(2) var<storage, read> starts: array<i32>;
+@group(0) @binding(3) var<storage, read> weights: array<f32>;
+
+fn s2l(x: f32) -> f32 {
+    if (x <= 0.04045) { return x / 12.92; }
+    return pow((x + 0.055) / 1.055, 2.4);
+}
+fn l2s(x: f32) -> f32 {
+    let c = clamp(x, 0.0, 1.0);
+    if (c <= 0.0031308) { return 12.92 * c; }
+    return 1.055 * pow(c, 1.0 / 2.4) - 0.055;
+}
+
+// fp16's largest finite value: the sanitize/containment bound for the linear path. An Inf in a
+// hostile/broken fp16 source must never enter the accumulator (Inf × a negative lobe → NaN
+// spreads to every neighbour), and un-premultiplying just above the alpha floor can amplify
+// finite HDR past fp16 range — both are pinned to this bound instead.
+const F16_MAX: f32 = 65504.0;
+
+fn sanitize(v: vec4<f32>) -> vec4<f32> {
+    // min/max (not clamp): WGSL min/max yield the non-NaN operand, so NaN also lands finite.
+    return min(max(v, vec4<f32>(-F16_MAX)), vec4<f32>(F16_MAX));
+}
+
+// H pass → (dst_w × src_h) fp16 target: taps run along X of the bound source level. Loads the
+// straight-alpha source, linearizes (mode 0) + premultiplies, accumulates signed premult-linear.
+// Exactly-zero weights (boundary taps by construction) are skipped — fewer loads, and a
+// non-finite texel can't ride in on a zero weight.
+@fragment
+fn fs_h(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
+    let dim = vec2<i32>(textureDimensions(src));
+    let x = u32(pos.x);
+    let y = i32(pos.y);
+    let start = starts[x];
+    var acc = vec4<f32>(0.0, 0.0, 0.0, 0.0);
+    for (var t = 0u; t < params.taps; t = t + 1u) {
+        let w = weights[x * params.taps + t];
+        if (w == 0.0) { continue; }
+        let cx = clamp(start + i32(t), 0, dim.x - 1);
+        let s = sanitize(textureLoad(src, vec2<i32>(cx, y), 0));
+        var rgb = s.rgb;
+        if (params.srgb_in == 1u) { rgb = vec3<f32>(s2l(rgb.r), s2l(rgb.g), s2l(rgb.b)); }
+        let a = clamp(s.a, 0.0, 1.0);
+        acc = acc + vec4<f32>(rgb * a, a) * w;
+    }
+    return acc;
+}
+
+// V-pass accumulator: taps along Y of the fp16 intermediate (already premultiplied-linear —
+// filtered as-is, per the no-unpremult-between-passes rule). Loads are sanitized again: an H
+// result past fp16 range stores as Inf in the intermediate, which must not spread here.
+fn v_acc(pos: vec4<f32>) -> vec4<f32> {
+    let dim = vec2<i32>(textureDimensions(src));
+    let x = i32(pos.x);
+    let y = u32(pos.y);
+    let start = starts[y];
+    var acc = vec4<f32>(0.0, 0.0, 0.0, 0.0);
+    for (var t = 0u; t < params.taps; t = t + 1u) {
+        let w = weights[y * params.taps + t];
+        if (w == 0.0) { continue; }
+        let cy = clamp(start + i32(t), 0, dim.y - 1);
+        acc = acc + sanitize(textureLoad(src, vec2<i32>(x, cy), 0)) * w;
+    }
+    return acc;
+}
+
+// Un-premultiply ONCE at the final store. The divisor is the UNCLAMPED filtered alpha: Lanczos
+// overshoots alpha past 1.0 at an opaque/transparent step (~1.08 at 2×), and since the premult
+// RGB overshoots by the same factor, dividing by the true filtered alpha recovers the exact
+// straight colour — dividing by a clamped 1.0 would brighten it (visible fringe; Codex P1).
+// Only the STORED alpha clamps to [0,1]. Fully transparent output gets RGB = 0.
+fn unpremult(acc: vec4<f32>) -> vec4<f32> {
+    var rgb = vec3<f32>(0.0, 0.0, 0.0);
+    if (acc.a > 1e-4) { rgb = acc.rgb / acc.a; }
+    return vec4<f32>(rgb, clamp(acc.a, 0.0, 1.0));
+}
+
+@fragment
+fn fs_v_srgb(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
+    let s = unpremult(v_acc(pos));
+    return vec4<f32>(l2s(s.r), l2s(s.g), l2s(s.b), s.a); // l2s clamps (SDR ringing clipped)
+}
+
+@fragment
+fn fs_v_linear(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
+    let s = unpremult(v_acc(pos));
+    // Contain, don't clamp to SDR: HDR/wide-gamut values keep their range, but the divide just
+    // above the alpha floor can amplify past fp16's finite range (Codex P2) — pin to ±F16_MAX.
+    return vec4<f32>(min(max(s.rgb, vec3<f32>(-F16_MAX)), vec3<f32>(F16_MAX)), s.a);
 }
 "#;
 
@@ -778,6 +907,287 @@ fn generate_mips(
         pass.draw(0..3, 0..1); // fullscreen triangle → covers every target texel
     }
     queue.submit(Some(encoder.finish()));
+}
+
+/// The two-pass Lanczos derive pipelines (see [`DERIVE_WGSL`]), built once. Three pipelines
+/// because the render-target format is baked in: `h` targets the fp16 premultiplied-linear
+/// intermediate; `v_srgb` targets the mode-0 `Rgba8Unorm` final; `v_linear` the mode-2
+/// `Rgba16Float` final. One bind-group layout serves both passes (texture + params uniform +
+/// starts/weights storage). Phase 110a: built and tested, not yet on any production path — 110b
+/// wires it behind the `ScalePolicy` seam.
+struct DeriveLanczos {
+    bgl: wgpu::BindGroupLayout,
+    h: wgpu::RenderPipeline,
+    v_srgb: wgpu::RenderPipeline,
+    v_linear: wgpu::RenderPipeline,
+}
+
+/// GPU-side mirror of [`DERIVE_WGSL`]'s `DeriveParams`.
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct DeriveParams {
+    taps: u32,
+    srgb_in: u32,
+    _pad: [u32; 2],
+}
+
+fn build_derive(device: &wgpu::Device) -> DeriveLanczos {
+    let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("pb-derive"),
+        source: wgpu::ShaderSource::Wgsl(DERIVE_WGSL.into()),
+    });
+    let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("derive-bgl"),
+        entries: &[
+            wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 2,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: true },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 3,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: true },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+        ],
+    });
+    let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("derive-layout"),
+        bind_group_layouts: &[&bgl],
+        push_constant_ranges: &[],
+    });
+    let mk = |entry: &'static str, format: wgpu::TextureFormat, label: &'static str| {
+        device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some(label),
+            layout: Some(&layout),
+            vertex: wgpu::VertexState {
+                module: &module,
+                entry_point: "vs",
+                compilation_options: Default::default(),
+                buffers: &[],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &module,
+                entry_point: entry,
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+            cache: None,
+        })
+    };
+    DeriveLanczos {
+        h: mk("fs_h", wgpu::TextureFormat::Rgba16Float, "derive-h"),
+        v_srgb: mk(
+            "fs_v_srgb",
+            wgpu::TextureFormat::Rgba8Unorm,
+            "derive-v-srgb",
+        ),
+        v_linear: mk(
+            "fs_v_linear",
+            wgpu::TextureFormat::Rgba16Float,
+            "derive-v-linear",
+        ),
+        bgl,
+    }
+}
+
+/// Derive an exact-size (`dst_w`×`dst_h`) Fit from mip level `src_mip` of a retained Original
+/// (#110 Phase 110a). `srgb_in` says how the source stores pixels: `true` = mode 0 (sRGB-encoded
+/// `Rgba8Unorm`, final is the same), `false` = mode 2 (scene-linear fp16, final is fp16). The
+/// caller picks the mip per policy (last-eligible-mip vs `mip_bias = -1` — the 110c A/B) and is
+/// responsible for eligibility (never a `was_clamped` or mode-1 source — those fall back to the
+/// CPU Fit) and for VRAM accounting (the fp16 scratch intermediate is `dst_w × src_mip_h × 8`
+/// bytes, allocated and dropped per derive here — pool-vs-transient is a 110b measurement).
+///
+/// The output size must be the FITTED IMAGE size (aspect-correct, rotation/inset applied by the
+/// caller via `fit_rect` semantics, never an upscale) — a viewport-sized target would distort.
+/// Submits its own encoder; same-queue ordering makes the result safe to bind on return. The
+/// final carries `COPY_SRC` for readback (tests / future screenshot path).
+#[allow(clippy::too_many_arguments)]
+fn derive_fit_texture(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    derive: &DeriveLanczos,
+    src: &wgpu::Texture,
+    src_mip: u32,
+    srgb_in: bool,
+    dst_w: u32,
+    dst_h: u32,
+    a: u32,
+) -> wgpu::Texture {
+    let (sw, sh) = (
+        (src.width() >> src_mip).max(1),
+        (src.height() >> src_mip).max(1),
+    );
+    let kh = crate::resample::lanczos_axis_kernel(sw, dst_w, a);
+    let kv = crate::resample::lanczos_axis_kernel(sh, dst_h, a);
+
+    let tex = |w: u32, h: u32, format, label: &str| {
+        device.create_texture(&wgpu::TextureDescriptor {
+            label: Some(label),
+            size: wgpu::Extent3d {
+                width: w,
+                height: h,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                | wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        })
+    };
+    // H intermediate: dst width × SOURCE height, premultiplied-linear fp16 (signed lobes).
+    let mid = tex(
+        dst_w,
+        sh,
+        wgpu::TextureFormat::Rgba16Float,
+        "derive-intermediate",
+    );
+    let final_format = if srgb_in {
+        wgpu::TextureFormat::Rgba8Unorm
+    } else {
+        wgpu::TextureFormat::Rgba16Float
+    };
+    let out = tex(dst_w, dst_h, final_format, "derive-fit");
+
+    let kernel_bufs = |k: &crate::resample::AxisKernel, srgb: bool, label: &str| {
+        let params = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some(label),
+            contents: bytemuck::bytes_of(&DeriveParams {
+                taps: k.taps,
+                srgb_in: srgb as u32,
+                _pad: [0; 2],
+            }),
+            usage: wgpu::BufferUsages::UNIFORM,
+        });
+        let starts = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some(label),
+            contents: bytemuck::cast_slice(&k.starts),
+            usage: wgpu::BufferUsages::STORAGE,
+        });
+        let weights = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some(label),
+            contents: bytemuck::cast_slice(&k.weights),
+            usage: wgpu::BufferUsages::STORAGE,
+        });
+        (params, starts, weights)
+    };
+    let bind = |view: &wgpu::TextureView, bufs: &(wgpu::Buffer, wgpu::Buffer, wgpu::Buffer)| {
+        device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("derive-bg"),
+            layout: &derive.bgl,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: bufs.0.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: bufs.1.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: bufs.2.as_entire_binding(),
+                },
+            ],
+        })
+    };
+    // The H pass reads exactly ONE mip level through a single-level view (level-agnostic shader;
+    // `textureDimensions` reports that level's extent).
+    let src_view = src.create_view(&wgpu::TextureViewDescriptor {
+        label: Some("derive-src"),
+        base_mip_level: src_mip,
+        mip_level_count: Some(1),
+        ..Default::default()
+    });
+    let mid_view = mid.create_view(&wgpu::TextureViewDescriptor::default());
+    let out_view = out.create_view(&wgpu::TextureViewDescriptor::default());
+    let h_bufs = kernel_bufs(&kh, srgb_in, "derive-h-k");
+    let v_bufs = kernel_bufs(&kv, false, "derive-v-k"); // V pass is always linear-in
+    let h_bg = bind(&src_view, &h_bufs);
+    let v_bg = bind(&mid_view, &v_bufs);
+
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("derive"),
+    });
+    for (pipeline, bg, view) in [
+        (&derive.h, &h_bg, &mid_view),
+        (
+            if srgb_in {
+                &derive.v_srgb
+            } else {
+                &derive.v_linear
+            },
+            &v_bg,
+            &out_view,
+        ),
+    ] {
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("derive-pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+        });
+        pass.set_pipeline(pipeline);
+        pass.set_bind_group(0, bg, &[]);
+        pass.draw(0..3, 0..1);
+    }
+    queue.submit(Some(encoder.finish()));
+    out
 }
 
 fn build_pipelines(device: &wgpu::Device, surface_format: wgpu::TextureFormat) -> Pipelines {
@@ -1512,29 +1922,46 @@ fn create_image_texture(
         generate_mips(device, queue, mip.expect("do_mip"), &tex, levels, !hdr);
     }
     let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
-    // Linear so large photos scaled down to the screen are smooth, not grainy/
-    // aliased. (Crisp high-ratio downscaling via mipmaps/Lanczos is a later
-    // quality pass; bilinear is the big first step up from nearest.)
+    let bind_group = image_bind_group(device, bgl, &view, color, mode, scale);
+    UploadedImage {
+        bind_group,
+        texture: tex,
+        was_clamped: img_w != orig_w || img_h != orig_h,
+        mode,
+    }
+}
+
+/// Build the scene bind group for an image texture view: the linear/trilinear sampler + the
+/// per-image ColorXf uniform (matrix + TRC + `mode` + output `scale`), baked off the keypress
+/// frame. Shared by [`create_image_texture`] (every upload) and the #110 derive (whose Fit is
+/// GPU-produced — same bind-group shape, no upload). The linear sampler keeps large photos
+/// smooth when scaled down; mipped Originals get trilinear through the same descriptor.
+fn image_bind_group(
+    device: &wgpu::Device,
+    bgl: &wgpu::BindGroupLayout,
+    view: &wgpu::TextureView,
+    color: &ColorTransform,
+    mode: f32,
+    scale: f32,
+) -> wgpu::BindGroup {
     let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
         mag_filter: wgpu::FilterMode::Linear,
         min_filter: wgpu::FilterMode::Linear,
         mipmap_filter: wgpu::FilterMode::Linear,
         ..Default::default()
     });
-    // Per-image color-transform uniform (matrix + TRC + mode + scale). Tiny and
-    // created off the keypress frame, so it's baked into the slot's bind group.
     let color_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
         label: Some("color-uniform"),
         contents: bytemuck::bytes_of(&ColorUniform::new(color, mode, scale)),
         usage: wgpu::BufferUsages::UNIFORM,
     });
-    let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+    device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("img-bg"),
         layout: bgl,
         entries: &[
             wgpu::BindGroupEntry {
                 binding: 0,
-                resource: wgpu::BindingResource::TextureView(&view),
+                resource: wgpu::BindingResource::TextureView(view),
             },
             wgpu::BindGroupEntry {
                 binding: 1,
@@ -1545,13 +1972,40 @@ fn create_image_texture(
                 resource: color_buf.as_entire_binding(),
             },
         ],
-    });
-    UploadedImage {
-        bind_group,
-        texture: tex,
-        was_clamped: img_w != orig_w || img_h != orig_h,
-        mode,
+    })
+}
+
+/// The decode-to-fit output size for a `w`×`h` source in a fit box — EXACTLY the CPU rule
+/// (`pb_decode::common::downscale_to_fit`): contain-scale `min(fw/w, fh/h, 1)`, a `>= 0.999`
+/// near-identity band returning the source unchanged, else round-to-nearest with a floor of 1.
+/// Matching the incumbent matters: the derived Fit and the CPU Fit must agree on geometry or
+/// the 110c A/B compares different sizes.
+fn contain_dims(w: u32, h: u32, fit_w: u32, fit_h: u32) -> (u32, u32) {
+    let scale = (fit_w as f64 / w as f64)
+        .min(fit_h as f64 / h as f64)
+        .min(1.0);
+    if scale >= 0.999 {
+        return (w, h);
     }
+    (
+        ((w as f64 * scale).round() as u32).max(1),
+        ((h as f64 * scale).round() as u32).max(1),
+    )
+}
+
+/// Pick the derive's source mip: the LAST (coarsest) level still ≥ the target on both axes —
+/// maximally box-prefiltered, cheapest taps — then `mip_bias` (−1 = one level finer: residual
+/// 2–4× and a wider scale-aware kernel; the real 110c design fork per Codex). Clamped to the
+/// chain. Level dims floor at 1 (wgpu mip sizing).
+fn select_derive_mip(w: u32, h: u32, levels: u32, dst_w: u32, dst_h: u32, bias: i32) -> u32 {
+    let mut level = 0u32;
+    while level + 1 < levels
+        && (w >> (level + 1)).max(1) >= dst_w
+        && (h >> (level + 1)).max(1) >= dst_h
+    {
+        level += 1;
+    }
+    (level as i32 + bias).clamp(0, levels.saturating_sub(1) as i32) as u32
 }
 
 /// Thin wrapper over [`create_image_texture`] keeping only the bind group — for every non-ring
@@ -2019,13 +2473,14 @@ struct RingSlot {
     peak: f32,
     /// #110: the owned image texture (mip chain included for the `Original` rep), so the GPU Lanczos
     /// derive can sample it. `was_clamped`/`mode` gate derive eligibility (Original rep, mipped,
-    /// `mode != 1`, not `clamp_to_max`'d). Written now (Phase 110a); read by the derive (Phase 110b).
-    #[allow(dead_code)]
+    /// `mode != 1`, not `clamp_to_max`'d).
     texture: wgpu::Texture,
-    #[allow(dead_code)]
     was_clamped: bool,
-    #[allow(dead_code)]
     mode: f32,
+    /// The CONTENT's dynamic range, separate from the storage/transfer `mode` (#110 §3c): today
+    /// `content_hdr == (mode == 2)`, but a derived fp16 Fit of SDR content would split them —
+    /// the scene scale (SDR-white on an HDR surface) keys off content, never storage.
+    content_hdr: bool,
 }
 
 /// What `render` draws this frame. Pure decision so the priority is unit-testable
@@ -2070,6 +2525,9 @@ pub struct WgpuRenderer {
     /// Mipmap-generation pipelines, built once (gpu-mipmap-hq-scaling). Used by `upload_slot` when
     /// uploading the full-res `Original` rep so trilinear sampling downscales it near-Lanczos.
     mipgen: MipGen,
+    /// #110: the two-pass Lanczos derive pipelines, built once. Used by `derive_held_fit` to
+    /// produce an exact-size Fit from the held Original's mip chain (no decode, no upload).
+    derive: DeriveLanczos,
     device: wgpu::Device,
     queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
@@ -2381,6 +2839,7 @@ impl WgpuRenderer {
         let view = ViewTransform::default();
         let pipelines = build_pipelines(&device, format);
         let mipgen = build_mipgen(&device);
+        let derive = build_derive(&device);
         let mut upload: Box<dyn UploadStrategy> = Box::new(StagingUpload::new());
         let bind_group = upload_image(
             &device,
@@ -2417,6 +2876,7 @@ impl WgpuRenderer {
             surface,
             adapter,
             mipgen,
+            derive,
             device,
             queue,
             config,
@@ -3239,7 +3699,78 @@ impl Renderer for WgpuRenderer {
             texture: uploaded.texture,
             was_clamped: uploaded.was_clamped,
             mode: uploaded.mode,
+            content_hdr: hdr,
         });
+    }
+
+    fn derive_held_fit(
+        &mut self,
+        dst_slot: usize,
+        fit_w: u32,
+        fit_h: u32,
+        kernel: u32,
+        mip_bias: i32,
+    ) -> Option<DerivedFit> {
+        if dst_slot >= self.ring.len() || fit_w == 0 || fit_h == 0 {
+            return None;
+        }
+        let held = self.held.as_ref()?;
+        // Eligibility (#110 §6): a genuine mipped Original — only Originals are mipped, so the
+        // chain length IS the rep check — never `clamp_to_max`'d (nearest-neighbour aliasing is
+        // baked into every mip), never source-ICC mode 1 (its TRC isn't in the derive chain).
+        if held.was_clamped || held.mode == 1.0 || held.texture.mip_level_count() <= 1 {
+            return None;
+        }
+        // ACTUAL uploaded dims from the texture (RingSlot.w/h retain pre-clamp dims by
+        // contract; a clamped slot was rejected above, but the texture stays the source of
+        // truth for kernel geometry regardless).
+        let (tw, th) = (held.texture.width(), held.texture.height());
+        let (dw, dh) = contain_dims(tw, th, fit_w, fit_h);
+        let level = select_derive_mip(tw, th, held.texture.mip_level_count(), dw, dh, mip_bias);
+        let srgb_in = held.mode == 0.0;
+        let content_hdr = held.content_hdr;
+        let peak = held.peak;
+        let out = derive_fit_texture(
+            &self.device,
+            &self.queue,
+            &self.derive,
+            &held.texture,
+            level,
+            srgb_in,
+            dw,
+            dh,
+            kernel,
+        );
+        let view = out.create_view(&wgpu::TextureViewDescriptor::default());
+        let mode = if srgb_in { 0.0 } else { 2.0 };
+        // §3c: the Fit's scene scale keys off the CONTENT dynamic range, not the storage
+        // format — an fp16 Fit of SDR content on an HDR surface would still need the
+        // SDR-white scale. (Today mode 2 ⟺ HDR content; this is the general form.)
+        let scale = self.scene_scale(content_hdr);
+        let bind_group = image_bind_group(
+            &self.device,
+            &self.bgl,
+            &view,
+            &ColorTransform::srgb(),
+            mode,
+            scale,
+        );
+        let bytes = dw as u64 * dh as u64 * if srgb_in { 4 } else { 8 };
+        self.ring[dst_slot] = Some(RingSlot {
+            bind_group,
+            w: dw,
+            h: dh,
+            peak,
+            texture: out,
+            was_clamped: false,
+            mode,
+            content_hdr,
+        });
+        Some(DerivedFit {
+            w: dw,
+            h: dh,
+            bytes,
+        })
     }
 
     fn present_slot(&mut self, slot: usize) -> bool {
@@ -4129,6 +4660,613 @@ mod tests {
             [0, 0, 0, 255],
             "dst (1,0) averages src cols 2-3 / rows 0-1: the white col 4 and row 2 are DROPPED \
              (any non-black here would mean the box now reaches the odd trailing texels)"
+        );
+    }
+
+    // ---- #110 Phase 110a: the two-pass Lanczos derive (DERIVE_WGSL) ----
+
+    /// `contain_dims` must reproduce `pb_decode::common::downscale_to_fit`'s sizing exactly —
+    /// same scale rule, same 0.999 identity band, same rounding — or the derived Fit and the
+    /// CPU Fit disagree on geometry.
+    #[test]
+    fn contain_dims_matches_the_cpu_decode_rule() {
+        assert_eq!(contain_dims(6000, 4000, 1440, 2036), (1440, 960));
+        assert_eq!(contain_dims(4000, 6000, 1440, 2036), (1357, 2036));
+        assert_eq!(
+            contain_dims(100, 100, 200, 200),
+            (100, 100),
+            "never upscale"
+        );
+        assert_eq!(
+            contain_dims(1000, 1000, 999, 2000),
+            (1000, 1000),
+            "the >= 0.999 near-identity band returns the source unchanged (CPU parity)"
+        );
+    }
+
+    /// Mip selection: the last (coarsest) level still >= the target on both axes, biased by
+    /// `mip_bias` (−1 = one finer), clamped to the real chain.
+    #[test]
+    fn select_derive_mip_picks_the_last_level_at_or_above_target() {
+        // 6000×4000: L1 = 3000×2000, L2 = 1500×1000 (≥ 1440×960), L3 = 750×500 (<) → L2.
+        assert_eq!(select_derive_mip(6000, 4000, 13, 1440, 960, 0), 2);
+        assert_eq!(
+            select_derive_mip(6000, 4000, 13, 1440, 960, -1),
+            1,
+            "bias −1 = one finer"
+        );
+        assert_eq!(
+            select_derive_mip(6000, 4000, 13, 6000, 4000, 0),
+            0,
+            "identity target → L0"
+        );
+        assert_eq!(
+            select_derive_mip(6000, 4000, 13, 6000, 4000, -1),
+            0,
+            "bias clamps at L0"
+        );
+        assert_eq!(
+            select_derive_mip(8, 8, 4, 1, 1, 0),
+            3,
+            "tiny target reaches chain end"
+        );
+        assert_eq!(
+            select_derive_mip(8, 8, 4, 1, 1, 5),
+            3,
+            "bias clamps at the chain end"
+        );
+    }
+
+    fn ref_s2l(x: f32) -> f32 {
+        if x <= 0.04045 {
+            x / 12.92
+        } else {
+            ((x + 0.055) / 1.055).powf(2.4)
+        }
+    }
+    fn ref_l2s(x: f32) -> f32 {
+        let c = x.clamp(0.0, 1.0);
+        if c <= 0.0031308 {
+            12.92 * c
+        } else {
+            1.055 * c.powf(1.0 / 2.4) - 0.055
+        }
+    }
+
+    /// Pure-CPU reference of the exact mode-0 derive chain (linearize → premultiply → H → V →
+    /// un-premultiply → encode), sharing `lanczos_axis_kernel` — so the GPU tests isolate the
+    /// SHADER's application of the weights + colour chain (the kernel itself has exact CPU tests
+    /// in `resample.rs`).
+    fn cpu_derive_mode0(
+        src: &[[u8; 4]],
+        sw: u32,
+        sh: u32,
+        dw: u32,
+        dh: u32,
+        a: u32,
+    ) -> Vec<[u8; 4]> {
+        let kh = crate::resample::lanczos_axis_kernel(sw, dw, a);
+        let kv = crate::resample::lanczos_axis_kernel(sh, dh, a);
+        let lin: Vec<[f32; 4]> = src
+            .iter()
+            .map(|p| {
+                let al = p[3] as f32 / 255.0;
+                [
+                    ref_s2l(p[0] as f32 / 255.0) * al,
+                    ref_s2l(p[1] as f32 / 255.0) * al,
+                    ref_s2l(p[2] as f32 / 255.0) * al,
+                    al,
+                ]
+            })
+            .collect();
+        let mut mid = vec![[0f32; 4]; (dw * sh) as usize];
+        for y in 0..sh {
+            for x in 0..dw {
+                let mut acc = [0f32; 4];
+                for t in 0..kh.taps {
+                    let cx = (kh.starts[x as usize] + t as i32).clamp(0, sw as i32 - 1) as u32;
+                    let w = kh.weights[(x * kh.taps + t) as usize];
+                    let s = lin[(y * sw + cx) as usize];
+                    for c in 0..4 {
+                        acc[c] += s[c] * w;
+                    }
+                }
+                mid[(y * dw + x) as usize] = acc;
+            }
+        }
+        let mut out = vec![[0u8; 4]; (dw * dh) as usize];
+        for y in 0..dh {
+            for x in 0..dw {
+                let mut acc = [0f32; 4];
+                for t in 0..kv.taps {
+                    let cy = (kv.starts[y as usize] + t as i32).clamp(0, sh as i32 - 1) as u32;
+                    let w = kv.weights[(y * kv.taps + t) as usize];
+                    let s = mid[(cy * dw + x) as usize];
+                    for c in 0..4 {
+                        acc[c] += s[c] * w;
+                    }
+                }
+                // Divide by the UNCLAMPED filtered alpha (the shader's rule): premult RGB and
+                // alpha overshoot an alpha step by the same factor, so the true divisor
+                // recovers the exact straight colour. Only the stored alpha clamps.
+                let rgb = if acc[3] > 1e-4 {
+                    [acc[0] / acc[3], acc[1] / acc[3], acc[2] / acc[3]]
+                } else {
+                    [0.0; 3]
+                };
+                let al = acc[3].clamp(0.0, 1.0);
+                out[(y * dw + x) as usize] = [
+                    (ref_l2s(rgb[0]) * 255.0).round() as u8,
+                    (ref_l2s(rgb[1]) * 255.0).round() as u8,
+                    (ref_l2s(rgb[2]) * 255.0).round() as u8,
+                    (al * 255.0).round() as u8,
+                ];
+            }
+        }
+        out
+    }
+
+    /// Read `tex` (single level `w`×`h`, `bpp` bytes/texel) back to tightly-packed rows.
+    async fn read_texture(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        tex: &wgpu::Texture,
+        w: u32,
+        h: u32,
+        bpp: u32,
+    ) -> Vec<u8> {
+        let padded = (w * bpp).div_ceil(256) * 256;
+        let readback = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("derive-readback"),
+            size: (padded * h) as u64,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let mut encoder =
+            device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        encoder.copy_texture_to_buffer(
+            wgpu::ImageCopyTexture {
+                texture: tex,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::ImageCopyBuffer {
+                buffer: &readback,
+                layout: wgpu::ImageDataLayout {
+                    offset: 0,
+                    bytes_per_row: Some(padded),
+                    rows_per_image: Some(h),
+                },
+            },
+            wgpu::Extent3d {
+                width: w,
+                height: h,
+                depth_or_array_layers: 1,
+            },
+        );
+        queue.submit(std::iter::once(encoder.finish()));
+        let slice = readback.slice(..);
+        let (tx, rx) = std::sync::mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |r| {
+            let _ = tx.send(r);
+        });
+        device.poll(wgpu::Maintain::Wait);
+        rx.recv().expect("map channel").expect("map readback");
+        let mapped = slice.get_mapped_range();
+        let mut out = Vec::with_capacity((w * bpp * h) as usize);
+        for row in 0..h {
+            let s = (row * padded) as usize;
+            out.extend_from_slice(&mapped[s..s + (w * bpp) as usize]);
+        }
+        drop(mapped);
+        readback.unmap();
+        out
+    }
+
+    /// Upload an RGBA8 source, run the mode-0 derive from `src_mip`, read back the RGBA8 final.
+    async fn run_derive_mode0(
+        src: &[[u8; 4]],
+        sw: u32,
+        sh: u32,
+        dw: u32,
+        dh: u32,
+        a: u32,
+    ) -> Vec<[u8; 4]> {
+        let instance = instance();
+        let adapter = instance
+            .request_adapter(&wgpu::RequestAdapterOptions {
+                power_preference: wgpu::PowerPreference::HighPerformance,
+                force_fallback_adapter: false,
+                compatible_surface: None,
+            })
+            .await
+            .expect("no GPU adapter");
+        let (device, queue, _p010) = request_device_p010(&adapter).await;
+        let derive = build_derive(&device);
+        let tex = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("derive-test-src"),
+            size: wgpu::Extent3d {
+                width: sw,
+                height: sh,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        let bytes: Vec<u8> = src.iter().flatten().copied().collect();
+        queue.write_texture(
+            wgpu::ImageCopyTexture {
+                texture: &tex,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &bytes,
+            wgpu::ImageDataLayout {
+                offset: 0,
+                bytes_per_row: Some(sw * 4),
+                rows_per_image: Some(sh),
+            },
+            wgpu::Extent3d {
+                width: sw,
+                height: sh,
+                depth_or_array_layers: 1,
+            },
+        );
+        let out = derive_fit_texture(&device, &queue, &derive, &tex, 0, true, dw, dh, a);
+        let raw = read_texture(&device, &queue, &out, dw, dh, 4).await;
+        raw.chunks_exact(4)
+            .map(|c| [c[0], c[1], c[2], c[3]])
+            .collect()
+    }
+
+    /// Deterministic varied test pattern (colors + alpha classes incl. fully transparent).
+    fn derive_test_pattern(n: usize) -> Vec<[u8; 4]> {
+        let mut seed = 0x1234_5678u32;
+        let mut next = move || {
+            seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            (seed >> 24) as u8
+        };
+        (0..n)
+            .map(|i| {
+                let a = match i % 7 {
+                    0 => 0,   // fully transparent (its RGB must never bleed)
+                    3 => 96,  // partial
+                    5 => 224, // near-opaque
+                    _ => 255,
+                };
+                [next(), next(), next(), a]
+            })
+            .collect()
+    }
+
+    /// The GPU derive must reproduce the CPU reference chain within quantization tolerance
+    /// (fp16 intermediate + u8 encode). RGB is compared only where alpha is non-negligible —
+    /// straight RGB under near-zero alpha is numerically unstable (ε-branch) and visually
+    /// meaningless; alpha itself is always compared.
+    #[test]
+    fn derive_matches_the_cpu_reference_mode0() {
+        let (sw, sh, dw, dh, a) = (16u32, 12u32, 7u32, 5u32, 3u32);
+        let src = derive_test_pattern((sw * sh) as usize);
+        let gpu = pollster::block_on(run_derive_mode0(&src, sw, sh, dw, dh, a));
+        let cpu = cpu_derive_mode0(&src, sw, sh, dw, dh, a);
+        for (i, (g, c)) in gpu.iter().zip(cpu.iter()).enumerate() {
+            assert!(
+                (g[3] as i32 - c[3] as i32).abs() <= 2,
+                "texel {i} alpha: gpu {} vs cpu {}",
+                g[3],
+                c[3]
+            );
+            if g[3] >= 8 && c[3] >= 8 {
+                for ch in 0..3 {
+                    assert!(
+                        (g[ch] as i32 - c[ch] as i32).abs() <= 3,
+                        "texel {i} ch {ch}: gpu {:?} vs cpu {:?}",
+                        g,
+                        c
+                    );
+                }
+            }
+        }
+    }
+
+    /// At 1:1 the derive is (near-)lossless: the kernel is an impulse, so the only error is the
+    /// EOTF→fp16→OETF round-trip — within ±1/255 per channel.
+    #[test]
+    fn derive_identity_is_lossless_mode0() {
+        let (sw, sh) = (9u32, 7u32);
+        let src: Vec<[u8; 4]> = (0..(sw * sh) as usize)
+            .map(|i| {
+                [
+                    (i * 7 % 256) as u8,
+                    (i * 29 % 256) as u8,
+                    (i * 53 % 256) as u8,
+                    255,
+                ]
+            })
+            .collect();
+        let gpu = pollster::block_on(run_derive_mode0(&src, sw, sh, sw, sh, 3));
+        for (i, (g, s)) in gpu.iter().zip(src.iter()).enumerate() {
+            for ch in 0..4 {
+                assert!(
+                    (g[ch] as i32 - s[ch] as i32).abs() <= 1,
+                    "texel {i} ch {ch}: got {:?} want {:?}",
+                    g,
+                    s
+                );
+            }
+        }
+    }
+
+    /// Premultiplied filtering: a fully transparent RED region next to opaque GREEN must
+    /// contribute NO red to the downscale (its RGB rides in as rgb·α = 0). Any red in the output
+    /// means the shader filtered straight alpha — the fringe bug the §3b chain exists to prevent.
+    #[test]
+    fn derive_never_bleeds_transparent_color() {
+        let (sw, sh) = (8u32, 8u32);
+        let src: Vec<[u8; 4]> = (0..(sw * sh))
+            .map(|i| {
+                let x = i % sw;
+                if x < sw / 2 {
+                    [0, 255, 0, 255] // opaque green
+                } else {
+                    [255, 0, 0, 0] // fully transparent red
+                }
+            })
+            .collect();
+        let gpu = pollster::block_on(run_derive_mode0(&src, sw, sh, 4, 4, 3));
+        for (i, g) in gpu.iter().enumerate() {
+            assert!(
+                g[0] <= 2,
+                "texel {i} has red {} — transparent texels' RGB leaked into the filter (straight-alpha bug)",
+                g[0]
+            );
+        }
+    }
+
+    /// Codex P1 regression: at an opaque/transparent ALPHA STEP the filtered alpha overshoots
+    /// past 1.0, and premultiplied RGB overshoots by the same factor — so un-premultiplying by
+    /// the UNCLAMPED filtered alpha must recover the exact uniform colour. The clamped-divisor
+    /// bug brightens texels near the step (÷1.0 instead of ÷~1.08 ≈ +5 sRGB code values on
+    /// mid-gray). Uniform mid-gray with an alpha step: every visible output texel must still be
+    /// exactly mid-gray.
+    #[test]
+    fn derive_keeps_straight_color_constant_across_an_alpha_step() {
+        let (sw, sh) = (16u32, 4u32);
+        let src: Vec<[u8; 4]> = (0..(sw * sh))
+            .map(|i| {
+                let x = i % sw;
+                [128, 128, 128, if x < sw / 2 { 255 } else { 0 }]
+            })
+            .collect();
+        let gpu = pollster::block_on(run_derive_mode0(&src, sw, sh, 7, 4, 3));
+        for (i, g) in gpu.iter().enumerate() {
+            if g[3] < 8 {
+                continue; // straight RGB under near-zero alpha is meaningless
+            }
+            for (ch, &v) in g.iter().take(3).enumerate() {
+                assert!(
+                    (v as i32 - 128).abs() <= 2,
+                    "texel {i} ch {ch} = {v} (want 128): straight colour drifted across the \
+                     alpha step — the un-premultiply divisor is wrong"
+                );
+            }
+        }
+    }
+
+    /// Codex P2 regression: a non-finite texel in an fp16 source (a broken/hostile HDR decode)
+    /// must not spread — sanitize-on-load pins it to fp16's finite range, so every output stays
+    /// finite (an Inf riding a negative Lanczos lobe would otherwise turn neighbours NaN).
+    #[test]
+    fn derive_contains_a_nonfinite_hdr_texel() {
+        use half::f16;
+        let (sw, sh) = (8u32, 4u32);
+        let mut src: Vec<f16> = (0..(sw * sh) as usize)
+            .flat_map(|_| [f16::from_f32(0.5); 4])
+            .collect();
+        src[(sw as usize + 4) * 4] = f16::INFINITY; // one Inf red channel mid-image (row 1, col 4)
+        let out = pollster::block_on(async {
+            let instance = instance();
+            let adapter = instance
+                .request_adapter(&wgpu::RequestAdapterOptions {
+                    power_preference: wgpu::PowerPreference::HighPerformance,
+                    force_fallback_adapter: false,
+                    compatible_surface: None,
+                })
+                .await
+                .expect("no GPU adapter");
+            let (device, queue, _p010) = request_device_p010(&adapter).await;
+            let derive = build_derive(&device);
+            let tex = device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("derive-inf-src"),
+                size: wgpu::Extent3d {
+                    width: sw,
+                    height: sh,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba16Float,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            });
+            queue.write_texture(
+                wgpu::ImageCopyTexture {
+                    texture: &tex,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                bytemuck::cast_slice(&src.iter().map(|h| h.to_bits()).collect::<Vec<u16>>()),
+                wgpu::ImageDataLayout {
+                    offset: 0,
+                    bytes_per_row: Some(sw * 8),
+                    rows_per_image: Some(sh),
+                },
+                wgpu::Extent3d {
+                    width: sw,
+                    height: sh,
+                    depth_or_array_layers: 1,
+                },
+            );
+            let out = derive_fit_texture(&device, &queue, &derive, &tex, 0, false, 4, 2, 3);
+            read_texture(&device, &queue, &out, 4, 2, 8).await
+        });
+        for (i, c) in out.chunks_exact(2).enumerate() {
+            let v = f16::from_bits(u16::from_le_bytes([c[0], c[1]])).to_f32();
+            assert!(
+                v.is_finite(),
+                "component {i} is {v} — a non-finite source texel leaked through the derive"
+            );
+        }
+    }
+
+    /// Mode-2 (fp16 scene-linear) identity: HDR values above 1.0 and exact fractions survive the
+    /// derive unclamped and unencoded — the linear final stores straight scene-linear fp16.
+    #[test]
+    fn derive_mode2_identity_preserves_hdr_values() {
+        use half::f16;
+        let (sw, sh) = (6u32, 4u32);
+        let vals = [0.25f32, 0.5, 1.0, 2.0, 4.0, 0.75];
+        let src: Vec<f16> = (0..(sw * sh) as usize)
+            .flat_map(|i| {
+                let v = vals[i % vals.len()];
+                [
+                    f16::from_f32(v),
+                    f16::from_f32(v * 0.5),
+                    f16::from_f32(v * 0.25),
+                    f16::ONE,
+                ]
+            })
+            .collect();
+        let out = pollster::block_on(async {
+            let instance = instance();
+            let adapter = instance
+                .request_adapter(&wgpu::RequestAdapterOptions {
+                    power_preference: wgpu::PowerPreference::HighPerformance,
+                    force_fallback_adapter: false,
+                    compatible_surface: None,
+                })
+                .await
+                .expect("no GPU adapter");
+            let (device, queue, _p010) = request_device_p010(&adapter).await;
+            let derive = build_derive(&device);
+            let tex = device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("derive-test-src-f16"),
+                size: wgpu::Extent3d {
+                    width: sw,
+                    height: sh,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba16Float,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            });
+            queue.write_texture(
+                wgpu::ImageCopyTexture {
+                    texture: &tex,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                bytemuck::cast_slice(&src.iter().map(|h| h.to_bits()).collect::<Vec<u16>>()),
+                wgpu::ImageDataLayout {
+                    offset: 0,
+                    bytes_per_row: Some(sw * 8),
+                    rows_per_image: Some(sh),
+                },
+                wgpu::Extent3d {
+                    width: sw,
+                    height: sh,
+                    depth_or_array_layers: 1,
+                },
+            );
+            let out = derive_fit_texture(&device, &queue, &derive, &tex, 0, false, sw, sh, 3);
+            read_texture(&device, &queue, &out, sw, sh, 8).await
+        });
+        let got: Vec<f32> = out
+            .chunks_exact(2)
+            .map(|c| f16::from_bits(u16::from_le_bytes([c[0], c[1]])).to_f32())
+            .collect();
+        for (i, (g, s)) in got.iter().zip(src.iter()).enumerate() {
+            let want = s.to_f32();
+            assert!(
+                (g - want).abs() <= 1e-3 * want.max(1.0),
+                "component {i}: got {g} want {want} — HDR linear values must pass through the \
+                 identity derive (no clamp, no encode)"
+            );
+        }
+    }
+
+    /// The derive reads exactly the requested mip LEVEL through its single-level view: with L0
+    /// white and L1 written mid-gray directly, an identity derive from mip 1 must return gray —
+    /// sampling L0 by mistake would return white.
+    #[test]
+    fn derive_reads_the_requested_mip_level() {
+        let out = pollster::block_on(async {
+            let instance = instance();
+            let adapter = instance
+                .request_adapter(&wgpu::RequestAdapterOptions {
+                    power_preference: wgpu::PowerPreference::HighPerformance,
+                    force_fallback_adapter: false,
+                    compatible_surface: None,
+                })
+                .await
+                .expect("no GPU adapter");
+            let (device, queue, _p010) = request_device_p010(&adapter).await;
+            let derive = build_derive(&device);
+            let tex = device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("derive-mip-src"),
+                size: wgpu::Extent3d {
+                    width: 4,
+                    height: 4,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 2,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba8Unorm,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            });
+            for (level, dim, val) in [(0u32, 4u32, 255u8), (1, 2, 128)] {
+                let px = vec![val; (dim * dim * 4) as usize];
+                queue.write_texture(
+                    wgpu::ImageCopyTexture {
+                        texture: &tex,
+                        mip_level: level,
+                        origin: wgpu::Origin3d::ZERO,
+                        aspect: wgpu::TextureAspect::All,
+                    },
+                    &px,
+                    wgpu::ImageDataLayout {
+                        offset: 0,
+                        bytes_per_row: Some(dim * 4),
+                        rows_per_image: Some(dim),
+                    },
+                    wgpu::Extent3d {
+                        width: dim,
+                        height: dim,
+                        depth_or_array_layers: 1,
+                    },
+                );
+            }
+            let out = derive_fit_texture(&device, &queue, &derive, &tex, 1, true, 2, 2, 3);
+            read_texture(&device, &queue, &out, 2, 2, 4).await
+        });
+        assert!(
+            (127..=129).contains(&out[0]),
+            "identity derive from mip 1 must return its gray (got {}), not L0's white",
+            out[0]
         );
     }
 
