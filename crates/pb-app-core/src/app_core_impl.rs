@@ -5536,7 +5536,14 @@ impl AppCore {
                 continue; // already the definitive full (see `decode_is_definitive_full`)
             }
             if !resident {
-                previews.push(Job::display(t, fit, true));
+                // Preview-first (`allow_preview`) is a FIT-scale concept: an embedded ~256px
+                // thumbnail is a fine instant stand-in for a fit-to-window view, but it is NEVER a
+                // valid `Original` (1:1 / Fill decodes at native res). Gating on `fit.is_some()`
+                // (true only in Fit mode) keeps a preview out of the Original ring slot — otherwise
+                // switching scale modes lands a thumbnail in the native tier and the rest of the
+                // engine trusts it as the full image. Off-thread, so no beachball risk (unlike the
+                // sync first-paint in `load_current_sync`, which stays preview-first on purpose).
+                previews.push(Job::display(t, fit, fit.is_some()));
             } else if Some(t) == sharpen {
                 head.push(Job::display(t, fit, false));
             } else if ring.contains(&t) {
