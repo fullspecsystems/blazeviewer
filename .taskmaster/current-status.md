@@ -151,9 +151,18 @@ FFmpeg→MF locator "bridge" was a MISTAKE, DELETED** (regression test
   posters resolved. Accepted quirk: some Netflix specials (e.g. Ali Wong) that previously looked
   good now pick white-ish frames — likely the blank-title-card skip trading black leads for white
   cards. tasks.json **#92.1 done**; the macOS AVFoundation half (#92.2) remains open.
-- **10 s Shift-seek gap** (~1.2–1.6 s, measured as video recreate+run-up): defer — scope with
-  **79.10 NVDEC hardware decode**, which is the owner-required next video work (4K60 is borderline
-  on software decode; plan at `.taskmaster/plans/79.10-nvdec-hw-decode.md`).
+- **79.10 NVDEC hardware decode — SHIPPED (2026-07-19), branch `feat/79.10-nvdec-hw-decode`.**
+  Phases A–C (NVDEC + NV12 + in-shader YUV) landed 07-11; this session added the **seek run-up
+  convert-skip** (task #4 — recreate-seek run-up 200 ms → 81 ms on the 4K60 NVDEC path; 494 →
+  369 ms software) and **HDR → P010 (Track B)** — HDR films/clips now play in real HDR instead
+  of SDR-clamped, the HDR gate lifted (MF verified to pass PQ/BT.2020 through P010 raw). The
+  10 s Shift-seek gap is largely absorbed: the run-up is near-free on the hardware path now;
+  the residual is the reader reopen (~80 ms local / ~220 ms SMB), which frame-skipping can't
+  touch. A **keyframe-deliver** enhancement (land big seeks on the keyframe, no run-up) is
+  designed + parked (trigger: a NAS film feeling laggy on a big seek). Plan rev3 (shipped):
+  `.taskmaster/plans/79.10-nvdec-hw-decode.md`. **Owner smoke on the physical display still
+  owed:** full-screen 4K60 SDR + a real HDR film (`\\beenas\Media\Movies` has clean HDR10:
+  Past Lives, Tenet, Top Gun Maverick).
 
 **Load-bearing:** WASAPI reseek ~10 ms; MF and FFmpeg enumerate audio streams in different orders
 (the `ff`/`mf` two-currency locators); Windows audio is the master clock while playing; a `Failed`
