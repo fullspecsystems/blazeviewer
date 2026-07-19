@@ -128,6 +128,14 @@ impl Want {
 pub struct Outcome {
     pub key: DecodeKey,
     pub result: Result<DecodedImage, DecodeError>,
+    /// The JOB's `allow_preview` flag (not the image's `is_preview`). Load-bearing for the
+    /// drain's upgrade bookkeeping: an `is_preview` image from a `preview: true` job landing on
+    /// an already-resident preview is a DUPLICATE (the pool untracks a finished job before its
+    /// outcome is drained, so a blaze-time re-issue can decode the same preview twice) and must
+    /// be dropped — only an `is_preview` image from a `preview: false` job means "a genuine
+    /// full request could only produce a preview" (the RAW case) and may end the sharpen loop.
+    /// Conflating the two poisoned `upgrade_done` and left photos stuck blurry (2026-07-19).
+    pub preview: bool,
     /// The pool's byte-budget RAII (freed on drop). `None` for a *synthetic* outcome not
     /// produced by the pool — a macOS archive-video poster the shell generated and fed back
     /// in (`Outcome::synthetic`); it carries no pool budget.
@@ -152,8 +160,16 @@ impl Outcome {
                 rep_kind,
             },
             result,
+            preview: false, // a synthetic poster is a definitive full, not a preview request
             _budget: None,
         }
+    }
+
+    /// Mark this (synthetic/test) outcome as produced by an `allow_preview` job — the
+    /// preview-first request shape, for tests exercising the duplicate-preview drain rule.
+    pub fn from_preview_request(mut self) -> Self {
+        self.preview = true;
+        self
     }
 
     /// Move the decoded image out, dropping the pool byte-budget reservation —
@@ -430,6 +446,7 @@ fn worker_loop(shared: Arc<Shared>) {
         let outcome = Outcome {
             key: job.key,
             result,
+            preview: job.preview,
             _budget: Some(BudgetGuard {
                 shared: shared.clone(),
                 bytes,

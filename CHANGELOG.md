@@ -21,11 +21,13 @@ with any pre-release suffix carried only by the tag.
   pressing next/previous immediately afterwards showed a small blurry thumbnail for a couple
   of seconds. The app now keeps those full-resolution copies across the change and produces
   the sharp view from them instantly.
-- **A photo can no longer get stuck blurry.** In rare cases (a key-release the app never
-  received, e.g. around a fullscreen flip while paging fast) a photo could stay on its
-  low-res preview until you resized or refocused the window. The app now notices a photo
-  that has lingered blurry and fetches its sharp version on its own within a couple of
-  seconds, no matter what state the keyboard tracking is in.
+- **A photo can no longer get stuck blurry.** Two causes fixed. Paging quickly could
+  occasionally make the app decode a photo's small placeholder twice and mistake the second
+  copy for proof that no sharper version exists — that photo then stayed blurry until a
+  window change; the duplicate is now recognised and ignored. And as a backstop, the app now
+  notices any photo that has lingered blurry for a couple of seconds and fetches its sharp
+  version on its own — even when its own bookkeeping (or the keyboard tracking) claims
+  otherwise.
 
 ### Added
 - **Switching between fit-to-screen and 1:1 is instant now.** When you stop on a photo, the

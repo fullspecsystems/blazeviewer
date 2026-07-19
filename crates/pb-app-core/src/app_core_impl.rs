@@ -5898,10 +5898,14 @@ impl AppCore {
         //    (its upgrade path is the poster pipeline), and a RAW's forced "full" is a
         //    seconds-long uncancellable demosaic — its embedded preview is near-full-res anyway.
         //    Cheap-first: the kind/extension checks only run while a preview is displayed.
+        // Deliberately NOT gated on `upgrade_done`: that flag can be poisoned (a decode error,
+        // or historically the duplicate-preview race) and a poisoned flag would gate off the
+        // very safety net meant to catch it. The fire edge clears it instead — one forced
+        // retry per arming cycle (the latched `fired` prevents a retry loop; navigating away
+        // and back re-arms, giving the next deliberate visit one more chance).
         let lingering = self.displayed_item.filter(|d| {
             self.display_slot(*d).is_some()
                 && self.preview_resident.contains(d)
-                && !self.upgrade_done.contains(d)
                 && self.target_caught_up()
                 && matches!(
                     crate::video::item_kind(self.source.as_ref(), *d),
@@ -5918,10 +5922,14 @@ impl AppCore {
                 if !w.fired && self.now.saturating_duration_since(w.since) >= PREVIEW_WATCHDOG_AFTER
                 {
                     w.fired = true;
+                    let lingered = self.now.saturating_duration_since(w.since);
+                    // Second chance (ADR-024 "converge or self-correct"): a lingering preview
+                    // with `upgrade_done` set means the flag lied — clear it so the sharpen
+                    // path reopens. Once per arming cycle (see above).
+                    let was_poisoned = self.upgrade_done.remove(&d);
                     if sharp_diag() {
                         eprintln!(
-                            "[sharp-diag] preview watchdog FIRED item={d} (lingered {:?}, held_nav={}) — forcing sharpen",
-                            self.now.saturating_duration_since(w.since),
+                            "[sharp-diag] preview watchdog FIRED item={d} (lingered {lingered:?}, held_nav={}, cleared_upgrade_done={was_poisoned}) — forcing sharpen",
                             self.held_nav().is_some(),
                         );
                     }
@@ -6706,6 +6714,20 @@ impl AppCore {
         }
         self.mark_resolved(item);
         self.current = self.meta_cache.get(&item).cloned();
+        // Diagnosis affordance (the 2026-07-19 stuck repro was SILENT in the logs — nothing
+        // prints while parked on a blurry photo whose sharpen is gated off): one line per
+        // parked landing on a resident preview, naming the gate state. Event-driven, diag-only.
+        if sharp_diag() && self.held_nav().is_none() && self.preview_resident.contains(&item) {
+            eprintln!(
+                "[sharp-diag] parked on item={item} as a resident PREVIEW: upgrade_done={} ({})",
+                self.upgrade_done.contains(&item),
+                if self.upgrade_done.contains(&item) {
+                    "sharpen BLOCKED — watchdog second-chance due in ~2s"
+                } else {
+                    "sharpen expected now"
+                }
+            );
+        }
         // The panel (if shown) is now stale for the old photo; `about_to_wait`
         // rebuilds it for `item` next tick (or hides it while blazing), so it
         // tracks the photo with no blank flash. The bitmap stays up meanwhile.
@@ -6907,20 +6929,32 @@ impl AppCore {
                 // forever. Any other already-resident duplicate is dropped.
                 let is_prev = self.preview_resident.contains(&item);
                 let img = o.result.as_ref().expect("Err handled above");
-                if sharp_diag() && self.displayed_item == Some(item) {
-                    let decision = if is_prev && img.is_preview {
-                        "upgrade_done (full came back a PREVIEW — stays blurry)"
+                // A preview image from a preview REQUEST landing on an already-resident preview
+                // is a DUPLICATE — the pool untracks a finished job before its outcome is
+                // drained, so a blaze-time `request_prefetch` re-issue can decode the same
+                // preview twice. It must be dropped WITHOUT touching `upgrade_done`: treating
+                // it as "the full came back a preview" gated off both the sharpen loop and the
+                // watchdog, leaving the photo stuck blurry until a geometry change purged the
+                // flag (the owner-hit back-up-one-after-a-blaze repro, 2026-07-19). Only a
+                // preview image from a FULL request (`o.preview == false` — e.g. a RAW whose
+                // only image IS its preview) may end the sharpen loop.
+                let duplicate_preview = is_prev && img.is_preview && o.preview;
+                if sharp_diag() && (self.displayed_item == Some(item) || duplicate_preview) {
+                    let decision = if duplicate_preview {
+                        "DROPPED (duplicate preview outcome — not an upgrade verdict)"
+                    } else if is_prev && img.is_preview {
+                        "upgrade_done (a FULL request came back a preview — stays as-is)"
                     } else if is_prev {
                         "UPGRADE (sharpen applied)"
                     } else {
                         "DROPPED (item not preview_resident when the full landed)"
                     };
                     eprintln!(
-                        "[sharp-diag] full landed item={item} is_preview={} is_prev={} rk={:?} -> {decision}",
-                        img.is_preview, is_prev, rk
+                        "[sharp-diag] full landed item={item} is_preview={} is_prev={} job_preview={} rk={:?} -> {decision}",
+                        img.is_preview, is_prev, o.preview, rk
                     );
                 }
-                if is_prev && img.is_preview {
+                if is_prev && img.is_preview && !o.preview {
                     self.upgrade_done.insert(item);
                 }
                 return is_prev && !img.is_preview;
@@ -15875,6 +15909,147 @@ mod tests {
         assert!(
             core.ring.original_slot(1).is_some(),
             "the source Original is untouched"
+        );
+    }
+
+    /// The 2026-07-19 owner-hit stuck-blurry repro: during a blaze the pool untracks a finished
+    /// preview job before its outcome is drained, so a re-issued preview decodes TWICE — and the
+    /// second preview outcome, landing after the first made the item resident, was misread as
+    /// "the full came back a preview" → `upgrade_done` → the sharpen loop AND the watchdog both
+    /// permanently gated off. A duplicate preview outcome must be dropped without a verdict.
+    #[test]
+    fn a_duplicate_preview_outcome_never_poisons_upgrade_done() {
+        let mut core = test_core();
+        core.source = photos_named(&["a.jpg"]);
+        core.playlist = Playlist::new(1, 0).with_cursor(0);
+        core.ring = ResidentRing::new(4);
+        core.fit = Some(FitBox {
+            max_width: 1440,
+            max_height: 960,
+        });
+        core.view.mode = ScaleMode::Fit;
+        core.targets = vec![0];
+        core.displayed_item = Some(0);
+        core.target_item = Some(0);
+        core.mark_resolved(0);
+        // The FIRST preview outcome made the photo resident-as-preview.
+        let fit_rep = core.rep_of(pb_core::RepKind::Fit);
+        make_resident(&mut core, 0, fit_rep, &[0]);
+        core.preview_resident.insert(0);
+
+        // The SECOND (duplicate) preview outcome arrives from a preview-request job.
+        let dup = pb_decode::DecodedImage {
+            width: 256,
+            height: 171,
+            orig_width: 6000,
+            orig_height: 4000,
+            codec: "JPEG",
+            format: pb_decode::PixelFormat::Rgba8,
+            pixels: vec![0; 256 * 171 * 4],
+            is_preview: true,
+            color: pb_decode::ColorTransform::srgb(),
+            peak: 1.0,
+            animated: None,
+        };
+        core.pending_uploads.push(
+            Outcome::synthetic(0, core.epoch, pb_core::RepKind::Fit, Ok(dup))
+                .from_preview_request(),
+        );
+        core.drain_results();
+
+        assert!(
+            !core.upgrade_done.contains(&0),
+            "a duplicate preview outcome must never be read as an upgrade verdict"
+        );
+        assert!(core.preview_resident.contains(&0), "still sharpen-eligible");
+        assert_eq!(
+            core.sharpen_now(),
+            Some(0),
+            "the real full still gets requested — no stuck-blurry"
+        );
+    }
+
+    /// The legit case the poisoned branch existed for: a genuine FULL request (job preview =
+    /// false) whose best result is still a preview (a RAW whose only embedded image IS its
+    /// preview) must still end the sharpen loop — no infinite re-decode.
+    #[test]
+    fn a_full_request_that_returns_a_preview_still_ends_the_loop() {
+        let mut core = test_core();
+        core.source = photos_named(&["a.jpg"]);
+        core.playlist = Playlist::new(1, 0).with_cursor(0);
+        core.ring = ResidentRing::new(4);
+        core.fit = Some(FitBox {
+            max_width: 1440,
+            max_height: 960,
+        });
+        core.view.mode = ScaleMode::Fit;
+        core.targets = vec![0];
+        core.displayed_item = Some(0);
+        core.target_item = Some(0);
+        core.mark_resolved(0);
+        let fit_rep = core.rep_of(pb_core::RepKind::Fit);
+        make_resident(&mut core, 0, fit_rep, &[0]);
+        core.preview_resident.insert(0);
+
+        let best_is_preview = pb_decode::DecodedImage {
+            width: 256,
+            height: 171,
+            orig_width: 6000,
+            orig_height: 4000,
+            codec: "JPEG",
+            format: pb_decode::PixelFormat::Rgba8,
+            pixels: vec![0; 256 * 171 * 4],
+            is_preview: true,
+            color: pb_decode::ColorTransform::srgb(),
+            peak: 1.0,
+            animated: None,
+        };
+        core.pending_uploads.push(Outcome::synthetic(
+            0,
+            core.epoch,
+            pb_core::RepKind::Fit,
+            Ok(best_is_preview),
+        ));
+        core.drain_results();
+
+        assert!(
+            core.upgrade_done.contains(&0),
+            "a full request that can only produce a preview ends the loop (RAW semantics)"
+        );
+        assert_eq!(core.sharpen_now(), None, "no infinite re-decode");
+    }
+
+    /// The watchdog is the second chance for a POISONED `upgrade_done` (a decode error, or any
+    /// future mis-flagging): it arms despite the flag, and its fire clears it exactly once per
+    /// arming cycle so the sharpen reopens — parked photos converge to sharp no matter how the
+    /// bookkeeping got lied to (ADR-024 "converge or self-correct").
+    #[test]
+    fn the_watchdog_gives_a_poisoned_upgrade_done_a_second_chance() {
+        let mut core = stuck_preview_core();
+        core.held.clear(); // genuinely parked — the poison case needs no stuck key
+        core.upgrade_done.insert(0); // poisoned: sharpen_now is gated off
+        assert_eq!(
+            core.sharpen_now(),
+            None,
+            "poisoned — the sharpen is blocked"
+        );
+
+        let t0 = core.now;
+        core.tick(); // arms despite upgrade_done
+        core.now = t0 + PREVIEW_WATCHDOG_AFTER;
+        core.tick(); // fires → clears the poison → forces the re-issue
+        assert!(
+            !core.upgrade_done.contains(&0),
+            "the fire edge clears the poisoned flag"
+        );
+        assert_eq!(
+            core.sharpen_now(),
+            Some(0),
+            "the sharpen path reopened — the photo converges to sharp"
+        );
+        assert!(
+            core.full_requested_at.contains_key(&0),
+            "and the full was actually re-requested"
         );
     }
 
