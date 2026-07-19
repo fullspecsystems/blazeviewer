@@ -248,6 +248,15 @@ window. What survived the growth is the philosophy:
   OS key-repeat events, plus a focus-loss release net (avoids known winit
   repeat/lost key-up bugs).
 
+**Platform scope:** this section and the two below (HUD icons, the `pb-ui`
+chrome) describe the **winit shell — Windows and Linux**. They apply to macOS
+almost not at all: the Mac ships a **native SwiftUI/AppKit chrome**
+(`mac/Sources/BlazeViewerMac/` — dialogs, inspector, folder tree, help are
+native views, not egui) held to the "Mac-assed Mac app" bar — see
+*Cross-platform discipline* below. The *behavior* (actions, keymap, session
+logic) is still shared via `pb-app-core`; only the presentation is
+per-platform.
+
 ### HUD / toast icons — Font Awesome solid (codified workflow)
 
 Overlay panels (the `pb-hud` crate — shell-neutral since NS0) composite white
@@ -421,26 +430,50 @@ is persisted unless the user deliberately invokes the action.
   the audit before adding any *passive* disk write; any on-disk scratch must be opt-in
   + cleared.
 
-## Cross-platform discipline (Windows now, Apple Silicon later)
+## Cross-platform discipline (the platform priority, honestly stated)
 
-Windows 11 is the target, but the spikes + codex review (see `decisions.md`,
-post-spike update) put us on the **portable path**: **wgpu is the v1 renderer**
-(DX12 backend on Windows, Metal on macOS), because CPU decode (2.5×) and the
-staging-ring upload (3.4×) already clear 120 Hz — wgpu's portability costs nothing
-measurable here.
-- **`winit` owns windowing + input**; the wgpu surface is created on its window
-  handle. Rendering/upload/decode sit behind the `Renderer`, `DecodeBackend`, and
-  `UploadStrategy` traits.
-- **macOS is a cheap port** (wgpu Metal backend + a hardware-decode/upload backend
-  swap), not a rewrite — deferred to v2.
+**Design cross-platform first; make it idiomatic on the Mac; ensure it works
+on Windows; keep Linux cheap.** In practice:
+
+1. **Cross-platform first.** Behavior — actions, keymap, session logic, timing
+   — lands in the shell-neutral core (`pb-app-core` + the trait seams), never
+   in a shell. A feature designed inside one shell is a design bug even if it
+   works.
+2. **Idiomatic on the Mac.** macOS is not a port of the winit shell — it's a
+   **native SwiftUI/AppKit host** (`mac/`, over `pb-mac-ffi`) held to John
+   Siracusa's **"Mac-assed Mac app"** bar: platform conventions, native
+   controls and feel, wherever possible. The house definition + concrete
+   checklist is `.taskmaster/docs/macos-native-ui-plan.md` (§ *North star —
+   what "Mac-assed" means here*). The full skill is **vendored at
+   `.claude/skills/mac-arsed-mac-app/`** (SKILL.md + reference docs on
+   detailed rules, SwiftUI/AppKit choices, and review/QA — MIT, from
+   <https://github.com/bartreardon/skills>; note the English-variant
+   spelling), so it's invocable as `/mac-arsed-mac-app` when doing Mac UI
+   work — load it before designing or reviewing anything user-facing on
+   macOS.
+3. **Works on Windows.** Windows 11 is the primary dev/target hardware and
+   ships the winit shell; every feature must hold the performance bar there.
+4. **Linux is deliberately cheap — but never designed out.** It rides the
+   winit shell + wgpu Vulkan with no polish pass; the rule is only that we
+   never architect something in a way that would make Linux *hard* later.
+
+The technical base that makes this affordable:
+
+- **wgpu is the renderer everywhere** (DX12 on Windows, Metal on macOS, Vulkan
+  on Linux) — chosen post-spike because CPU decode (2.5×) and the staging-ring
+  upload (3.4×) already clear 120 Hz, so wgpu's portability costs nothing
+  measurable (`decisions.md`).
+- **`winit` owns windowing + input on Windows/Linux**; on macOS the Swift host
+  owns them. Rendering/upload/decode sit behind the `Renderer`,
+  `DecodeBackend`, and `UploadStrategy` traits.
 - **GPU decode + zero-copy is a gated acceleration backend** (native D3D12 +
-  nvImageCodec), pursued only if the high-MP stress test proves a need (ADR-012
-  kill criterion). The CPU pool is the permanent baseline and handles formats GPU
-  decode can't.
+  nvImageCodec), pursued only if the high-MP stress test proves a need
+  (ADR-012 kill criterion). The CPU pool is the permanent baseline and handles
+  formats GPU decode can't.
 - Do color management **in-shader** (matrix + TRC) so it ports unchanged.
 - Isolate every platform-specific call (refresh-rate query, swapchain latency
-  hook, photon timestamp) behind a single helper so the eventual port is a small
-  surface.
+  hook, media decode) behind a single helper seam — that's what made the Mac
+  host a bounded surface instead of a rewrite.
 
 ## Licensing — LGPL discipline (read before touching FFmpeg, libheif, or dist)
 
