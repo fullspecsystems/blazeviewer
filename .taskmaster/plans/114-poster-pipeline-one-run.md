@@ -1,7 +1,7 @@
 # 114 — One-run poster pipeline: choose once, keep an Original, derive everything else
 
-_Status: **DESIGN DRAFT rev 2** (2026-07-19) — Codex round 1 folded (review log at the bottom);
-round 2 + owner sign-off pending. **Do not implement** until green-lit._
+_Status: **DESIGN DRAFT rev 3** (2026-07-19) — Codex rounds 1 + 2 folded (review log at the
+bottom); round 3 + owner sign-off pending. **Do not implement** until green-lit._
 
 ## The ask (owner, 2026-07-19)
 
@@ -15,7 +15,7 @@ round 2 + owner sign-off pending. **Do not implement** until green-lit._
 
 1. **Multiple walks per movie.** The thumb strip and the display view each run the FULL scored
    walk (Thumb-purpose videos route through the normal poster path, engine.rs:492), and the pool
-   *deliberately* dedups by `(item, purpose, rep_kind)` (decode_pool.rs:218) — so the two walks
+   _deliberately_ dedups by `(item, purpose, rep_kind)` (decode_pool.rs:218) — so the two walks
    run **concurrently** (both wants assembled in one scheduler batch, app_core_impl.rs:5779/5859):
    two MF readers, two burst decodes, two deep-seek sequences per film, each multi-second on SMB.
 2. **The scoring is resolution-dependent** — frames are scored AFTER scaling to the requested fit
@@ -49,9 +49,9 @@ AppCore:
 
 ```
 PosterSelection = Absent
-               | Selecting { content_gen, consumers: {Thumb?, Display?} }
+               | Selecting { content_gen, consumers: {Thumb?, Display?}, retries }
                | Chosen(PosterChoice)
-               | WaitingForReentry { retries }   // §4
+               | WaitingForReentry { retries }   // §4 (retry re-enters Selecting)
                | Terminal                        // failed twice — honest blank
 ```
 
@@ -59,15 +59,36 @@ PosterSelection = Absent
   a second walk — the selection job is the ONE walk, and `consumers` is the **union** of thumb +
   display demand (a display-cancel must not kill a selection the thumb still needs; cancel only
   when the union empties).
+- **The selection is its own pool work kind — geometry-neutral, level-triggered, class-mutable**
+  (round 2; a selection dressed as a Fit/Original display want inherits three wrong behaviors):
+  - Keyed `(item, content_gen)`, **not** the geometry epoch — the pool cancels every tracked job
+    on an epoch change (decode_pool.rs:295) and `pending_uploads` is cleared on ring rebuilds
+    (app_core_impl.rs:7492), but a selection is geometry-independent by definition: it must
+    survive a mid-walk resize, and its outcome must not ride the geometry-scoped pending list.
+  - **Re-emitted in every `set_targets`** while the consumer union is nonempty — the pool is
+    level-triggered and cancels wants that stop being asked for (decode_pool.rs:314); `Selecting`
+    without a live job is the bug, not a state.
+  - **Stable identity, mutable scheduling class** (round-2 occupancy finding): a thumb-only
+    selection counts against the thumb admission cap (decode_pool.rs:391 — far-away movies must
+    not occupy every worker), and when display demand joins, the job is **promoted** to display
+    class without changing identity — never cancel/restart (the per-purpose dedup identity would
+    otherwise force exactly that).
 - **A typed selection result** rides the outcome seam (the pool's `DecodeFn` returns one
   `DecodedImage` today, decode_pool.rs:57 — the selection outcome instead carries
-  `PosterChoice { ts, native_w, native_h, hdr } + native winner pixels + judge metadata`), and
-  the drain **fans it out** to every registered consumer: thumb tile cut + poster Fit + the
-  Original install (§3). This typed seam is where "the other purpose consumes the choice"
-  actually happens — it had nowhere safe to live in rev 1.
-- `PosterChoice.ts` is captured from `ReadSample`'s timestamp output (the walk currently
-  discards timestamps entirely, mf_poster.rs:368) and its coordinate is **defined**:
-  session-relative (origin-adjusted — MPEG-TS files have nonzero origins).
+  `PosterChoice + artifacts`), **matched at the top of `drain_results`** — before the thumb
+  branch (:7033) and the display rep routing (:7171), fenced by `content_gen` (round 2: the
+  existing branches move the single image and cannot fan out). **Artifacts are produced on the
+  worker, never the event loop**: the selection job already holds the native buffer off-thread,
+  so it cuts the thumb tile AND the display-size Fit there and returns all three; the drain only
+  routes. The display Fit is included even when Original admission is denied (§3), so the screen
+  always gets its poster. The payload implements summed byte accounting
+  (`OutcomePayload::bytes()`) — multiple pixel buffers must all count against the pool budget.
+- `PosterChoice` stores **the absolute backend seek locator** — `{ origin, relative_ts }` —
+  because replay must seek `origin + relative_ts` exactly as playback does
+  (mf_video_producer.rs:220/:326); MPEG-TS files have nonzero origins, so a bare
+  session-relative PTS is the wrong replay coordinate (round 2 caught rev 2 claiming
+  otherwise). The timestamp is captured from `ReadSample`'s output, which the walk currently
+  discards entirely (mf_poster.rs:368).
 
 ### 2. Fixed-size judging + native-winner retention (one pass, no replay needed)
 
@@ -77,27 +98,39 @@ on a preceding keyframe and decode forward — the playback seek path already im
 decode-forward-until-`ts ≥ target` algorithm, mf_video_producer.rs:213/:252). So the two ideas
 fuse into one contract, per backend:
 
-- **MF (Windows)**: negotiate the selection reader at **native** (bounded by a hard edge
-  ceiling); for each candidate, CPU-downscale to the shared judge size (`POSTER_JUDGE_WIDTH`
-  ≈ 256 px) and score THAT; retain the **best-so-far native buffer** (exactly one frame resident
-  at a time, same keep-if-better shape as today's `best.consider`). The walk ends holding the
-  chosen frame at native res — no second pass, no replay.
+- **MF (Windows) — two variants, A/B-gated on the corpus** (round 2: "small added cost" was
+  unsupported — native output makes EVERY candidate pay a full-res RGB conversion+copy
+  (mf_video.rs:352) plus a CPU reduction, and the existing Lanczos helper consumes its source
+  (common.rs:319), so a scratch-reusing borrowed reducer is needed either way):
+  - **Variant A (native walk)**: negotiate the reader at the capped edge (§3 ceiling);
+    per candidate, reduce to the judge size (`POSTER_JUDGE_WIDTH` = **256 px**, owner-locked)
+    and score that; retain the best-so-far native buffer. Ends holding the winner — no replay.
+  - **Variant B (fitted walk + winner replay)**: keep today's fitted negotiation (cheap
+    candidates), score on a judge-size reduction (consistency fixed either way), then acquire
+    the winner once at the end via the decode-forward replay (one GOP cost, amortized).
+  - The A/B records walk latency, candidates reached before the 15 s deadline, and CPU time
+    over the movie corpus; the winner ships, the loser stays behind the seam.
+  - **Active native RAM is bounded by a permit** (round 2): during a native walk the retained
+    best + current candidate ≈ two native buffers coexist per selection, and the pool's
+    `inflight_bytes` only counts bytes AFTER a decode returns (decode_pool.rs:414) — eight UHD
+    walks ≈ 0.5 GiB invisible to the budget. Native-mode selections take a byte permit from the
+    pool budget up front (or a hard low concurrency cap, e.g. 2 native walks at once).
 - **FFmpeg (mac/Linux)**: already two-scale — replace its private 480-edge reduction
   (ffmpeg/poster.rs:337) with the shared judge constant; it retains the raw winning `AVFrame`
   and converts once at the end, which becomes "convert at native" — HW decode and the two-scale
   architecture untouched.
-- **Honest efficiency accounting** (round 1): fixed-size judging buys *consistency* (the gate
+- **Honest efficiency accounting** (round 1): fixed-size judging buys _consistency_ (the gate
   stops being resolution-dependent — the Ali Wong fix); the per-candidate downscale on MF is a
-  small added cost, not a saving. The *efficiency* comes from §1 (half the walks) and §3 (no
+  small added cost, not a saving. The _efficiency_ comes from §1 (half the walks) and §3 (no
   re-walks ever again). Known limitation: FFmpeg's **HDR** poster scorer is brightness-only
   (ffmpeg/poster.rs:202) — the title-card detail gate does not cover HDR films yet; noted, out
   of scope.
-- **The replay contract exists but is the *recovery* path, not the hot path**: re-obtaining an
-  evicted Original = fresh reader + `SetCurrentPosition(choice.ts)` + decode-forward until
-  `ts ≥ choice.ts` (the playback algorithm — fresh-reader positioning avoids the warm-HEVC ~1 s
-  trap). It can decode a whole GOP; **benchmark over SMB with HEVC/long-GOP material before
-  relying on it** (prime directive), and it must reproduce the *same* frame by timestamp match,
-  never "first frame after seek".
+- **The replay contract** (Variant B's winner acquisition, and the recovery path for an evicted
+  Original either way): fresh reader + `SetCurrentPosition(origin + relative_ts)` +
+  decode-forward until the absolute timestamp matches (the playback algorithm — fresh-reader
+  positioning avoids the warm-HEVC ~1 s trap). It can decode a whole GOP; **benchmark over SMB
+  with HEVC/long-GOP material before relying on it** (prime directive), and it must reproduce
+  the _same_ frame by timestamp match, never "first frame after seek".
 
 ### 3. The chosen frame becomes the video's Original (the resize fix)
 
@@ -114,7 +147,17 @@ Round 1 verified the core claim: **#110 derives videos with zero render changes*
   retained native buffer is dropped; re-admission uses the §2 replay path.
 - `full_res_eligible` gains a video arm gated on `Chosen` **and** on
   `native_w × native_h` against a hard pixel/byte ceiling — "videos are at most 4K" is folklore,
-  not an invariant.
+  not an invariant. **The ceiling is a 4096 edge** (owner-accepted 2026-07-19, non-native above
+  it): a 16:9 film on the 7680×2160 display fits height-bound at 3840×2160, so a native 4K
+  poster displays 1:1 and the cap only ever bites >4K sources. VRAM stays boring because
+  admission is demand-gated — a folder of five hundred 4K movies holds parked-window-many poster
+  Originals (~3–7 × 44 MB), never five hundred.
+- **Wide-gamut SDR (P3) posters need a derivable representation** (round 2 caught this): MF can
+  return an enabled P3 transform, which the renderer stores as **mode 1 — deliberately unmipped
+  and rejected as a derive source** (gpu.rs:1862/:3759), so those videos would silently miss the
+  promised resize path. Until 110d solves mode-1 derivation generally, a P3 poster installs as
+  **mode-2 fp16 scene-linear** (color-correct, mipped, derivable — 2× bytes; the conversion is
+  one frame at install time). An SDR-P3 resize regression test pins it.
 - **Format accounting** (round 1 correction): Windows MF posters are RGBA8 (PQ/HLG
   SDR-clamped by design, mf_video.rs:298) → 4K ≈ 44 MB mipped; FFmpeg HDR posters are fp16
   (ffmpeg/poster.rs:396) → 4K ≈ **88 MB**. Both count against the parked quota (and #112's
@@ -138,12 +181,19 @@ either loops or never schedules. Instead, per item:
 
 - **Re-entry is an absent→present demand edge** (the item left the window/targets and came
   back), not "is visible this tick" — that's what bounds it.
-- The retry count is preserved *before* enqueue (a second failure transitions to `Terminal`;
+- The retry count is preserved _before_ enqueue (a second failure transitions to `Terminal`;
   cancellation of the retry job does **not** consume the attempt).
 - Poster-selection retry is **item-level across consumers** (one retry even if both thumb and
   display want it — no double walks through the back door).
 - On `Recovered` for the current target: clear the caught-up/presentation state stamped by the
   failure and re-present, so the healed image actually appears.
+- **Scope: all item kinds — photos included** (owner decision 2026-07-19): `thumbs.failed` and
+  `AppCore::failed` gate photos exactly the same way, and a transient SMB read error on a photo
+  thumb is at least as common as on a movie poster. The state machine is kind-agnostic by
+  construction (it wraps the failed-set lifecycle, not the decoder), so photos ride for free —
+  and this is the leading suspect for the residual "stuck with no thumbnails" sightings (the
+  other suspect, the #109 deck-identity hole, stays separately tracked; this retry does not
+  cover it and a repro after this ships points squarely at #109).
 
 ### 5. Head-only fallback, at the layer that actually fails (round 1 narrowed this)
 
@@ -178,16 +228,16 @@ teardown/content-change wipes, and PTS/path data never enters metrics or persist
 
 ## What this fixes (symptom → mechanism)
 
-| Observed this session | Fixed by |
-|---|---|
-| Resize spinner on videos (~seconds) | §3 Original + GPU derive |
-| Thumb shows a scene, poster shows the white card | §2 judging (+§3 same-frame thumb) |
-| White-ish posters on the Ali Wong specials | §2 (the small-judge pick wins) |
-| Gremlins ×3 re-walk churn after eviction | §1 selector + §2 replay recovery |
-| Two concurrent walks (SMB readers) per movie | §1 purpose-neutral selection |
-| Rare permanently-blank thumbs on SMB hiccups | §4 retry state machine |
-| BDMV `.m2ts` losing even their head frames | §5 typed invalid-position fallback |
-| "corrupt image: cancelled" console flood | done (`cb65b6d6`) |
+| Observed this session                            | Fixed by                           |
+| ------------------------------------------------ | ---------------------------------- |
+| Resize spinner on videos (~seconds)              | §3 Original + GPU derive           |
+| Thumb shows a scene, poster shows the white card | §2 judging (+§3 same-frame thumb)  |
+| White-ish posters on the Ali Wong specials       | §2 (the small-judge pick wins)     |
+| Gremlins ×3 re-walk churn after eviction         | §1 selector + §2 replay recovery   |
+| Two concurrent walks (SMB readers) per movie     | §1 purpose-neutral selection       |
+| Rare permanently-blank thumbs on SMB hiccups     | §4 retry state machine             |
+| BDMV `.m2ts` losing even their head frames       | §5 typed invalid-position fallback |
+| "corrupt image: cancelled" console flood         | done (`cb65b6d6`)                  |
 
 ## Interactions
 
@@ -200,7 +250,7 @@ teardown/content-change wipes, and PTS/path data never enters metrics or persist
 - **#92**: subsumes the divergence + white-card quirk; the macOS AVFoundation backend (#92.2)
   adopts the judge constant + selector via the shared policy (video.rs) when it lands.
 - **79.10 (parallel branch)**: shared-file edges are `video.rs` constants and
-  `mf_video_producer.rs` (79.10 rebuilds the producer; §2's replay borrows its *algorithm*, not
+  `mf_video_producer.rs` (79.10 rebuilds the producer; §2's replay borrows its _algorithm_, not
   its code). Coordinate at merge; land order free.
 
 ## Test plan
@@ -223,31 +273,45 @@ teardown/content-change wipes, and PTS/path data never enters metrics or persist
   cancellation doesn't consume the attempt; recovery re-presents a current target.
 - **Fallback**: mock reader failing at `SetCurrentPosition` vs at post-seek `ReadSample` — both
   return the head best; a non-position deep error still fails the walk (corruption not masked).
+- **SDR-P3 resize regression**: a P3-tagged poster derives correctly after a resize (the mode-2
+  install path), colors intact.
+- **RAM permit**: N concurrent native selections never exceed the permit; the ninth walk parks
+  until a permit frees.
 - **No-trace**: existing disk-diff tests extended to a movie folder; lifecycle tests carry the
   teardown guarantee.
 - **Measured end-to-end**: SMB movie-folder browse — walk count (expect ≈1/movie), total poster
   wall-time, reader opens; resize→sharp latency for a displayed video (expect walk-time →
   derive-time).
 
-## Phases (after owner sign-off) — re-cut by round 1 (MF phase 1 is structural, not small)
+## Phases — ONE ARC (owner decision 2026-07-19: single arc, one testing round)
 
-1. **The selector + typed result seam** (state machine, union demand, content_gen, lifecycle
-   method + tests) — pure orchestration, no walk changes yet; kills the double walk on its own.
-2. **Walk rework**: MF native-negotiation + judge-downscale scoring + timestamp capture +
-   best-native retention; FFmpeg judge-constant swap; corpus threshold re-validation.
-3. **Original install + demand-gated admission + video `full_res_eligible` arm + same-frame
-   thumb** (kills the resize spinner); the replay recovery path + its SMB benchmark.
-4. **Retry state machine + typed invalid-position head-best fallback.**
-5. *(Optional)* `DecodeError::Cancelled`; macOS backend parity (with #92.2).
+Round 2 also killed the rev-2 phase-1/phase-2 split: a typed result with no timestamp/native
+capture is a fiction, so the seam and the minimum walk changes land together.
 
-## Open questions (owner)
+1. **Selector + typed seam + minimum walk changes**: the state machine (pool work kind,
+   level-triggered re-emission, class promotion, lifecycle method), the typed fan-out result,
+   and the walk changes that make the result real — timestamp/origin capture + judge-size
+   scoring (256 px) + the FFmpeg judge-constant swap; corpus threshold re-validation.
+2. **The MF variant A/B** (native walk vs fitted+winner-replay) + the scratch-reusing reducer +
+   the native-RAM permit; the winner ships.
+3. **Original install + demand-gated admission + the 4096-edge ceiling + mode-2 P3 handling +
+   same-frame thumb** (kills the resize spinner); the replay path + its SMB benchmark.
+4. **Retry state machine (all kinds, photos included) + typed invalid-position head-best
+   fallback.**
+5. _(Optional)_ `DecodeError::Cancelled`; macOS backend parity (with #92.2).
 
-1. Judge width: 256 px (proposed) or 320 px? (Corpus A/B decides; 256 is the proposal.)
-2. Retry scope: videos/thumbs only (proposed), or photos too?
-3. Ship after phase 2 (judging + one-run, quality + churn wins) or hold for phase 3 (the resize
-   fix) as one arc?
-4. The MF native-negotiation ceiling: cap at 4096-edge (proposed) — above it, negotiate capped
-   and accept a non-native Original?
+All phases merge as one arc with one owner-testing round at the end.
+
+## Owner answers (2026-07-19) — the former open questions
+
+1. **Judge width: 256 px.**
+2. **Retry covers photos too** — same mechanism, kind-agnostic; leading suspect for the residual
+   blank-thumbnails sightings (deck-identity #109 remains the other, separately tracked).
+3. **One arc**, one round of testing.
+4. **4096-edge ceiling, non-native accepted above it.** Rationale recorded in §3: a 4K film
+   displays 1:1 at 3840×2160 on the owner's display, so 4096 is not overkill — it is exactly
+   native for the common worst case; RAM/VRAM stays bounded because Original admission is
+   demand-gated (parked window, ~3–7 posters resident), never per-folder.
 
 ## Codex review log
 
@@ -265,4 +329,21 @@ teardown/content-change wipes, and PTS/path data never enters metrics or persist
   the head best. Round 1 confirmed: the double-walk reality, the resolution-dependent scoring
   (and that `cfd55ffe`'s two-scale lives in FFmpeg, not MF), that #110 derives videos with zero
   render changes, geometry-preserves-metadata, and privacy soundness.
-- **Round 2: pending** — re-review of rev 2 before owner sign-off.
+- **Round 2 (2026-07-19, rev 2): NOT sign-off-ready — no P0, 6×P1 + 1×P2, all folded into
+  rev 3**: the selection became a distinct geometry-neutral pool work kind keyed
+  `(item, content_gen)`, level-triggered (re-emitted every `set_targets`), exempt from
+  epoch-cancellation, with a stable identity + mutable scheduling class (thumb-cap vs display
+  promotion without restart); the typed result is matched at the top of the drain, artifacts
+  (thumb + display Fit) are produced on the worker (never event-loop CPU resizes), the display
+  Fit ships even when Original admission is denied, and payload bytes are summed; MF native
+  judging became an **A/B-gated variant** vs fitted+winner-replay (per-candidate native
+  conversion cost is unproven) with a scratch-reusing reducer and an active-native-RAM permit
+  (inflight_bytes counts nothing until a decode returns); the replay locator became absolute
+  (`origin + relative_ts` — MPEG-TS origins made the rev-2 session-relative claim wrong); SDR-P3
+  posters install as mode-2 fp16 (mode 1 is deliberately unmipped and derive-rejected —
+  gpu.rs:1862/:3759 — so "zero render changes" was false for P3 until this); the retry enum
+  gained its in-flight state; the impossible phase-1/2 split merged. Round 2 confirmed closed:
+  the lifecycle correction, demand-gated admission + fp16 math, the retry concept, the
+  invalid-position fallback, and the native-retention architecture itself.
+- **Round 3: pending** — re-review of rev 3 (which also bakes in the owner's four answers)
+  before implementation starts.
