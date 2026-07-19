@@ -5703,7 +5703,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     fn pat_diag_1px(w: u32, h: u32) -> Vec<[u8; 4]> {
         (0..w * h)
             .map(|i| {
-                let v = if ((i % w) + (i / w)) % 2 == 0 {
+                let v = if ((i % w) + (i / w)).is_multiple_of(2) {
                     235
                 } else {
                     20
