@@ -313,6 +313,59 @@ tests); see [`hud-panels-plan.md`](hud-panels-plan.md).
 
 ---
 
+### ADR-024 — Two viewing modes, one residency invariant: previews are blazing-only; interaction serves from a resident, display-capped Original pyramid
+*Decided 2026-07-18 (owner). Execution: task #110 ([`110-gpu-lanczos-from-original.md`](../plans/110-gpu-lanczos-from-original.md)) and item-6 ([`106.7-item6-retain-remap-SPEC.md`](../plans/106.7-item6-retain-remap-SPEC.md)). Root-caused from the stuck-preview / scale-swap / 1s-re-decode bug class.*
+
+The viewer has **two modes with opposite priorities**, and a whole bug class — a photo stuck on a
+blurry preview, switching scale modes flashing a ~256 px thumbnail, the ~1 s re-decode after a
+fullscreen toggle — all trace to **one root**: a single preview-first pipeline served *both* modes, so
+the speed shortcut (an embedded ~256 px preview) leaked into the tier where quality is the entire point,
+and downstream logic then trusted that thumbnail as the real image. **Decision:** make the mode split
+explicit and give each mode its own residency rule.
+
+- **Blazing** (a nav key is held, `held_nav().is_some()`): decode-to-fit **previews**, throwaway, in the
+  resident ring at the current display size. Speed is the only currency; a preview is *correct* here.
+  The keypress→photon hot path is untouched.
+- **Interacting / parked** (`held_nav().is_none()`): the current image — plus a small neighbour window
+  for instant prev/next — holds a **mipmapped full-res `Original`**, and **every** display (Fit at any
+  window size, Fill, 1:1, zoom) is a **pure GPU derivation from that pyramid**. A preview must **never**
+  appear here. RAM is spent freely, bounded (below).
+
+**Invariant:** *a preview is a blazing-only asset; the interaction display is a pure function of the
+resident Original pyramid.* First enforcement is shipped — the async prefetch requests a preview only
+when decoding a Fit (`allow_preview = decode_fit().is_some()`), so the native tier is never fed a
+thumbnail.
+
+**Residency — bounded, and machine-adaptive by construction.** The key that carries this from a 32 GB
+RTX 5090 down to a 4 GB laptop: **cap the resident pyramid's L0 to ~display resolution (× a small zoom
+headroom), not the image's native size.** A fit-to-screen view never needs more source pixels than the
+screen shows, so a 24 MP and a 100 MP photo cost roughly the same resident footprint for *viewing*
+(display-bound, not image-bound), and the budget self-scales because weak machines have small screens
+(a 1080p pyramid ≈ 21 MB; a 29 MP-display pyramid ≈ 160 MB). Total budget = a fraction of detected
+RAM/VRAM; the neighbour radius (default 1 = current ± prev/next) auto-drops to 0 under tight memory. The
+blazing Fit ring is separate and unaffected.
+
+**Gigapixel is the one deliberate seam.** The capped pyramid serves every fit-to-screen view and true
+1:1 / zoom on any normal photo (≤ ~30–60 MP) instantly. It degrades only for **true 1:1 pixel-peeping of
+an above-cap file** (a 100 MP Hasselblad shows a native crop that needs those pixels). Today that stays
+**clamped** (`clamp_to_max`, current behaviour — no regression); holding it whole is fine on a strong
+machine; and **decode-just-the-visible-region on demand** is a *named, deferred* escalation — built only
+if someone actually pixel-peeps gigapixel neighbours, never speculatively.
+
+**How the roadmap serves this (it validates the plans, it does not replace them).** #110 (GPU-derive an
+exact-size Lanczos Fit from the mipped Original) is the pyramid → any-size-quality **sampler**, the
+linchpin. item-6 (retain the Original across geometry changes + "a Fit display may be satisfied by a
+resident Original") keeps the pyramid resident and authoritative on nav. #110's `full_res_eligible` +
+VRAM-accounting work (Phase 1b) is where the display-capped budget lives.
+
+**Prime-directive safe:** the split rides the pre-existing `held_nav()` seam, so the blazing
+keypress→photon path is untouched (no full-res, no derive on the keypress frame); the interaction tier
+activates only when parked. The gut-check: the moment someone stops to scrutinise a 60 MP macro —
+eyelashes, pore stipple, a capillary in the sclera — they get every pixel immediately, or the app has
+failed at the one thing it exists to do.
+
+---
+
 ## Owner decisions (resolved 2026-06-26)
 
 | Q | Decision | Effect |
