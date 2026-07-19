@@ -926,6 +926,7 @@ impl App {
             left_tab: Default::default(),
             thumbs: Default::default(),
             poster_sel: Default::default(),
+            retry: Default::default(),
             folder_tree_sig: None,
             folder_tree_panel: None,
             folder_tree_counts: None,
@@ -3797,6 +3798,7 @@ impl App {
         self.core.pending_uploads.clear();
         // Poster selections are viewing-derived (task #114) — wiped with the rest.
         self.core.poster_sel.reset(self.core.content_gen);
+        self.core.retry.reset();
         self.core.meta_cache.clear();
         self.core.exif_cache.clear();
         // Recognized text (OCR + QR, task #45) is pixel-derived — drop it with the

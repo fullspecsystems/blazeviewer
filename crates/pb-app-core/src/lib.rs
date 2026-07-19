@@ -79,6 +79,7 @@ pub mod panels;
 pub mod pb_key;
 pub mod poster_select;
 pub mod prompt;
+pub mod retry;
 pub mod save_rotation;
 pub mod scan;
 pub mod secret;

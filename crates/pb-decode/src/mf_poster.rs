@@ -295,7 +295,7 @@ pub fn decode_video_poster_replay(
                         Some(&mut ts_hns),
                         Some(&mut sample),
                     )
-                    .map_err(|e| DecodeError::Corrupt(mf_open_msg(e)))?;
+                    .map_err(map_read_err)?;
                 if flags & (MF_SOURCE_READERF_ENDOFSTREAM.0 as u32) != 0 {
                     break;
                 }
@@ -346,6 +346,27 @@ pub fn decode_video_poster_replay(
         retire_reader(reader);
         result
     }
+}
+
+/// The marker message for `MF_E_INVALID_POSITION` (0xC00D36E5) — MF refusing a
+/// positioned read on a raw stream (`BDMV\STREAM\*.m2ts`). Classified at the
+/// COM layer, where the HRESULT still exists (task #114 phase 4): the deep walk
+/// degrades to its accumulated head best on exactly this code, and NO other
+/// (masking real corruption behind a fallback poster is worse than no poster).
+const INVALID_POSITION_MSG: &str = "positioned reads not permitted (raw stream)";
+
+/// Map an MF read/seek error, preserving the invalid-position class.
+fn map_read_err(e: windows::core::Error) -> DecodeError {
+    if e.code().0 as u32 == 0xC00D_36E5 {
+        DecodeError::Corrupt(INVALID_POSITION_MSG.into())
+    } else {
+        DecodeError::Corrupt(mf_open_msg(e))
+    }
+}
+
+/// Whether a walk error is the typed invalid-position class.
+fn is_invalid_position(e: &DecodeError) -> bool {
+    matches!(e, DecodeError::Corrupt(m) if m == INVALID_POSITION_MSG)
 }
 
 /// Replay watchdog: a healthy replay decodes one GOP (well under a second);
@@ -643,7 +664,7 @@ unsafe fn scan(
                 Some(&mut ts_hns),
                 Some(&mut sample),
             )
-            .map_err(|e| DecodeError::Corrupt(mf_open_msg(e)))?;
+            .map_err(map_read_err)?;
         if flags & (MF_SOURCE_READERF_ENDOFSTREAM.0 as u32) != 0 {
             break;
         }
@@ -702,9 +723,14 @@ unsafe fn deep_scan(
         if Instant::now() >= deadline {
             return Ok(false);
         }
-        // A seek that won't open (a bad offset) just moves to the next one.
-        let Ok((reader, w, h, stride)) = reopen_at_rgb32(input, dims, target, origin_hns) else {
-            continue;
+        // A seek that won't open (a bad offset) moves to the next offset —
+        // EXCEPT the typed invalid-position refusal (a raw BDMV stream, task
+        // #114 phase 4): no deeper offset can ever succeed there, so stop and
+        // let the accumulated head best serve as the poster.
+        let (reader, w, h, stride) = match reopen_at_rgb32(input, dims, target, origin_hns) {
+            Ok(v) => v,
+            Err(e) if is_invalid_position(&e) => return Ok(false),
+            Err(_) => continue,
         };
         let mut deep_origin = Some(origin_hns);
         let r = scan(
@@ -717,8 +743,14 @@ unsafe fn deep_scan(
             deadline,
         );
         retire_reader(reader);
-        if r? {
-            return Ok(true);
+        match r {
+            Ok(true) => return Ok(true),
+            Ok(false) => {}
+            // The post-seek ReadSample refusing positioned reads: same class,
+            // same degrade — the head best survives instead of being discarded
+            // (this `?` used to throw the whole walk's work away).
+            Err(e) if is_invalid_position(&e) => return Ok(false),
+            Err(e) => return Err(e),
         }
     }
     Ok(false)
@@ -744,7 +776,7 @@ unsafe fn reopen_at_rgb32(
     let pos = propvariant_i8(hns.max(0));
     reader
         .SetCurrentPosition(&windows::core::GUID::zeroed(), &pos)
-        .map_err(|e| DecodeError::Corrupt(mf_open_msg(e)))?;
+        .map_err(map_read_err)?;
     Ok((reader, w, h, stride))
 }
 
@@ -1126,6 +1158,18 @@ mod tests {
                 }
             );
         }
+    }
+
+    #[test]
+    fn invalid_position_is_classified_and_nothing_else_is() {
+        let e = windows::core::Error::from_hresult(windows::core::HRESULT(0xC00D_36E5u32 as i32));
+        assert!(is_invalid_position(&map_read_err(e)));
+        let other =
+            windows::core::Error::from_hresult(windows::core::HRESULT(0xC00D_36B4u32 as i32));
+        assert!(!is_invalid_position(&map_read_err(other)));
+        assert!(!is_invalid_position(&DecodeError::Corrupt(
+            "positioned reads refused".into()
+        )));
     }
 
     /// The phase-2 walk-variant A/B (task #114 plan §2, "measure don't guess"):

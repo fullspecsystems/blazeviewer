@@ -694,6 +694,10 @@ pub struct AppCore {
     /// deck, fanned out to every consumer. RAM-only; reset at every content
     /// boundary (never on geometry changes).
     pub poster_sel: crate::poster_select::PosterSelector,
+    /// Bounded session retry for transient decode failures (task #114 phase 4,
+    /// all item kinds): one demand-re-entry second chance per item; corrupt
+    /// files fail twice and stay failed. RAM-only, deck-scoped.
+    pub retry: crate::retry::RetryLedger,
 
     // --- Rendering (NS0 5.4) ---
     /// The HUD text/overlay compositor (`pb-hud`), or `None` if no system font was found.
