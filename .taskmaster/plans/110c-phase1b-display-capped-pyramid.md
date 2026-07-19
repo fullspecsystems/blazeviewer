@@ -1,6 +1,33 @@
-# Phase 1b — the display-capped pyramid budget (ADR-024) — DESIGN DRAFT
+# Phase 1b — the display-capped pyramid budget (ADR-024) — DESIGN DRAFT (Codex-reviewed)
 
-> **STATUS: design draft — 2026-07-19, written for Codex review; NOT implemented.** The rest of
+> **REVIEW OUTCOME (Codex, 2026-07-19): implementable WITH the revisions below — fold these into
+> the design before building. They supersede the corresponding draft sections.**
+> 1. **Identity (Q1):** typed `Representation::Pyramid { l0_cap }`, but mapped to the **same
+>    source-family `RepKind` as `Original`** — compiler policing of 1:1-ineligibility without
+>    allowing duplicate source slots per item. (`slot_for_rep` today can't compare "resident L0
+>    vs required L0"; same-key replacement is blocked — hence:)
+> 2. **Monitor grow (Q4): do NOT defer to the next content change and do NOT build the lazy
+>    staleness scheme in v1.** On cap GROW: drop only insufficient Pyramids from ring identity
+>    (keep natives + already-large-enough Pyramids), keep the presented texture as the held
+>    fallback, re-request current-first. On SHRINK: retain everything. A lazy scheme would also
+>    have to un-definitive every Fit derived from the old small Pyramid — not worth it.
+> 3. **Budget (Q3 + threading):** one **overall GPU residency budget** with (a) a parked-source
+>    quota inside it and (b) **reserved transient headroom that the derive scratch
+>    (`DERIVE_SCRATCH_MAX`) draws from** — not persistent ring bytes; derive refuses → CPU Fit
+>    when headroom is short. Thread a `ResidencyLimits` from the shell AFTER adapter selection
+>    (wgpu's `get_info`/limits do NOT expose VRAM; the DXGI query must match the adapter wgpu
+>    actually picked — the current display helper's adapter-0 enumeration is unsafe on hybrid
+>    GPUs; macOS unified memory needs a system-memory policy). Sites to rewire:
+>    `RING_BUDGET_BYTES`, `ring_capacity`, `prefetch_fulls`, the content rebuild, both shells'
+>    init; add `ResidentRing::set_byte_budget` (or budget-taking `compact_to`). Document that
+>    `reserve_bytes`/`compact_to`'s "one oversized current item is admitted" exception means the
+>    fraction is not a literal hard ceiling.
+> 4. **Headroom (Q2): ship 1.5×** (2× costs ~1.78× more than 1.5×, not 4×; make 2× evidence-driven).
+> 5. **HDR eligibility:** projected bytes need a storage-class hint from the earlier Fit decode,
+>    or conservative 8 B/px until known. **Preserve #110's mode-1 CPU-Fit fallback** — a
+>    source-ICC Pyramid is unmipped and not derive-eligible.
+>
+> **STATUS: design draft — 2026-07-19; NOT implemented.** The rest of
 > #110 (110a/110b/110c harness + data-driven kernel pick) and item-6 (retain/remap + derive-on-nav)
 > shipped on `feat/110-gpu-lanczos-from-original`. This is the remaining ADR-024 residency piece:
 > **cap the resident pyramid's L0 to ~display resolution and budget the parked tier by detected
