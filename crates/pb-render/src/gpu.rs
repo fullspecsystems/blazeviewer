@@ -1419,8 +1419,19 @@ fn clamp_to_max(image: &[u8], w: u32, h: u32, max: u32) -> (Cow<'_, [u8]>, u32, 
     (Cow::Owned(out), tw, th)
 }
 
+/// A freshly created image texture and its scene bind group, returned by [`create_image_texture`].
+/// #110: `texture` is owned so the GPU Lanczos derive can sample the mip chain of the full-res
+/// `Original`; `was_clamped`/`mode` gate whether a slot is a valid derive source (a `clamp_to_max`'d
+/// or source-ICC (mode 1) image is not).
+struct UploadedImage {
+    bind_group: wgpu::BindGroup,
+    texture: wgpu::Texture,
+    was_clamped: bool,
+    mode: f32,
+}
+
 #[allow(clippy::too_many_arguments)]
-fn upload_image(
+fn create_image_texture(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     bgl: &wgpu::BindGroupLayout,
@@ -1437,7 +1448,7 @@ fn upload_image(
     // re-uploaded per frame. Source-ICC (mode 1) images are never mipped (their TRC isn't in the
     // mip shader), so they fall back to single-level even when a policy is passed.
     mip: Option<&MipGen>,
-) -> wgpu::BindGroup {
+) -> UploadedImage {
     // HDR images are scene-linear fp16 (Rgba16Float, mode 2); everything else is
     // sRGB/source-encoded RGBA8 (mode 1 if a profile applies, else 0).
     let (tex_format, mode) = if hdr {
@@ -1451,6 +1462,7 @@ fn upload_image(
     // Downscale anything beyond the GPU's max texture dimension so huge images
     // (e.g. panoramas) upload instead of failing device validation. RGBA8 only —
     // HDR sources are already fit-sized in the decoder.
+    let (orig_w, orig_h) = (img_w, img_h);
     let (image, img_w, img_h) = if hdr {
         (Cow::Borrowed(image), img_w, img_h)
     } else {
@@ -1512,7 +1524,7 @@ fn upload_image(
         contents: bytemuck::bytes_of(&ColorUniform::new(color, mode, scale)),
         usage: wgpu::BufferUsages::UNIFORM,
     });
-    device.create_bind_group(&wgpu::BindGroupDescriptor {
+    let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("img-bg"),
         layout: bgl,
         entries: &[
@@ -1529,7 +1541,37 @@ fn upload_image(
                 resource: color_buf.as_entire_binding(),
             },
         ],
-    })
+    });
+    UploadedImage {
+        bind_group,
+        texture: tex,
+        was_clamped: img_w != orig_w || img_h != orig_h,
+        mode,
+    }
+}
+
+/// Thin wrapper over [`create_image_texture`] keeping only the bind group — for every non-ring
+/// uploader (toast/pie/overlay/tree/subtitle/egui/single-image) that never samples the texture again
+/// (the bind group's view keeps it alive). Ring slots use `create_image_texture` directly so the
+/// #110 derive can reach the `Original` texture.
+#[allow(clippy::too_many_arguments)]
+fn upload_image(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    bgl: &wgpu::BindGroupLayout,
+    uploader: &mut dyn UploadStrategy,
+    image: &[u8],
+    img_w: u32,
+    img_h: u32,
+    color: &ColorTransform,
+    hdr: bool,
+    scale: f32,
+    mip: Option<&MipGen>,
+) -> wgpu::BindGroup {
+    create_image_texture(
+        device, queue, bgl, uploader, image, img_w, img_h, color, hdr, scale, mip,
+    )
+    .bind_group
 }
 
 /// [`upload_image`] through a reusable slot (task #79 phase 3 — the `set_image`
@@ -1971,6 +2013,15 @@ struct RingSlot {
     h: u32,
     /// Scene-linear peak (SDR tone-map white point on an SDR display); 1.0 for SDR.
     peak: f32,
+    /// #110: the owned image texture (mip chain included for the `Original` rep), so the GPU Lanczos
+    /// derive can sample it. `was_clamped`/`mode` gate derive eligibility (Original rep, mipped,
+    /// `mode != 1`, not `clamp_to_max`'d). Written now (Phase 110a); read by the derive (Phase 110b).
+    #[allow(dead_code)]
+    texture: wgpu::Texture,
+    #[allow(dead_code)]
+    was_clamped: bool,
+    #[allow(dead_code)]
+    mode: f32,
 }
 
 /// What `render` draws this frame. Pure decision so the priority is unit-testable
@@ -3163,7 +3214,7 @@ impl Renderer for WgpuRenderer {
         // fit-downscaling is near-Lanczos. Disjoint field borrows: `self.upload` (mut) vs
         // `self.mipgen` (shared).
         let mipgen = mip.then_some(&self.mipgen);
-        let bind_group = upload_image(
+        let uploaded = create_image_texture(
             &self.device,
             &self.queue,
             &self.bgl,
@@ -3177,10 +3228,13 @@ impl Renderer for WgpuRenderer {
             mipgen,
         );
         self.ring[slot] = Some(RingSlot {
-            bind_group,
+            bind_group: uploaded.bind_group,
             w,
             h,
             peak,
+            texture: uploaded.texture,
+            was_clamped: uploaded.was_clamped,
+            mode: uploaded.mode,
         });
     }
 
