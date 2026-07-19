@@ -5876,9 +5876,15 @@ impl AppCore {
         let mut sel_pushed: HashSet<usize> = HashSet::new();
         self.poster_sel.begin_pass();
         for &t in &self.targets {
-            if self.failed.contains(&t) || pending_reps.contains(&(t, dk)) {
+            if self.failed.contains(&t) {
                 continue;
             }
+            // Pending display artifacts suppress duplicate REQUESTS below, but
+            // must NOT starve a video's level-triggered selection re-emission
+            // (owner smoke report: the staged placeholder made a pass skip the
+            // selection want, which CANCELLED the in-flight walk/replay — then
+            // the next pass restarted it from scratch, seconds of churn).
+            let pending_display = pending_reps.contains(&(t, dk));
             let resident = self.ring.slot_for_rep(t, dk).is_some();
             let is_prev = resident && self.preview_resident.contains(&t);
             if resident && !is_prev {
@@ -5889,8 +5895,7 @@ impl AppCore {
                 // platforms that becomes the ONE walk (task #114): purpose-neutral,
                 // level-triggered (re-emitted every pass while selecting), shared
                 // with the thumb tier below. `Chosen` with no resident pixels means
-                // the artifact was evicted — phase 1 reopens for one fresh walk
-                // (phases 2–3 replace this with replay / GPU derive).
+                // the artifact was evicted — the hint makes the recut a replay.
                 if crate::engine::poster_select_supported()
                     && matches!(
                         crate::video::item_kind(self.source.as_ref(), t),
@@ -5914,12 +5919,44 @@ impl AppCore {
                             .want(t, crate::poster_select::Demand::Display);
                     }
                     sel_pushed.insert(t);
-                    // Phase 1e (owner feedback): the INSTANT tier first — a
-                    // synthesized placeholder (zero I/O) so landing on a film
-                    // never blocks navigation on the walk. Fit-scale only, like
-                    // every preview. The selection rides right behind it.
-                    if fit.is_some() {
-                        previews.push(Job::display(t, fit, true));
+                    if !pending_display {
+                        // The INSTANT tier (phase 1e + owner's cache insight):
+                        // a cached thumb TILE is a far better stand-in than the
+                        // dark placeholder — recognizable at once, upgraded in
+                        // place by the selection. RAM-only reuse; zero decode,
+                        // zero I/O — it goes straight into the upload queue.
+                        let tile = self.thumbs.cache.get(t).map(|e| {
+                            let p = &e.payload;
+                            pb_decode::DecodedImage {
+                                width: e.w,
+                                height: e.h,
+                                orig_width: p.orig_w,
+                                orig_height: p.orig_h,
+                                codec: p.codec,
+                                format: pb_decode::PixelFormat::Rgba8,
+                                pixels: p.rgba.clone(),
+                                is_preview: true,
+                                color: pb_decode::ColorTransform::srgb(),
+                                peak: 1.0,
+                                animated: None,
+                            }
+                        });
+                        match tile {
+                            Some(img) if fit.is_some() => self.pending_uploads.push(
+                                crate::decode_pool::Outcome::synthetic(
+                                    t,
+                                    self.epoch,
+                                    pb_core::RepKind::Fit,
+                                    Ok(img),
+                                )
+                                .from_preview_request(),
+                            ),
+                            _ if fit.is_some() => {
+                                // No tile yet: the synthesized flat placeholder.
+                                previews.push(Job::display(t, fit, true));
+                            }
+                            _ => {}
+                        }
                     }
                     previews.push(
                         Job::poster_select(t, fit, self.content_gen, true)
@@ -5928,6 +5965,9 @@ impl AppCore {
                                 crate::engine::poster_walk_native() || fit.is_none(),
                             ),
                     );
+                    continue;
+                }
+                if pending_display {
                     continue;
                 }
                 // Preview-first (`allow_preview`) is a FIT-scale concept: an embedded ~256px
@@ -5971,7 +6011,7 @@ impl AppCore {
                                 ),
                         );
                     }
-                } else {
+                } else if !pending_display {
                     head.push(Job::display(t, fit, false));
                 }
             }
@@ -5982,9 +6022,10 @@ impl AppCore {
         // while blazing / in Random mode). `ring_order` is already filtered to resident
         // previews minus the sharpen; only the per-tick job guards repeat here.
         for &t in &ring_order {
-            if self.failed.contains(&t) || pending_reps.contains(&(t, dk)) {
+            if self.failed.contains(&t) {
                 continue;
             }
+            let pending_display = pending_reps.contains(&(t, dk));
             // Resident-placeholder videos upgrade via their selection here too.
             if crate::engine::poster_select_supported()
                 && matches!(
@@ -6016,7 +6057,9 @@ impl AppCore {
                 }
                 continue;
             }
-            fulls.push(Job::display(t, fit, false));
+            if !pending_display {
+                fulls.push(Job::display(t, fit, false));
+            }
         }
         let mut jobs = head;
         jobs.append(&mut previews);
@@ -16010,6 +16053,51 @@ mod tests {
             "the fitted poster is the definitive full - placeholder retired"
         );
         assert!(core.poster_sel.choice(0).is_some());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_cached_tile_serves_as_the_instant_video_preview() {
+        // Owner insight (phase-4 smoke): when the strip already has a tile, the
+        // instant stand-in should be THAT (recognizable), not the dark
+        // placeholder — RAM-only reuse, straight into the upload queue with no
+        // decode round-trip.
+        let mut core = test_core();
+        core.source = photos_named(&["clip.mkv"]);
+        core.playlist = Playlist::new(1, 0);
+        core.fit = Some(FitBox {
+            max_width: 800,
+            max_height: 600,
+        });
+        let demand = pb_core::ThumbDemand::centered(0, 4);
+        core.thumbs.cache.insert(
+            0,
+            pb_core::ThumbTier::Full,
+            64,
+            36,
+            64 * 36 * 4,
+            crate::thumbs::ThumbPixels {
+                rgba: vec![200; 64 * 36 * 4],
+                orig_w: 3840,
+                orig_h: 2160,
+                codec: "HEVC",
+            },
+            &demand,
+        );
+        core.request_prefetch();
+        let staged: Vec<_> = core
+            .pending_uploads
+            .iter()
+            .filter(|o| {
+                o.key.item == 0
+                    && o.key.purpose == crate::decode_pool::Purpose::Display
+                    && o.key.rep_kind == pb_core::RepKind::Fit
+            })
+            .collect();
+        assert_eq!(staged.len(), 1, "the tile staged as the instant preview");
+        let img = staged[0].result.as_ref().expect("tile pixels");
+        assert!(img.is_preview, "upgradeable, never definitive");
+        assert_eq!((img.width, img.height), (64, 36));
     }
 
     #[test]

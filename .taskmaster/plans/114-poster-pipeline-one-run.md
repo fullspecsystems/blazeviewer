@@ -450,9 +450,26 @@ All phases merge as one arc with one owner-testing round at the end.
   accounting balance, `synthetic_carved` arithmetic (zero-byte cases included), replay
   cancellation, reader retirement, `content_hdr=false` on MF, synthetic Originals DO get mips
   via the `rk == Original` upload flag, non-video routing untouched, privacy unchanged.
-- **Remaining**: phase 4 (retry state machine + typed invalid-position head-best fallback) and
-  optional phase 5 (`DecodeError::Cancelled`, macOS parity with #92.2); the P2-10 corpus
-  threshold re-validation rides the measure step.
+- **Phase 4 DONE (2026-07-19, `1aeebd5c`)**: the bounded retry (all item kinds; demand-re-entry
+  edges per domain, one budget, failure-primed presence so it can never tight-loop; wired at
+  every failure/success site; display recovery clears `presented_epoch`) + the typed
+  `MF_E_INVALID_POSITION` head-best fallback for raw BDMV streams (classified at the COM layer;
+  degrades from BOTH deep failure sites; any other error still fails the walk honestly).
+- **Owner smoke findings (2026-07-19, probed on The Holdovers 2160p DoVi)**: the judge is NOT
+  perfectly resolution-independent on real MF-scaled pixels — a thumb-fit walk picked
+  ts=39.29 s while a display-fit walk picked ts=81.0 s (borderline frames flip when MF's own
+  scaler feeds the 256 px reducer different pixels). **The architecture, not the judge, is the
+  consistency guarantee**: one walk per movie + the choice surviving artifact staleness + the
+  replay (which reproduced ts=39.29 at display fit in **273 ms** with the native artifact).
+  The synthetic judge test stands for the grain/vignette class; perfect cross-fit pick equality
+  is downgraded from claim to goal. Two fixes from the same smoke: staged display artifacts no
+  longer starve the level-triggered selection re-emission (the pending guard was CANCELLING the
+  in-flight walk/replay for a pass, then restarting it — seconds of churn that presented as a
+  3–4 s "stuck" pie), and a cached thumb TILE now serves as a video's instant preview (the
+  owner's cache insight: recognizable at once, RAM-only, zero decode — the dark placeholder is
+  only the no-tile fallback).
+- **Remaining**: optional phase 5 (`DecodeError::Cancelled`, macOS parity with #92.2); the
+  P2-10 corpus threshold re-validation rides the measure step.
 - **Phase-1 implementation review (2026-07-19, commits 2ab7d274..a3630382): no P0s, 7×P1 +
   3×P2 — all but one folded** in the follow-up commit: the artifact tag gained its `FitBox`
   half (a promoted thumb-only walk's ~thumb output could pass the epoch check into the display

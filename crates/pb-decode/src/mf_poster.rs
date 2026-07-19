@@ -1172,6 +1172,69 @@ mod tests {
         )));
     }
 
+    /// Focused one-file probe (owner bug reports): walk at the thumb fit vs the
+    /// display fit (do the picks agree?), then replay the thumb walk's choice
+    /// at display fit (identity + cost — the re-visit path).
+    ///   PB_PROBE_FILE='\\beenas\media\Movies\<file>.mkv' cargo test -p \
+    ///     pb-decode --release -- --ignored probe_one_file --nocapture
+    #[test]
+    #[ignore]
+    fn probe_one_file() {
+        let Some(f) = std::env::var_os("PB_PROBE_FILE") else {
+            eprintln!("set PB_PROBE_FILE");
+            return;
+        };
+        let input = crate::VideoInput::Path(f.into());
+        let cancel = AtomicBool::new(false);
+        let thumb = FitBox {
+            max_width: 512,
+            max_height: 512,
+        };
+        let disp = Some(FitBox {
+            max_width: 2560,
+            max_height: 1440,
+        });
+        let t0 = Instant::now();
+        let a = decode_video_poster_select(&input, Some(thumb), thumb, false, false, &cancel)
+            .expect("thumb-fit walk");
+        eprintln!(
+            "thumb-fit walk:   ts={:.2}s  ({} ms)",
+            a.choice.relative_hns as f64 / 1e7,
+            t0.elapsed().as_millis()
+        );
+        let t0 = Instant::now();
+        let b = decode_video_poster_select(&input, disp, thumb, false, false, &cancel)
+            .expect("display-fit walk");
+        eprintln!(
+            "display-fit walk: ts={:.2}s  ({} ms){}",
+            b.choice.relative_hns as f64 / 1e7,
+            t0.elapsed().as_millis(),
+            if a.choice.relative_hns != b.choice.relative_hns {
+                "  << PICK DIVERGES"
+            } else {
+                ""
+            }
+        );
+        let t0 = Instant::now();
+        match decode_video_poster_replay(
+            &input,
+            a.choice.origin_hns,
+            a.choice.relative_hns,
+            disp,
+            thumb,
+            true,
+            &cancel,
+        ) {
+            Ok(r) => eprintln!(
+                "replay:           ts={:.2}s  ({} ms) native={}",
+                r.choice.relative_hns as f64 / 1e7,
+                t0.elapsed().as_millis(),
+                r.native.is_some()
+            ),
+            Err(e) => eprintln!("replay ERR: {e}  ({} ms)", t0.elapsed().as_millis()),
+        }
+    }
+
     /// The phase-2 walk-variant A/B (task #114 plan §2, "measure don't guess"):
     /// run BOTH variants over real clips, print per-file walk latency + the
     /// chosen timestamp (the shared judge should make the pick identical).
