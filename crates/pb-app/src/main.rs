@@ -832,6 +832,7 @@ impl App {
             upgrade_done: HashSet::new(),
             last_upgrade_set: Vec::new(),
             full_requested_at: HashMap::new(),
+            preview_watchdog: None,
             live_motion_cache: HashMap::new(),
             metrics,
             // Latency timers for "feeling fast" (open→first, open→cached, resize); gated by
@@ -3803,6 +3804,7 @@ impl App {
         self.core.clear_archive_passwords();
         self.core.failed.clear();
         self.core.preview_resident.clear();
+        self.core.preview_watchdog = None;
         self.core.upgrade_done.clear();
         self.core.last_upgrade_set.clear();
         self.core.undo_stack.clear();

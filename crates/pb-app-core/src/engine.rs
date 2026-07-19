@@ -62,6 +62,20 @@ pub const MAX_FULL_RING: usize = 24;
 /// transient decode buffer.
 pub const FULL_RES_MAX_PIXELS: u64 = 200_000_000;
 
+/// ADR-024 watchdog: how long the displayed photo may linger as a **resident preview** before
+/// its full is force-requested regardless of `held_nav` (the level-triggered safety net). A lost
+/// key-up can leave the held-key map stuck `Some`, which suppresses the sharpen (both the tick's
+/// re-issue and `sharpen_now` gate on `held_nav().is_none()`) until a focus change fires the
+/// release net — the unreproducible stuck-preview race.
+///
+/// The deadline must comfortably exceed the **slowest legitimate single-photo dwell while a nav
+/// key is genuinely held**, or a real (slow) blaze would trip it and put a forced full decode
+/// ahead of the previews the blaze needs. Settings allow a 1 s hold delay (`hold_delay_ms` cap)
+/// and a 1 photo/s advance-rate floor (`max_advance_rate` min), so the legit ceiling is ~1 s;
+/// 2 s gives 2× margin. A stuck preview self-heals in 2 s where before it lingered until a
+/// focus change — still well inside "the app fixed itself before I reached for the mouse".
+pub const PREVIEW_WATCHDOG_AFTER: Duration = Duration::from_millis(2000);
+
 /// How many bytes the preview-first path (#106.5) reads from the front of a JPEG to find
 /// its embedded EXIF thumbnail + SOF header. The IFD1 thumbnail is ~22 KB near the file
 /// start; 256 KB comfortably covers it (and the SOF) while staying a small fraction of a

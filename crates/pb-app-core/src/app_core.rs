@@ -190,6 +190,19 @@ impl ItemDetails {
     }
 }
 
+/// The lingering-preview watchdog's arming state (see [`AppCore::preview_watchdog`]).
+#[derive(Clone, Copy, Debug)]
+pub struct PreviewWatchdog {
+    /// The displayed item being tracked.
+    pub item: usize,
+    /// When it was first seen displayed as a resident preview.
+    pub since: Instant,
+    /// Whether the deadline has passed (the `sharpen_now` held-nav override is active).
+    /// Recorded as state so the fire is also a one-shot edge the tick can use to force a
+    /// prefetch re-issue.
+    pub fired: bool,
+}
+
 pub struct AppCore {
     /// The injected wall-clock "now" for this event/tick — **the core never calls
     /// `Instant::now()`** (NS0 5.5 / Phase 0.3). The shell stamps it at each event-loop entry
@@ -376,6 +389,15 @@ pub struct AppCore {
     pub last_upgrade_set: Vec<usize>,
     /// When a full-res upgrade was requested per item, to rate-limit re-requests.
     pub full_requested_at: HashMap<usize, Instant>,
+    /// ADR-024's level-triggered safety net: how long the **displayed** photo has been sitting
+    /// as a resident preview. Once that exceeds
+    /// [`PREVIEW_WATCHDOG_AFTER`](crate::engine::PREVIEW_WATCHDOG_AFTER), the sharpen is forced
+    /// even while `held_nav()` claims blazing — a lost key-up can leave `held` stuck `Some`,
+    /// which would otherwise suppress the sharpen until a focus change fires the release net.
+    /// Re-armed on every new displayed item (a real blaze advances long before the deadline, so
+    /// the hot path never sees it fire); cleared the moment the display isn't a resident
+    /// preview. Driven by the tick (`update_preview_watchdog`).
+    pub preview_watchdog: Option<PreviewWatchdog>,
     /// Live Photo pairing, memoized per item: `Some(path)` = companion motion `.mov`, `None`
     /// = not a Live Photo. Filled lazily only when settled on a photo; RAM-only (privacy #2).
     pub live_motion_cache: HashMap<usize, Option<PathBuf>>,

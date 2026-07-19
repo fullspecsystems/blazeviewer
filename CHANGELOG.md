@@ -7,6 +7,13 @@ with any pre-release suffix carried only by the tag.
 
 ## [Unreleased]
 
+### Fixed
+- **A photo can no longer get stuck blurry.** In rare cases (a key-release the app never
+  received, e.g. around a fullscreen flip while paging fast) a photo could stay on its
+  low-res preview until you resized or refocused the window. The app now notices a photo
+  that has lingered blurry and fetches its sharp version on its own within a couple of
+  seconds, no matter what state the keyboard tracking is in.
+
 ### Added
 - **Switching between fit-to-screen and 1:1 is instant now.** When you stop on a photo, the
   app keeps its full resolution ready in the background, so toggling to actual pixels (and

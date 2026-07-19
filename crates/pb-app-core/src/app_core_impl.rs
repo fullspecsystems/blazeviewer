@@ -169,6 +169,7 @@ impl AppCore {
             upgrade_done: HashSet::new(),
             last_upgrade_set: Vec::new(),
             full_requested_at: std::collections::HashMap::new(),
+            preview_watchdog: None,
             live_motion_cache: std::collections::HashMap::new(),
             metrics: crate::metrics::StageTimes::default(),
             perf: crate::perf::Perf::new(perf_on()),
@@ -1603,11 +1604,15 @@ impl AppCore {
 
         // 3b. Sharpen / prefetch-ahead. When parked, re-issue the prefetch whenever the
         // wanted-fulls set changes (not every tick → no per-frame churn); keep ticking while any
-        // sharpen is outstanding so `drain_results` catches it.
+        // sharpen is outstanding so `drain_results` catches it. The ADR-024 watchdog also opens
+        // this gate when a displayed preview has lingered past the deadline with `held_nav`
+        // stuck `Some` (the lost-key-up race) — its firing edge forces one re-issue because the
+        // change-detection can't see an eligibility change that leaves the wanted-set equal.
+        let watchdog_fired_now = self.update_preview_watchdog();
         let mut sharpen_pending = false;
-        if self.held_nav().is_none() {
+        if self.held_nav().is_none() || self.preview_watchdog_fired() {
             let upgrade = self.fulls_wanted();
-            if upgrade != self.last_upgrade_set {
+            if upgrade != self.last_upgrade_set || watchdog_fired_now {
                 self.last_upgrade_set = upgrade.clone();
                 self.request_prefetch();
             }
@@ -3201,9 +3206,12 @@ impl AppCore {
         self.thumbs.clear_deck();
         self.emit_panels_changed();
         self.preview_resident.clear();
+        // Indices are deck-relative: a fired watchdog for old-item-N must not carry into a new
+        // deck where N names a different photo (it would sharpen instantly instead of re-arming).
+        self.preview_watchdog = None;
         self.resize_hold = None; // indices reassigned — any resize hold is meaningless now
-        // Drop any in-flight archive-video poster requests: item indices are deck-relative,
-        // so a straggler callback must not upgrade a same-index item in the new deck.
+                                 // Drop any in-flight archive-video poster requests: item indices are deck-relative,
+                                 // so a straggler callback must not upgrade a same-index item in the new deck.
         self.poster_inflight.clear();
         self.pending_poster_bytes.clear();
         self.upgrade_done.clear();
@@ -3317,9 +3325,12 @@ impl AppCore {
         self.thumbs.clear_deck();
         self.emit_panels_changed();
         self.preview_resident.clear();
+        // Indices are deck-relative: a fired watchdog for old-item-N must not carry into a new
+        // deck where N names a different photo (it would sharpen instantly instead of re-arming).
+        self.preview_watchdog = None;
         self.resize_hold = None; // indices reassigned — any resize hold is meaningless now
-        // Drop any in-flight archive-video poster requests: item indices are deck-relative,
-        // so a straggler callback must not upgrade a same-index item in the new deck.
+                                 // Drop any in-flight archive-video poster requests: item indices are deck-relative,
+                                 // so a straggler callback must not upgrade a same-index item in the new deck.
         self.poster_inflight.clear();
         self.pending_poster_bytes.clear();
         self.upgrade_done.clear();
@@ -5647,8 +5658,7 @@ impl AppCore {
         // the constraining edge, which normally lands exactly on the fit) while the source has more
         // pixels than we kept ⇒ this was decoded at a stale/smaller fit, not the current one.
         const SLACK: u32 = 4;
-        let undersized =
-            img.width + SLACK < fit.max_width && img.height + SLACK < fit.max_height;
+        let undersized = img.width + SLACK < fit.max_width && img.height + SLACK < fit.max_height;
         let has_more = img.width < img.orig_width || img.height < img.orig_height;
         !(undersized && has_more)
     }
@@ -5723,7 +5733,10 @@ impl AppCore {
     /// better decode to pull. `None` while blazing (sharpening a frame that's about to
     /// change is pointless) and `None` once it's already full.
     pub fn sharpen_now(&self) -> Option<usize> {
-        if self.held_nav().is_some() {
+        // A fired watchdog overrides the blazing gate (ADR-024, level-triggered): a photo that
+        // has lingered as a resident preview past the deadline means the "held" key is a lie
+        // (the lost-key-up race) — a real blaze advances long before the watchdog fires.
+        if self.held_nav().is_some() && !self.preview_watchdog_fired() {
             return None;
         }
         let d = self.displayed_item?;
@@ -5731,6 +5744,73 @@ impl AppCore {
             && self.preview_resident.contains(&d)
             && !self.upgrade_done.contains(&d))
         .then_some(d)
+    }
+
+    /// Drive the ADR-024 lingering-preview watchdog (level-triggered, from the tick): stamp when
+    /// the displayed photo first shows as a resident preview, re-arm on a new displayed item,
+    /// clear the moment the display isn't a resident preview (upgraded, navigated away, evicted),
+    /// and mark it fired once it has lingered past [`PREVIEW_WATCHDOG_AFTER`]. Returns `true` on
+    /// the firing edge only — the caller forces one prefetch re-issue then, because the tick's
+    /// `last_upgrade_set` change-detection can't see an eligibility change that doesn't change
+    /// the wanted-set. Two set lookups per tick, so blazing never notices it.
+    fn update_preview_watchdog(&mut self) -> bool {
+        // Arming requires more than "a resident preview is displayed":
+        //  - `target_caught_up`: mid-blaze with the ring outrun, the *old* photo legitimately
+        //    lingers while the next target decodes — forcing its full then would put a decode
+        //    ahead of the previews the blaze is waiting on. The stuck race always ends caught-up
+        //    (the stuck "hold" auto-advances until it parks on a presented preview).
+        //  - still images only, never RAW: a video/door placeholder has no sharper full to force
+        //    (its upgrade path is the poster pipeline), and a RAW's forced "full" is a
+        //    seconds-long uncancellable demosaic — its embedded preview is near-full-res anyway.
+        //    Cheap-first: the kind/extension checks only run while a preview is displayed.
+        let lingering = self.displayed_item.filter(|d| {
+            self.display_slot(*d).is_some()
+                && self.preview_resident.contains(d)
+                && !self.upgrade_done.contains(d)
+                && self.target_caught_up()
+                && matches!(
+                    crate::video::item_kind(self.source.as_ref(), *d),
+                    crate::video::LibraryItemKind::Image
+                )
+                && !self.is_raw_item(*d)
+        });
+        let Some(d) = lingering else {
+            self.preview_watchdog = None;
+            return false;
+        };
+        match &mut self.preview_watchdog {
+            Some(w) if w.item == d => {
+                if !w.fired && self.now.saturating_duration_since(w.since) >= PREVIEW_WATCHDOG_AFTER
+                {
+                    w.fired = true;
+                    if sharp_diag() {
+                        eprintln!(
+                            "[sharp-diag] preview watchdog FIRED item={d} (lingered {:?}, held_nav={}) — forcing sharpen",
+                            self.now.saturating_duration_since(w.since),
+                            self.held_nav().is_some(),
+                        );
+                    }
+                    return true;
+                }
+                false
+            }
+            _ => {
+                self.preview_watchdog = Some(crate::PreviewWatchdog {
+                    item: d,
+                    since: self.now,
+                    fired: false,
+                });
+                false
+            }
+        }
+    }
+
+    /// Whether the watchdog is currently fired: the displayed photo has been a resident preview
+    /// for over [`PREVIEW_WATCHDOG_AFTER`]. While `true`, [`sharpen_now`](Self::sharpen_now)
+    /// ignores the `held_nav` blazing gate so the display converges to its full (ADR-024's
+    /// invariant enforced regardless of what stuck `held_nav`).
+    fn preview_watchdog_fired(&self) -> bool {
+        self.preview_watchdog.is_some_and(|w| w.fired)
     }
 
     /// The full-res "sharp ring" to prefetch around the cursor at LOW priority (below
@@ -6797,10 +6877,10 @@ impl AppCore {
                         img.width, img.height
                     );
                 }
-                                           // Real end-to-end sharpen latency for the ON-SCREEN photo (what the
-                                           // user actually waits on): full requested → full on screen. Ahead-ring
-                                           // fulls land late by design (low priority), so they'd skew this — only
-                                           // record the displayed one.
+                // Real end-to-end sharpen latency for the ON-SCREEN photo (what the
+                // user actually waits on): full requested → full on screen. Ahead-ring
+                // fulls land late by design (low priority), so they'd skew this — only
+                // record the displayed one.
                 let t0 = self.full_requested_at.remove(&item);
                 if self.displayed_item == Some(item) {
                     if let Some(t0) = t0 {
@@ -11911,7 +11991,9 @@ mod tests {
         let mut core = test_core();
         let folder = PathBuf::from("/some/folder");
         let folder_src = |names: &[&str]| -> Arc<dyn ItemSource> {
-            Arc::new(FsSource::new(names.iter().map(|n| folder.join(n)).collect()))
+            Arc::new(FsSource::new(
+                names.iter().map(|n| folder.join(n)).collect(),
+            ))
         };
 
         // 1. A folder scan bootstraps its deck.
@@ -11938,7 +12020,10 @@ mod tests {
             recursive: false,
             start: 0,
         });
-        assert!(core.archive_scope.is_some(), "we're on the archive deck now");
+        assert!(
+            core.archive_scope.is_some(),
+            "we're on the archive deck now"
+        );
         assert_eq!(core.source.len(), 3);
 
         // 3. The still-alive folder scan delivers a LARGER cumulative batch. It must be rejected —
@@ -11970,7 +12055,9 @@ mod tests {
         let mut core = test_core();
         let folder = PathBuf::from("/some/folder");
         let folder_src = |names: &[&str]| -> Arc<dyn ItemSource> {
-            Arc::new(FsSource::new(names.iter().map(|n| folder.join(n)).collect()))
+            Arc::new(FsSource::new(
+                names.iter().map(|n| folder.join(n)).collect(),
+            ))
         };
         core.apply_scan_batch(crate::scan::Resolved {
             source: folder_src(&["a.jpg", "b.jpg"]),
@@ -15085,7 +15172,10 @@ mod tests {
 
         // Navigating to a different photo ends the hold (its preview guard no longer applies).
         core.present_item(1, 0);
-        assert_eq!(core.resize_hold, None, "nav to another photo clears the hold");
+        assert_eq!(
+            core.resize_hold, None,
+            "nav to another photo clears the hold"
+        );
     }
 
     #[test]
@@ -15185,6 +15275,245 @@ mod tests {
         core.preview_resident.remove(&0);
         core.upgrade_done.insert(0);
         assert_eq!(core.sharpen_now(), None, "sharp now — the pie stops");
+    }
+
+    /// Sets up a core parked on item 0 displayed as a resident PREVIEW, with a nav key stuck
+    /// held (the lost-key-up race): `held` claims Space is down, but no release will ever come.
+    /// `hold_start`/`initial_delay` are pinned so the tick's step-3 advance machinery stays out
+    /// of the way — the subject under test is the 3b sharpen gate, not hold-to-blaze.
+    fn stuck_preview_core() -> AppCore {
+        let mut core = test_core();
+        core.source = photos_named(&["a.jpg"]);
+        core.playlist = Playlist::new(1, 0).with_cursor(0);
+        core.ring = ResidentRing::new(4);
+        core.fit = Some(FitBox {
+            max_width: 100,
+            max_height: 100,
+        });
+        core.view.mode = ScaleMode::Fit;
+        let fit_rep = core.rep_of(pb_core::RepKind::Fit);
+        make_resident(&mut core, 0, fit_rep, &[0]);
+        core.preview_resident.insert(0);
+        core.targets = vec![0];
+        core.displayed_item = Some(0);
+        core.target_item = Some(0);
+        core.mark_resolved(0);
+        core.held.insert(PbKey::Space, Action::Next);
+        core.hold_start = Some(core.now);
+        core.initial_delay = Duration::from_secs(3600);
+        core
+    }
+
+    /// The ADR-024 watchdog (level-triggered safety net): a lost key-up leaves `held_nav` stuck
+    /// `Some`, which suppresses the sharpen — the stuck-preview race. Once the displayed preview
+    /// has lingered past `PREVIEW_WATCHDOG_AFTER`, the sharpen is forced regardless of
+    /// `held_nav`, so the display converges to its full without waiting for a focus change.
+    #[test]
+    fn a_lingering_preview_sharpens_despite_a_stuck_held_nav() {
+        let mut core = stuck_preview_core();
+        assert!(core.held_nav().is_some(), "the stuck key reads as blazing");
+        assert_eq!(
+            core.sharpen_now(),
+            None,
+            "blazing suppresses the sharpen (the normal gate)"
+        );
+
+        let t0 = core.now;
+        core.tick(); // arms the watchdog (stamps the lingering preview)
+        assert_eq!(core.sharpen_now(), None, "not yet past the deadline");
+
+        core.now = t0 + PREVIEW_WATCHDOG_AFTER + Duration::from_millis(100);
+        core.tick(); // fires the watchdog
+        assert_eq!(
+            core.sharpen_now(),
+            Some(0),
+            "the lingering preview sharpens even though held_nav is stuck Some"
+        );
+        // The firing edge must also force the prefetch re-issue (the request path stamps
+        // `full_requested_at`), because 3b's change-detection alone can't reopen the gate.
+        assert!(
+            core.full_requested_at.contains_key(&0),
+            "the full was actually requested, not merely flagged wanted"
+        );
+    }
+
+    /// A real blaze must never trip the watchdog: every advance re-arms the stamp for the new
+    /// displayed item, so cumulative hold time is irrelevant — only *lingering on one photo*
+    /// counts. The hot path stays preview-only.
+    #[test]
+    fn a_real_blaze_resets_the_watchdog_every_advance() {
+        let mut core = stuck_preview_core();
+        core.source = photos_named(&["a.jpg", "b.jpg"]);
+        core.playlist = Playlist::new(2, 0).with_cursor(0);
+        let fit_rep = core.rep_of(pb_core::RepKind::Fit);
+        make_resident(&mut core, 1, fit_rep, &[0, 1]);
+        core.preview_resident.insert(1);
+        core.targets = vec![0, 1];
+
+        let t0 = core.now;
+        core.tick(); // arms for item 0
+
+        // Most of a deadline later the blaze advances: a new photo is displayed (still a preview).
+        core.now = t0 + PREVIEW_WATCHDOG_AFTER * 3 / 4;
+        core.displayed_item = Some(1);
+        core.target_item = Some(1);
+        core.mark_resolved(1);
+        core.tick(); // re-arms for item 1 — the clock restarts
+
+        // Same again: total hold = 1.5× the deadline, but no single photo reached it.
+        core.now = t0 + PREVIEW_WATCHDOG_AFTER * 3 / 2;
+        core.tick();
+        assert_eq!(
+            core.sharpen_now(),
+            None,
+            "no single photo lingered past the deadline — a real blaze never trips the watchdog"
+        );
+    }
+
+    /// Once the full lands (the preview upgrades), the watchdog disarms and the sharpen
+    /// override ends — the level-trigger tracks the *current* display state, not history.
+    #[test]
+    fn the_watchdog_disarms_once_the_full_lands() {
+        let mut core = stuck_preview_core();
+        let t0 = core.now;
+        core.tick();
+        core.now = t0 + PREVIEW_WATCHDOG_AFTER + Duration::from_millis(100);
+        core.tick();
+        assert_eq!(core.sharpen_now(), Some(0), "fired");
+
+        // The full lands: no longer a resident preview.
+        core.preview_resident.remove(&0);
+        core.tick();
+        assert!(
+            core.preview_watchdog.is_none(),
+            "the watchdog clears the moment the display is no longer a resident preview"
+        );
+        assert_eq!(core.sharpen_now(), None, "nothing left to force");
+    }
+
+    /// The firing edge must force a prefetch re-issue even when the wanted-fulls set is
+    /// byte-identical to `last_upgrade_set` — the change-detection can't see an *eligibility*
+    /// change (blazing-suppressed → forced) that leaves the set equal. Without the
+    /// `watchdog_fired_now` escape this scenario would flag the sharpen wanted but never
+    /// actually request it.
+    #[test]
+    fn the_firing_edge_forces_a_reissue_even_with_an_unchanged_wanted_set() {
+        let mut core = stuck_preview_core();
+        // As if this exact set had already been issued before the key got stuck.
+        core.last_upgrade_set = vec![0];
+
+        let t0 = core.now;
+        core.tick(); // arm
+        assert!(
+            !core.full_requested_at.contains_key(&0),
+            "nothing requested while the gate is closed"
+        );
+        core.now = t0 + PREVIEW_WATCHDOG_AFTER;
+        core.tick(); // fire — the set is unchanged, so only the firing edge can re-issue
+        assert!(
+            core.full_requested_at.contains_key(&0),
+            "the firing edge forced request_prefetch despite an unchanged wanted-set"
+        );
+    }
+
+    /// The override is a LEVEL, not a pulse: while the preview keeps lingering, later ticks
+    /// keep `sharpen_now` forced (but the firing edge — the forced re-issue — is one-shot).
+    #[test]
+    fn the_fired_watchdog_holds_until_the_state_changes() {
+        let mut core = stuck_preview_core();
+        let t0 = core.now;
+        core.tick();
+        core.now = t0 + PREVIEW_WATCHDOG_AFTER;
+        core.tick();
+        assert_eq!(core.sharpen_now(), Some(0));
+
+        core.now = t0 + PREVIEW_WATCHDOG_AFTER + Duration::from_secs(5);
+        core.tick();
+        assert_eq!(
+            core.sharpen_now(),
+            Some(0),
+            "still lingering → still forced (level-triggered)"
+        );
+        assert!(
+            core.preview_watchdog.is_some_and(|w| w.fired),
+            "fired state persists while the preview lingers"
+        );
+    }
+
+    /// A genuine fast blaze that has OUTRUN the ring never arms the watchdog: the old photo
+    /// lingers only because the *next* target is still decoding (`target_caught_up` false), and
+    /// forcing its full then would put a decode ahead of the previews the blaze is waiting on.
+    #[test]
+    fn an_outrun_blaze_waiting_on_its_target_never_arms_the_watchdog() {
+        let mut core = stuck_preview_core();
+        core.source = photos_named(&["a.jpg", "b.jpg"]);
+        core.playlist = Playlist::new(2, 0).with_cursor(0);
+        core.targets = vec![0, 1];
+        core.target_item = Some(1); // the blaze wants item 1; it isn't decoded yet
+
+        let t0 = core.now;
+        core.tick();
+        core.now = t0 + PREVIEW_WATCHDOG_AFTER + Duration::from_secs(1);
+        core.tick();
+        assert!(
+            core.preview_watchdog.is_none(),
+            "not caught up → the lingering old frame is the blaze's problem, not the watchdog's"
+        );
+        assert_eq!(core.sharpen_now(), None);
+    }
+
+    /// RAW is excluded from the watchdog: its forced "full" is a seconds-long uncancellable
+    /// demosaic, and its embedded preview is near-full-res anyway. (When genuinely parked the
+    /// normal `sharpen_now` path still upgrades RAW — only the held-nav override abstains.)
+    #[test]
+    fn raw_never_arms_the_watchdog() {
+        let mut core = stuck_preview_core();
+        core.source = photos_named(&["a.nef"]);
+
+        let t0 = core.now;
+        core.tick();
+        core.now = t0 + PREVIEW_WATCHDOG_AFTER + Duration::from_secs(1);
+        core.tick();
+        assert!(core.preview_watchdog.is_none(), "RAW must never arm");
+        assert_eq!(core.sharpen_now(), None);
+    }
+
+    /// Deck-index reassignment disarms the watchdog: `PreviewWatchdog.item` is deck-relative,
+    /// so a fired entry for old-item-0 must not instantly force a sharpen on a NEW deck whose
+    /// first photo also happens to sit at index 0 — the new photo gets a fresh arm.
+    #[test]
+    fn a_deck_rebuild_disarms_the_watchdog() {
+        let mut core = stuck_preview_core();
+        let t0 = core.now;
+        core.tick();
+        core.now = t0 + PREVIEW_WATCHDOG_AFTER;
+        core.tick();
+        assert!(core.preview_watchdog.is_some_and(|w| w.fired));
+
+        let root = PathBuf::from("photos");
+        let src: Arc<dyn ItemSource> =
+            Arc::new(FsSource::new(vec![root.join("x.jpg"), root.join("y.jpg")]));
+        core.rebuild_playlist(src, root, None, false, 0);
+        assert!(
+            core.preview_watchdog.is_none(),
+            "indices were reassigned — the old fired state must not carry over"
+        );
+    }
+
+    /// The deadline boundary: strictly-before stays armed-only; at the deadline it fires.
+    #[test]
+    fn the_watchdog_fires_at_the_deadline_not_before() {
+        let mut core = stuck_preview_core();
+        let t0 = core.now;
+        core.tick(); // arm at t0
+
+        core.now = t0 + PREVIEW_WATCHDOG_AFTER - Duration::from_millis(1);
+        core.tick();
+        assert_eq!(core.sharpen_now(), None, "1 ms early — not fired");
+
+        core.now = t0 + PREVIEW_WATCHDOG_AFTER;
+        core.tick();
+        assert_eq!(core.sharpen_now(), Some(0), "at the deadline — fired");
     }
 
     #[test]
