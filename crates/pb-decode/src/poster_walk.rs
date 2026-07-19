@@ -1,4 +1,4 @@
-//! The **one** poster walk policy (task #115) — shared by every backend.
+//! The **one** poster walk policy (task #121) — shared by every backend.
 //!
 //! A feature film opens on black, a studio logo, or a fade for its first 30–90 s, so a
 //! head-only walk hands back a black poster. The policy that fixes that — walk the head

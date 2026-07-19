@@ -1,6 +1,6 @@
-# 115 — One poster walk: a shared driver, three thin backends
+# 121 — One poster walk: a shared driver, three thin backends
 
-_Status: **rev 2 — IMPLEMENTATION-READY**. Codex round 1 folded (review log at the bottom:
+_Status: **rev 2 — IMPLEMENTATION-READY**. Renumbered #115 → **#121** at the 2026-07-19 merge: the parallel Windows agent was concurrently using #115 for the compcol RAR task. Phase 1 landed as `7089c548`, whose message says "#115 phase 1" — same work. Codex round 1 folded (review log at the bottom:
 no P0, 5×P1, 3×P2 — rev 2 IS those corrections). Owner ask 2026-07-19: "we desperately need
 to DRY up this part of the codebase… can we make a reasonably bounded change that removes the
 duplication and ensures that windows and mac versions are on the same poster code?"

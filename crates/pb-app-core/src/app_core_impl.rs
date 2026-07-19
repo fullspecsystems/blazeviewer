@@ -5547,7 +5547,16 @@ impl AppCore {
             self.ring.release_pending(item, res.slot, cg, rep);
             return false;
         };
-        self.ring.mark_resident(item, res.slot, cg, rep);
+        if !self.ring.mark_resident(item, res.slot, cg, rep) {
+            // Unreachable while reserve→derive→mark is one synchronous stretch — but if it
+            // ever fires, the derived texture is unbound: shout and fall back to the CPU
+            // decode path rather than present a slot the core doesn't track (#109.4).
+            eprintln!(
+                "[ring-desync] mark_resident refused the derive slot {} item {item}",
+                res.slot
+            );
+            return false;
+        }
         self.retry_recover(item);
         self.ring
             .set_slot_bytes(item, pb_core::RepKind::Fit, d.bytes);
@@ -7777,9 +7786,10 @@ impl AppCore {
                 // adjusts the count but performs no eviction itself).
                 self.ring
                     .make_room_for_upgrade(item, rk, item_bytes, &self.targets);
+                let mut uploaded = true;
                 if let Some(a) = self.renderer.as_mut() {
                     let t0 = Instant::now();
-                    a.upload_slot(
+                    uploaded = a.upload_slot(
                         slot,
                         &img.pixels,
                         img.width,
@@ -7790,6 +7800,19 @@ impl AppCore {
                         rk == pb_core::RepKind::Original,
                     );
                     self.metrics.record("upload", t0.elapsed());
+                }
+                if !uploaded {
+                    // #109.4 fail-loud bridge: the renderer refused the upgrade upload (an
+                    // out-of-bounds slot — its ring and this one have desynced capacities).
+                    // The preview texture is still what it shows, so every flag stays as-is
+                    // (`preview_resident` in particular keeps the photo sharpen-eligible);
+                    // recording the upgrade anyway is how a desync hides until a frozen view.
+                    eprintln!(
+                        "[ring-desync] upgrade upload refused: slot {slot} item {item} — \
+                         core/renderer ring capacities out of sync"
+                    );
+                    self.thumbs_capture(outcome);
+                    continue;
                 }
                 self.ring.set_slot_bytes(item, rep.kind(), item_bytes);
                 if self.decode_is_definitive_full(img) {
@@ -7839,9 +7862,10 @@ impl AppCore {
                 .ring
                 .reserve_bytes(item, cg, rep, item_bytes, &self.targets)
             {
+                let mut uploaded = true;
                 if let Some(a) = self.renderer.as_mut() {
                     let t0 = Instant::now();
-                    a.upload_slot(
+                    uploaded = a.upload_slot(
                         res.slot,
                         &img.pixels,
                         img.width,
@@ -7853,7 +7877,34 @@ impl AppCore {
                     );
                     self.metrics.record("upload", t0.elapsed());
                 }
-                self.ring.mark_resident(item, res.slot, cg, rep);
+                if !uploaded {
+                    // #109.4 fail-loud bridge: the renderer refused the upload (an out-of-
+                    // bounds slot — its ring and this one have desynced capacities). Marking
+                    // residency anyway is exactly the mirror-says-resident / renderer-has-
+                    // nothing drift; roll the reservation back instead (a stuck Pending
+                    // would block this item's next decode) and surface the divergence here.
+                    eprintln!(
+                        "[ring-desync] upload refused: slot {} item {item} — core/renderer \
+                         ring capacities out of sync",
+                        res.slot
+                    );
+                    self.ring.release_pending(item, res.slot, cg, rep);
+                    self.thumbs_capture(outcome);
+                    continue;
+                }
+                if !self.ring.mark_resident(item, res.slot, cg, rep) {
+                    // Unreachable while reserve→upload→mark is one synchronous stretch
+                    // (nothing can invalidate the reservation in between) — but if it ever
+                    // fires, the renderer holds a texture the core refuses to track: shout
+                    // and skip the residency bookkeeping rather than present an untracked
+                    // slot (#109.4 — the check this call ignored for its whole life).
+                    eprintln!(
+                        "[ring-desync] mark_resident refused a just-reserved slot {} item {item}",
+                        res.slot
+                    );
+                    self.thumbs_capture(outcome);
+                    continue;
+                }
                 self.retry_recover(item);
                 // `preview_resident` and the cache metrics track the DISPLAY texture only; a
                 // parked Original (rk != dk) is held silently and must not touch either.
@@ -16570,6 +16621,157 @@ mod tests {
             .reserve_bytes(item, cg, rep, 64, keep)
             .expect("a free slot");
         assert!(core.ring.mark_resident(item, res.slot, cg, rep));
+    }
+
+    // ── #109 item 4: the fail-loud ring bridge ──
+
+    /// A `Renderer` double whose `upload_slot` REFUSES every upload — the answer a real
+    /// renderer gives for an out-of-bounds slot (its ring and the core's have desynced
+    /// capacities). Everything else is inert; `device`/`queue` are never reached headless.
+    struct RefusingUploads;
+
+    impl pb_render::Renderer for RefusingUploads {
+        fn resize(&mut self, _: u32, _: u32) {}
+        fn set_image(
+            &mut self,
+            _: &[u8],
+            _: u32,
+            _: u32,
+            _: pb_render::ColorTransform,
+            _: bool,
+            _: f32,
+        ) {
+        }
+        fn clear_image(&mut self) {}
+        fn set_view(&mut self, _: pb_render::ViewTransform) {}
+        fn set_overlay(&mut self, _: Option<(&[u8], u32, u32)>, _: u32, _: u32) {}
+        fn set_info_line(&mut self, _: Option<(&[u8], u32, u32)>, _: u32, _: pb_render::HAlign) {}
+        fn reserve_ring(&mut self, _: usize, _: u32, _: u32) {}
+        #[allow(clippy::too_many_arguments)]
+        fn upload_slot(
+            &mut self,
+            _: usize,
+            _: &[u8],
+            _: u32,
+            _: u32,
+            _: pb_render::ColorTransform,
+            _: bool,
+            _: f32,
+            _: bool,
+        ) -> bool {
+            false
+        }
+        fn present_slot(&mut self, _: usize) -> bool {
+            true
+        }
+        fn surface_size(&self) -> (u32, u32) {
+            (0, 0)
+        }
+        fn set_letterbox(&mut self, _: [u8; 3]) {}
+        fn set_toast(&mut self, _: Option<(&[u8], u32, u32)>, _: u32) {}
+        fn set_pie(&mut self, _: Option<(&[u8], u32, u32)>, _: u32) {}
+        fn set_tree(&mut self, _: Option<(&[u8], u32, u32)>, _: u32) {}
+        fn set_subtitle_overlay(&mut self, _: Option<(&[u8], u32, u32)>, _: f32, _: f32) {}
+        fn device(&self) -> &pb_render::wgpu::Device {
+            unreachable!("headless test double")
+        }
+        fn queue(&self) -> &pb_render::wgpu::Queue {
+            unreachable!("headless test double")
+        }
+        fn set_egui_overlay(&mut self, _: Option<&pb_render::wgpu::Texture>) {}
+        fn image_size(&self) -> (u32, u32) {
+            (0, 0)
+        }
+        fn set_edr_headroom(&mut self, _: f32) {}
+        fn hdr_surface_wants_edr(&self) -> Option<bool> {
+            None
+        }
+        fn poll(&self) {}
+        fn render(&mut self) -> Result<bool, pb_render::RenderError> {
+            Ok(true)
+        }
+    }
+
+    /// A definitive full-quality decode (`is_preview: false`, sized to the fit) for the
+    /// #109.4 refused-upload tests.
+    fn rgba_full(w: u32, h: u32, orig_w: u32, orig_h: u32) -> pb_decode::DecodedImage {
+        pb_decode::DecodedImage {
+            width: w,
+            height: h,
+            orig_width: orig_w,
+            orig_height: orig_h,
+            codec: "JPEG",
+            format: pb_decode::PixelFormat::Rgba8,
+            pixels: vec![0; (w * h * 4) as usize],
+            is_preview: false,
+            color: pb_decode::ColorTransform::srgb(),
+            peak: 1.0,
+            animated: None,
+        }
+    }
+
+    /// #109 item 4 (the fail-loud ring bridge): a refused upload must never leave the core
+    /// believing the slot is resident. Before the fix `mark_resident` ran unconditionally
+    /// after `upload_slot`'s silent no-op — the mirror said "resident", `present_slot` had
+    /// nothing to rebind, and the desync surfaced navigations later as a frozen view.
+    #[test]
+    fn a_refused_upload_is_never_marked_resident_and_rolls_back() {
+        let mut core = test_core();
+        core.source = photos_named(&["a.jpg"]);
+        core.playlist = Playlist::new(1, 0).with_cursor(0);
+        core.ring = ResidentRing::new(4);
+        core.fit = Some(FitBox {
+            max_width: 100,
+            max_height: 100,
+        });
+        core.view.mode = ScaleMode::Fit;
+        core.targets = vec![0];
+        core.target_item = Some(0);
+        core.renderer = Some(Box::new(RefusingUploads));
+        core.pending_uploads.push(Outcome::synthetic(
+            0,
+            core.epoch,
+            pb_core::RepKind::Fit,
+            Ok(rgba_full(100, 67, 6000, 4000)),
+        ));
+
+        core.drain_results();
+
+        assert!(
+            core.ring.slot_for_rep(0, pb_core::RepKind::Fit).is_none(),
+            "a refused upload must never be recorded resident (the silent-desync class)"
+        );
+        assert!(
+            !core.ring.is_tracked_rep(0, pb_core::RepKind::Fit),
+            "the reservation must roll back — a stuck Pending would block this item's next decode"
+        );
+    }
+
+    /// #109 item 4, the in-place upgrade flavor: a refused preview→full upgrade upload must
+    /// leave the upgrade bookkeeping untouched — the renderer still shows the preview, so
+    /// recording "sharp now" would freeze the photo blurry with no retry.
+    #[test]
+    fn a_refused_upgrade_upload_keeps_the_preview_sharpen_eligible() {
+        let mut core = stuck_preview_core();
+        core.held.clear(); // parked — the upgrade path, not the blaze gate, is under test
+        core.renderer = Some(Box::new(RefusingUploads));
+        core.pending_uploads.push(Outcome::synthetic(
+            0,
+            core.epoch,
+            pb_core::RepKind::Fit,
+            Ok(rgba_full(100, 67, 6000, 4000)),
+        ));
+
+        core.drain_results();
+
+        assert!(
+            core.ring.slot_for(0).is_some(),
+            "the preview's own residency is real and stays"
+        );
+        assert!(
+            core.preview_resident.contains(&0),
+            "refused upgrade: the preview is still what's on screen — it must stay sharpen-eligible"
+        );
     }
 
     #[test]

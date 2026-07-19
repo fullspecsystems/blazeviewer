@@ -617,7 +617,7 @@ pub fn poster_judge(rgba: &[u8], w: u32, h: u32) -> (bool, f32) {
 pub const POSTER_NATIVE_CAP_EDGE: u32 = 4096;
 
 /// One rational timestamp → **absolute 100 ns units** (`hns`), the canonical unit
-/// a `PosterChoice` locator speaks (task #115). The single conversion every
+/// a `PosterChoice` locator speaks (task #121). The single conversion every
 /// backend uses: MF already hands over hns, FFmpeg has `pts` + a stream time
 /// base, AVFoundation has a `CMTime`'s value + timescale.
 ///
@@ -685,7 +685,7 @@ pub fn poster_deep_cap(duration: Duration) -> Duration {
 mod tests {
     use super::*;
 
-    /// The locator conversion (task #115). Exactness matters: a replay claims the
+    /// The locator conversion (task #121). Exactness matters: a replay claims the
     /// stored locator only if a decoded frame's timestamp matches it, so drift
     /// here becomes a silent fall-back to a multi-second scored walk.
     #[test]
