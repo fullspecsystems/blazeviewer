@@ -219,23 +219,6 @@ fn rolloff(v: f32, headroom: f32) -> f32 {
 
 @fragment
 fn fs_present(in: VsOut) -> @location(0) vec4<f32> {
-    // Dev-only present-liveness bar (PB_FRAME_COUNTER): a 24-bit binary readout in the top-left,
-    // repainted every presented frame. `params.w` carries the frame counter (0 = disabled). The
-    // low bit (leftmost cell) flickers every frame — if the on-screen bar is frozen while the
-    // logs advance, `Present` isn't reaching the compositor. `in.pos` is the framebuffer pixel,
-    // so the bar sits at a fixed screen spot regardless of the photo underneath.
-    let fc = u32(pr.params.w);
-    if (fc > 0u) {
-        let cell = 16.0;
-        let bar_h = 24.0;
-        if (in.pos.y < bar_h && in.pos.x < cell * 24.0) {
-            let bit = u32(floor(in.pos.x / cell));
-            if (((fc >> bit) & 1u) == 1u) {
-                return vec4<f32>(1.0, 1.0, 0.0, 1.0); // lit cell = bit set (yellow)
-            }
-            return vec4<f32>(0.04, 0.04, 0.04, 1.0);   // dark cell = bit clear
-        }
-    }
     let s = textureSample(tex, samp, in.uv);
     if (pr.params.z > 0.5) {
         // HDR/wide-gamut scRGB surface: the intermediate is already final scene-linear
@@ -2103,13 +2086,6 @@ pub struct WgpuRenderer {
     ring: Vec<Option<RingSlot>>,
     /// When `Some(i)`, `render` draws ring slot `i` instead of `bind_group`.
     present_idx: Option<usize>,
-    /// Dev-only present-liveness counter (`PB_FRAME_COUNTER=1`): bumped on every frame we
-    /// actually acquire+present, and drawn as a 24-bit binary bar in the tonemap pass. If the
-    /// on-screen bar freezes while the logs keep advancing, `Present` isn't reaching the
-    /// compositor (the silent DXGI/DWM/RDP drop) — the one thing our `Ok(true)` present signal
-    /// can't otherwise prove. Zero cost when off (the shader keys off a 0 in `params.w`).
-    frame_counter: u32,
-    frame_counter_overlay: bool,
     /// The frame that was on screen when the ring was last rebuilt (`reserve_ring` on a
     /// geometry change), moved out of the ring so it survives the rebuild. While the async
     /// re-decode is in flight, `render` draws this (GPU-refit to the new viewport) instead of
@@ -2418,8 +2394,6 @@ impl WgpuRenderer {
             upload,
             ring: Vec::new(),
             present_idx: None,
-            frame_counter: 0,
-            frame_counter_overlay: std::env::var("PB_FRAME_COUNTER").is_ok_and(|v| v == "1"),
             held: None,
             letterbox: [LETTERBOX[0], LETTERBOX[1], LETTERBOX[2]],
             content_top_inset: 0,
@@ -3276,19 +3250,6 @@ impl Renderer for WgpuRenderer {
             }
             Err(wgpu::SurfaceError::OutOfMemory) => return Err(RenderError::OutOfMemory),
         };
-        // Present-liveness counter (PB_FRAME_COUNTER): we hold a real acquired frame now, so this
-        // draw *will* be submitted+presented. Bump the counter and poke it into the present
-        // uniform's spare 4th float (byte offset 12 — leaves peak/headroom/hdr untouched) so the
-        // tonemap pass can paint the binary bar. If the on-screen bar freezes while this keeps
-        // incrementing in the logs, `Present` is being silently discarded downstream.
-        if self.frame_counter_overlay {
-            self.frame_counter = self.frame_counter.wrapping_add(1);
-            self.queue.write_buffer(
-                &self.peak_buf,
-                12,
-                bytemuck::bytes_of(&(self.frame_counter as f32)),
-            );
-        }
         let view = frame
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
