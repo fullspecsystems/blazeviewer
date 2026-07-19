@@ -2,13 +2,10 @@
 
 Blaze Viewer is an image and video viewer with an obsession: Make viewing as fast and smooth as possible.
 
-> **Calibrate your sense of "old":** the repo was inited **2026-06-26** — the
-> entire project is weeks, not years, old, and it moves fast (1,000+ commits in
-> its first month). A "stale" claim in this file may be ten days stale; treat
-> dated notes as snapshots, and when code and doc disagree, the code wins —
-> then fix the doc.
 A key feature is "Blaze Mode": seeking through photos in a direction (forward, backwards, or 'randomly') as fast as a user wants, within the limits of the hardware.
 The feel and acceleration of this is customizable, but on a powerful computer with a 120Hz display, that means we can literally display 120 images per second in a way that is actually useful. When a user stops and parks on an image, operations like rescaling, toggling fullscreen, and playing videos are all feel instant.
+
+This project was started as a POC on 2026-06-26 and has moved quickly since then, adding video playback, archive support, a Mac-native UI, and many more features.
 
 ## Prime Directive
 
@@ -415,8 +412,10 @@ is persisted unless the user deliberately invokes the action.
     same exposure as the password while the user types it.
 - **AI describe/Ask (task #44) is the one network-touching feature, and it
   follows the Second Directive exactly.** macOS uses the **on-device** Apple
-  Foundation Models backend (never Private Cloud Compute — cloud by Apple's
-  hand is still cloud); everywhere else the image goes **only to the
+  Foundation Models backend. Private Cloud Compute isn't *precluded* — but
+  it's cloud, so if/when it's integrated (a macOS/iOS 27 feature; those OSes
+  are still in beta) it becomes **opt-in behind a warning** like any other
+  egress, never a default. Everywhere else the image goes **only to the
   user-configured OpenAI-compatible endpoint URL** (LM Studio / Ollama —
   `pb-app-core::describe`), only on an explicit command or the opt-in
   auto-describe toggle, downscaled + JPEG-re-encoded first (the original
