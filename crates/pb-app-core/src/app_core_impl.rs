@@ -238,6 +238,7 @@ impl AppCore {
             folder_tree_open: false,
             left_tab: Default::default(),
             thumbs: Default::default(),
+            poster_sel: Default::default(),
             folder_tree_sig: None,
             folder_tree_panel: None,
             folder_tree_counts: None,

@@ -690,6 +690,10 @@ pub struct AppCore {
     /// Thumbnails-strip state (task #83): the RAM-only thumb cache + derive
     /// thread + auto-follow. Zero cost until the panel is first opened.
     pub thumbs: crate::thumbs::Thumbs,
+    /// The poster-selection ledger (task #114): one scored walk per movie per
+    /// deck, fanned out to every consumer. RAM-only; reset at every content
+    /// boundary (never on geometry changes).
+    pub poster_sel: crate::poster_select::PosterSelector,
 
     // --- Rendering (NS0 5.4) ---
     /// The HUD text/overlay compositor (`pb-hud`), or `None` if no system font was found.
