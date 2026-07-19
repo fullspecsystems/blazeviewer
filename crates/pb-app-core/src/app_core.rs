@@ -284,6 +284,12 @@ pub struct AppCore {
     pub pan_last: Option<Instant>,
     /// When a window resize/toggle has "settled" enough to re-decode at the new fit.
     pub resize_settle_at: Option<Instant>,
+    /// When the Fullscreen action last flipped the window mode. A toggle is a DISCRETE event —
+    /// not a drag stream — so the resize it triggers uses the short
+    /// [`FULLSCREEN_SETTLE`](crate::engine::FULLSCREEN_SETTLE) instead of the 180 ms drag
+    /// debounce, landing the crisp re-derive promptly (#110 §4). Never cleared: staleness is
+    /// handled by the read (only resizes within 500 ms of the stamp count as toggle-caused).
+    pub fullscreen_toggled_at: Option<Instant>,
     /// When to persist the debounced window-geometry change (an explicit user action).
     pub geometry_save_at: Option<Instant>,
     /// The live window presentation mode: `true` = a decorated window, `false` = borderless

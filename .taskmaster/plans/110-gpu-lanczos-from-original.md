@@ -12,12 +12,24 @@
 
 ---
 
-> **PROGRESS (branch `feat/110-gpu-lanczos-from-original`, 2026-07-18):** 110a partly done — the
-> scale-aware Lanczos coefficients (`resample.rs`, 6 CPU tests, `90f8c4a5`) and the RingSlot owned-texture
-> retention (`create_image_texture` → `RingSlot.texture/was_clamped/mode`, `fa5b30ab`) are committed and
-> green. **Remaining 110a:** the two WGSL passes (§3a/§3b colour chain) + the odd-dim MIPGEN regression
-> test. Then **110b** wires the derive in (the felt phase). Also landed this session: **ADR-024** (the
-> two-mode invariant this plan serves) and the preview-into-native-tier fix (`100b3d3c`).
+> **PROGRESS (branch `feat/110-gpu-lanczos-from-original`, 2026-07-18):** **110a COMPLETE + 110b
+> COMPLETE (pending owner verify).** 110a: coefficients (`resample.rs`, `90f8c4a5`), RingSlot texture
+> retention (`fa5b30ab`), the odd-dim MIPGEN regression (pins the DROP semantics — the old comment's
+> "under-weight" claim was false), and the two WGSL derive passes (`DERIVE_WGSL`) with the §3b colour
+> chain — Codex-reviewed, which caught two real defects now fixed + regression-tested: the final
+> un-premultiply must divide by the UNCLAMPED filtered alpha (overshoot ~1.08 at an alpha step;
+> clamped divide brightens fringes), and fp16 sources need Inf/NaN containment (sanitize-on-load to
+> ±65504 in both passes + a contained final). 9 GPU derive tests incl. a CPU oracle. 110b:
+> `Renderer::derive_held_fit` (eligibility: mipped Original, `!was_clamped`, mode ≠ 1; ACTUAL texture
+> dims; `contain_dims` mirrors the CPU fit rule incl. the 0.999 identity band; `select_derive_mip` +
+> bias), `RingSlot.content_hdr` (the §3c hdr split), pb-core `release_pending` (reserve-then-derive
+> rollback), core `try_gpu_derive_fit` on the settle (parked-only, Fit-only, current-photo-only,
+> reserve→derive→mark_resident→canonical present; CPU fallback on any miss), the short
+> `FULLSCREEN_SETTLE` (50 ms vs 180 ms drag debounce), and the `PB_SCALE_POLICY`/`PB_DERIVE_KERNEL`/
+> `PB_DERIVE_MIP_BIAS` levers (defaults: gpu, L3, bias 0 — 110c decides). **Remaining: 110c** (A/B/X
+> harness + nv-flip + the display-capped pyramid budget) and the deferred 110d. Also landed this
+> session: **ADR-024**, the preview-into-native-tier fix (`100b3d3c`), and the ADR-024
+> lingering-preview watchdog (task #3, `21c9df9a`).
 
 ## 1. Problem & goal
 

@@ -833,6 +833,7 @@ impl App {
             last_upgrade_set: Vec::new(),
             full_requested_at: HashMap::new(),
             preview_watchdog: None,
+            fullscreen_toggled_at: None,
             live_motion_cache: HashMap::new(),
             metrics,
             // Latency timers for "feeling fast" (open→first, open→cached, resize); gated by

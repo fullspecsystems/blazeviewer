@@ -557,6 +557,38 @@ impl ResidentRing {
             _ => false,
         }
     }
+
+    /// Roll back a reservation that will never be fulfilled: `Pending(item, content_gen, rep)` →
+    /// `Empty`, releasing its key mapping and committed bytes. The #110 GPU-derive path reserves
+    /// its destination Fit slot BEFORE dispatching the derive (refuse-before-reserve, plan §4);
+    /// when the derive reports ineligible/failed, the caller releases here and schedules the CPU
+    /// Fit instead — a stale `Pending` would otherwise pin the slot and block that very CPU
+    /// decode (`reserve_bytes` refuses while the key is tracked). Same staleness contract as
+    /// [`mark_resident`](Self::mark_resident): only the caller's own pending reservation is
+    /// released; a reused slot, advanced generation, or resident occupant returns `false`
+    /// untouched (evicting a resident is `reserve_bytes`' job, not a rollback).
+    pub fn release_pending(
+        &mut self,
+        item: usize,
+        slot: usize,
+        content_gen: u64,
+        representation: Representation,
+    ) -> bool {
+        if slot >= self.slots.len() {
+            return false;
+        }
+        match self.slots[slot] {
+            SlotState::Pending {
+                item: it,
+                content_gen: cg,
+                rep,
+            } if it == item && cg == content_gen && rep == representation => {
+                self.free_slot(slot);
+                true
+            }
+            _ => false,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -565,6 +597,38 @@ mod tests {
     use crate::rng::SplitMix64;
 
     const CG: u64 = 1; // a fixed content generation for tests that don't vary it
+
+    #[test]
+    fn release_pending_frees_the_slot_and_its_bytes() {
+        let mut r = ResidentRing::new_with_budget(4, 1000);
+        let res = r.reserve_bytes(0, CG, fit(1), 400, &[0]).expect("reserve");
+        assert!(r.is_tracked_rep(0, RepKind::Fit));
+        assert!(r.release_pending(0, res.slot, CG, fit(1)));
+        assert!(!r.is_tracked_rep(0, RepKind::Fit), "key mapping released");
+        // Slot + budget genuinely free again: a full-budget re-reservation succeeds.
+        assert!(
+            r.reserve_bytes(0, CG, fit(1), 1000, &[0]).is_some(),
+            "released bytes must return to the budget"
+        );
+    }
+
+    #[test]
+    fn release_pending_refuses_stale_wrong_or_resident() {
+        let mut r = ResidentRing::new_with_budget(4, 1000);
+        let res = r
+            .reserve_bytes(0, CG, fit(1), 100, &[0, 1])
+            .expect("reserve");
+        // Wrong item / generation / representation: refused, reservation untouched.
+        assert!(!r.release_pending(1, res.slot, CG, fit(1)));
+        assert!(!r.release_pending(0, res.slot, CG + 1, fit(1)));
+        assert!(!r.release_pending(0, res.slot, CG, fit(2)));
+        assert!(r.is_tracked_rep(0, RepKind::Fit));
+        // A RESIDENT occupant is not a pending reservation — releasing it would be an
+        // eviction in disguise; refused.
+        assert!(r.mark_resident(0, res.slot, CG, fit(1)));
+        assert!(!r.release_pending(0, res.slot, CG, fit(1)));
+        assert!(r.is_tracked_rep(0, RepKind::Fit));
+    }
     fn fit(epoch: u64) -> Representation {
         Representation::Fit {
             geometry_epoch: epoch,

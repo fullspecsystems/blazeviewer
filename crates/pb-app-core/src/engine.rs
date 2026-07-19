@@ -76,6 +76,48 @@ pub const FULL_RES_MAX_PIXELS: u64 = 200_000_000;
 /// focus change — still well inside "the app fixed itself before I reached for the mouse".
 pub const PREVIEW_WATCHDOG_AFTER: Duration = Duration::from_millis(2000);
 
+/// #110 ScalePolicy A/B levers (the 110c harness formalizes these into `ScalePolicy` variants).
+/// `PB_SCALE_POLICY=cpu` disables the GPU derive — the incumbent CPU Lanczos settle re-decode
+/// runs instead; unset/anything else = derive on (the 110b default).
+pub fn gpu_derive_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("PB_SCALE_POLICY").map_or(true, |v| v != "cpu"))
+}
+
+/// `PB_DERIVE_KERNEL` — Lanczos lobe count for the GPU derive: 2 (safer, less halo) or
+/// 3 (more detail, more ring). Default 3 until the 110c A/B decides.
+pub fn derive_kernel() -> u32 {
+    static K: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    *K.get_or_init(|| {
+        std::env::var("PB_DERIVE_KERNEL")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .filter(|k| *k == 2 || *k == 3)
+            .unwrap_or(3)
+    })
+}
+
+/// `PB_DERIVE_MIP_BIAS` — source-mip policy for the GPU derive: 0 = last eligible box mip
+/// (fastest, most box-prefiltered), −1 = one level finer (residual 2–4×, wider scale-aware
+/// kernel — the real quality/perf fork per the #110 plan §3a). Default 0 until 110c decides.
+pub fn derive_mip_bias() -> i32 {
+    static B: std::sync::OnceLock<i32> = std::sync::OnceLock::new();
+    *B.get_or_init(|| {
+        std::env::var("PB_DERIVE_MIP_BIAS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .filter(|b| (-2..=1).contains(b))
+            .unwrap_or(0)
+    })
+}
+
+/// How long a resize settle waits after a **discrete fullscreen toggle** before the crisp
+/// re-derive/re-decode (#110 §4). The standard 180 ms settle debounces interactive drag-resize
+/// streams; a toggle is ONE event, so waiting the full debounce just delays the sharp frame.
+pub const FULLSCREEN_SETTLE: Duration = Duration::from_millis(50);
+/// The standard interactive-resize settle (drag streams need real debouncing).
+pub const RESIZE_SETTLE: Duration = Duration::from_millis(180);
+
 /// How many bytes the preview-first path (#106.5) reads from the front of a JPEG to find
 /// its embedded EXIF thumbnail + SOF header. The IFD1 thumbnail is ~22 KB near the file
 /// start; 256 KB comfortably covers it (and the SOF) while staying a small fraction of a

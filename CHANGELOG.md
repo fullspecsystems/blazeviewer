@@ -7,6 +7,14 @@ with any pre-release suffix carried only by the tag.
 
 ## [Unreleased]
 
+### Changed
+- **Fullscreen and window-size changes sharpen instantly.** Toggling fullscreen (or resizing
+  the window) used to show a slightly soft image for about a second while the photo was
+  re-processed at the new size. The sharp version is now produced directly on the graphics
+  card from the full-resolution copy the app already holds, so the crisp image appears
+  immediately and the second-long re-processing pause is gone. The fullscreen toggle also
+  reacts faster now (it no longer waits out the delay meant for window-edge dragging).
+
 ### Fixed
 - **A photo can no longer get stuck blurry.** In rare cases (a key-release the app never
   received, e.g. around a fullscreen flip while paging fast) a photo could stay on its

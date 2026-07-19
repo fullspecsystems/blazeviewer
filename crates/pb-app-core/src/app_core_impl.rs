@@ -141,6 +141,7 @@ impl AppCore {
             pan_started: None,
             pan_last: None,
             resize_settle_at: None,
+            fullscreen_toggled_at: None,
             geometry_save_at: None,
             windowed: true,
             meta_cache: std::collections::HashMap::new(),
@@ -555,6 +556,7 @@ impl AppCore {
             // persistent preference; the shell applies the window ops (and snapshots/persists the
             // windowed geometry) when it drains the `SetWindowMode` effect (`apply_window_mode`).
             Action::Fullscreen => {
+                self.fullscreen_toggled_at = Some(self.now); // → short resize settle (#110 §4)
                 self.windowed = !self.windowed;
                 // Record the new mode as the remembered last state (settings.fullscreen is the
                 // inverse of `windowed`), so `StartupMode::Remember` restores it + Settings stays
@@ -1437,8 +1439,17 @@ impl AppCore {
             self.video_paused_by_resize = true;
         }
         // Deferred crisp decode-to-fit + ring refill once the size settles (`self.now` is stamped
-        // by the host at the start of the event).
-        self.resize_settle_at = Some(self.now + Duration::from_millis(180));
+        // by the host at the start of the event). A resize caused by a discrete fullscreen
+        // toggle settles fast — the 180 ms debounce exists for drag-resize streams (#110 §4).
+        let settle = if self
+            .fullscreen_toggled_at
+            .is_some_and(|t| self.now.saturating_duration_since(t) < Duration::from_millis(500))
+        {
+            FULLSCREEN_SETTLE
+        } else {
+            RESIZE_SETTLE
+        };
+        self.resize_settle_at = Some(self.now + settle);
     }
 
     /// A scroll wheel / trackpad two-finger swipe ([`CoreEvent::Scroll`], NS0 loose-end): pan (the
@@ -5417,8 +5428,86 @@ impl AppCore {
                 r.set_view(view);
             }
         }
+        // #110 Phase 110b: before queueing the CPU re-decode, try to GPU-derive the current
+        // photo's Fit from its retained Original (the frame `invalidate_geometry` just moved
+        // into the renderer's `held`). On success the Fit is resident + presented before the
+        // prefetch below runs, so the ~1 s CPU Lanczos re-decode never gets queued — the
+        // owner-felt win. On any miss this is a no-op and the incumbent path proceeds.
+        self.try_gpu_derive_fit();
         self.request_prefetch();
         self.draw();
+    }
+
+    /// #110 Phase 110b: satisfy a settled geometry change by GPU-deriving the current photo's
+    /// exact-size Fit from its retained Original (`renderer.held`) instead of the CPU re-decode.
+    /// Dispatched from the settle only — parked-only (`held_nav` none, §4), Fit display only
+    /// (Original/Fill decode at native res), current photo only, at most one derive per settle.
+    /// Reserve-then-derive (§4/§7): the destination Fit slot is reserved BEFORE dispatch with a
+    /// worst-case byte bound (fit box × fp16), corrected to the real size after; on any
+    /// ineligibility the reservation is released so the CPU fallback can take the very slot.
+    /// Returns whether the derived Fit is resident + presented.
+    fn try_gpu_derive_fit(&mut self) -> bool {
+        if !gpu_derive_enabled() || self.held_nav().is_some() {
+            return false;
+        }
+        let Some(item) = self.target_item else {
+            return false;
+        };
+        if self.displayed_item != Some(item) {
+            return false;
+        }
+        let Some(fit) = self.decode_fit() else {
+            return false;
+        };
+        if self
+            .ring
+            .slot_for_rep(item, pb_core::RepKind::Fit)
+            .is_some()
+        {
+            return false; // already resident (e.g. the instant-toggle rebind path)
+        }
+        let est = fit.max_width as u64 * fit.max_height as u64 * 8;
+        let rep = self.rep_of(pb_core::RepKind::Fit);
+        let cg = self.content_gen;
+        let Some(res) = self.ring.reserve_bytes(item, cg, rep, est, &self.targets) else {
+            return false;
+        };
+        let derived = self.renderer.as_mut().and_then(|r| {
+            r.derive_held_fit(
+                res.slot,
+                fit.max_width,
+                fit.max_height,
+                derive_kernel(),
+                derive_mip_bias(),
+            )
+        });
+        let Some(d) = derived else {
+            // Ineligible (headless / no held Original / clamped / mode 1): roll back so the
+            // CPU Fit's own reservation isn't blocked by a stale Pending.
+            self.ring.release_pending(item, res.slot, cg, rep);
+            return false;
+        };
+        self.ring.mark_resident(item, res.slot, cg, rep);
+        self.ring
+            .set_slot_bytes(item, pb_core::RepKind::Fit, d.bytes);
+        // The derived Fit is a definitive full: clear stale preview/upgrade bookkeeping so the
+        // sharpen loop doesn't CPU-decode what is already sharp, and release the
+        // quality-monotonic resize hold — this IS the fresh full it was waiting for.
+        self.preview_resident.remove(&item);
+        self.upgrade_done.remove(&item);
+        if self.resize_hold == Some(item) {
+            self.resize_hold = None;
+        }
+        if sharp_diag() {
+            eprintln!(
+                "[sharp-diag] GPU-derived Fit item={item} {}x{} ({} B) — CPU re-decode skipped",
+                d.w, d.h, d.bytes
+            );
+        }
+        // Present through the canonical target path so view/title/pie/perf behave exactly as
+        // if the decode had landed.
+        self.try_present_target();
+        true
     }
 
     /// Grow the playlist in place as a streaming scan delivers more images: swap in the
@@ -15497,6 +15586,65 @@ mod tests {
         assert!(
             core.preview_watchdog.is_none(),
             "indices were reassigned — the old fired state must not carry over"
+        );
+    }
+
+    /// #110 110b: when the renderer can't derive (headless here; no held Original / clamped /
+    /// mode-1 in production), the reserved destination Fit slot must be RELEASED — a stale
+    /// `Pending` would block the CPU fallback's own reservation of that (item, Fit) key and
+    /// strand the photo soft forever.
+    #[test]
+    fn a_failed_derive_releases_its_reservation() {
+        let mut core = test_core();
+        core.source = photos_named(&["a.jpg"]);
+        core.playlist = Playlist::new(1, 0).with_cursor(0);
+        core.ring = ResidentRing::new(4);
+        core.fit = Some(FitBox {
+            max_width: 800,
+            max_height: 600,
+        });
+        core.view.mode = ScaleMode::Fit;
+        core.targets = vec![0];
+        core.displayed_item = Some(0);
+        core.target_item = Some(0);
+
+        assert!(
+            !core.try_gpu_derive_fit(),
+            "a headless renderer has nothing to derive from"
+        );
+        assert!(
+            !core.ring.is_tracked_rep(0, pb_core::RepKind::Fit),
+            "the reservation must be rolled back so the CPU Fit can take the slot"
+        );
+    }
+
+    /// #110 110b dispatch gates: never while blazing (a derive competes with the shared GPU
+    /// queue, §4), and only for a Fit display (Original/Fill decode at native res). Neither
+    /// refusal may leave ring state behind.
+    #[test]
+    fn the_derive_is_parked_only_and_fit_only() {
+        let mut core = test_core();
+        core.source = photos_named(&["a.jpg"]);
+        core.playlist = Playlist::new(1, 0).with_cursor(0);
+        core.ring = ResidentRing::new(4);
+        core.fit = Some(FitBox {
+            max_width: 800,
+            max_height: 600,
+        });
+        core.view.mode = ScaleMode::Fit;
+        core.targets = vec![0];
+        core.displayed_item = Some(0);
+        core.target_item = Some(0);
+
+        core.held.insert(PbKey::Space, Action::Next);
+        assert!(!core.try_gpu_derive_fit(), "blazing → no derive");
+        core.held.clear();
+
+        core.view.mode = ScaleMode::Original; // decode_fit() = None
+        assert!(!core.try_gpu_derive_fit(), "native-res display → no derive");
+        assert!(
+            !core.ring.is_tracked_rep(0, pb_core::RepKind::Fit),
+            "refused dispatches must not touch the ring"
         );
     }
 
