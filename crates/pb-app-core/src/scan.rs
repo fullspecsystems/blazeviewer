@@ -510,8 +510,11 @@ impl ScanProgress {
         self.inner.cancel.store(true, Ordering::Relaxed);
     }
 
-    /// Whether cancellation has been requested (polled by the walk loop).
-    fn is_cancelled(&self) -> bool {
+    /// Whether cancellation has been requested (polled by the walk loop, and asserted by
+    /// the shells' worker-supersession tests). `pub` for parity with
+    /// [`pb_source::OpenProgress::is_cancelled`] — the two progress handles are the two
+    /// halves of the same cross-type cancellation contract (#109 item 1).
+    pub fn is_cancelled(&self) -> bool {
         self.inner.cancel.load(Ordering::Relaxed)
     }
 

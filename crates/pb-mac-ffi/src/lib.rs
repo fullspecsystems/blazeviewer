@@ -2751,6 +2751,13 @@ impl AppCoreHandle {
             Source::Scan { roots, recursive } => (roots, recursive),
             _ => return, // open_plan routes explicit lists + archives elsewhere
         };
+        // Cross-type supersession (#109 item 1, winit parity — `8293a662`): starting a folder
+        // scan must also drop any in-flight archive open, or a stale `ArchiveResolved` landing
+        // after this rebuilds the deck back onto the archive on top of the folder we're now
+        // scanning. Symmetric with the scan-drop in `begin_archive_open`.
+        if let Some(prev) = self.archive_load.take() {
+            prev.progress.request_cancel();
+        }
         let root = roots.first().cloned().unwrap_or_else(|| PathBuf::from("."));
         let scan_root = roots.first().cloned();
         // Live Show Archives preference (task #104): with it off, the walk drops archive doors.
@@ -2891,6 +2898,15 @@ impl AppCoreHandle {
         if let Some(prev) = self.archive_load.take() {
             prev.progress.request_cancel();
         }
+        // Cross-type supersession (#109 item 1, winit parity — `8293a662`): a folder scan is a
+        // DIFFERENT worker than an archive open, so the `archive_gen` bump below never cancels
+        // it. Left alive, its next cumulative batch reaches the core and bootstraps/extends over
+        // *this* archive deck while both GPU rings still hold the archive's textures. The core's
+        // `apply_scan_batch` extend guard already covers mode A on macOS; this closes mode B (a
+        // stale scan's FIRST batch bootstrapping over an archive opened just after it started)
+        // and stops the worker sooner. Placed before the synchronous ZIP shortcut so that path
+        // supersedes the scan too.
+        self.cancel_dir_scan();
         // The synchronous ZIP shortcut is only safe when no auto-try will run (a wrong-password
         // ZIP attempt decrypts the whole first entry — must go off-thread). Empty cache + no
         // user password = today's fast path.
@@ -5143,6 +5159,103 @@ mod tests {
         std::iter::from_fn(|| h.next_effect()).collect()
     }
 
+    /// A synthetic in-flight folder scan: the handle the shell tracks, plus its progress
+    /// handle and a live sender kept by the caller. Nothing has to actually walk a directory
+    /// for the supersession contract to hold — but the sender stays alive so the fixture
+    /// models a worker that is still RUNNING, not one that already hung up. Otherwise a
+    /// dropped-but-never-cancelled handle would pass the test while a real walk kept going.
+    fn fake_dir_scan() -> (
+        DirScan,
+        ScanProgress,
+        std::sync::mpsc::Sender<(u64, ScanUpdate)>,
+    ) {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let progress = ScanProgress::new();
+        (
+            DirScan {
+                generation: 1,
+                rx,
+                progress: progress.clone(),
+                name: "fixture".into(),
+                started: Instant::now(),
+            },
+            progress,
+            tx,
+        )
+    }
+
+    /// #109 item 1 (winit parity, `8293a662`): starting an archive open must drop the
+    /// in-flight folder scan. Left alive, the scan's next batch reaches the core and
+    /// bootstraps/extends over the archive deck while the rings still hold the archive's
+    /// textures — the "title advances, view frozen, door card over a photo" corruption.
+    /// Asserted on the `.zip` SYNCHRONOUS path deliberately: it returns early, so it is the
+    /// arm that would silently skip a cancel placed too late in the function.
+    #[test]
+    fn beginning_an_archive_open_supersedes_an_in_flight_folder_scan() {
+        let mut h = test_handle(1920, 1080, 2.0);
+        let (scan, progress, _tx) = fake_dir_scan();
+        h.dir_scan = Some(scan);
+        h.core.scanning = true;
+
+        // A path that does not exist: `scan::open_archive` fails, which is fine — the
+        // supersession happens before the open is even attempted.
+        h.begin_archive_open(
+            std::env::temp_dir().join("pb_ffi_no_such_archive.zip"),
+            None,
+        );
+
+        assert!(
+            h.dir_scan.is_none(),
+            "the folder-scan worker must be dropped by a superseding archive open"
+        );
+        assert!(
+            progress.is_cancelled(),
+            "and told to stop — merely forgetting the handle leaves a real walk streaming \
+             batches at the core until its next send"
+        );
+        assert!(
+            !h.core.scanning,
+            "and the core must stop believing a scan is running"
+        );
+    }
+
+    /// The symmetric half: starting a folder scan drops an in-flight archive open, or a
+    /// stale `ArchiveResolved` landing afterwards rebuilds the deck back onto the archive
+    /// on top of the folder we are now scanning. `OpenProgress::is_cancelled` lets this
+    /// half assert the worker was actually told to stop, not merely forgotten.
+    #[test]
+    fn beginning_a_folder_scan_supersedes_an_in_flight_archive_open() {
+        let mut h = test_handle(1920, 1080, 2.0);
+        let progress = pb_source::OpenProgress::new();
+        let (_tx, rx) = std::sync::mpsc::channel();
+        h.archive_load = Some(ArchiveLoad {
+            generation: 1,
+            rx,
+            path: std::env::temp_dir().join("pb_ffi_superseded.7z"),
+            attempted_password: None,
+            progress: progress.clone(),
+        });
+
+        let dir = std::env::temp_dir().join("pb_ffi_scan_supersedes");
+        std::fs::create_dir_all(&dir).unwrap();
+        h.begin_dir_scan(
+            Source::Scan {
+                roots: vec![dir],
+                recursive: false,
+            },
+            Cursor::First,
+        );
+
+        assert!(
+            h.archive_load.is_none(),
+            "the archive-open worker must be dropped by a superseding folder scan"
+        );
+        assert!(
+            progress.is_cancelled(),
+            "and told to stop — a forgotten worker keeps reading the archive"
+        );
+    }
+
     /// Slice-1 proof: an event driven in through the FFI produces effects the host can pull
     /// out — the full round-trip through the real `AppCore::handle`, and the queue is emptied
     /// by a drain. Escape resolves (default keymap) to `Action::Quit`, a HOST-side flow
@@ -5207,6 +5320,12 @@ mod tests {
         h.core
             .rebuild_playlist(src, dir.clone(), Some(dir), false, 0);
         h.core.displayed_item = Some(1); // the door
+                                         // …and *presented*: `door_card` gates on `door_presented()` (the #108 fix, cd07a388)
+                                         // so a card can never flash over the previous photo still held by the renderer. A
+                                         // fixture that only names the door leaves `presented_epoch: None`, which reads as
+                                         // "not on screen yet" and hides the card — this line is what the real present path
+                                         // stamps, not a test-only shortcut.
+        h.core.presented_epoch = Some(h.core.epoch);
         h
     }
 
