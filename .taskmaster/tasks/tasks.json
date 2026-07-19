@@ -1,10 +1,5 @@
 {
   "master": {
-    "metadata": {
-      "created": "2026-06-26",
-      "updated": "2026-07-13",
-      "description": "Post-core feature backlog for PhotoBlaze. These ship AFTER the core viewer is stable (roadmap Phases 0-3: window, decode-to-fit, prefetch ring, hold-to-blaze). Every task obeys the prime directive (faster or perf-neutral) and the project's TDD rules: pure logic isolated and unit-tested, GPU work behind the Renderer seam, golden-image tests for visuals. Shared infrastructure is factored out so it is built once: a per-photo ViewTransform (rotation + zoom + scaling mode), a translucent HUD/overlay layer, and a central configurable action/keymap."
-    },
     "tasks": [
       {
         "id": 18,
@@ -13,7 +8,7 @@
         "status": "pending",
         "priority": "low",
         "dependencies": [
-          16
+          "16"
         ],
         "details": "From docs/heic-decode-plan.md 'Deferred review findings': (1) HDR HEICs bypass preview-first (HDR float branch returns before allow_preview; needs SDR-thumb->HDR-full upgrade, slot format change). (2) Fill mode decodes full-res (decode_fit returns None for Fill+Original; give Fill a cover-to-screen target). (3) Decode-pool byte budget is a soft cap (reserve-before-decode; largely moot now). (4) DecodeKind::{Preview,Full} in the pool key (defensive). (5) Sync load paths (startup/resize/mode) bypass preview-first -> ~250ms HEIC freeze. (6) No unit/property tests for the tier state machine (extract pure bits).",
         "subtasks": [
@@ -21,37 +16,43 @@
             "id": 1,
             "title": "HDR HEICs bypass preview-first",
             "description": "Windows WIC reorder tracked as standalone task #95; macOS Image-I/O thumbnail path as task #97.",
-            "status": "pending"
+            "status": "pending",
+            "parentId": "undefined"
           },
           {
             "id": 2,
             "title": "Fill mode decodes full-res -> cover-to-screen target",
             "description": "Tracked as standalone task #96 (semantic Contain/Cover decode target, per-image).",
-            "status": "pending"
+            "status": "pending",
+            "parentId": "undefined"
           },
           {
             "id": 3,
             "title": "Decode-pool byte budget is a soft cap",
             "description": "Reserve-before-decode instead of check-then-add. Largely moot with displayed-only (<=1 full in flight); revisit if the sharp full-ring (prefetch_fulls) or fp16 HDR upgrades overshoot VRAM.",
-            "status": "pending"
+            "status": "pending",
+            "parentId": "undefined"
           },
           {
             "id": 4,
             "title": "DecodeKind::{Preview,Full} in the pool key",
             "description": "Defensive; no current bug. Distinguish a preview vs full request in the decode-pool job key.",
-            "status": "pending"
+            "status": "pending",
+            "parentId": "undefined"
           },
           {
             "id": 5,
             "title": "Sync load paths bypass preview-first (~250ms HEIC freeze)",
             "description": "DONE 2026-07-14: resize/scale-mode/rebuild no longer decode synchronously on the event loop. Epoch-aware readiness (presented_epoch + target_caught_up/target_pending), a renderer held-frame carried across the ring rebuild (choose_draw_source), and the async prefetch owning the re-decode. load_current_sync kept only for the user-initiated edit/restore paths (save-rotation/undo/restore-still); the redundant startup re-decode removed; the while-hidden initial_image decode kept (documented, non-interactive).",
-            "status": "done"
+            "status": "done",
+            "parentId": "undefined"
           },
           {
             "id": 6,
             "title": "Tier state-machine unit/property tests",
             "description": "Partly addressed by #5 (pure choose_draw_source in pb-render + target_caught_up/pending + geometry/rebuild/failure tests in pb-app-core). Broader preview->full tier coverage (drain_results upgrade, preview_resident transitions) still to extract/test.",
-            "status": "pending"
+            "status": "pending",
+            "parentId": "undefined"
           }
         ]
       },
@@ -62,7 +63,7 @@
         "status": "pending",
         "priority": "low",
         "dependencies": [
-          27
+          "27"
         ],
         "details": "Implement as part of task #54's ExifPanel migration. pb-app-core should expose untruncated detail rows plus copy payloads: whole-panel text and optional per-row text. Presenters provide the affordance natively: egui context menu/button/row action on Windows; native command/context menu/selection behavior on macOS. Avoid teaching pb-hud render_table about hover state, row hit rects, or per-row click handling; the CPU compositor stays for ephemeral/non-interactive overlays.",
         "testStrategy": "Pure: unit-test ExifPanel rows -> clipboard text (formatting, label:value lines, ordering, no viewport truncation) and per-row copy payloads. Manual after rich-panel migration: Shift+I, copy full details and paste; copy one field and paste; confirm the 'Copied' toast fires and copying writes nothing to disk (privacy #2 - clipboard is a user-initiated action, not a viewing trace).",
@@ -72,7 +73,8 @@
             "title": "Add ExifPanel copy payloads",
             "description": "As part of task #54's model extraction, expose whole-panel clipboard text and per-row copy payloads from pb-app-core. Keep payloads untruncated and independent of the visible viewport.",
             "status": "pending",
-            "dependencies": []
+            "dependencies": [],
+            "parentId": "undefined"
           },
           {
             "id": 2,
@@ -81,7 +83,8 @@
             "status": "pending",
             "dependencies": [
               1
-            ]
+            ],
+            "parentId": "undefined"
           },
           {
             "id": 3,
@@ -91,7 +94,8 @@
             "dependencies": [
               1,
               2
-            ]
+            ],
+            "parentId": "undefined"
           }
         ]
       },
@@ -107,55 +111,64 @@
             "id": 1,
             "title": "pb-hud font-fallback cascade",
             "description": "Per-glyph fallback across 2-3 faces (UI font → CJK → symbol) so arbitrary model prose and non-Latin EXIF render on both platforms. Prerequisite for the description panel.",
-            "status": "pending"
+            "status": "pending",
+            "parentId": "undefined"
           },
           {
             "id": 2,
             "title": "Prompt/context builder in core",
             "description": "Pure fn over meta_cache: salient EXIF + filename/folder, junk-date filtering, unverified-context framing, template with placeholders + settings.toml custom-template override. DONE 2026-07-04: crates/pb-app-core/src/prompt.rs — pure build_context (salience over the exif_cache (tag,value) list: DateTimeOriginal/DateTime normalized with epoch-default + future-date junk filtering; Make/Model brand-token dedup + LensModel; GPSLatitude/Longitude to signed decimal with raw-string fallback; filename + parent folder from the name) and build_prompt (DEFAULT_INSTRUCTION + unverified-context trailer, or a settings.toml custom template via context/filename/folder/datetime/camera/location placeholder substitution). 18 unit tests green (salience, junk dates, GPS parse, templating).",
-            "status": "done"
+            "status": "done",
+            "parentId": "undefined"
           },
           {
             "id": 3,
             "title": "Describer seam + policy in AppCore",
             "description": "Action::DescribeImage, state machine (idle/busy/shown/failed), dwell auto-describe (500 ms, opt-in), generation-counter cancel, RAM-only per-image cache, backend policy Auto→Apple→endpoint, image prep (downscale + JPEG re-encode from decoded RGBA). DONE 2026-07-04: describe machine wired into AppCore, generalizing image_text.rs. Fields descriptions: HashMap<usize, Result<String,String>> + describe_scan: Option<DescribeScan> + describe_gen (bumped with text_gen; cleared in enter_empty_state/rebuild + shell clear_session_state; per-item evict on rotate). Action::DescribeImage (D) toggles InfoMode::Describe + kicks ensure_describe_scan; poll_describe_scan on the tick (+wants-tick guard). Policy describer_from_settings: Auto/LocalEndpoint -> LocalEndpoint from settings.describe_endpoint (Apple FM is subtask 5, delegated later); empty endpoint caches the 'set up a backend' hint. default_describe_prompt uses prompt::build_context/build_prompt over exif_cache. Describe does NOT auto-fire on settle (unlike OCR) — remote-endpoint safety; dwell auto-describe is later. Settings gained describe_backend(DescribeBackend enum)/endpoint/model/auto/speak_descriptions/prompt (serde default). 6 headless state-machine tests (toggle, cache-by-item, stale-gen drop, error->user message, no-endpoint hint, ask bypasses cache). Full workspace builds + clippy clean (boxed DialogOutcome::SettingsSaved.settings to satisfy large_enum_variant after Settings grew). AUTO-DESCRIBE refined per owner 2026-07-04: describe_auto fires ONLY while the Describe panel is already open (show_overlay InfoMode::Describe arm), never as a passive background send — the user opted into looking at descriptions. Off by default (privacy + token cost). Settle path, so hold-to-blaze does not machine-gun the backend.",
-            "status": "done"
+            "status": "done",
+            "parentId": "undefined"
           },
           {
             "id": 4,
             "title": "Local endpoint backend (pure Rust)",
             "description": "OpenAI-compatible /v1/chat/completions with base64 image, blocking ureq on a worker thread (no tokio), error taxonomy → user-facing messages. Works on both platforms. DONE 2026-07-04: crates/pb-app-core/src/describe.rs — Describer seam (image+prompt to text), DescribeError taxonomy with actionable user_message(), LocalEndpoint backend (blocking ureq 3.x POST to OpenAI-compatible /v1/chat/completions on a worker thread; connect 4s / global 120s timeouts; TLS on by default so https endpoints work). Pure/tested: chat_url join, build_chat_request (image_url data URI + prompt, omit empty model), parse_chat_response (string + array content, surfaces server error objects), map_ureq_error. prepare_image = pb_decode::downscale_rgba8 to 1024 long edge + new pb_decode::encode_jpeg_rgba8 (added image-crate jpeg encode feature) + base64 data URI. describe_job = the whole worker (decode to_clipboard_rgba8 + rotate + prep + describe), image_text::scan_job shape. FakeDescriber for subtask-3 state-machine tests. 13 describe unit tests + 2 pb-decode encode tests green; clippy clean. Dev example examples/describe_probe.rs live-smokes subtasks 2+4 against LM Studio/Ollama. Deps added to pb-app-core: ureq(json), serde_json, base64. NOT YET WIRED into AppCore (subtask 3). LIVE-SMOKED 2026-07-04 end-to-end over the LAN: describe_probe on a full-res photo -> Gremlin (192.168.1.160) LM Studio, qwen2.5-vl-32b-instruct on an RTX 5090 -> accurate multi-sentence description (even OCR'd text on boxes) in 3.3s. NOTE for owner setups: LM Studio must fully GPU-offload the VL model (Hardware > Limit Model Offload to Dedicated GPU Memory = ON, Guardrails Relaxed, per-model GPU Offload maxed) or it silently spills to shared system RAM and runs ~0.6-3 tok/s (CPU speed) -> the 120s global timeout trips; fully offloaded on a 5090 it's ~58 tok/s.",
-            "status": "done"
+            "status": "done",
+            "parentId": "undefined"
           },
           {
             "id": 5,
             "title": "Apple Foundation Models backend (Swift + FFI)",
             "description": "Availability check (macOS 27+, Apple Intelligence on), FM session with image input (file URL handoff for on-disk stills), password-flow-style effect out / result FFI back.",
-            "status": "pending"
+            "status": "pending",
+            "parentId": "undefined"
           },
           {
             "id": 6,
             "title": "Interim HUD description panel + future DescriptionPanel model",
             "description": "Interim description overlay in the detailed-info position + busy indicator; wraps long prose; rebuilt on change only. Durable target is task #54's DescriptionPanel rich model/presenter so description and Ask answers become selectable/copyable. DONE 2026-07-04: InfoMode::Describe panel renders via pb-hud render_paragraph (the OCR panel's word-wrap block), states = description / one-line backend error / 'Describing…' busy / 'Press D to describe this photo.' hint. Shares the single overlay slot (mutually exclusive with info/EXIF/text/help). Rebuild-on-change only. Streaming + the loading-pie affordance are later polish.",
-            "status": "done"
+            "status": "done",
+            "parentId": "undefined"
           },
           {
             "id": 7,
             "title": "TTS: CoreEffect::Speak + platform impls",
             "description": "AVSpeechSynthesizer (macOS) / Windows.Media.SpeechSynthesis or SAPI (Windows); speech cancels on navigation; speak-aloud toggle.",
-            "status": "pending"
+            "status": "pending",
+            "parentId": "undefined"
           },
           {
             "id": 8,
             "title": "AI Descriptions settings UI (both shells)",
             "description": "Own tab on macOS (per-tab sized), group card on egui: backend picker, endpoint URL + model name, auto-describe toggle, speak-aloud toggle. EGUI SIDE DONE 2026-07-04 (winit shell, visible on macOS via cargo run -p pb-app > Settings): new AI tab (dialog.rs) — group card 'Image Descriptions' with Backend combo (Auto/Apple-on-device[disabled: needs macOS 27]/Local endpoint), Endpoint URL + Model text fields (disabled when Apple), a TEST CONNECTION button (probe on a worker thread -> pb_app_core::describe::probe_endpoint GET /models; inline status: reachable + model count + warns when no served model looks vision-capable via looks_like_vision_model), Response length combo (Brief/Standard/Detailed -> describe_max_tokens 256/512/1024), Auto-describe + Speak toggles; a 'Prompt' card with a full-width multiline custom-prompt field (built-in instruction as placeholder + {placeholder} legend); and the ADR-018 privacy caption. SettingsDraft from/to_settings extended; ConnTest enum + threaded state. NEW: describe_max_tokens setting (clamped 16..4096) threaded through LocalEndpoint/build_chat_request; probe_endpoint + looks_like_vision_model in describe.rs (2 new tests). REMAINING: the native SwiftUI 'AI' tab in PhotoBlazeMac SettingsView (the shell the owner runs day-to-day) + its FFI. SWIFTUI SIDE DONE 2026-07-04 (the shell the owner runs): native 'AI' tab in SettingsView.swift (TabView, sparkles icon, 560x560 fixed pane) mirroring the egui tab — Backend segmented picker (Auto/Apple[shows a 'needs macOS 27' caption when picked]/Local endpoint), Endpoint URL + Model TextFields, Test connection button (Task.detached -> new probe_describe_endpoint FFI free fn -> ProbeResultFfi {ok,message}; primitives extracted inside the detached task so nothing non-Sendable crosses; inline colored status), Response length segmented (Brief/Standard/Detailed), Auto-describe + Speak toggles, a Prompt section (TextEditor + placeholder legend), and the ADR-018 privacy caption. Auto-saves via the existing debounced settings_edited path. FFI: SettingsFormFfi gained describe_backend(u8)/endpoint/model/prompt(String, empty=None)/max_tokens(u32)/auto/speak; settings_form + fold_settings_form extended; ProbeResultFfi + probe_describe_endpoint added (swift-bridge structs reject /// doc comments — use //). Swift SettingsDraft extended (init(form:)/toForm() + lengthPreset helpers). 1 new FFI round-trip test (settings_form_carries_the_describe_fields). Full workspace + Swift host build + clippy clean. BOTH SHELLS COMPLETE. MODEL PICKER 2026-07-04 (both shells): the Model field gained a dropdown filled from GET /v1/models (reusing probe_endpoint) — vision-capable models first via new core describe::sort_models_vision_first (stable, tested), a '(loaded model)' = blank option, vision ones badged; free-text kept for a not-yet-loaded model. Test button relabeled 'Test & list models' (one action tests + fills the picker). egui: DialogWindow.describe_models Vec threaded through settings_ui/ai_tab; render_conn_test captures the sorted list; ComboBox beside the text field. SwiftUI: ProbeResultFfi gained a newline-joined models String (avoids Vec across swift-bridge), runConnTest splits it into describeModels, a Menu picker beside the TextField (display-only isLikelyVisionModel marker). 229 core tests.",
-            "status": "done"
+            "status": "done",
+            "parentId": "undefined"
           },
           {
             "id": 9,
             "title": "Ask about this image (visual Q&A) — post-v1 extension",
             "description": "Owner idea 2026-07-04 from WWDC26 (VQA is explicitly supported): both backends already take an arbitrary prompt, so once describe lands, asking a typed question about the current image is nearly free — a native/egui input dialog now, and later task #54's Description/Ask rich panel action if inline input is wanted. The question feeds through the SAME image-prep + Describer seam + panel, replacing only the canned prompt. On-device Apple FM makes it zero-setup/zero-cost/on-device; the local endpoint serves it on Windows. Scope AFTER v1 describe (subtasks 2-8) is working. PARTIALLY WIRED 2026-07-04: Action::AskImage (id ask_image, default Shift+D) + core ask_describe(question) (bypasses the general-description cache, reruns through the same Describer+panel) are in. Remaining: the text-input dialog (winit egui shell) that collects the question and calls ask_describe — ask_image() currently toasts a placeholder. Owner elevated this from post-v1 to in-phase (2026-07-04, 'freaking cool'). DONE 2026-07-04 (both shells): Action::AskImage (Shift+D) + Action::CopyDescription (menu/context, no key). Ask flow: new DialogKind::AskImage + DialogResult::AskSubmitted(String); ask_image() emits ShowDialog(AskImage); the shell collects a MULTI-LINE question and returns AskSubmitted -> handle_dialog_resolved -> CloseDialog + ask_describe(). egui: ask_dialog (multiline TextEdit, plain Enter=newline, Cmd/Ctrl+Enter or Ask submits; DialogWindow take_ask_result plumbing) + DialogOutcome::AskSubmitted routing + DialogKind maps. SwiftUI: AskSheetView (TextEditor, sparkles, Cmd+Return submit) + SheetKind.ask + showDialog case ask_image + askEntry/askSubmit/askCancel + ask_submitted FFI method + ShowDialog string. Copy AI description: copy_description() (cached Ok -> clipboard 'Copied description'; else kick describe + copy_when_done added to DescribeScan, poll copies on landing; cached Err retried); Edit + context menu items in BOTH shells (winit menu.rs ids/MenuAction; SwiftUI MenuBar.swift + CoreModel context menu). Also added Describe Image / Ask About Image menu items for discoverability. 4 new core tests (copy cache/deferred, ask opens+submits). 228 pb-app-core + 17 pb-mac-ffi tests + full workspace + Swift host build + clippy all clean.",
-            "status": "done"
+            "status": "done",
+            "parentId": "undefined"
           }
         ]
       },
@@ -175,7 +188,7 @@
         "status": "in-progress",
         "priority": "low",
         "dependencies": [
-          54
+          "54"
         ],
         "details": "CRASH FIXED (2026-07-06): setting window.toolbar synchronously inside viewDidMoveToWindow (← attachCanvas ← SwiftUI addSubview realizing the WindowGroup window) crashed in -[NSToolbar _loadAllPlaceholderItems] (SIGTRAP) — re-entrant toolbar mutation mid-realization. Fix: defer the window.toolbar assignment one runloop hop (installToolbarIfNeeded → DispatchQueue.main.async), gated so the per-drain reassertIfClobbered waits for toolbarInstalled=true. autosavesConfiguration stays TRUE (verified NOT the cause; Hide/Customize persist natively). Shipped .app verified launch- and photo-load-clean.\n\nv1.0 landed (2026-07-06): a native AppKit NSToolbar (mac/Sources/PhotoBlazeMac/ToolbarController.swift), the sibling of MenuBar.swift — every button fires a stable Action id via CoreModel.menuAction, and sync(MenuState, treeVisible) mirrors the live state (selected scale segment; Info/Folders/Slideshow on-state; Compare/Reveal/Delete enables). Chosen over a floating overlay strip because a titlebar toolbar costs zero extra image area in windowed mode, and Hide Toolbar (⌥⌘T) / Customize Toolbar… / fullscreen auto-hide are free native behaviors — resolving the chrome-less prime-directive tension. toolbarStyle = .unifiedCompact (the Preview-on-Tahoe look); the window title is split into filename + 'N of M' subtitle (applyWindowTitle). Default set: nav segmented, random, flexible space, scale segmented, rotate-left, inspector/tree/slideshow toggles. Allowed palette adds zoom, rotate-right, play, compare, copy, copy-path, reveal, delete, describe, open-file/folder, settings, fullscreen. SF Symbols (not FA) for system consistency. Compiles clean; produced a debug .app.\n\nOPEN / ITERATE (needs on-device smoke — headless build here can't see it): (1) SwiftUI clobber — does it swap in its own window.toolbar on scene updates? reassertIfClobbered runs in assertWindowChrome (identity check, logged) to heal it; watch the trace. If it fights (flicker), consider dropping the .toolbarBackground modifier in ContentView and owning F-mode titlebar hiding purely via AppKit. (2) Look/legibility of the glass toolbar over bright/white photos (verify over a pure-white image — the known HDR all-white capture stress case). (3) Confirm the default button SET + order with the owner. (4) Toggle active-state rendering (pushOnPushOff recess + accent tint) — is it clear enough, or switch to a view-based recessed style? (5) Optional: transparent full-bleed variant (titlebarAppearsTransparent + fullSizeContentView in windowed mode) so the image runs edge-to-edge under the glass, the way the owner liked in the Preview Tahoe screenshot — a small follow-up once the button set is settled. (6) Windows/egui parity is still deferred to the egui presenter track (#54 subtask 5).",
         "testStrategy": "Owner smoke test on device: every toolbar button reaches the same effect as its keyboard/menu equivalent; toggle on-states track the panels; Hide Toolbar + Customize persist across relaunch (autosavesConfiguration); the toolbar survives an F-mode round trip (SwiftUI clobber healed) and is gone in the borderless speed mode; keypress→photon timing unchanged with the toolbar hidden. Compile gate: swift build --package-path mac.",
@@ -188,7 +201,7 @@
         "status": "pending",
         "priority": "low",
         "dependencies": [
-          54
+          "54"
         ],
         "details": "Scope: title = the current folder's name (bold, middle-ellipsis truncated like the row labels already do), derived client-side from the existing treeRows[isCurrent] entry in CoreModel.swift (no new FFI needed — isCurrent + name are already exposed per row). Maybe show a small parent segment too (\"Documents > Downloads\") if width allows, clickable to jump up one level (reuses the existing up/PanelAction::OpenTreeTarget navigation, not new orchestration). Keep the ✕ close button and existing chrome layout (FolderTreePanelView's HStack at line 44-58) otherwise unchanged. Windows/egui tree (task #54 subtask 5, not yet built) should follow the same title convention when it lands.",
         "testStrategy": "Owner smoke test on macOS: open the tree at various folder depths/name lengths (short name, long name needing truncation, root with no parent) and confirm the title reads correctly and any parent-segment click navigates up a level. No new core logic, so no new pb-app-core unit tests expected beyond what task #54 already covers for tree navigation.",
@@ -211,8 +224,8 @@
         "status": "in-progress",
         "priority": "medium",
         "dependencies": [
-          54,
-          55
+          "54",
+          "55"
         ],
         "details": "SHIPPED core impl 2026-07-13 (winit shell, Windows+Linux). Rendered in the #54 egui overlay (crates/pb-app/src/toolbar.rs) as an egui TopBottomPanel, composited by pb-render; dispatches via PanelAction::ToolbarAction (one-shot) and ToolbarNavPress/Release (hold-to-blaze through the core's begin/end_pointer_nav, which already existed). State via a separate Copy+Eq ToolbarState diffed each turn (NOT MenuState, which re-syncs the native menu) — counter from display_counter()/displayed_item (present-truth, hides on cold start), video-aware current_has_motion()/motion_playing(). Top inset reuses set_content_top_inset (chrome_inset_px = menu + toolbar); refresh_chrome_inset re-fits on a live toggle. Icons: 10 FA glyphs vendored BOTH families (the glyph! macro requires solid+regular) + a paint_tinted_flipped mirror API for random-prev. Styling from pb_ui tokens/Palette (hover fill, sunken press, accent for active toggle / playing). Settings: show_toolbar (default true, serde(default) via struct) with a Display>Appearance toggle, live-applied. Button set matches #55 minus power features; ADDS Delete. Non-occlusion is Fit-only (Fill/zoom/pan ride under, per the #59 spike). REMAINING (see subtasks): the pb-ui gallery/atom promotion, DPI-overlap + fullscreen-round-trip tests, the 8K/120 windowed on/off perf A/B gate, and visual polish iteration with the owner.",
         "testStrategy": "Landed: pure width-plan tests (collapse order folder-nav>rotate>random, monotonic); display_counter present-truth test (counter stays on displayed_item during a ring miss); the core's pointer_nav hold-to-blaze test. Pending: button->Action mapping table test; pointer quick-click = one advance vs hold lifecycle; left/right no-overlap at 100/125/150/200% DPI; old settings (no show_toolbar) default enabled; fullscreen round-trip has no stale-toolbar frame; headless light/dark snapshots; the 8K/120 A/B perf gate. Manual: click through every button, confirm accent-on-active + play-accent-while-playing, hold nav to fly, toggle show_toolbar live and see the photo reflow.",
@@ -221,25 +234,29 @@
             "id": 1,
             "title": "pb-ui gallery + promote the icon button atom",
             "description": "Add the toolbar (and its states) to the pb-ui gallery for light/dark A-B; promote toolbar.rs icon_button into pb-ui as a reusable atom once the look settles.",
-            "status": "pending"
+            "status": "pending",
+            "parentId": "undefined"
           },
           {
             "id": 2,
             "title": "Remaining tests (mapping, input lifecycle, DPI, fullscreen)",
             "description": "Button->Action mapping table; quick-click=one-advance vs hold/release/drag-off; left/right no-overlap at 100-200% DPI; old-settings-default-enabled; fullscreen round-trip no stale frame; headless snapshots.",
-            "status": "pending"
+            "status": "pending",
+            "parentId": "undefined"
           },
           {
             "id": 3,
             "title": "8K/120 windowed toolbar-on/off perf A/B gate",
             "description": "Scripted keypress workload, toolbar on vs off, report CPU/GPU p50/p95/p99 + missed refreshes + keypress-to-photon; if the full-window composite is measurable, escalate to a strip-sized retained target.",
-            "status": "pending"
+            "status": "pending",
+            "parentId": "undefined"
           },
           {
             "id": 4,
             "title": "Visual polish iteration with owner",
             "description": "Tune surface/opacity, hover/press/accent tones, group spacing/divider, icon set + counter format, overflow behavior — iterate until beautiful.",
-            "status": "pending"
+            "status": "pending",
+            "parentId": "undefined"
           }
         ]
       },
@@ -250,7 +267,7 @@
         "status": "pending",
         "priority": "low",
         "dependencies": [
-          44
+          "44"
         ],
         "details": "Mirror LocalEndpoint's shape: blocking ureq on a worker thread (no tokio), connect+global timeouts, DescribeError taxonomy mapped to actionable user_message() (add a distinct arm for 401 = bad/expired API key, and 429 = rate limited). Keep request-build / response-parse / error-map as PURE functions with unit tests, exactly like LocalEndpoint (chat_url/build_chat_request/parse_chat_response/map_ureq_error) — only the socket call stays untested in-process, exercised by a dev example probe. Prepared image is already downscaled+JPEG (PreparedImage.jpeg, MAX_EDGE 1024, quality 85) — base64 that same buffer into the source block; media_type is image/jpeg. Respect settings.describe_max_tokens (Brief/Standard/Detailed = 256/512/1024) as Anthropic max_tokens. Settings UI extends the existing 'AI Descriptions' tab from #44 subtask 8 (BOTH shells: egui dialog.rs + SwiftUI SettingsView.swift) — backend picker gains 'Anthropic (Claude)'; add a SECURE api-key field (keychain-backed, not the TOML draft) + model field/picker (haiku/sonnet); update the ADR-018 privacy caption to name the cloud case explicitly ('Anthropic backend uploads the image to Anthropic; may be retained/used per their policy — this is the one non-local option'). Test-connection can hit GET /v1/models (with x-api-key) to validate the key. Do NOT thread the api key through the same serde SettingsDraft/FFI path as other fields — it must not land in settings.toml or logs.",
         "testStrategy": "Pure: unit-test the Anthropic request body (base64 source block present, x-api-key + anthropic-version headers set, model + max_tokens included), response parse (content[].text; server error object surfaced), and error mapping (401 -> 'check your API key' actionable message; 429 -> rate-limit message). Dev example anthropic_describe_probe against api.anthropic.com with a real key (mirrors describe_probe.rs) to live-smoke the socket path the unit tests skip. Manual: select the Anthropic backend, enter a key, press D on a photo -> multi-sentence description; Shift+D Ask a question -> answered; Copy description works; confirm the key is stored in the OS keychain and does NOT appear in settings.toml or any log; confirm ADR-018 + the settings privacy caption were updated (subtask 1) BEFORE this ships.",
@@ -259,37 +276,43 @@
             "id": 1,
             "title": "Reconcile the charter FIRST (ADR-018 + #44 privacy blurb)",
             "description": "Before any code: update ADR-018 and task #44's privacy notes/settings caption to state that ONE explicit, opt-in, user-keyed cloud backend (Anthropic) is now permitted, local stays default, nothing is sent to cloud without the user selecting that backend and entering their own key. This makes the cloud backend a documented decision, not silent drift that contradicts the app's stated privacy posture. Load-bearing — do not skip.",
-            "status": "pending"
+            "status": "pending",
+            "parentId": "undefined"
           },
           {
             "id": 2,
             "title": "AnthropicEndpoint backend (pure Rust) + probe",
             "description": "New impl Describer in describe.rs: POST /v1/messages, base64 source block (reuse PreparedImage.jpeg), x-api-key + anthropic-version headers, blocking ureq on a worker thread mirroring LocalEndpoint, parse content[0].text, DescribeError taxonomy incl. 401/429 arms. Pure unit tests for build/parse/error-map; dev example anthropic_describe_probe for the live socket path.",
-            "status": "pending"
+            "status": "pending",
+            "parentId": "undefined"
           },
           {
             "id": 3,
             "title": "API key in the OS keychain (keyring crate)",
             "description": "Store/retrieve describe_api_key via the keyring crate; never in settings.toml, never logged. Load at describe time. Keep it off the serde SettingsDraft/FFI path used for non-secret fields.",
-            "status": "pending"
+            "status": "pending",
+            "parentId": "undefined"
           },
           {
             "id": 4,
             "title": "Wire into DescribeBackend + describer_from_settings",
             "description": "Add the Anthropic variant to the DescribeBackend enum (settings.rs) and the match in describer_from_settings() (app_core_impl.rs ~4439); default model claude-haiku-4-5; thread describe_max_tokens through as Anthropic max_tokens.",
-            "status": "pending"
+            "status": "pending",
+            "parentId": "undefined"
           },
           {
             "id": 5,
             "title": "Settings UI (both shells) + updated privacy caption",
             "description": "Extend the existing AI Descriptions tab (#44 subtask 8) in BOTH shells: backend picker gains 'Anthropic (Claude)'; secure keychain-backed api-key field; model field/picker (haiku/sonnet); 'Test & validate key' via GET /v1/models with x-api-key; update the ADR-018 privacy caption to name the cloud case. Mirror the egui + SwiftUI structure #44 already established.",
-            "status": "pending"
+            "status": "pending",
+            "parentId": "undefined"
           },
           {
             "id": 6,
             "title": "CHANGELOG + owner smoke",
             "description": "Unreleased > Added entry ('optional Anthropic/Claude cloud backend for AI descriptions'). Owner smoke: pick Anthropic, enter key, D + Shift+D + Copy on the corpus; verify key is in the keychain not settings.toml; verify local backend still default and unchanged.",
-            "status": "pending"
+            "status": "pending",
+            "parentId": "undefined"
           }
         ]
       },
@@ -300,86 +323,99 @@
         "status": "pending",
         "priority": "medium",
         "dependencies": [
-          62
+          "62"
         ],
         "subtasks": [
           {
             "id": 1,
             "title": "Papercut pass: Wayland/X11 decorations, HiDPI/fractional scaling, GL fallback",
             "description": "Run under both Wayland and X11; check window decorations, fractional scaling, and that wgpu falls back to GL if a box lacks Vulkan. Fix the shake-out bugs. NOTE: fullscreen is a borderless window manually positioned (set_outer_position is a no-op on native Wayland and primary_monitor() can be None) — use Fullscreen::Borderless on the Wayland backend. First thing to check in the Ubuntu VM test.",
-            "status": "pending"
+            "status": "pending",
+            "parentId": "undefined"
           },
           {
             "id": 2,
             "title": "Desktop integration: .desktop file + icon (+ optional xdg-mime default)",
             "description": "Ship a .desktop entry + icon so it's a real app in the launcher; optional xdg-mime association for 'open with'. NOTE: Settings ▸ System shows a dead \"Default apps\" row on Linux (silent no-op, Windows wording, dialog.rs ~2104) — hide or re-word until the .desktop/xdg-mime story lands. The .desktop file is also the only way Wayland gets a window icon.",
-            "status": "pending"
+            "status": "pending",
+            "parentId": "undefined"
           },
           {
             "id": 3,
             "title": "Packaging (optional, ship-gated): AppImage or Flatpak",
             "description": "Bare binary works for early users; AppImage or Flatpak for a real release channel. Optional — don't let it block the writeup.",
-            "status": "pending"
+            "status": "pending",
+            "parentId": "undefined"
           },
           {
             "id": 4,
             "title": "THE DELIVERABLE: companion blog post + post it",
             "description": "'I ported my Rust image viewer to Linux (and it might be the fastest one there)'. ~1200 words, screenshot running on a Wayland desktop, aimed at r/rust / HN / r/linux. This is what makes the port COUNT — the port without the post is the vanishing pattern. Pays into both April Big Rocks (Build + Blog). Do NOT let this slip past the code.",
-            "status": "pending"
+            "status": "pending",
+            "parentId": "undefined"
           },
           {
             "id": 5,
             "title": "AVIF decode on Linux",
             "description": "No AVIF decoder at all on Linux (WIC covers it on Windows). Route .avif through libheif where the system build has AV1, else wire the dav1d+avif-parse path from the original plan. Decide + implement. [Implemented 2026-07-08: route AVIF to the libheif backend gated on heif_have_decoder_for_format(AV1). Linux distro libheif (built with dav1d — Debian/Ubuntu libheif1 depends on libdav1d) decodes AVIF through the same pipeline as HEIC (color via colr box, self-orient); Windows vcpkg (libde265-only) keeps AVIF on WIC, unchanged. SDR only for now — HDR (PQ/HLG) AVIF routes away like HDR HEIC. VERIFY IN A LINUX VM: (1) an .avif file opens and displays, (2) a folder with .avif is scanned (not skipped), (3) color/orientation look right, (4) if the distro libheif lacks dav1d it degrades to a clean \"unsupported\", not a crash.]",
-            "status": "review"
+            "status": "review",
+            "parentId": "undefined"
           },
           {
             "id": 6,
             "title": "Linux CI job that actually builds the shell",
             "description": "core-linux only tests pb-core and is advisory. Add an ubuntu job with libgtk-3-dev + libheif-dev that builds pb-app (--features libheif) and runs the workspace tests, so the actively-developed Linux shell cannot rot silently.",
-            "status": "pending"
+            "status": "pending",
+            "parentId": "undefined"
           },
           {
             "id": 7,
             "title": "Fonts via fontconfig instead of hard-coded paths",
             "description": "pb-hud and pb-ui probe DejaVu/Liberation/Noto at Debian/Arch paths only; Fedora-style layouts fall through to egui fallback. Resolve through fontconfig (or bundle a face).",
-            "status": "pending"
+            "status": "pending",
+            "parentId": "undefined"
           },
           {
             "id": 8,
             "title": "OS theme tracking on X11",
             "description": "window.theme() is None on X11 so the app defaults dark regardless of the desktop setting (Wayland tracks via portal). Read the portal/gsettings directly or document the limitation.",
-            "status": "pending"
+            "status": "pending",
+            "parentId": "undefined"
           },
           {
             "id": 9,
             "title": "Reveal-in-file-manager with file selection",
             "description": "Linux reveal is xdg-open on the folder only. Use the org.freedesktop.FileManager1.ShowItems DBus call (Nautilus/Dolphin/Thunar all implement it) with the xdg-open fallback.",
-            "status": "pending"
+            "status": "pending",
+            "parentId": "undefined"
           },
           {
             "id": 10,
             "title": "Decide the degraded-feature story: OCR, Live Photos, animated AVIF/HEIC, HDR-HEIC tone-map, TTS",
             "description": "All currently degrade gracefully on Linux (message or still image). Decide accept-vs-implement per feature: OCR (tesseract?), Live Photo video+audio (GStreamer/ffmpeg — big), animated AVIF/HEIC, HDR HEIC decoded-to-SDR tone-map, Describe TTS (speech-dispatcher).",
-            "status": "pending"
+            "status": "pending",
+            "parentId": "undefined"
           },
           {
             "id": 11,
             "title": "File the winit WSLg keycode-overflow issue upstream",
             "description": "wayland/seat/keyboard/mod.rs:135 key+8 overflow on WSLg bogus keycodes; unfixed on master. Our X11 preference dodges it, but upstream should know.",
-            "status": "pending"
+            "status": "pending",
+            "parentId": "undefined"
           },
           {
             "id": 12,
             "title": "Right-click context menu on Linux (egui)",
             "description": "CoreEffect::ShowContextMenu is discarded by the Linux shell arm (main.rs ~1851; muda cannot attach to a raw winit window). Render an egui context menu in the existing overlay — the menu dropdown row renderer already exists.",
-            "status": "pending"
+            "status": "pending",
+            "parentId": "undefined"
           },
           {
             "id": 13,
             "title": "Small Linux fixes bundle",
             "description": "a) 7z RAM pre-flight: parse /proc/meminfo MemAvailable instead of the blind 8 GiB assumption (archive.rs ~99). b) HEIC embedded-thumbnail fast-preview is cfg(windows)-gated (libheif.rs ~29) — enable for libheif builds so HEIC fly-through gets previews. c) Copy Image publishes pixels only — add text/uri-list file reference alongside. d) DONE: scanner skipped HEIC on Linux (is_supported_extension gate) — fixed.",
-            "status": "pending"
+            "status": "pending",
+            "parentId": "undefined"
           }
         ]
       },
@@ -397,19 +433,22 @@
             "id": 1,
             "title": "Retune the ramp constants (gentler start, lower top speed)",
             "description": "Adjust ZOOM_MIN/MAX_RATE + ZOOM_RAMP_SECS and PAN_MIN/MAX_SPEED + PAN_RAMP_SECS in engine.rs; owner feel-checks candidate values on device. One-file change.",
-            "status": "pending"
+            "status": "pending",
+            "parentId": "undefined"
           },
           {
             "id": 2,
             "title": "Ease-in curve shape (shared pure helper)",
             "description": "Replace the linear t-ramp in apply_view_holds with a shared ease-in (smoothstep / t^2) helper used by both zoom and pan; unit-test endpoints + monotonicity + gentler-than-linear midpoint.",
-            "status": "pending"
+            "status": "pending",
+            "parentId": "undefined"
           },
           {
             "id": 3,
             "title": "Optional: release ease-out / inertia",
             "description": "Only if still wanted after 1+2: decay the last pan/zoom velocity over ~150-250ms on key-up instead of stopping dead, so motion settles smoothly. Own subtask because it adds state to the hold loop.",
-            "status": "pending"
+            "status": "pending",
+            "parentId": "undefined"
           }
         ]
       },
@@ -427,25 +466,29 @@
             "id": 1,
             "title": "Core idle auto-hide policy + emit SetCursor(Hidden)",
             "description": "Pure, testable policy in pb-app-core: after an idle timeout with no pointer movement (and no overlay/affordance/menu/dialog active) emit CoreEffect::SetCursor(CursorKind::Hidden); restore the resolved cursor on movement. Schedule the hide via the existing tick-deadline machinery (no spin). Stronger/sooner hide in WindowMode::Fullscreen. Unit tests over (now, last-move, mode, overlay state).",
-            "status": "pending"
+            "status": "pending",
+            "parentId": "undefined"
           },
           {
             "id": 2,
             "title": "winit shell: actually hide via set_cursor_visible",
             "description": "Replace the Hidden->Default stub in cursor_icon/SetCursor handling (main.rs): on Hidden call window.set_cursor_visible(false), on any other kind restore visibility + set the icon; track state to avoid per-event thrash. Windows + X11 honored; accept Wayland's compositor-mediated limitation.",
-            "status": "pending"
+            "status": "pending",
+            "parentId": "undefined"
           },
           {
             "id": 3,
             "title": "macOS: confirm/adjust the hide behavior",
             "description": "Core now emits Hidden — verify the SwiftUI shell's setHiddenUntilMouseMoves feel matches the policy, or switch to explicit NSCursor.hide()/unhide() if the auto-restore-on-move semantics fight the core's restore. No new orchestration.",
-            "status": "pending"
+            "status": "pending",
+            "parentId": "undefined"
           },
           {
             "id": 4,
             "title": "Settings toggle (both shells) + default",
             "description": "Add settings.hide_cursor_when_idle (serde default; optional idle-seconds) and a toggle in BOTH shells — egui Settings (pb-ui toggle_with_label) + SwiftUI SettingsView + its FFI. Owner picks the default (likely ON, or ON-only-in-fullscreen). CHANGELOG Unreleased > Added.",
-            "status": "pending"
+            "status": "pending",
+            "parentId": "undefined"
           }
         ]
       },
@@ -456,7 +499,7 @@
         "status": "pending",
         "priority": "medium",
         "dependencies": [
-          70
+          "70"
         ],
         "details": "For each candidate symbol: (1) an explicit candidate list (winit-shell-shaped helpers plausibly orphaned once the macOS shell and its call sites are gone); (2) a pb-app call-site search; (3) a pb-mac-ffi search INCLUDING generated/ bridge glue; (4) run BOTH host test suites (pb-app-core on Windows/Linux + pb-mac-ffi on macOS). Delete only symbols proven unused by all four. No behavior change to either shell.",
         "testStrategy": "Each removed symbol has a documented no-callers proof across pb-app + pb-mac-ffi(+generated); pb-app-core tests green on Windows/Linux; pb-mac-ffi builds + the Swift host runs unchanged on macOS.",
@@ -465,13 +508,15 @@
             "id": 1,
             "title": "Assemble + prove the candidate symbol list",
             "description": "List winit-shell-shaped pb-app-core symbols plausibly orphaned by #70; for each, prove no callers across pb-app, pb-mac-ffi, and generated bridge glue.",
-            "status": "pending"
+            "status": "pending",
+            "parentId": "undefined"
           },
           {
             "id": 2,
             "title": "Delete only the proven-dead; re-run both host suites",
             "description": "Remove the proven-unused symbols; pb-app-core tests green on Win/Linux; pb-mac-ffi + Swift host unchanged on macOS.",
-            "status": "pending"
+            "status": "pending",
+            "parentId": "undefined"
           }
         ]
       },
@@ -482,7 +527,7 @@
         "status": "pending",
         "priority": "medium",
         "dependencies": [
-          70
+          "70"
         ],
         "details": "Keep it behavior-preserving: Windows native menu + context menu unchanged; Linux egui menu + F10/Alt/arrows/Enter/Esc unchanged. The win is structural — Linux stops compiling muda + the dead builders, so the allow(dead_code) suppressions disappear rather than being carried, and muda becomes a Windows-only dependency.",
         "testStrategy": "Windows + Linux menu tests still present and green; muda absent from the Linux dep tree (cargo tree --target x86_64-unknown-linux-gnu); no allow(dead_code) menu band-aids remain; manual: Windows native/context menu + Linux egui menu behave exactly as before.",
@@ -491,13 +536,15 @@
             "id": 1,
             "title": "Extract the shared, dependency-free menu model (actions / spec / navigation)",
             "description": "Move MenuAction/MenuGroup/MenuRow/menu_bar_spec/menu_nav into a shared module used by both shells; no behavior change; Win + Linux menu tests stay green.",
-            "status": "pending"
+            "status": "pending",
+            "parentId": "undefined"
           },
           {
             "id": 2,
             "title": "windows_menu.rs (#[cfg(windows)]) + muda to Windows-only deps + drop the allows",
             "description": "Move native muda construction/handles/attachment/state-sync/context-menu to windows_menu.rs (#[cfg(windows)]); relocate muda to [target.'cfg(windows)'.dependencies]; delete the Linux dead_code allows. Verify muda is gone from the Linux dep tree.",
-            "status": "pending"
+            "status": "pending",
+            "parentId": "undefined"
           }
         ]
       },
@@ -655,20 +702,22 @@
         "status": "pending",
         "priority": "medium",
         "dependencies": [
-          79
+          "79"
         ],
         "subtasks": [
           {
             "id": 1,
             "title": "Decide the slideshow-video policy",
             "description": "Pick between: (a) play the video to completion, then advance; (b) treat it as a still (show the poster for the normal slideshow interval, no playback); (c) play the video but cap it at the slideshow interval, then advance; or a hybrid (e.g. play up to min(clip length, interval)). Consider muted/audio, hold-to-blaze interaction, and very long clips.",
-            "status": "pending"
+            "status": "pending",
+            "parentId": "undefined"
           },
           {
             "id": 2,
             "title": "Fix slideshow advancing while a video is active",
             "description": "Slideshow currently stalls when a video item is current — the advance timer does not fire / the video blocks it. Make the slideshow tick reach video items and drive them per the chosen policy on all shells (macOS native player, winit/egui VideoSession).",
-            "status": "pending"
+            "status": "pending",
+            "parentId": "undefined"
           }
         ]
       },
@@ -679,26 +728,29 @@
         "status": "pending",
         "priority": "medium",
         "dependencies": [
-          79
+          "79"
         ],
         "subtasks": [
           {
             "id": 1,
             "title": "AVPlayerItemVideoOutput capture path (Swift)",
             "description": "Attach an AVPlayerItemVideoOutput to the item; on CaptureNativeVideoFrame copy the pixel buffer for the current time, convert to RGBA8, and call back native_video_frame_ready with the request_id/session_id/item. Handle no-frame-available gracefully.",
-            "status": "pending"
+            "status": "pending",
+            "parentId": "undefined"
           },
           {
             "id": 2,
             "title": "FFI: map CaptureNativeVideoFrame + the frame-ready reply",
             "description": "Add a CoreEffectFfi variant for CaptureNativeVideoFrame (session_id, item, purpose, request_id) in map_effect, and the Swift→core native_video_frame_ready callback carrying the pixels.",
-            "status": "pending"
+            "status": "pending",
+            "parentId": "undefined"
           },
           {
             "id": 3,
             "title": "Verify the four consumers use the live frame",
             "description": "Copy, OCR, Describe, and Compare-pin operate on the captured displayed frame (not the poster). Define + confirm auto-describe behavior on a video. No-trace: capture is on-demand only.",
-            "status": "pending"
+            "status": "pending",
+            "parentId": "undefined"
           }
         ]
       },
@@ -709,32 +761,36 @@
         "status": "in-progress",
         "priority": "medium",
         "dependencies": [
-          79
+          "79"
         ],
         "subtasks": [
           {
             "id": 1,
             "title": "FFI: carry the entry bytes to the Swift shell",
             "description": "PlayVideo currently carries a path. Extend the core->shell contract (pb-mac-ffi CoreEffectFfi + CoreModel.swift dispatch) so a pathless video item hands the shell the Arc-shared container bytes + entry name, fetched off the main thread (mirror the Windows producer-thread fetch in start_video_session; reuse ActiveVideo::media / VideoInput::Bytes). Remove the 'can't play yet' toast arm once wired.",
-            "status": "done"
+            "status": "done",
+            "parentId": "undefined"
           },
           {
             "id": 2,
             "title": "Swift: AVAssetResourceLoaderDelegate over in-RAM bytes",
             "description": "In NativeVideoPlayer.swift, build an AVURLAsset on a custom scheme whose resource loader serves contentInformation (length, UTI from the entry extension) + byte ranges straight from the buffer. Play it through the existing AVPlayer pipeline (audio, seeks, scrubber, hover controls unchanged). Verify seeking and EOS-replay behave like file-backed clips.",
-            "status": "done"
+            "status": "done",
+            "parentId": "undefined"
           },
           {
             "id": 3,
             "title": "Posters for archive videos (av_poster parity)",
             "description": "av_poster.rs is path-based AVFoundation, so archive entries show the placeholder tile. Route it through the same bytes-backed asset (or an equivalent) so archive videos get a real first-non-black-frame poster with correct rotation/color, matching the Windows decode_video_poster_input path.",
-            "status": "done"
+            "status": "done",
+            "parentId": "undefined"
           },
           {
             "id": 4,
             "title": "Add a dedicated mac no-trace integration test for archive video",
             "description": "Functionality is done and owner-verified (opens/posters/plays with audio/seeks on a video-only zip); the RAM-only guarantee holds by construction. Narrowed remaining scope: add an automated Swift/mac-ffi test asserting archive-video playback (poster + play + seek) writes nothing to disk, matching the coverage the Windows/loose-file paths already have, per CLAUDE.md's no-trace testing standard.",
-            "status": "pending"
+            "status": "pending",
+            "parentId": "undefined"
           }
         ]
       },
@@ -751,55 +807,64 @@
             "id": 1,
             "title": "Phase 0: pure policy - ThumbCache + FollowState (TDD)",
             "description": "pb-core ThumbCache: tiers (Empty/Preview/Full), exact-byte accounting, eviction classes (pinned-visible > overscan > warm +/-64 > rest farthest/oldest), fill-plan ordering, deck+request generation discard; bytes stored outside the pure policy. FollowState state machine (Following | Detached{anchor} | ProgrammaticScroll{target, generation}) with events PanelOpened/UserScrolled/Navigation/Jump/PlaylistMutated/ProgrammaticScrollCompleted. Proptest invariants: budget never exceeded incl. in-flight reservations; pinned never evicted; tier upgrades monotonic; stale generations never install. Tests: wrap, random jump, deletion, streamed append, scroll-during-animation. DONE 2026-07-12: pb-core::thumbs (ThumbCache<T>, 14 tests incl. the proptest budget+pin invariant) + pb-app-core::follow (FollowState, 6 tests).",
-            "status": "done"
+            "status": "done",
+            "parentId": "undefined"
           },
           {
             "id": 2,
             "title": "Phase 1: decode-pool multi-consumer contract",
             "description": "Request identity {item, epoch, purpose, fit-class, tier}; Outcome carries it back. One merged scheduler: DisplayCurrent > DisplayPreview > DisplayFull > Poster > ThumbVisible > ThumbWarm > ThumbRefine (AppCore appends purpose-tagged thumb wants below display/poster wants in the existing request_prefetch composition). Occupancy guard: thumb jobs capped at max(1, workers-2), cancellable mid-decode; expensive fills only while parked. DELIVERABLE = the displacement tests: thumb demand can never cancel/dedup/delay display work; saturated queue starts no thumb job before any display job; per-purpose cancellation is isolated. DONE 2026-07-12: Purpose::{Display,Thumb} in DecodeKey/DecodeFn/Want; (item,purpose) dedup; thumb cap max(1,workers-2); Outcome::into_image() budget-freeing handoff; 4 displacement tests green.",
-            "status": "done"
+            "status": "done",
+            "parentId": "undefined"
           },
           {
             "id": 3,
             "title": "Phase 2: T0 derive - post-upload handoff + format contract + perf gate",
             "description": "After drain_results uploads to the ring, MOVE the CPU buffer over a bounded 2-3-slot channel to a dedicated derive thread (zero clone, zero display latency; channel-full => skip, warm fill regenerates). derive_thumbnail(&DecodedImage) -> ThumbSrgb8: RGBA8 downscale-then-bake ColorTransform (3x3+TRC on the ~0.2MP result); Rgba16F fp16 downscale + extended-Reinhard (per-image peak) + sRGB encode; straight alpha; Nv12 never (video = posters). Capture gated on first panel open this session. ACCEPTANCE: corpus A/B capture off/on - decode-to-upload and keypress->photon p50/p95/p99 unchanged within noise. Do not proceed if display latency regresses. DONE 2026-07-12: post-upload handoff at drain_results' three exits -> bounded 3-slot channel -> thumb-derive thread; pb_decode::derive_thumbnail (RGBA8 color bake, fp16 Reinhard+sRGB — shader-mirror constants, NV12 refused; 8 tests). PENDING: the corpus A/B perf gate needs the Windows box (capture is structurally one try_send post-upload; measure before enabling winit parity).",
-            "status": "done"
+            "status": "done",
+            "parentId": "undefined"
           },
           {
             "id": 4,
             "title": "Phase 3: core model, batched bridge, absolute jump",
             "description": "Left-pane tab enum beside Panels; Action::Thumbnails + Shift+T default + help overlay + menu items; public absolute-jump command extracted from the existing compare-jump flow (Playlist::jump_to already exists - expose, don't rebuild). Shell bridge: monotonic dirty counter, notifications coalesced <=1/pump (ride emit_panels_changed), lightweight item snapshot (names/badges/state/rotation/current - no pixels), per-entry pull-once byte accessor. DONE 2026-07-12: LeftTab beside folder_tree_open (Shift+F/Shift+T tab semantics, tree_panel_visible tab-aware); Action::Thumbnails + Shift+T + help row + View-menu item; thumb_jump; batched bridge (dirty counter, per-entry pull-once gen accessors); native_thumbs gates shells without a presenter.",
-            "status": "done"
+            "status": "done",
+            "parentId": "undefined"
           },
           {
             "id": 5,
             "title": "Phase 4: macOS SwiftUI panel (T0 thumbnails + ring-hit jumps)",
             "description": "Tabbed left pane mirroring InspectorPanel's segmented tabs (FA solid 'images' icon); virtualized uniform fixed ~3:2 cells with placeholders; bounded CGImage cache (visible+overscan only, evicted on leave); FollowState wiring (withAnimation scrollTo with generation tokens; smooth <=~2 viewports, snap beyond incl. wraps); middle-truncated filenames + tooltips; hover + current highlights; type badges; rotation-at-draw; failed glyph; click-jump for ring-resident targets; existing ResizeHandle. BUILT 2026-07-12: ThumbnailsPanel.swift + LeftPaneTabBar (shared with FolderTreePanel), virtualized fixed cells, FollowState wiring w/ generation-fenced onScrollGeometryChange (macOS 15+; 14 = always-follow), badges, rotation-at-draw, failed glyph. Multiple owner-feedback polish rounds landed after the initial build (08b80d5c cell card/speed/width/tab icons, adb4b990 cell vertical rhythm + animation-mark promotion, 02dd241a tab icons down to 225pt, acf4a247 tab-highlight/pane-width/margin fixes, 05015dd3 compact-tab threshold tune) — treating as owner-accepted.",
-            "status": "done"
+            "status": "done",
+            "parentId": "undefined"
           },
           {
             "id": 6,
             "title": "Phase 5: transient preview slot (cold-jump instant present)",
             "description": "Dedicated non-ring preview slot in pb-render: a cold click-jump uploads the cached thumb (<=1MiB, ~20us via the staging path, allowed on the click pump - a discrete pointer action, not the keypress hot path) and presents it immediately; the full decode replaces it through the normal preview->full swap; the slot never evicts the ring and clears on present. No cached thumb => placeholder + normal decode flow. Measured with the same harness as the phase-2 gate. DONE 2026-07-12 as the synthetic-outcome design instead of a new renderer slot: the cached thumb lands as a resident PREVIEW via Outcome::synthetic on the click pump (the macOS archive-poster pattern), presents immediately with true orig dims/codec in meta, and the top-priority real decode upgrades in place — satisfies the §4 contract (instant, atomic replace, no out-of-policy ring eviction: the target owns a slot legitimately).",
-            "status": "done"
+            "status": "done",
+            "parentId": "undefined"
           },
           {
             "id": 7,
             "title": "Phase 6: T1 cold fills (format-gated)",
             "description": "Per the format matrix: embedded-preview capable (RAW largest-preview / HEIC thmb / PSD / WIC thumbnail) fill cheaply at native size + preview tier; JPEG gains the kamadak-exif IFD1 thumbnail path (~160px, header-parse only - small new work, or defer per open question); everything else full-decode fallback ONLY while parked, capped concurrency, cancellable - placeholders while flying are correct behavior. Failed items placeholder, never retry-looped. DONE 2026-07-12: decode_item_for routes Thumb purpose -> pb_decode::exif_thumbnail (IFD1, container orientation, >=16px sanity) else fitted decode of the read bytes; videos poster through normal routing; fills only visible+parked at lowest priority; thumbs.failed never re-plans.",
-            "status": "done"
+            "status": "done",
+            "parentId": "undefined"
           },
           {
             "id": 8,
             "title": "Phase 7: winit/egui parity",
             "description": "ScrollArea::show_rows uniform rows; egui textures registered for visible+overscan cells from the shared CPU bytes, freed on leave; animated scroll_to driven by the same FollowState; left pane gains the tab pair; add a resize handle (egui tree width is currently a constant). DONE 2026-07-12 (b5309379 \"feat(thumbs): winit/egui thumbnails panel + resizable panes + shell-owned cursor (task #83 phase 7)\"): the winit/egui strip landed — native_thumbs flipped on, left pane Folders|Thumbnails tab bar, ScrollArea::show_rows over uniform cells with an egui TextureHandle cache, click-to-jump, FollowState-driven scroll, resizable panes. Remaining: the phase-2 corpus A/B perf gate (decode-to-upload + keypress->photon p50/p95/p99, capture off/on) is still open — carried under subtask 9.",
-            "status": "done"
+            "status": "done",
+            "parentId": "undefined"
           },
           {
             "id": 9,
             "title": "Phase 8: T2 refine + privacy + docs",
             "description": "T2 scaled-decode refine ONLY after native scaled-decode (JPEG DCT / WebP use_scaling) exists and benchmarks justify it. Privacy: no-trace tests over filesystem AND ZIP AND 7z sessions with the panel open (ADR-018). CHANGELOG entry; CLAUDE.md keymap addition. Acceptance gates final check: hidden-panel baseline unchanged; thumb work never displaces display work; cache accounting covers all owned buffers; stale results cannot cross a deck generation. PROGRESS 2026-07-12: privacy test done (thumbnail_session_writes_nothing_to_disk — T1 fill + T0 capture/derive/insert over a sandbox, zero writes); CHANGELOG entry done. REMAINING: T2 refine (gated on native scaled decode), the Windows corpus perf gate, archive (ZIP/7z) no-trace variants with the panel open, CLAUDE.md keymap doc line.",
-            "status": "in-progress"
+            "status": "in-progress",
+            "parentId": "undefined"
           }
         ]
       },
@@ -810,56 +875,64 @@
         "status": "in-progress",
         "priority": "high",
         "dependencies": [
-          79
+          "79"
         ],
         "subtasks": [
           {
             "id": 1,
             "title": "Shared FFmpeg foundation",
             "description": "ffmpeg/ffvideo feature split, resampling dep + Dockerfile libswresample, ffmpeg/{init,io,probe,color} modules: custom AVIO over Arc bytes, interrupt-callback cancellation + watchdog, non-attached-pic stream selection, rotation/SAR, CICP color mapping, correct swscale coefficients",
-            "status": "done"
+            "status": "done",
+            "parentId": "undefined"
           },
           {
             "id": 2,
             "title": "FFmpeg video producer + poster",
             "description": "run_ff_video_producer speaking the VideoProducerEvent/Msg protocol (in-place av_seek_file seek, EOS park, corrupt-input bounds) + first-non-black poster; protocol tests on the committed fixtures + new tiny MKV/WebM corpus",
-            "status": "done"
+            "status": "done",
+            "parentId": "undefined"
           },
           {
             "id": 3,
             "title": "fp16 HDR present-path fix",
             "description": "present_video_frame honors Rgba16F + VideoColorInfo peak through the fp16 scene-linear path (mirrors is_hdr stills); producer emits fp16 scRGB for PQ/HLG sources",
-            "status": "done"
+            "status": "done",
+            "parentId": "undefined"
           },
           {
             "id": 4,
             "title": "Linux video integration",
             "description": "Route Linux video -> Session via the FFmpeg producer in start_video_session; FFmpeg poster in decode_item_cancellable; muted interim (has_audio=false); compile+test in the appimage container",
-            "status": "done"
+            "status": "done",
+            "parentId": "undefined"
           },
           {
             "id": 5,
             "title": "macOS dual-backend integration",
             "description": "Plan section 8: capability routing, FFI progress/backend state, SwiftUI controls parity, poster dispatcher (keep-both, FFmpeg fallback). DONE — owner-confirmed on hardware (current-status.md 2026-07-13): \"WebM and MKV play on macOS, including a 4K MKV film streamed over the network, with audio.\" Shipped in the 0.2.0 release notes.",
-            "status": "done"
+            "status": "done",
+            "parentId": "undefined"
           },
           {
             "id": 6,
             "title": "Streaming audio",
             "description": "Plan section 7: shared FFmpeg audio decoder, AVAudioEngine (macOS) + pw-cat (Linux) sinks, honest clock. DONE — owner-confirmed alongside subtask 5 (audio explicitly verified on the 4K MKV test); crash-fix follow-up (ObjC-exception shield, multichannel plane fix) also landed and verified by replaying the exact crash scenario.",
-            "status": "done"
+            "status": "done",
+            "parentId": "undefined"
           },
           {
             "id": 7,
             "title": "Hardware decode",
             "description": "Plan section 10: VideoToolbox (macOS hard gate) + VAAPI (Linux best-effort), NV12/P010 into the fp16 present path",
-            "status": "review"
+            "status": "review",
+            "parentId": "undefined"
           },
           {
             "id": 8,
             "title": "Distribution + compliance",
             "description": "Plan §9-dist: DMG FFmpeg closure + inside-out signing + task #77 manifest. DONE + locally verified (2026-07-13): release-macos.sh builds via build-swift-host.sh --bundle-ffmpeg by default (ffvideo feature + pinned LGPL FFmpeg in Contents/Frameworks, --no-video opts out) and re-signs the libav*/libsw* dylibs inside-out with the Developer ID (runtime+timestamp) before the app binary. Verified: closure audit OK (zero external deps), codesign --verify --deep --strict PASS, dylibs carry runtime flag + Team ID + secure timestamp, app loads FFmpeg via @rpath, spctl accepted=Developer ID. Compliance manifest updated. OWNER-REMAINING (not code): run the real notarized release + clean-machine launch test; PGP-verify the pinned tarball (sha256 already gated); patent-licensing decision; the Linux clean-container per-codec audit (subtask carried separately).",
-            "status": "review"
+            "status": "review",
+            "parentId": "undefined"
           }
         ]
       },
@@ -875,25 +948,29 @@
             "id": 1,
             "title": "Surface AccentSource + accent_custom over the FFI (CoreModel)",
             "description": "Read the shared settings fields into the Swift CoreModel like the other settings.",
-            "status": "pending"
+            "status": "pending",
+            "parentId": "undefined"
           },
           {
             "id": 2,
             "title": "Apply a root .tint per source on the SwiftUI scene",
             "description": "System = no override (system accent), Custom = chosen color, Blaze Orange = #FF4915.",
-            "status": "pending"
+            "status": "pending",
+            "parentId": "undefined"
           },
           {
             "id": 3,
             "title": "Port ensure_legible + text_on_accent for hand-drawn accent fills",
             "description": "Keep a chosen color visible on the panels and its on-accent pill/text legible.",
-            "status": "pending"
+            "status": "pending",
+            "parentId": "undefined"
           },
           {
             "id": 4,
             "title": "Add the Accent color picker to macOS SettingsView",
             "description": "Menu/segmented control + a ColorPicker for Custom, mirroring the Windows dialog.",
-            "status": "pending"
+            "status": "pending",
+            "parentId": "undefined"
           }
         ]
       },
@@ -904,57 +981,65 @@
         "status": "pending",
         "priority": "medium",
         "dependencies": [
-          79,
-          84
+          "79",
+          "84"
         ],
         "subtasks": [
           {
             "id": 1,
             "title": "Map the .photoslibrary structure + Photos.sqlite schema",
             "description": "Document originals/ hex-fanout layout, resources/derivatives, and the Z_-prefixed Core Data tables (ZASSET, ZADDITIONALASSETATTRIBUTES, ZGENERICALBUM, ZASSETCONTRIBUTOR…): asset uuid -> original filename, capture date, kind (photo/video), favorite, album membership, Live-Photo pairing id, and the iCloud local-vs-cloud flags. Catalog schema drift across macOS 13/14/15/26. Lean on osxphotos (MIT) as a schema reference — knowledge, not code.",
-            "status": "pending"
+            "status": "pending",
+            "parentId": "undefined"
           },
           {
             "id": 2,
             "title": "Prototype a read-only asset reader (rusqlite, immutable=1)",
             "description": "New pb-source backend that opens Photos.sqlite read-only/immutable (safe while Photos.app holds a WAL lock), lists assets, and resolves each to its originals/<hex>/<uuid>.<ext> path. Yield bytes/paths through the existing PhotoSource 'encoded bytes + name for item i' contract. Confirm rusqlite is low build-risk cross-platform.",
-            "status": "pending"
+            "status": "pending",
+            "parentId": "undefined"
           },
           {
             "id": 3,
             "title": "Assess iCloud 'optimize storage' reality (the cross-platform gate)",
             "description": "Measure, on a real library, how many originals are actually on disk vs cloud-only. If cloud-only is common, direct-FS is weak: define the derivative fallback (resources/derivatives rendered JPEG) or a 'cloud only' placeholder. This decides whether the cross-platform direct-FS route is viable or macOS PhotoKit is required for a good experience.",
-            "status": "pending"
+            "status": "pending",
+            "parentId": "undefined"
           },
           {
             "id": 4,
             "title": "Evaluate the macOS PhotoKit backend",
             "description": "PHAsset/PHFetchResult/PHImageManager/PHAssetResourceManager + PHLivePhoto in the SwiftUI shell: async request-based access, transparent iCloud download, native Live-Photo pairing, albums/moments/smart-albums. Note the NSPhotoLibraryUsageDescription consent prompt + entitlement. Compare robustness/iCloud vs the direct-FS route; sketch it as a second PhotoSource impl. STRATEGIC: PhotoKit is the SAME framework on iOS — this backend is the foundation for a future iOS version, where it is the ONLY viable photo source (iOS has no filesystem access to the library, so the direct-FS route gives iOS nothing). Keep it seam-clean so it ports.",
-            "status": "pending"
+            "status": "pending",
+            "parentId": "undefined"
           },
           {
             "id": 5,
             "title": "Map albums / years / moments onto the folder-tree seam",
             "description": "Reuse the synthetic folder-tree the archive sources already provide (Shift+F): represent Albums (and/or Years > Months) as navigable 'folders' scoping the deck. Sketch PhotosLibrarySource: PhotoSource + its tree provider.",
-            "status": "pending"
+            "status": "pending",
+            "parentId": "undefined"
           },
           {
             "id": 6,
             "title": "Prove the decode/video/Live-Photo pipeline works unchanged on library bytes",
             "description": "Smoke-test that HEIC stills, plain videos, and a still+.mov Live-Photo pair sourced from the library flow through the existing decode + video + Live-Photo players with no pipeline changes on both Windows and macOS.",
-            "status": "pending"
+            "status": "pending",
+            "parentId": "undefined"
           },
           {
             "id": 7,
             "title": "Privacy + safety review",
             "description": "Guarantee read-only: never write to the library, open the DB immutable, handle the locked WAL without copying originals to disk. Re-run the no-trace audit/integration test so viewing a library writes nothing.",
-            "status": "pending"
+            "status": "pending",
+            "parentId": "undefined"
           },
           {
             "id": 8,
             "title": "Write up go/no-go + recommended architecture",
             "description": "Recommend: cross-platform direct-FS MVP, macOS PhotoKit, or both-behind-one-seam. Include effort estimate, schema-maintenance burden, and the value vs. 'just export from Photos' baseline (the win is in-place browsing + a fast single-query scan over a huge library).",
-            "status": "pending"
+            "status": "pending",
+            "parentId": "undefined"
           }
         ]
       },
@@ -970,43 +1055,50 @@
             "id": 1,
             "title": "Product-fit + scope decision",
             "description": "Does a converter belong in a speed-first viewer, or is it a distraction? Define the MVP (convert the current photo) vs the ambition (Squoosh-style batch with live preview). Confirm it's an explicit-user-action feature (privacy-allowed writes, never passive). Decide before building anything.",
-            "status": "pending"
+            "status": "pending",
+            "parentId": "undefined"
           },
           {
             "id": 2,
             "title": "Encoder seam survey",
             "description": "PB only decodes today. Survey encoders per format for quality/speed/build-risk, pure-Rust preferred: JPEG (jpeg-encoder / mozjpeg), WebP (image lossless vs libwebp), AVIF (ravif/rav1e), JXL (jxl-oxide/jpegxl-rs), PNG (oxipng), and resize (fast_image_resize — already used for decode-to-fit Lanczos). Sketch a pb-encode seam mirroring the ImageDecoder seam; note which formats pull in C deps.",
-            "status": "pending"
+            "status": "pending",
+            "parentId": "undefined"
           },
           {
             "id": 3,
             "title": "Conversion-mode UX (the hard part)",
             "description": "The enter-mode gesture/key; format + quality + resize controls; the Squoosh signature = a split before/after preview with a LIVE output-file-size readout that re-encodes as you drag quality; apply-to-current vs apply-to-selected. Design it to feel fast and legible, not a settings dump. This is where the real work is per the owner.",
-            "status": "pending"
+            "status": "pending",
+            "parentId": "undefined"
           },
           {
             "id": 4,
             "title": "Batch pipeline",
             "description": "Reuse the RAM-only selection set (mobile-vision.md): convert N selected in one operation. Destination folder + naming scheme + overwrite guard, progress + cancel, encode OFF the event-loop thread (same discipline as decode — never block the hot path).",
-            "status": "pending"
+            "status": "pending",
+            "parentId": "undefined"
           },
           {
             "id": 5,
             "title": "Privacy + safety",
             "description": "Writes are explicit-user-action (allowed, ADR-018) — confirm destination, never write on the view/decode path, never passive. Re-run the no-trace audit/integration test to prove viewing still writes nothing (convert is reachable only from a deliberate command).",
-            "status": "pending"
+            "status": "pending",
+            "parentId": "undefined"
           },
           {
             "id": 6,
             "title": "Cross-platform + perf",
             "description": "Verify the chosen encoders build/run on Windows/Mac/Linux; measure encode time (esp. AVIF/JXL, which are slow) and keep it off the flick-through hot path; consider a live-preview re-encode budget so the quality slider stays responsive.",
-            "status": "pending"
+            "status": "pending",
+            "parentId": "undefined"
           },
           {
             "id": 7,
             "title": "Write up go/no-go + MVP scope",
             "description": "Recommend MVP vs full ambition, effort estimate, C-dependency footprint, and the honest verdict on whether a converter fits PhotoBlaze's identity or belongs as a separate tool.",
-            "status": "pending"
+            "status": "pending",
+            "parentId": "undefined"
           }
         ],
         "details": " Keybinding note (owner, 2026-07-14, tentative — not locked): bare E is the leaning choice for Export; task #99 has been told not to spend it."
@@ -1018,47 +1110,53 @@
         "status": "in-progress",
         "priority": "medium",
         "dependencies": [
-          79,
-          84,
-          98
+          "79",
+          "84",
+          "98"
         ],
         "subtasks": [
           {
             "id": 0,
             "title": "P0.8 — text-shaping spike (GATE)",
             "description": "DONE 2026-07-14, findings in .taskmaster/docs/90-p08-text-shaping-spike.md. cosmic-text 0.19 clears the bar: shaping proven (Arabic 12 chars->11 glyphs + RTL; Devanagari 6->4 conjunct), system-font fallback finds Arabic/CJK/Devanagari/Hebrew with ZERO .notdef, RGBA8 CPU output suits both presenters, ~15-20 pure-Rust deps (harfrust, NOT rustybuzz; no C, ADR-015 clean). CORRECTION TO THE PLAN: FontSystem::new() = 261 ms / 1114 faces, so lazy-init on first subtitle use must NOT happen on the event loop -- build it on a worker (the media_details pattern) at track-select/video-open. Per-cue shape+raster = 0.15 ms mean / 0.40 ms worst warm, 1.3-1.5 ms first-use-per-script, vs an 8.3 ms frame. P0.7 presenter premise VERIFIED: NativeVideoPlayer.swift attaches AVPlayerLayer as a sublayer of the Metal canvas, so a wgpu subtitle quad would be invisible under the movie -- macOS needs a CALayer above it.",
-            "status": "done"
+            "status": "done",
+            "parentId": "undefined"
           },
           {
             "id": 1,
             "title": "Subtitle stream + sidecar discovery",
             "description": "DONE. SidecarOrigin (pb_decode::tracks: reopenable Path | ArchiveEntry{archive,entry} -- by NAME not index, since a .srt is not a library item) + TrackLocator::Sidecar. Naming rules + encodings in pb-app-core::sidecar (20 tests, pure). PhotoSource EXTENDED with sibling_names(i)/sibling_bytes(i,name) -- the only door to a non-library file: FsSource = read_dir the parent (bare-name-only, cannot escape the dir); ZipSource = the pooled handle's central directory, scoped to the item's archive folder both ways, same decompression-bomb guards as bytes(); ScopedSource delegates through the index map; SevenZSource DELIBERATELY reports none (solid+eager: an unindexed entry's bytes were never produced, so it would need a predicate change at open or a full re-decompress per read -- pinned by a test so the gap is a decision). Discovery merges into the catalog subtitles TrackSet in media_details::probe_job, continuing the catalog id namespace so a sidecar TrackId cannot collide with an embedded stream's. Design: pure over a LIST OF SIBLING NAMES (one impl serves both sources); ENUMERATES rather than chooses (a case-collision is just two tracks); case-insensitive BY RULE so a ZIP finds the same sidecars on every host. 29 pb-source tests, Windows cross-check clean.",
-            "status": "done"
+            "status": "done",
+            "parentId": "undefined"
           },
           {
             "id": 2,
             "title": "Decode text cues to timed plain text",
             "description": "DONE 2026-07-15. BOTH tiers ship. Sidecars: SubRip + WebVTT parsed in pure Rust (cues.rs). EMBEDDED streams: pb_decode::ffmpeg::cues (ff_stream_subtitle_cues) demuxes + avcodec_decode_subtitle2 for MKV subrip/ass/webvtt and MP4 mov_text. Lives at the `ffprobe` level, NOT beside demux.rs (which is ffvideo-gated = absent on Windows): reading a subtitle stream needs a demuxer + a SUBTITLE decoder, never a video one, so the trimmed Windows FFmpeg serves it — resolving the #100.8 constraint (sidecars stay pure-Rust and never touch FFmpeg, so Windows' missing srt/webvtt/ass DEMUXER is moot; no need to widen the trim). KEY FACT: FFmpeg normalizes EVERY text decoder's output to one ASS envelope (ff_ass_get_dialog: 8 commas then Text), so text_cue::ass_event_text (pure, tested) is the only wire-format knowledge needed. STREAMING (the design that makes it usable): reading cues is a full linear pass over the container — MEASURED 39 s on the corpus MKV (4.4 GB over SMB) — because subtitle blocks are scattered through every cluster. As a blocking wait that is indistinguishable from broken. But the reader walks in presentation order at ~70x the rate playback consumes, so it hands cues over as it finds them: MEASURED first batch at 1.06 s, 177 batches, cancellation stops a read in ~1 s not 40. CueLoad::drop cancels, so a nav can't leave a worker chewing 20 GB. FUTURE OPT: the playback demuxer already reads these packets and discards them — forwarding them would make cues cost zero I/O, but it only exists on routes using OUR demuxer, and a feature must never be gated on a backend. Layer it under, never replace. TWO ffmpeg-next LANDMINES FOUND: (1) NO Drop for Subtitle and it never calls avsubtitle_free — leaks per cue unless you free it yourself; (2) Text::get/Ass::get are from_utf8_unchecked = UB on the non-UTF-8 payloads that really exist (CP1252 .srt muxed without sub_charenc). We read the C string lossily via raw ptr instead. MOJIBAKE REPAIR (pb_app_core::mojibake, 15 tests): the corpus MKV carries `â™ª` where `♪` belongs — VERIFIED with `ffprobe -show_data` to be IN THE FILE, not our bug. Undone only when provable: re-encode a run to CP1252, require the bytes be valid UTF-8. `café` fails that (E9 is a lead with no continuation) so it is untouched. Applied per-RUN, not whole-string, at the single choke point (CueTrack::from_cues) BOTH tiers pass through. ⚠ SAFE_LEADS excludes à/á on purpose: French 'voilà «' (E0 A0 AB) IS valid UTF-8 and a naive round-trip corrupts it into a Samaritan letter — pinned by a test. Cost: mojibake'd Thai/Devanagari stays broken; the right trade. Also needed the 5 WHATWG windows-1252 passthrough bytes (0x81/8D/8F/90/9D) — `”` is E2 80 9D, so without 0x9D every CLOSING curly quote stays broken while the opening one repairs. Found by a test, not the spec.",
-            "status": "done"
+            "status": "done",
+            "parentId": "undefined"
           },
           {
             "id": 3,
             "title": "Timed overlay render + audio-clock sync",
             "description": "PURE CORE STARTED (pb-app-core/src/subtitle.rs, 18 tests): SubtitleMode { Off, Automatic, Track(TrackId) } + resolve_track, and the placement math. OWNER DECISIONS 2026-07-14: Off means OFF (forced does NOT leak through — text on screen while the UI says off, with no way to get silence, is worse than missing a sign); Automatic = forced-only MATCHING THE AUDIO LANGUAGE (translate the signs in the film you chose; deliberately NOT system-language or OS-accessibility coupling, which would turn subtitles on by itself). Guards: a TrackId from a stale catalog generation never resolves; an unrenderable (PGS/VobSub) track never becomes active even via a stale id or Automatic; unknown audio language matches nothing (never surprise); en/eng compared through the shared display map so the backend that probed cannot change the answer. REMAINING for #90.3: the rasterizer (cosmic-text + tiny-skia -> RGBA8), Renderer::set_subtitle_overlay, the macOS SwiftUI overlay, the cue-engine clock/seek-generation wiring, and audio-clock sync. | SHIPPED: rasterizer + placement + subtitle_engine + the macOS SwiftUI presenter; clocked off AppCore::video_position() (both backends). The engine now reads the Details catalog + resolve_track (2026-07-15) — selection is real, not \"the first sidecar we tripped over\", and embedded tracks are reachable. REMAINING: seek generations (no stale cue flash), wire controls_h so cues lift above the transport bar.",
-            "status": "done"
+            "status": "done",
+            "parentId": "undefined"
           },
           {
             "id": 4,
             "title": "Legibility settings (the owner's core requirement)",
             "description": "UI SHIPPED (macOS) 2026-07-15 — owner-testing. All 8 axes are reachable: a 5th Settings tab (SubtitlesPane.swift, SF `captions.bubble`) over a LIVE PREVIEW. PERSISTENCE: SubtitleStyle gained serde + a nested Settings.subtitle_style. ⚠ #[serde(default)] on SubtitleStyle AND Shadow is load-bearing, not decoration: it lives BY VALUE (unlike Option<WindowGeometry>, which is absent-or-whole), so a partial [subtitle_style] table must fill gaps from Default — otherwise a hand-edited config setting one key fails to parse, and Settings::load's 'malformed -> defaults' rule DISCARDS EVERY OTHER SETTING IN THE FILE to punish one typo here. SubtitleEngine::from_settings now takes &Settings, not a bool — post-mortem bug #2 was a preference dropped at one of its three call sites (new_host builds from defaults then re-derives); a signature that asks for the object can't be called while forgetting a field of it. THE PREVIEW (subtitle_preview.rs) is the point: 'outline 0.3%' is not a decision anyone can make from a number, and you can't see the film from inside a modal Settings window. It uses the SAME rasterizer + to_params + place() as the real overlay, so it cannot drift — that IS the one-rasterizer decision paying off. Because it uses the real place(), dragging the vertical offset negative visibly walks the text into the letterbox (the owner's headline ask, unjudgeable otherwise). Backdrop = a 2.39:1 picture (dark->light gradient + a bright band, so white text crosses a hostile patch) in the user's real letterbox colour. ⚠ LAYOUT TRAP: the preview must NOT stretch to the full pane width — a swatch WIDER than 2.39:1 pillarboxes and shows NO bars, hiding the one setting it exists to explain (a first PNG dump at 760x300 did exactly that). Capped at 420pt, 16:9. Max width + line spacing sit behind a collapsed Advanced group so the pane fits the FIXED 560x680 window. FFI: SubtitleStyleFfi is its OWN flat form, deliberately not 28 more fields on the 37-field SettingsFormFfi — the preview needs the DRAFT style every slider tick, which would mean shipping all 65 fields per frame to redraw one swatch. Font picker = a curated shortlist (owner call: fontdb finds ~1114 faces, nearly all unusable as subtitles); the stored value is a NAME, so a full picker later invalidates nothing. BUGS FOUND WHILE BUILDING: (1) TOML can hold `nan` and f32::clamp PANICS on a NaN bound while a NaN input sails through it — non-finite is reset BEFORE any clamp. (2) to_params used the raw font_family, but the FFI can't carry Option<String> and sends \"\" for System. (3) Color->UInt8 must clamp first: a wide-gamut pick lands outside 0...1 in sRGB and UInt8(-3.0) TRAPS in Swift. (4) the preview spinner would have spun FOREVER — nothing re-renders SwiftUI when the 261 ms font worker lands, so a .task polls until ready. REMAINING: owner verdict on the defaults ('slightly large'); the egui tab (deferred with #90.5 — the winit shell has no presenter, so it would configure an invisible feature; SettingsDraft::to_settings preserves subtitle_style untouched meanwhile).",
-            "status": "done"
+            "status": "done",
+            "parentId": "undefined"
           },
           {
             "id": 5,
             "title": "Cross-platform + backend coverage",
             "description": "Ship on the FFmpeg backend first (macOS MKV/WebM + sidecars, all Linux). Decide the path for Windows MF and macOS AVFoundation: either add a text-cue extraction there too, or route subtitle-bearing playback through the FFmpeg backend. Verify build/run on all three. Note bitmap PGS/VobSub and styled ASS as explicit non-goals (stretch: libass behind a feature flag, PGS RGBA overlay). | The winit shell has no presenter yet (Renderer::set_subtitle_overlay) — Windows/Linux show nothing. Deferred until the style defaults settle.",
             "status": "review",
-            "details": "WINIT PRESENTER + SETTINGS SHIPPED 2026-07-16, owner-confirmed on screen (\"Subtitles do display!\") against a real film over SMB. Windows now reaches parity with macOS on the two things that matter: cues DRAW and the style is CONFIGURABLE.\n\nWHAT LANDED\n1. Renderer::set_subtitle_overlay (pb-render): a sixth overlay layer. Unlike every other overlay it is placed at an ABSOLUTE origin, not an inset from an edge -- the core already placed it (subtitle::place), the renderer only converts px -> NDC. y may be slightly negative BY DESIGN (place clamps the TEXT's box, so a soft shadow bleeds off the top rather than shoving the words down); the vertex helper takes f32 for exactly that.\n2. ITS OWN PREMULTIPLIED BLEND PIPELINE -- the load-bearing find. pb_hud::subtitle emits premultiplied RGBA (its own tests enforce it); the other CPU overlays are authored straight and share a pipeline whose ALPHA_BLENDING multiplies by alpha. Sending one through the other multiplies TWICE and visibly darkens every antialiased edge: measured 0.108 vs 0.216 linear. A GPU readback test (`the_subtitle_pipeline_blends_premultiplied_not_straight`) fails on exactly that mistake -- verified by pointing it at the wrong pipeline. The value it asserts is also what the macOS CGImage .premultipliedLast path produces, so the two shells match by construction rather than by eye.\n3. Drawn FIRST of the overlays (pass 1b), so chrome composites above: the toast that says \"Subtitles: English\" shares the bottom-center strip with the cue it is talking about.\n4. The presenter is SHELL-LOCAL on purpose (App::present_subtitles), NOT in tick_subtitles. macOS draws the same bitmap as a SwiftUI overlay over its AVPlayerLayer; putting this in the shared tick would draw every cue twice there. One rasterizer, two presenters.\n5. POST-MORTEM BUG #2, still live in this shell, now fixed: AppCore was built by struct literal with `subtitles: Default::default()` and never called SubtitleEngine::from_settings, so `subtitles = true` on disk launched with captions OFF. Latent only because there was no presenter to reveal it. VERIFIED by trace: first tick now reports on=true.\n6. Settings > Subtitles tab (egui, #90.4): all eight axes over the live preview, mirroring SubtitlesPane.swift's grouping/bounds/copy. Binds SubtitleStyle as a struct (no FFI to flatten for) and needs no debounce (the existing fold coalesces a drag). The swatch borrows the app's ONE SubtitleRasterizer -- never a second FontSystem -- and caches its texture against the exact inputs it drew.\n7. The native Windows menu had NO subtitle entry AT ALL (the 'View > Subtitles' item that looked like it existed is in menu_bar_spec = the LINUX egui bar). C/Shift+C both worked and nothing said so. Added Subtitles + Next Subtitle Track to the native View menu.\n\nTWO BUGS FOUND BY LOOKING AT THE OUTPUT (the #90 rule, paying again)\n- ui.available_width() is NOT a safe texture dimension: egui's first frame reports a default screen_rect, measured 4944pt -> a 9888px texture, and egui PANICS past the GPU limit rather than clamping. Capped at the device's real max_texture_side.\n- Scaled controls must write back only on .changed(): round-tripping a fraction through x100 and /100 is not bit-exact (0.04 -> 0.040000001) and the settings fold saves on ANY diff, so writing back unconditionally spews a config write every frame the tab is merely open.\n\nREMAINING (deliberately not attempted; both are #99, not #90.5)\n- The winit TRACK PICKER UI. Core is ready and shell-agnostic (subtitle_picker_rows / select_subtitle_row / subtitle_tracks_known, incl. the tri-state). Two homes, both real work: the winit 'playback bar' is a hand-laid-out egui info pill (panels_ui.rs), not a transport HStack like the Mac's, so a popover means manual layout + hit-testing + the video_bar_interactive gate; and a menu flyout needs machinery muda lacks -- macOS uses NSMenuDelegate.menuNeedsUpdate to pull tracks as the menu opens, while muda builds the tree once and only mirrors checkmarks. Shift+C + the new menu item cover the function meanwhile.\n- AUDIO TRACK SWITCHING ON WINDOWS. Blocked on more than effort: WasapiAudio::open takes no track at all, and the catalog hands out TrackLocator::FfStream (an FFMPEG stream index, since #100 made FFmpeg the demuxer) while MF's Source Reader enumerates its OWN indices -- a real currency mismatch the TrackLocator seam exists for but nobody has resolved. On top of that, Windows audio IS the master clock, so a mid-playback switch must tear down and re-prime it at the playhead (main.rs already documents this as the genuinely hard half). And it cannot be verified without listening. Left alone.\n\nLINUX: unverified. Same wgpu path, so it should follow, but nobody has run it."
+            "details": "WINIT PRESENTER + SETTINGS SHIPPED 2026-07-16, owner-confirmed on screen (\"Subtitles do display!\") against a real film over SMB. Windows now reaches parity with macOS on the two things that matter: cues DRAW and the style is CONFIGURABLE.\n\nWHAT LANDED\n1. Renderer::set_subtitle_overlay (pb-render): a sixth overlay layer. Unlike every other overlay it is placed at an ABSOLUTE origin, not an inset from an edge -- the core already placed it (subtitle::place), the renderer only converts px -> NDC. y may be slightly negative BY DESIGN (place clamps the TEXT's box, so a soft shadow bleeds off the top rather than shoving the words down); the vertex helper takes f32 for exactly that.\n2. ITS OWN PREMULTIPLIED BLEND PIPELINE -- the load-bearing find. pb_hud::subtitle emits premultiplied RGBA (its own tests enforce it); the other CPU overlays are authored straight and share a pipeline whose ALPHA_BLENDING multiplies by alpha. Sending one through the other multiplies TWICE and visibly darkens every antialiased edge: measured 0.108 vs 0.216 linear. A GPU readback test (`the_subtitle_pipeline_blends_premultiplied_not_straight`) fails on exactly that mistake -- verified by pointing it at the wrong pipeline. The value it asserts is also what the macOS CGImage .premultipliedLast path produces, so the two shells match by construction rather than by eye.\n3. Drawn FIRST of the overlays (pass 1b), so chrome composites above: the toast that says \"Subtitles: English\" shares the bottom-center strip with the cue it is talking about.\n4. The presenter is SHELL-LOCAL on purpose (App::present_subtitles), NOT in tick_subtitles. macOS draws the same bitmap as a SwiftUI overlay over its AVPlayerLayer; putting this in the shared tick would draw every cue twice there. One rasterizer, two presenters.\n5. POST-MORTEM BUG #2, still live in this shell, now fixed: AppCore was built by struct literal with `subtitles: Default::default()` and never called SubtitleEngine::from_settings, so `subtitles = true` on disk launched with captions OFF. Latent only because there was no presenter to reveal it. VERIFIED by trace: first tick now reports on=true.\n6. Settings > Subtitles tab (egui, #90.4): all eight axes over the live preview, mirroring SubtitlesPane.swift's grouping/bounds/copy. Binds SubtitleStyle as a struct (no FFI to flatten for) and needs no debounce (the existing fold coalesces a drag). The swatch borrows the app's ONE SubtitleRasterizer -- never a second FontSystem -- and caches its texture against the exact inputs it drew.\n7. The native Windows menu had NO subtitle entry AT ALL (the 'View > Subtitles' item that looked like it existed is in menu_bar_spec = the LINUX egui bar). C/Shift+C both worked and nothing said so. Added Subtitles + Next Subtitle Track to the native View menu.\n\nTWO BUGS FOUND BY LOOKING AT THE OUTPUT (the #90 rule, paying again)\n- ui.available_width() is NOT a safe texture dimension: egui's first frame reports a default screen_rect, measured 4944pt -> a 9888px texture, and egui PANICS past the GPU limit rather than clamping. Capped at the device's real max_texture_side.\n- Scaled controls must write back only on .changed(): round-tripping a fraction through x100 and /100 is not bit-exact (0.04 -> 0.040000001) and the settings fold saves on ANY diff, so writing back unconditionally spews a config write every frame the tab is merely open.\n\nREMAINING (deliberately not attempted; both are #99, not #90.5)\n- The winit TRACK PICKER UI. Core is ready and shell-agnostic (subtitle_picker_rows / select_subtitle_row / subtitle_tracks_known, incl. the tri-state). Two homes, both real work: the winit 'playback bar' is a hand-laid-out egui info pill (panels_ui.rs), not a transport HStack like the Mac's, so a popover means manual layout + hit-testing + the video_bar_interactive gate; and a menu flyout needs machinery muda lacks -- macOS uses NSMenuDelegate.menuNeedsUpdate to pull tracks as the menu opens, while muda builds the tree once and only mirrors checkmarks. Shift+C + the new menu item cover the function meanwhile.\n- AUDIO TRACK SWITCHING ON WINDOWS. Blocked on more than effort: WasapiAudio::open takes no track at all, and the catalog hands out TrackLocator::FfStream (an FFMPEG stream index, since #100 made FFmpeg the demuxer) while MF's Source Reader enumerates its OWN indices -- a real currency mismatch the TrackLocator seam exists for but nobody has resolved. On top of that, Windows audio IS the master clock, so a mid-playback switch must tear down and re-prime it at the playhead (main.rs already documents this as the genuinely hard half). And it cannot be verified without listening. Left alone.\n\nLINUX: unverified. Same wgpu path, so it should follow, but nobody has run it.",
+            "parentId": "undefined"
           }
         ],
         "details": "\n\nSTATUS 2026-07-16: subtasks 3 and 4 shipped + owner-verified on macOS. Subtask 5 (the winit presenter + the egui Settings tab + the Windows menu) shipped and is owner-confirmed displaying on Windows; it is in REVIEW pending the owner's pass over the tab and the defaults. Linux is unverified (same wgpu path). What is left is #99 work, not #90: the winit track-picker UI, and Windows audio-track switching (blocked on an FFmpeg-vs-MediaFoundation stream-index mismatch plus the master-clock re-prime)."
@@ -1070,20 +1168,22 @@
         "status": "pending",
         "priority": "medium",
         "dependencies": [
-          79
+          "79"
         ],
         "subtasks": [
           {
             "id": 1,
             "title": "Windows MF backend (mf_poster.rs)",
             "description": "Add seek-deep sampling using IMFSourceReader::SetCurrentPosition; reuse the shared poster_frame_score / best-frame selection. Cannot be tested on the Mac dev box - needs a Windows build/run.",
-            "status": "pending"
+            "status": "pending",
+            "parentId": "undefined"
           },
           {
             "id": 2,
             "title": "macOS AVFoundation backend (av_poster.rs)",
             "description": "Give the Live-Photo streaming reader an AVAssetReader timeRange start offset so decode_video_poster can sample deeper into the clip, then reuse the shared best-frame selection. Covers MP4/MOV feature films on macOS.",
-            "status": "pending"
+            "status": "pending",
+            "parentId": "undefined"
           }
         ]
       },
@@ -1094,7 +1194,7 @@
         "status": "pending",
         "priority": "medium",
         "dependencies": [
-          14
+          "14"
         ],
         "details": "Install the current build via the normal Velopack channel (not a dev/cargo run) so the ProgId's open command points at the real `...\\current\\photoblaze.exe`. In Explorer: select a few hundred image files in one folder (Ctrl+A on a large library folder works well), choose Open / press Enter, and confirm (a) exactly one PhotoBlaze process starts, (b) the playlist matches the full selection (not truncated), (c) the window comes to the foreground, and (d) repeating the selection while PhotoBlaze is already running forwards to the same window instead of spawning a second process. Also sanity-check a selection large enough to approach the ~32K command-line limit (~250+ paths) still arrives complete via the WM_COPYDATA forward path (which has no such cap), and that `--new-window` still spawns a standalone second process on request.",
         "testStrategy": "Manual, on-device only (Explorer-driven, not scriptable the same way as #14.5's process-spawn simulation): fresh Velopack install, Ctrl+A a few hundred files, Open; confirm process count stays 1, playlist is complete, window gets focus. Repeat while PhotoBlaze is already running. Confirm --new-window bypass still works.",
@@ -1112,13 +1212,15 @@
             "id": 1,
             "title": "Space pauses (never advances) while a video is playing",
             "description": "When the displayed item is a video and it is playing, space pauses it instead of advancing to the next item. Decide + document the paused-video behavior (recommend: space resumes, so space toggles like a media player once playback has begun; navigation resumes on a stopped/ended clip or a non-video item). Route through pb-app-core action dispatch so both shells inherit it; unit-test the contextual dispatch, including hold-to-blaze (a held space advancing across items must not get stuck on a video).",
-            "status": "pending"
+            "status": "pending",
+            "parentId": "undefined"
           },
           {
             "id": 2,
             "title": "RAM-only per-session resume positions for videos",
             "description": "Remember each video's last play position for the lifetime of the app session ONLY: a RAM map keyed by item, dropped in clear_session_state on Esc/quit like every other runtime cache, so the ADR-018 privacy guarantee holds (nothing persisted, no on-disk trace, and the no-trace integration test stays green). Returning to a longer video resumes from (slightly before) where you left off instead of restarting; near-start/near-end positions restart from 0 (thresholds TBD). Works on both backends: native = seek before play; Session = seek-after-open or an initial-position plumb-through.",
-            "status": "done"
+            "status": "done",
+            "parentId": "undefined"
           }
         ]
       },
@@ -1129,7 +1231,7 @@
         "status": "pending",
         "priority": "medium",
         "dependencies": [
-          18
+          "18"
         ],
         "details": "HDR capture is the iPhone default, so this is a growing class of photos. Verification harness gotchas: crates/pb-decode/examples/decode.rs hardcodes allow_preview=false (can't assert a preview) - use heic_bench or add a --preview mode reporting is_preview + PixelFormat. Confirm the test fixture actually has an nclx transfer 16/18 (an iPhone gain-map aux may not enter the PQ/HLG branch). Validate the WIC thumbnail's color: WIC exposes thumbnail retrieval and per-frame color contexts separately, so applying the primary image's colr to the thumbnail needs evidence, not assumption. Also make slot_bytes_estimate / VRAM planning fp16-aware if the sharp full-ring (prefetch_fulls, up to 8 workers) can leave the ring over budget after multiple 8 B/px upgrades (see #18.3).",
         "subtasks": []
@@ -1141,7 +1243,7 @@
         "status": "pending",
         "priority": "low",
         "dependencies": [
-          18
+          "18"
         ],
         "details": "Owner decision (2026-07-14): use the semantic Contain/Cover target despite ~40 FitBox construction sites across 3 crates - a mechanical change, preferable to shipping a known sharpness regression. downscale_to_fit currently uses min() (contain); Cover uses max(sw/w, sh/h) clamped to no-upscale, computed against each image's own dims, so the box can stay image-independent (the screen box) and neighbors are correct too. AUDIT ALL 9 decode_fit() consumers (not just prefetch + slot_bytes_estimate): it also drives video scaling/budgeting, animation decoding, Live Photo streaming, and macOS archive posters. Benefit for HEIC is upload/VRAM/CPU-downscale (finalize applies the box after a full decode), not decode time.",
         "subtasks": []
@@ -1153,7 +1255,7 @@
         "status": "pending",
         "priority": "low",
         "dependencies": [
-          95
+          "95"
         ],
         "details": "RATIONALE / IMPORTANCE (owner-requested, 2026-07-14): macOS HEIC preview-first is ENTIRELY ABSENT today - this is a NEW capability, not a regression fix. So Apple-Silicon users currently get no fast-scrub on HEIC/HDR libraries (every HEIC is a full decode on the scroll path). Importance: matters once the macOS build is a real shipping target; LOW URGENCY while Windows is the primary platform. Pairs with #95 (the Windows WIC reorder) as the cross-platform completion of finding #1.",
         "subtasks": []
@@ -1170,37 +1272,43 @@
             "id": 1,
             "title": "Phase A — URL corrections",
             "description": "DONE 8da7ad31. jdlien/photoblaze → fullspecsystems/blazeviewer in CHANGELOG compare links + ARM64 runner script + self-hosted-runners doc; About (both shells) → blazeviewer.app since the repo is private; egui QR fixture → blazeviewer.app; documented that the GitHub runner's Windows service name is fixed at registration time (a pre-rename runner stays actions.runner.jdlien-photoblaze.* until re-registered).",
-            "status": "done"
+            "status": "done",
+            "parentId": "undefined"
           },
           {
             "id": 2,
             "title": "Phase B1 — add APP_NAME/APP_SLUG/APP_ID constants to pb-app-core",
             "description": "There is no central product-name constant today (only TAGLINE) — the name is hardcoded in ~381 places, which is precisely what makes this rename expensive. Add APP_NAME=\"Blaze Viewer\", APP_SLUG=\"blazeviewer\", APP_ID=\"ca.fullspec.BlazeViewer\" to pb-app-core, then have config.rs, single_instance.rs, default_app.rs, update.rs and the dialogs consume them. DO THIS BEFORE Phase C — it turns C from a sweep into a handful of edits, and makes any future rename a one-line change.",
-            "status": "done"
+            "status": "done",
+            "parentId": "undefined"
           },
           {
             "id": 3,
             "title": "Phase B2 — structural DONE (Swift target, icons, CLI, Swift UI strings); docs prose remains",
             "description": "DONE: SwiftPM target PhotoBlazeMac->BlazeViewerMac (33 files git mv; the Mac suffix is KEPT — not to disambiguate from Windows/Linux (those are pb-app, a Rust crate in another namespace) but so the SwiftPM intermediate is not `BlazeViewer` against the shipped `Blaze Viewer`, differing only by a space). All 19 icon files renamed + every reference (include_bytes!, build.rs, icon.json image-name, CFBundleIconFile, actool/Velopack/AppImage paths) — verified by RUNNING build-macos-icons.sh: icns byte-identical, Assets.car same size with only the 6 layer-name strings changed (the old name had been shipping inside the compiled catalog). CLI: clap bin_name photoblaze->blaze (ripgrep convention: short command + display_name=APP_NAME), the EXAMPLES block, and the PATH doc comment clap renders into --help. Swift: appName now read ONCE from Bundle CFBundleName — the macOS APP MENU still said PhotoBlaze/About PhotoBlaze/Quit PhotoBlaze because the Phase C sweep grepped crates/ but never mac/. Windows VERSIONINFO + manifest assemblyIdentity. LICENSE/EULA retired + vendor naming rule. ALSO FIXED: mac/.build had /Users/jdlien/code/photoblaze baked into 72 files, so the Mac build had been broken since the directory rename. REMAINS: ~284 prose/comment refs (README, .taskmaster/docs, doc-comments) — ZERO in code. Historical records (CHANGELOG, archive.json, *-plan.md) keep the old name deliberately.",
-            "status": "in-progress"
+            "status": "in-progress",
+            "parentId": "undefined"
           },
           {
             "id": 4,
             "title": "Phase D — VERIFIED: Velopack follows the 302; the flat dir is mandatory",
             "description": "VERIFIED 2026-07-14 against velopack-0.0.70 source. (1) The Rust binding has NO GithubSource — only HttpSource/FileSource — so the earlier \"fall back to GithubSource\" idea is void; GitHub per-release asset layout cannot be walked, and a flat dir is what keeps delta updates working. (2) download_release_entry does url.join(&asset.FileName) — the .nupkg URL is strictly FEED_URL+FileName, so releases.win.json carries a filename NOT a url; Windows can never point straight at GitHub and the flat dir is mandatory. (3) The 302 WORKS: velopack builds ureq::AgentBuilder::new().tls_connector(..).build() and never calls .redirects(0), so ureq default redirects:5 applies. macOS + Linux need NO redirect — Sparkle enclosure url and the Linux Asset.url are both absolute. Worker gotcha: velopack appends ?localVersion=&id= to the releases.win.json request — do not 404 on it. The releases repo must be PUBLIC (private release assets need auth). SEQUENCING: moving the feed URL is only free during the Phase C forced reinstall (it is compiled in); moving the BYTES is free forever after. So point the feed at downloads.blazeviewer.app in C, and defer the GitHub-bytes migration — stealth + one user means bandwidth is ~zero today.",
-            "status": "done"
+            "status": "done",
+            "parentId": "undefined"
           },
           {
             "id": 5,
             "title": "Phase C — identity cutover LANDED (needs a real release to validate)",
             "description": "LANDED 2026-07-14. Constants flipped (APP_NAME=Blaze Viewer / APP_IDENT=BlazeViewer / APP_SLUG=blazeviewer); cargo bin photoblaze->blazeviewer; bundle id ca.fullspec.BlazeViewer; CFBundleName/DisplayName/Executable = Blaze Viewer; app bundle \"Blaze Viewer.app\"; DMG BlazeViewer-<v>.dmg (NO space - generate-mac-appcast.sh concatenates the enclosure URL with no encoding, so a space would emit a literal space in an XML url attr and break Sparkle); Velopack packId BlazeViewer + mainExe blazeviewer.exe + packTitle \"Blaze Viewer\"; ProgIDs BlazeViewer.*; config dirs; 4 Swift queue labels ca.fullspec.blazeviewer.*; CLI symlink /usr/local/bin/blaze; feeds -> downloads.blazeviewer.app/{win,mac,linux} (product namespace dropped). Sparkle EdDSA key deliberately UNCHANGED. DELIBERATELY NOT renamed: icon filenames (B2), SwiftPM target PhotoBlazeMac (B2), the photoblaze-notary keychain alias (renaming breaks the owner local credential), and setup-libheif.ps1 \"PhotoBlaze task #100\" (a functional idempotency marker in a vcpkg portfile - renaming it would re-patch an already-patched tree). VERIFIED: 553 tests, Windows cross-check (check+clippy --tests), all .sh + .ps1 parse, plutil OK, fmt. NOT yet validated by an actual release - that is what moves this to done. Server: downloads.blazeviewer.app vhost is written + validated + etckeeper-committed on jdlien.com but NOT reloaded, pending grey-cloud DNS. VALIDATED 2026-07-14: the Windows x64 0.2.1 release was cut and published to downloads.blazeviewer.app/win under the new identity — packId BlazeViewer, blazeviewer.exe, BlazeViewer.Image/.Archive/.Video ProgIds from APP_IDENT, VERSIONINFO ProductName \"Blaze Viewer\" + CompanyName \"FullSpec Systems Inc.\", signed FullSpec Systems, feed index serving a single clean BlazeViewer 0.2.1 entry and /latest/windows resolving to it. The identity cutover is real-release-validated on Windows (macOS 0.2.1 shipped earlier).",
-            "status": "done"
+            "status": "done",
+            "parentId": "undefined"
           },
           {
             "id": 6,
             "title": "Terminology — \"Hold to Fly\" → \"Hold to Blaze\"",
             "description": "DONE. The fast-flick feature is named Blaze; the verb is blaze, not fly. Swept code comments, README/CLAUDE.md/AGENTS.md/roadmap, one `flying` local (renamed `blazing`) and one test name. Comments-only — no user-visible UI copy said fly. Historical records (CHANGELOG, archive.json, .taskmaster/docs/*-plan.md) deliberately keep the old term. OPEN (owner call): the Settings section holding the blaze-speed options is labelled \"Navigation\" (SettingsView.swift:149) — the original plan called it BLAZE; renaming it would surface the feature name in the UI for the first time.",
-            "status": "done"
+            "status": "done",
+            "parentId": "undefined"
           }
         ]
       },
@@ -1216,37 +1324,43 @@
             "id": 1,
             "title": "Phase 0 - crate verification spikes",
             "description": "DONE. entries_with_seek exists; bzip2 default backend = libbz2-rs-sys; flate2 default = miniz_oxide; lzma-rust2 exposes XzReader (multi-stream) so .tar.xz is in scope at zero new deps; ruzstd 0.8.3 can encode (fixtures generated in-test, no committed binaries) but its StreamingDecoder is single-frame and skips the first-frame window cap (both fixed by our MultiFrameZstd wrapper). Spike 102.0 (compcol) findings recorded in the plan; verdict: incumbents for the big three, compcol not adopted for tar.",
-            "status": "done"
+            "status": "done",
+            "parentId": "undefined"
           },
           {
             "id": 2,
             "title": "Phase 1 - ArchiveKind classifier + lazy TarSource",
             "description": "DONE d993fb6. Classifier with eager()/background_open(), double-extension matrix tests; lazy plain-tar index (seek over data, offset reads, full sibling listing, dup-name last-wins, truncated-tail skip, traversal-name skip, entry-count/name caps).",
-            "status": "done"
+            "status": "done",
+            "parentId": "undefined"
           },
           {
             "id": 3,
             "title": "Phases 2-3 - eager compressed tar, all four codecs",
             "description": "DONE d993fb6. Codec-reader seam, counting-reader progress, mid-stream RAM budget (OpenError::TooLarge), cancellation, metadata quota, expanded-work cap, post-iteration codec drain (trailer CRCs), multi-frame + skippable zstd with window pre-check + checksum verify, xz first-block dict pre-check. 63 pb-source tests.",
-            "status": "done"
+            "status": "done",
+            "parentId": "undefined"
           },
           {
             "id": 4,
             "title": "Phase 4 - app wiring (winit + mac-ffi + Swift panel)",
             "description": "DONE 92b4d44. scan::load_archive single worker entry (7z preflight moved inside), every kind but ZIP opens off-thread, is_archive -> archive_kind in both shells, picker filters (+bare gz/bz2/zst/xz; macOS panel too - no All-files hatch there), OS associations deliberately unchanged, no-trace tests (tar + tar.gz), archived-video-in-tar dispatch test, Linux MemAvailable, tar_open fuzz target.",
-            "status": "done"
+            "status": "done",
+            "parentId": "undefined"
           },
           {
             "id": 5,
             "title": "Phase 5 (optional) - bare compressed single images",
             "description": "photo.jpg.gz / photo.png.bz2 / photo.jxl.zst open as one-entry sources (NOT .svgz - already a supported image via svg.rs). The picker already offers the bare suffixes; today they refuse cleanly, this makes them open.",
-            "status": "pending"
+            "status": "pending",
+            "parentId": "undefined"
           },
           {
             "id": 6,
             "title": "Fuzz run + corpus benchmarks",
             "description": "Run cargo fuzz run tar_open on the Linux side (nightly; target compiles on MSVC too). Corpus benchmarks: plain-tar index latency, codec throughput, cancel latency, peak RSS on representative multi-GB tarballs.",
-            "status": "pending"
+            "status": "pending",
+            "parentId": "undefined"
           }
         ]
       },
@@ -1257,38 +1371,43 @@
         "status": "review",
         "priority": "medium",
         "dependencies": [
-          102
+          "102"
         ],
         "subtasks": [
           {
             "id": 1,
             "title": "Unblock: compcol dep with the x86 fix",
             "description": "Fork git-dep wired: exact rev 5c47b0e (pushed branch tip with the x86 fix). REMAINING: swap to an exact crates.io pin once upstream PR #121 merges + releases. The local rar3-standard-filters branch (Delta + add_file_boundary) is the next pin bump when it lands.",
-            "status": "in-progress"
+            "status": "in-progress",
+            "parentId": "undefined"
           },
           {
             "id": 2,
             "title": "RarSource non-solid (lazy)",
             "description": "Block-chain scan for the file table, per-entry decode, CRC32, window cap, encryption detection. TDD against compcol-rar-corpus rar5_m*_nonsolid.",
-            "status": "done"
+            "status": "done",
+            "parentId": "undefined"
           },
           {
             "id": 3,
             "title": "RarSource solid (eager)",
             "description": "Whole-group decode-to-RAM with OpenProgress/budget; byte-identical to unrar; Delta-member-in-solid degrades that group's later members, never the archive.",
-            "status": "done"
+            "status": "done",
+            "parentId": "undefined"
           },
           {
             "id": 4,
             "title": "App wiring + harden",
             "description": "ArchiveKind::Rar (+cbr/cbz), dispatch via load_archive, picker, no OS association, no-trace test, archived-video-in-rar smoke, per-entry honest Unsupported for Delta/ARM/encrypted, own fuzz target, docs.",
-            "status": "done"
+            "status": "done",
+            "parentId": "undefined"
           },
           {
             "id": 5,
             "title": "Password decryption (-p and -hp)",
             "description": "RAR5 encryption via PBKDF2-HMAC-SHA256 + AES-256-CBC (pb-source/src/rar_crypt.rs). Per-file and full-header encryption both decrypt; missing/wrong password returns PasswordRequired (reuses ZIP/7z prompt flow, no shell changes). Encrypted-solid runs stripped to real block length before the decoder (rar5_stream_len) to skip the 16-byte inter-file padding. Validated byte-identical to unrar over the corpus (20 archives / 66 entries) + a committed encrypted_solid.rar fixture; no-trace guarantee holds.",
-            "status": "done"
+            "status": "done",
+            "parentId": "undefined"
           }
         ]
       },
@@ -1299,9 +1418,9 @@
         "status": "review",
         "priority": "medium",
         "dependencies": [
-          30,
-          102,
-          103
+          "30",
+          "102",
+          "103"
         ],
         "subtasks": []
       },
@@ -1312,38 +1431,43 @@
         "status": "in-progress",
         "priority": "medium",
         "dependencies": [
-          104
+          "104"
         ],
         "subtasks": [
           {
             "id": 1,
             "title": "Core: sentinel, door_card(), omit dimensions, non-blocking size",
             "description": "1x1 transparent sentinel; door_card() keyed off the PRESENTED item (not the playlist cursor); omit dimensions for doors in the info line, Details and Copy Details; a size source that never stats on the event loop or a blaze step (prefer teaching the scan to carry sizes - read_dir gives metadata nearly free on Windows and FsSource has no size_hint today; a stat over SMB can block). Tests include: no fs::metadata on the frame path.",
-            "status": "done"
+            "status": "done",
+            "parentId": "undefined"
           },
           {
             "id": 2,
             "title": "winit/egui: the card, its lifecycle, thumbnails, command gating",
             "description": "PanelFrame.door + the visibility/signature seam (the retained overlay will NOT show the card on its own: overlay_panel_visible gates it and overlay_dirty gates rebuilds). Card from pb-ui atoms + middle_truncate, sized per the plan's formula (the fixed 512pt rule was wrong: it breaks past 200% scaling and cannot fit the 520x360 macOS minimum). Archive thumbnails, or the strip goes blank. Command gating (Copy Image / OCR / Describe / Compare). Shows while blazing.",
-            "status": "done"
+            "status": "done",
+            "parentId": "undefined"
           },
           {
             "id": 3,
             "title": "macOS: the same card in SwiftUI + a one-time artwork bridge",
             "description": "SwiftUI card, thumbnails, command gating. Artwork via a one-time generation+dims+RGBA accessor cached in CoreModel - never clone ~4MiB through FFI per pump. Requires a real Swift host build and a real-folder smoke test; cargo check -p pb-mac-ffi only validates the Rust half. STATUS (2026-07-17): built. FFI seam (DoorCardFfi + door_art_* free fns + thumb_archive), CoreModel pump + one-time NSImage, DoorCardView, the overlay slot, and archive thumb cells all land; pb-mac-ffi tests cover the seam. Verified visually via the new --pb-door-shot <dir> harness (ImageRenderer, no window/core needed - it runs in App.init because onAppear never fires on a Mac at the login window): short/long-name/no-art/min-window/tiny x light+dark all correct. STILL NEEDS the owner real-folder smoke test on a live window - screen capture and Accessibility are unavailable to the agent, so the pump->doorVisible->overlay path is unverified on screen.",
-            "status": "review"
+            "status": "review",
+            "parentId": "undefined"
           },
           {
             "id": 4,
             "title": "Measure the blaze cost (the gate)",
             "description": "The card is the first persistent chrome in the blaze hot path, and its filename changes each frame while scrubbing consecutive doors. The 'costs nil' claim was withdrawn as unsupported. Compare an image-only deck against a consecutive-door deck at target res + 120Hz; report p50/p95/p99 CPU frame time and keypress->photon, never means. If full-window egui repaint is material, retain the card in a smaller overlay texture.",
-            "status": "pending"
+            "status": "pending",
+            "parentId": "undefined"
           },
           {
             "id": 5,
             "title": "Cleanup + docs",
             "description": "Delete play_hint_persistent, the kind-3 arms, never_upscale, and the already-dead pb_hud::icon::assets::FILE_ZIPPER + its vendored SVG; drop Icon::Archive (glyph arms, gallery entry, both vendored family SVGs) if it ends up unused. Extend --egui-shot (the viewer-overlay harness, NOT --settings-shot) with door-card modes. Update CHANGELOG.md, whose text still describes an archive tile/icon. DONE (2026-07-17): play_hint_persistent, never_upscale, the kind-3 arms, and pb_hud FILE_ZIPPER were already removed in the earlier winit door-card commits (play_hint_kind is now 0/1/2, no door arm). Icon::Archive is KEPT — still used by the egui door card Open button + gallery. egui_shot already carries a door mode; the macOS shell gained --pb-door-shot (offscreen ImageRenderer harness). CHANGELOG updated: the stale tile/icon wording now reads card.",
-            "status": "done"
+            "status": "done",
+            "parentId": "undefined"
           }
         ]
       },
@@ -1359,43 +1483,51 @@
             "id": 1,
             "title": "Encoded-byte cache in front of source.bytes()",
             "description": "Every image decode calls source.bytes(item) (engine.rs:512), which for a ZIP re-inflates/re-reads the entry every call - so a resize (epoch bump -> re-decode) re-reads 39MB off SMB (~0.8s measured). Add a small bounded RAM-only LRU of encoded (inflated) bytes, consulted before source.bytes(). Kills the re-read for resize, preview->full upgrade, revisit, OCR, Describe. Highest value on archives/SMB (expensive bytes()), near-free on FsSource (OS page cache). RAM-only, dropped on nav/Esc (privacy #2, same category as pending_uploads). Decide scope (archive-only vs all) + byte budget. Behind a seam + A/B via PB_PERF resize numbers.",
-            "status": "pending"
+            "status": "pending",
+            "parentId": "undefined"
           },
           {
             "id": 2,
             "title": "Break down the 7s open->first-photo (it is NOT a full unzip)",
             "description": "CORRECTION: a ZIP is already lazy - open reads only the central directory + a local header per entry (ZipSource::open), then bytes(i) inflates ONE entry on demand. It is 7z that is eager (whole archive -> RAM on open, because solid). So the 7s is NOT unzip-everything; it is ~all the 39MB single-entry read over SMB + ~0.3s decode. Sub-instrument metric 1 into phases (open-cmd -> worker/central-dir done -> first bytes() read -> first decode -> present) to confirm the read dominates. NB a ZIP is not background_open (kind.rs:50) so open runs sync on the event loop; verify that is not itself a stall.",
-            "status": "in-progress"
+            "status": "in-progress",
+            "parentId": "undefined"
           },
           {
             "id": 3,
             "title": "Thumbnails: keep a tiny window warm when parked (bounded, off by default cost)",
             "description": "Owner call: do NOT always-capture everything (thumbs are off by default; bad trade for never-users). Happy medium: keep capture off by default, but when PARKED (held_nav is none), derive thumbs for a tiny window - current + next 2-3 - off-thread on the existing derive thread. Those items are already decoded/resident, so it is pure downsample (tens of ms each), zero source reads. Result: opening the panel always shows the neighbors instantly + rest fill on scroll, instead of a wall of placeholders for seconds. Blaze pays nothing (parked-gate); RAM capped (handful). Today thumbs_capture (app_core_impl.rs:2160) is gated on thumbs.enabled which only flips on first panel open (thumbs.rs:107), so a browse-then-open re-reads all N from SMB via Job::thumb. The ring-reuse (GPU-downsample a resident VRAM texture) stays a fallback for evicted items.",
-            "status": "pending"
+            "status": "pending",
+            "parentId": "undefined"
           },
           {
             "id": 4,
             "title": "First-image priority / bandwidth on a slow source",
             "description": "The prefetch already ranks the on-screen photo tier-1 (request_prefetch sharpen/head), but on a slow source its full-res read competes for bandwidth with the whole window's preview reads. Explore throttling concurrent reads from an archive/slow source so the first image isn't fighting its neighbors. Separable from the byte cache; only pursue if #2 shows read-bandwidth contention (vs a fixed open cost).",
-            "status": "pending"
+            "status": "pending",
+            "parentId": "undefined"
           },
           {
             "id": 5,
             "title": "Preview-first for big JPEGs via the embedded EXIF thumbnail",
             "description": "The real fix for the 7s first-photo over SMB. Large JPEGs embed a small thumbnail near the file start (owner test file: JPEGInterchangeFormat 240, len 22467 = 22KB). We already have pb_decode::exif_thumbnail but only use it for the thumbs strip; the main viewer decodes the full JPEG and shows nothing until done. Read just the first ~128KB of the entry, pull the embedded thumb, show it in ~100ms (blurry, fit-to-screen), then read the full entry in the background and upgrade to sharp (the preview-first model RAW/HEIC already use). Needs (a) a partial entry read - bytes() reads the whole entry today; (b) a JPEG preview-first path in decode. Turns 7s of placeholder into instant-preview->sharpen.",
-            "status": "pending"
+            "status": "pending",
+            "parentId": "undefined"
           },
           {
             "id": 6,
             "title": "Resize: jump to true 1:1 SIZE instantly (upscale the fit texture), then sharpen",
             "description": "Owner-observed two-stage Fit->1:1: (1) a small grow to an intermediate size, (2) ~1s spinner, (3) a jump to true pixel-1:1. Cause: in Fit mode finalize (common.rs:84) downscales the texture to the fit box (true res kept only as orig_width/orig_height), and ViewTransform base_scale for Original is 1.0 = draw the bound texture at 1:1 of ITS dims (view.rs:110). So the toggle shows the low-res fit texture at 1:1-of-reduced-dims (near fit size, wrong) until the full-res re-decode lands and present_slot re-places at the true dims (the big jump). Fix: on the toggle, place the quad at the TRUE size using orig_width/orig_height and let the GPU upscale the fit texture - so you jump to the correct SIZE instantly (soft), then only sharpness improves when the full decode arrives. One soft->sharp transition, no intermediate size step. The resize twin of #106.5 (EXIF preview-first); pairs with #106.1 (byte cache) so the sharpen is not gated on an SMB re-read.",
-            "status": "pending"
+            "status": "pending",
+            "parentId": "undefined"
           },
           {
             "id": 7,
             "title": "Hold the full-res of the PARKED photo so 1:1/zoom is instant (the real zoom win)",
             "description": "MEASUREMENT (warm, PB_PERF): reads are ~37ms/33-38MB (OS SMB cache warm - the 7s first-photo was the ONE-TIME cold read); steady-state the DECODE (~300-500ms per 36MP JPEG) is the whole cost. Every Fit<->1:1 toggle bumps the geometry epoch and re-decodes the WHOLE ring at the new fit (log: items 0-7 re-decode around each resize). Root cause (owner, confirmed): decode-to-fit only caches the fit-sized texture and discards the full-res (true res kept only as orig_width/orig_height, common.rs:84), so 1:1 re-decodes every time - even toggling back and forth.\n\nDESIGN (owner, 2026-07-17): while BLAZING keep decode-to-fit (small, the prime directive). When PARKED, background-decode + HOLD the full-res for a small SEQUENTIAL window - current + previous + next (radius 1, 3 items) by default; NOT the random-deck neighbors. Then Fit<->1:1<->Fit on the current photo (and on an immediate neighbor after one nav) are instant REBINDS - decode paid once, in the background, never on the toggle. Serve BOTH modes from the full-res (GPU downscales for Fit, 1:1 for Original). Drop full-res outside the window on nav.\n\nCONFIGURABLE + OOM-SAFE (owner: easy to dial in; constrained systems must be able to reduce it): a Settings knob for the full-res cache radius - 0 = current only (or off), 1 = current+/-1 (default), maybe up to a small cap. VRAM math: 36MP RGBA8 ~= 144MB each, so radius 1 = ~432MB of full-res on top of the fit ring; bound it against a VRAM budget and let a slow box dial to 0. Random-deck neighbors are a possible later addition (owner may want after real use), left out for now. REPRIORITIZES: #106.1 byte-cache is a COLD/SMB win (nothing for a warm resize); THIS is the actual zoom win.",
-            "status": "pending"
+            "status": "pending",
+            "parentId": "undefined",
+            "details": "<info added on 2026-07-19T05:32:10.521Z>\nitem-6 (retain/remap, the 106.7-item6 hardened spec) SHIPPED 2026-07-19 on feat/110-gpu-lanczos-from-original: invalidate_geometry now retains resident Originals (drop_fit_slots + compact_to + the new Renderer::remap_ring), invalidate_content keeps the full purge (spec 4.1 invariant), the settle re-presents the retained current Original at the new epoch (Part D), and try_present_target derives a missing Fit from a retained neighbour Original on nav (6b — advance-after-toggle stays sharp, no preview flash). The spec's Part C SatisfiedBy machinery was unnecessary because #110's GPU derive landed first. Undo-rotation of a navigated-away photo now bumps content_gen (the spec-flagged latent hole). Owner manual verification pending.\n</info added on 2026-07-19T05:32:10.521Z>"
           }
         ]
       },
@@ -1406,7 +1538,7 @@
         "status": "pending",
         "priority": "medium",
         "dependencies": [
-          105
+          "105"
         ],
         "subtasks": []
       },
@@ -1417,7 +1549,7 @@
         "status": "pending",
         "priority": "low",
         "dependencies": [
-          104
+          "104"
         ],
         "subtasks": []
       },
@@ -1428,7 +1560,7 @@
         "status": "pending",
         "priority": "medium",
         "dependencies": [
-          104
+          "104"
         ],
         "subtasks": []
       },
@@ -1436,20 +1568,33 @@
         "id": 110,
         "title": "GPU HQ-scaling follow-ons (Phase 1b VRAM + Phase D + Codex items)",
         "description": "Follow-ons to the mipmap Phase 1 (shipped d82df25f; plan .taskmaster/plans/gpu-mipmap-hq-scaling.md rev2). Phase 1 = mipmapped near-Lanczos GPU downscaling for the full-res Original rep. Deferred, in rough priority:\n(1) Phase 1b VRAM: exact mip-inclusive byte accounting in the ring (it records L0 only today), allocation-aware + HDR-limited full_res_eligible (200MP HDR + mips ~2.13GB > 1.5GB budget; full_res_eligible is pixel-count-only and doesn't exclude HDR), and the pre-existing make_room_for_upgrade/renderer-eviction bug (preview->full sets slot bytes without making room). Common <=24MP radius-1 case is safe today; this is for the pro/gigapixel range.\n(2) Phase D (retire the resize re-decode, truly toggle-smooth): CONDITIONAL + A/B-gated. Box mips != Lanczos-3 at 2-3x; keep the Lanczos Fit behind a switch, A/B at 1.25-8x, remove only if the owner confirms redundant. Needs a renderer retain/remap API (drop_fit_slots exists in ring.rs, no renderer half) + a 'Fit may be satisfied by a mipmapped Original' display rule + splitting the settle timer (it also resumes video/audio + repositions overlays). Escalation if box mips miss the bar: GPU-derive an exact-size Lanczos/Kaiser Fit from the mipped Original texture (no SMB re-read; needs RingSlot to expose a texture/view).\n(3) Odd-dim polyphase mip box (Phase 1 uses a clamped 2x2 that under-weights, never drops, the trailing texel). (4) Mode-1 source-ICC mips (thread the TRC into the mip shader; today mode-1 stays L0). (5) clamp_to_max uses nearest-neighbor reduction — replace with Lanczos/area so huge clamped panoramas aren't pre-softened. (6) Expand the golden suite (nv-flip dep; many ratios/patterns/phases, SDR+HDR+alpha) + a Metal smoke test for fp16 mips. (7) Bicubic-in-shader magnify path ONLY if owner testing shows upscaling needs it. Full Codex review captured in the 2026-07-18 session.",
-        "status": "pending",
+        "status": "in-progress",
         "priority": "medium",
         "dependencies": [],
-        "subtasks": []
+        "subtasks": [],
+        "updatedAt": "2026-07-19T05:31:59.280Z"
       },
       {
         "id": 111,
         "title": "Stuck preview: full-res never upgrades in the normal flow (blurry in Fit / tiny in 1:1)",
         "description": "Owner-reported 2026-07-18, reproduces on a plain SSD FOLDER too (so NOT archive-specific; an archive only widens the timing window). Sometimes loading a photo shows the low-res EXIF preview and it NEVER sharpens until a resize / fullscreen toggle / scale change forces a fresh decode. The unifying clue: pressing 0 (1:1/Original mode) in that state SHRINKS the image to the PREVIEW's native size — proving both symptoms are ONE root: the full-resolution decode is stuck at the preview stage (preview shown; full upgrade never completes). In Fit mode → upscaled/blurry; in Original mode → the tiny preview at true 1:1. A resize re-decodes fresh and completes.\nNOT the surface-drop bug (the preview IS presented; it's the full that's missing) — distinct from the frozen-door / same-size-Lost surface issue (that one still needs surface recreation, held in reserve).\nCandidate mechanisms traced (app_core_impl.rs, verify with a diagnostic — DON'T guess): sharpen_now (~5653) only requests the full while display_slot(d).is_some() && preview_resident.contains(d) && !upgrade_done.contains(d); request_prefetch (~5497) SKIPS the sharpen when `resident && !is_prev` ('already full'). So a preview that's resident-but-not-in-preview_resident, or shown via the single-image path (load_current_sync ~6814 uses set_image, outside the ring, so display_slot is None), or a full outcome dropped in drain_results' retain (~6611: kept only if `is_prev && !img.is_preview`; else dropped and possibly upgrade_done'd) — any of these leaves the preview stranded. Cancellation is cleanly discarded (decode_pool ~388/417), so it's NOT that. upgrade_done (~6471/6611) is the permanent 'stop sharpening' flag — a genuine decode error OR a full-that-came-back-a-preview sets it.\nNEXT: add a gated preview->full lifecycle diagnostic (preview presented / sharpen requested / full landed: is_preview, is_prev, kept|dropped|upgrade_done) so ONE capture pins which path strands it, then fix. Likely a pre-existing #106.5/#106.7 interaction, not the recent mip/resize work.",
-        "status": "pending",
+        "status": "done",
         "priority": "high",
         "dependencies": [],
-        "subtasks": []
+        "subtasks": [],
+        "updatedAt": "2026-07-19T05:31:58.507Z"
       }
-    ]
+    ],
+    "metadata": {
+      "version": "1.0.0",
+      "lastModified": "2026-07-19T05:31:59.280Z",
+      "taskCount": 43,
+      "completedCount": 1,
+      "tags": [
+        "master"
+      ],
+      "created": "2026-07-19T05:32:07.941Z",
+      "description": "Tasks for master context"
+    }
   }
 }
