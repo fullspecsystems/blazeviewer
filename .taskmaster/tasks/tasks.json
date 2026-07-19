@@ -1164,7 +1164,7 @@
       {
         "id": 92,
         "title": "Feature-film poster frame selection on the Windows (MF) + macOS (AVFoundation) backends",
-        "description": "The seek-deep, shallow-first, brightness+contrast poster selection (fixes all-black posters for films that open on a studio logo / fade-in) shipped only on the FFmpeg backend (crates/pb-decode/src/ffmpeg/poster.rs; Mac MKV/WebM + Linux). The Windows Media Foundation poster (mf_poster.rs) and the macOS AVFoundation poster (av_poster.rs, MP4/MOV via the Live-Photo streaming reader) still use the old first-non-black mean-luma walk (30 frames / ~1s), so feature-film posters remain black there. Port the same strategy: reuse the shared scoring (crate::video::poster_frame_score / POSTER_GOOD_SCORE / luma_stats_rgba8), add a head-walk then seek deeper (shallow-first offsets ~8/20/45/90s clamped to min(5min, 50%)) and pick the best-scoring frame. MF supports IMFSourceReader::SetCurrentPosition seeking; AVFoundation needs an AVAssetReader timeRange start offset added to the streaming reader (the harder one - the reader currently reads from the start).",
+        "description": "The seek-deep, shallow-first, brightness+contrast poster selection (fixes all-black posters for films that open on a studio logo / fade-in) shipped only on the FFmpeg backend (crates/pb-decode/src/ffmpeg/poster.rs; Mac MKV/WebM + Linux). The Windows Media Foundation poster (mf_poster.rs) and the macOS AVFoundation poster (av_poster.rs, MP4/MOV via the Live-Photo streaming reader) still use the old first-non-black mean-luma walk (30 frames / ~1s), so feature-film posters remain black there. Port the same strategy: reuse the shared scoring (crate::video::poster_frame_score / POSTER_GOOD_SCORE / luma_stats_rgba8), add a head-walk then seek deeper (shallow-first offsets ~8/20/45/90s clamped to min(5min, 50%)) and pick the best-scoring frame. MF supports IMFSourceReader::SetCurrentPosition seeking; AVFoundation needs an AVAssetReader timeRange start offset added to the streaming reader (the harder one - the reader currently reads from the start). OWNER 2026-07-19: the Windows deep-walk (267b1e9b, on main) is flagged GOOD ENOUGH FOR NOW - the worst issue (pure-black posters) is resolved. Accepted quirk: some Netflix specials (e.g. Ali Wong) that previously showed good posters now pick white-ish frames - most likely the blank-title-card skip trading black leads for white cards; revisit only if it grates. The macOS AVFoundation half (subtask 2) remains open.",
         "status": "pending",
         "priority": "medium",
         "dependencies": [
@@ -1175,7 +1175,7 @@
             "id": 1,
             "title": "Windows MF backend (mf_poster.rs)",
             "description": "Add seek-deep sampling using IMFSourceReader::SetCurrentPosition; reuse the shared poster_frame_score / best-frame selection. Cannot be tested on the Mac dev box - needs a Windows build/run.",
-            "status": "pending",
+            "status": "done",
             "parentId": "undefined"
           },
           {
@@ -1583,12 +1583,30 @@
         "dependencies": [],
         "subtasks": [],
         "updatedAt": "2026-07-19T05:31:58.507Z"
+      },
+      {
+        "id": 112,
+        "title": "Performance profiles: hardware-sized budgets (Safe / Normal / High slider)",
+        "description": "Scale the comfort budgets (VRAM ring, decode pool, full-res radius clamp, ring slot cap) from DETECTED hardware. Detection is the foundation, profiles are the fraction: Safe = today's shipping budgets, Normal (default) = today's fraction generalized (~25% VRAM), High = the beast tier (~45% VRAM) with an honest caveat in the description. UI = a 3-detent pb-ui slider on the General settings page (owner call). Safety budgets (archive eager decode, hostile-input caps) never scale. The window-split rebalance (2/3 ahead, 1/3 behind) rides along as its own phase. Design draft: .taskmaster/plans/112-performance-profiles.md (Codex-reviewed). DO NOT implement before owner sign-off on the design.",
+        "status": "pending",
+        "priority": "medium",
+        "dependencies": [],
+        "subtasks": []
+      },
+      {
+        "id": 113,
+        "title": "macOS: on-device verify of the #110/ADR-024 rendering arc (+ #109 shell parity edits)",
+        "description": "The rendering-quality arc (branch feat/110-gpu-lanczos-from-original: ADR-024 watchdog, #110 GPU Lanczos derive, item-6 retain/remap, sharpen-via-derive, nearest-first parked fulls, the duplicate-preview upgrade_done poisoning fix) lives almost entirely in SHARED code: pb-app-core orchestration + pb-render's WgpuRenderer, which the mac shell constructs directly (pb-mac-ffi/src/lib.rs ~2437 new_from_ca_layer). So remap_ring and derive_fit are NOT missing trait defaults on macOS (the current-status rev-18 claim was stale) - the arc should ride free at the next mac build via wgpu's Metal backend. UNVERIFIED until run on-device. Work (after feat/110 merges to main): (1) build the mac host and confirm remap_ring/derive_fit are exercised (PB_SHARP_DIAG: 'GPU-derived Fit', 'GPU-sharpened'); (2) run the .taskmaster/docs/110-manual-test-script.md flow on the Mac (fullscreen toggle crispness, advance-after-toggle, watchdog stress, PB_SCALE_POLICY=cpu A/B) - note the mac settle path uses the same FULLSCREEN_SETTLE/RESIZE_SETTLE constants; (3) verify the DERIVE shader on Metal (WGSL->MSL: fp16 intermediates, unclamped-alpha unpremultiply - the gpu.rs regression tests run headless on the Mac CI runner too); (4) while in there, do the #109 item-1 shell parity edits (begin_archive_open/begin_dir_scan cross-cancel, see task #109 - reference git show 8293a662); (5) update current-status.md. Windows-side prep is DONE; this task is mac-hardware-only.",
+        "status": "pending",
+        "priority": "medium",
+        "dependencies": [],
+        "subtasks": []
       }
     ],
     "metadata": {
       "version": "1.0.0",
       "lastModified": "2026-07-19T05:31:59.280Z",
-      "taskCount": 43,
+      "taskCount": 45,
       "completedCount": 1,
       "tags": [
         "master"
