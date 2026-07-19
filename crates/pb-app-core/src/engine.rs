@@ -553,7 +553,11 @@ pub fn decode_item_cancellable(
                                 return Ok(img);
                             }
                         }
-                        eprintln!("video poster failed: {}: {e}", path.display());
+                        // A cancelled walk (superseded thumb/prefetch job) is routine
+                        // churn, not a failure — over SMB it floods the console.
+                        if !e.is_cancelled() {
+                            eprintln!("video poster failed: {}: {e}", path.display());
+                        }
                     }
                 }
             }
@@ -570,7 +574,10 @@ pub fn decode_item_cancellable(
                         };
                         match pb_decode::ff_decode_video_poster(&input, fit, cancel) {
                             Ok(img) => return Ok(img),
-                            Err(e) => eprintln!("video poster failed: {}: {e}", source.name(item)),
+                            Err(e) if !e.is_cancelled() => {
+                                eprintln!("video poster failed: {}: {e}", source.name(item))
+                            }
+                            Err(_) => {}
                         }
                     }
                     Err(e) => eprintln!("video poster read failed: {}: {e}", source.name(item)),
@@ -596,7 +603,10 @@ pub fn decode_item_cancellable(
                 if let Some(input) = input {
                     match pb_decode::ff_decode_video_poster(&input, fit, cancel) {
                         Ok(img) => return Ok(img),
-                        Err(e) => eprintln!("video poster failed: {}: {e}", source.name(item)),
+                        Err(e) if !e.is_cancelled() => {
+                            eprintln!("video poster failed: {}: {e}", source.name(item))
+                        }
+                        Err(_) => {}
                     }
                 }
             }
@@ -615,7 +625,9 @@ pub fn decode_item_cancellable(
                         match pb_decode::decode_video_poster_input(&input, fit, cancel) {
                             Ok(img) => return Ok(img),
                             Err(e) => {
-                                eprintln!("video poster failed: {}: {e}", source.name(item));
+                                if !e.is_cancelled() {
+                                    eprintln!("video poster failed: {}: {e}", source.name(item));
+                                }
                             }
                         }
                     }

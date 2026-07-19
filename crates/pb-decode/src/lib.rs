@@ -434,6 +434,19 @@ pub enum DecodeError {
     Corrupt(String),
 }
 
+impl DecodeError {
+    /// Whether this error is a cooperative-cancellation bail-out rather than a real
+    /// decode failure. There is no dedicated `Cancelled` variant (yet): every
+    /// cancellable decoder (`mf_poster`, `animation`, `avis`, `av_poster`, `ff_live`)
+    /// reports the cancel flag as `Corrupt("…cancelled")`, so this helper is the ONE
+    /// place that knows the convention — callers use it to keep cancellations out of
+    /// error logs and failure bookkeeping. A decoder adding a new bail-out message
+    /// must keep the `cancelled` suffix.
+    pub fn is_cancelled(&self) -> bool {
+        matches!(self, DecodeError::Corrupt(why) if why.ends_with("cancelled"))
+    }
+}
+
 impl std::fmt::Display for DecodeError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -735,6 +748,17 @@ pub fn is_supported_extension(ext: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn is_cancelled_matches_the_bail_out_convention_and_nothing_else() {
+        // Every cancellable decoder's bail-out message ends in "cancelled".
+        assert!(DecodeError::Corrupt("cancelled".into()).is_cancelled());
+        assert!(DecodeError::Corrupt("motion decode cancelled".into()).is_cancelled());
+        // Real failures stay real — even ones that merely mention the word.
+        assert!(!DecodeError::Corrupt("truncated stream".into()).is_cancelled());
+        assert!(!DecodeError::Corrupt("cancelled transfer mid-header".into()).is_cancelled());
+        assert!(!DecodeError::Unsupported.is_cancelled());
+    }
 
     #[test]
     fn encode_jpeg_rgba8_produces_a_valid_jpeg_and_round_trips() {
