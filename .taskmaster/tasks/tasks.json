@@ -1606,7 +1606,7 @@
         "id": 114,
         "title": "One-run poster pipeline: fixed-size judging, PosterChoice store, poster-Original for videos",
         "description": "Owner ask 2026-07-19: ONE walk per movie, judge candidates on a fixed small downscale (more effective AND more efficient), and keep the chosen frame as the video's Original (max 4K, ~11-44 MB mipped) so window resize / scaling GPU-derives like a photo instead of re-running the multi-second scored walk (the observed resize spinner). Also: PosterChoice PTS store (RAM-only, cleared on content change) kills eviction re-walk churn and dedups thumb-vs-display double walks; bounded session retry heals transient SMB failures that today permanently blank a tile (thumbs.failed is never re-planned); head-only fallback posters seek-refusing BDMV .m2ts streams (0xC00D36E5). Fixes the Ali Wong thumb/poster divergence by construction (resolution-independent judging + thumb cut from the same native frame). Design: .taskmaster/plans/114-poster-pipeline-one-run.md (Codex review pending). Interacts: #110 (derive), #112 (parked quota), #109 (deck identity for the choice store), #92 (subsumes the divergence; mac backend adopts via shared constants). DO NOT implement before owner sign-off.",
-        "status": "in-progress",
+        "status": "done",
         "priority": "medium",
         "dependencies": [],
         "subtasks": []
