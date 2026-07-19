@@ -260,36 +260,18 @@ native views, not egui) held to the "Mac-assed Mac app" bar — see
 logic) is still shared via `pb-app-core`; only the presentation is
 per-platform.
 
-### HUD / toast icons — Font Awesome solid (codified workflow)
+### HUD / toast icons — Font Awesome solid
 
-Overlay panels (the `pb-hud` crate — shell-neutral since NS0) composite white
-outlined text **and optional icons** into
-one software RGBA8 pill, drawn as a single alpha-blended quad — rebuilt only on
-change, never per frame (off the photo hot path). Icons are **Font Awesome `solid`**
-SVGs (the house style): a single `currentColor` path tinted white, with the text's
-black-outline pass for legibility. They're vendored into the repo and rasterized via
-the same `resvg`/`usvg`/`tiny-skia` stack `pb-decode` uses (`icon::rasterize`).
+HUD overlays (the `pb-hud` crate — shell-neutral since NS0) composite text +
+icons into one software RGBA8 pill, drawn as a single quad, rebuilt only on
+change — off the photo hot path. Icons are **Font Awesome `solid`** (the house
+style — duotone was tried and rejected 2026-06-28: muddy at toast size; don't
+reintroduce it without a reason). The add-an-icon workflow lives in
+`crates/pb-hud/CLAUDE.md`.
 
-> **Style decision (2026-06-28, owner):** we tried `duotone` first but switched to
-> **solid** — "boring but reliable and effective." Duotone's 40%-opacity secondary
-> layer muddied at toast size. Use **solid** for any new icon; don't reintroduce
-> duotone without a reason.
-
-**To add an icon:**
-1. Find it in the local FA library:
-   `D:\Media\fontawesome-pro-plus-7.3.0-web\svgs\solid\<name>.svg`
-   (`ls svgs/solid | grep <kw>` to search; always the `solid` weight).
-2. Copy it **verbatim** into `crates/pb-hud/icons/<name>.svg`.
-3. Add `pub const <NAME>: &str = include_str!("../icons/<name>.svg");` to
-   `icon::assets` (`crates/pb-hud/src/icon.rs`).
-4. Show it: `show_toast_icon(msg, Some(icon::assets::<NAME>), ..)` for icon+text, or
-   `show_toast_icon("", Some(..), ..)` for an icon-only square pill (e.g. rotate).
-
-**Licensing:** FA **Pro** assets are licensed to the owner but **not redistributable**.
-The repo is **private**, so vendoring the SVGs is in-bounds. If it ever goes public:
-git-ignore `icons/` and load from the local FA path at build, or swap to the free-tier
-solid set (most of these icons, including the ones used here, are in FA Free).
-(Privacy task #2 is unaffected — the SVGs are compile-time assets, not a viewing trace.)
+**Licensing:** FA **Pro** assets are licensed to the owner but **not
+redistributable** — fine while the repo is private; any FA Pro glyph baked into
+a *shipped artifact* is a compliance defect (see *Licensing*).
 
 ## Chrome design system — the `pb-ui` crate (don't reinvent components)
 
@@ -315,39 +297,16 @@ The gallery is dev-only (eframe dev-dependency; never shipped) and is the place 
 **preview and A/B the system** — including light vs dark side by side, which a real
 single-theme dialog can't show.
 
-**What's there (`pb-ui/src/lib.rs`):**
-- **Tokens:** `SPACE_1..6` (4px scale), `GAP` (**the** standard gap — between rows, between
-  cards, and the dialog button gap/inset; one knob), `RADIUS_CONTROL`/`RADIUS_CARD`,
-  `CONTROL_H` (32px — set once, kills "every control a different size"), `FIELD_MARGIN`,
-  `CARD_WRAP_WIDTH`, and `Palette` (named color roles, light + dark).
-- **Theme:** `install_fonts` (native Segoe UI) once per dialog ctx; `apply_style(ctx,
-  dark)` each frame (cheap; survives egui's own theme bookkeeping); `apply_to_ui(ui,
-  dark)` to scope one region (e.g. a gallery column, or a **combo popup** — egui draws
-  popup *contents* with the global ctx style, so re-assert it inside `show_ui`).
-- **Components:** `group_card` (the **grouped-settings** card: a semibold heading inside
-  the card + `card_row`s that **auto-space by `GAP`** — no dividers; related settings share
-  one card, so a page is a few cards not one-per-setting), `card` (single), `card_row`
-  (responsive: control on the right when wide, stacked under the header below
-  `CARD_WRAP_WIDTH`), `toggle` / `toggle_with_label`, `page_title` / `section_label` (type ramp: page title
-  30 / section 17 — both semibold via the bundled Segoe UI Semibold face / card title 14.5
-  / description 12.5), `primary_button` / `secondary_button` / `danger_button`,
-  `text_field`, `slider` / `slider_stepped` (stable-width value box + solid-accent
-  fill — no jitter), `tab_bar` (the Settings tabs), `progress_bar` (the Loading /
-  Scanning views), `icon_sized`. Section headings are Title Case; setting labels
-  stay sentence case. `lib.rs` is the full token/component list — trust it over
-  this paragraph.
-- **Icons (`pb-ui/src/icon.rs`):** Font Awesome SVGs **vendored per family**
-  (`icons/<family>/<name>.svg`), rasterized to a **white square sprite** and **tinted at
-  draw time** — one texture serves every tone and theme (cached in the egui ctx). A
-  semantic `Icon` enum (`Lock`, `Warning`, `Trash`, …) names *meaning* not glyph; `Tone`
-  (`Neutral`/`Accent`/`Warning`/`Danger`/`Success`) resolves through the `Palette` so it's
-  light/dark-correct. Placement helpers — `lead_row` (gutter icon centered on the first
-  content line: the dialog body shape) and `inline` — bake the alignment, so there is
-  **no per-call nudging or top-clipping** (the old pain). The square render is our own
-  `fa-fw` — FA glyphs aren't all square (lock is 384×512), so we center every glyph in a
-  square box. **Switch families** by flipping `icon::ACTIVE_FAMILY` (vendor that family
-  first). The HUD toasts keep their own CPU-composite rasterizer (`pb-hud/src/icon.rs`);
-  only the egui chrome uses `pb-ui::icon`.
+**What's there (summary):** tokens (4px spacing scale, `GAP` as *the* one gap
+knob, radii, `CONTROL_H` = one 32px control height, `Palette` light+dark), the
+theme functions (`install_fonts` once, `apply_style` per frame, `apply_to_ui`
+to scope a region — re-assert inside combo popups), the component set (cards +
+rows, toggles, buttons, fields, sliders, tabs, progress), and the semantic
+`Icon`/`Tone` sprite system (white square sprites tinted at draw;
+`lead_row`/`inline` bake alignment so there's no per-call nudging). Section
+headings are Title Case; setting labels stay sentence case. **The full
+token/component/icon inventory + the add-a-component and add-an-icon workflows
+live in `crates/pb-ui/CLAUDE.md`; `lib.rs`/`icon.rs` are the source of truth.**
 
 **Conventions:** primary = accent default action (Save/OK/Unlock); secondary = neutral
 (Cancel); danger = red (Delete). Dialog status icons: Password = `Lock`/`Neutral`,
@@ -355,13 +314,6 @@ Message = `Warning`/`Warning`, Confirm-delete = `Trash`/`Danger`. `dialog.rs` ke
 the *scaffold* (the second window + `button_bar` / `dialog_frame` panels) and **composes
 pb-ui atoms** inside it. Theme is locked to the OS-resolved light/dark at open (explicit
 `ThemePreference`, not `System`, so `apply_style` isn't re-clobbered).
-
-**To add a component:** put it in `pb-ui` (drive it from tokens/`Palette`, take a
-`&mut egui::Ui`, return the `Response`), add it to the gallery `catalog`, then use it.
-Don't add UI primitives to `pb-app`. **To add an icon:** copy the glyph for each vendored
-family from the FA library (`D:\Media\fontawesome-pro-plus-7.3.0-web\svgs\<family>\`) into
-`pb-ui/icons/<family>/`, add a variant to `icon::Icon` + a `glyph!` arm, show it in the
-gallery's Icons row.
 
 > **Accent (resolved — brand-first):** the accent defaults to the logo orange
 > (`BRAND_ACCENT`, `#FF4915`), with an OS/custom override chosen in Settings.
@@ -573,200 +525,43 @@ compliance defect regardless of platform.
 
 If those three disagree with this section, **they win** — and fix this section.
 
-## Current library picks
+## The decode & source stack (summary)
 
-These are the starting points from the research in `.taskmaster/docs/`. Each is
-**provisional and benchmark-justified** — the A/B seams exist precisely so we can
-replace any of them with data.
+The deep detail lives with the code and auto-loads when you work there:
+`crates/pb-decode/CLAUDE.md` (library picks, per-format backends, color/HDR,
+video decode), `crates/pb-source/CLAUDE.md` (archive internals),
+`crates/pb-app-core/CLAUDE.md` (item kinds / doors). The always-relevant map:
 
-| Concern | Primary | A/B alternative / notes |
-|---|---|---|
-| JPEG | `turbojpeg` (libjpeg-turbo, **native scaled decode**) | `zune-jpeg` (pure Rust, SIMD; pair with `fast_image_resize`) |
-| PNG/APNG | `png` (image-rs) + `zlib-rs` backend (pure Rust, fastest now) | — (no scaled decode exists for PNG) |
-| WebP | `libwebp-sys` (`use_scaling` = true downscale-on-decode) | `image-webp` (pure Rust, no SIMD/scaling) |
-| AVIF | stills: Windows WIC / macOS ImageIO; **animated (`avis`): vcpkg dav1d + own demuxer** (task #76) | Linux: FFmpeg (`livephoto`) for animated |
-| HEIC | `libheif-rs` | ⚠ **highest** Windows build risk — pin vcpkg ports or ship DLLs |
-| JXL | `jxl-oxide` (pure Rust) | `jpegxl-rs` only if native DC downscale needed |
-| TIFF / BMP / QOI | `tiff` / `image` / `qoi` (all pure Rust) | — |
-| SVG | `resvg`/`usvg` → `tiny-skia` pixmap → texture | rasterize at on-screen res; watch `vello_hybrid` for live-zoom |
-| RAW | `kamadak-exif` → extract embedded JPEG preview → JPEG path | full demosaic deferred (100×+ cost); `rawler` optional (LGPL) |
-| Color | `moxcms` (pure Rust; 3×3 matrix + TRC in-shader) | `lcms2` behind a flag for exotic CLUT/CMYK profiles |
-| Windowing | `winit` (window + input; `refresh_rate_millihertz` for the advance cap) | portable; the wgpu surface is created on its window handle |
-| GPU API | **wgpu** (DX12 backend on Windows, Metal on macOS), present **Mailbox** | native D3D12 retained as a gated acceleration backend behind `Renderer` |
-| GPU decode | **CPU decode pool** (`zune-jpeg`; `turbojpeg` as A/B) — measured 2.5× @ 120 Hz | nvImageCodec/CUDA zero-copy is a gated escalation (ADR-012 kill criterion); benchmark 5090 HW-JPEG first |
-
-### Decode-to-fit value ranking
-JPEG ≫ WebP > JXL(C) ≫ everything else. Prioritize the scaled-decode path where
-it pays.
-
-### What's actually wired (2026-06-27) — deviations from the provisional table
-Multi-codec dispatch is implemented in `pb-decode` behind the `ImageDecoder` seam
-(`decode_bytes` sniff-registry + extension routing for the ambiguous ones). The
-pragmatic crate choices differ from the table above and are the current baseline:
-- **`image` crate** (one dep, `default-features` curated) covers PNG/GIF/BMP/TIFF/
-  **WebP**/TGA/QOI/ICO/PNM/HDR/EXR — chosen over the per-format crates (libwebp-sys,
-  png+zlib-rs, …) for zero build risk; swap individual formats back behind the seam if
-  benchmarks justify it.
-- **JXL** `jxl-oxide`; **SVG** `resvg/usvg/tiny-skia` (rasterized at display res).
-- **RAW** (ARW/NEF/CR2/DNG/…, `raw.rs`): hybrid. If the embedded preview is full-size
-  (long edge ≥ `PREVIEW_FULL_MIN`=4000, e.g. Nikon's ≈7360) use it (fast); else **demosaic
-  to true sensor res** via `rawloader` + `imagepipe` (e.g. Sony's 1616 thumbnail → 6048).
-  Demosaic runs on a **256 MB-stack thread** — some RAW decoders recurse deep enough to
-  overflow the default stack (a Nikon D800 NEF does; it's why the preview path exists for
-  full-preview cameras). Slower than preview-only; "preview-first then refine" is the
-  future optimization. JPEG-segment-parse finds embedded previews (`jpeg_spans`).
-- **AVIF + HEIC stills**: **Windows WIC** (`wic.rs`, `cfg(windows)`, `windows` crate) using the
-  OS codec extensions — first platform-specific decode backend (macOS mirrors with ImageIO).
-  Needs the AV1/HEVC/HEIF Store extensions; absent → graceful decode error. **JPEG-2000 not
-  added** (no pure-Rust decoder; OpenJPEG/C, rare).
-- **Animated AVIF (`avis`) on Windows** (task #76): the vcpkg static **dav1d** behind
-  `--features dav1d` (ship config, like libheif; same pinned tree via `setup-libheif.ps1`).
-  WIC exposes only frame 0 and MF can't demux `.avif`, so `pb-decode/src/avis.rs` demuxes the
-  sample tables itself (pure Rust, fuzzed) and feeds dav1d through a **C accessor shim**
-  (`csrc/dav1d_shim.c`, compiled by build.rs against the pinned headers — dav1d structs never
-  cross the FFI by hand). `probe_avis` is the shared detect/decode decision: avis-only (msf1 =
-  HEVC stays still), HDR → the fp16 WIC still path, fragmented/encrypted/stz2 → still; no dead
-  play hints. YUV→RGB in `yuv.rs` (identity/601/709/2020, limited+full, 8/10/12-bit); the trak
-  `colr` rides as the display `ColorTransform`. Cancellable via `decode_animation_cancellable`
-  (the whole animation path now checks the flag). Loops like a GIF; corpus 26-frame 1280×531 ≈
-  139 ms release decode.
-- **Orientation** (subtle, was buggy): `common::read_orientation` scans **all** EXIF IFDs
-  (HEIC/RAW put Orientation outside the primary IFD; a PRIMARY-only lookup wrongly read 1).
-  WIC **already applies** the container rotation, so the WIC path passes orientation=1 (re-
-  applying double-rotated). imagepipe also self-orients (demosaic path → 1). The RAW
-  *preview* path applies the container's orientation to the sensor-order preview.
-- Every backend returns full-res RGBA8 → shared `common::finalize`/`finalize_oriented`
-  (orientation + Lanczos decode-to-fit). Native scaled-decode (JPEG DCT, WebP) still a TODO.
-- **Panic-safety**: `decode_bytes`/`decode_image_file` wrap the decoders in `catch_panics`
-  (`catch_unwind`) — a third-party decoder panicking on a hostile file becomes a
-  `DecodeError`, not an app crash. **Release profile is `panic = "unwind"`** (changed from
-  abort) so this works; the GPU present hot path never panics, so unwind tables don't cost
-  it. A hard *stack overflow* (some NEFs) is still uncatchable — mitigated by the demosaic
-  big-stack thread, not `catch_unwind`.
-- **TGA is routed by extension** (`.tga`), not content — Targa has no magic number, so
-  `image::guess_format` can't sniff it; `decode_image_file` hands it an explicit format hint.
-- **Color management + wide-gamut + HDR output are wired** (tasks.json #11). Three layers:
-  1. **In-shader ICC CMS.** `pb_decode::color` parses the source profile (`moxcms`) to a
-     3×3 (source primaries → BT.709) + a 7-param TRC, carried on `DecodedImage::color`.
-     Read per backend: JPEG APP2 (zune `icc_profile`), PNG/TIFF/WebP (`image` `icc_profile`),
-     JXL `rendered_icc`, and — because the Windows HEIF decoder returns **no** WIC color
-     contexts — the ISOBMFF `colr` box parsed directly (`prof`/`rICC` ICC or `nclx` CICP) in
-     `wic.rs`. sRGB / ~2.2-gamma-sRGB-primaries → passthrough. Fixes oversaturated P3 HEICs.
-  2. **fp16 scRGB render path.** `pb-render` renders to an `Rgba16Float` scRGB-linear
-     intermediate (no gamut clamp), then a present pass → the surface: SDR 8-bit gets an
-     extended-Reinhard tone-map (per-image `peak`) + sRGB-encode; HDR fp16 copies straight.
-  3. **Wide-gamut + HDR output (pure wgpu, no native D3D12).** A DXGI **fp16 flip swapchain
-     is always scRGB**, so `pb_render::display::primary_hdr()` (DXGI `GetDesc1`) detects an
-     HDR desktop and configures an `Rgba16Float` surface. HDR AVIF/HEIC (PQ/HLG) decode to
-     fp16 scene-linear via WIC `128bppRGBAFloat` (`PixelFormat::Rgba16F`); brightness is baked
-     in the scene pass (SDR×SDR-white-scale, HDR×1.0 absolute). P3 shows wider and HDR gets
-     real headroom on a capable panel.
-- **Video playback (tier 2, task #79 — Windows shipped; Linux/macOS = parity work).**
-  Filesystem videos (one cross-platform container recognition list; per-file playability is
-  a runtime property of the OS codecs) are **typed items** — `LibraryItemKind`, dispatched
-  in `decode_item` *before* any `bytes()` read; path-only, never indexed inside archives;
-  Live-Photo companion `.mov`s are hidden by same-stem-per-directory dedup at scan.
-  Poster = the clip's first non-black frame via an MF reader configured identically to
-  playback (rotation/color parity by construction); panel facts come from a ~20 ms
-  header-only probe. Playback = a forward-only `VideoSession` (pb-app-core, injected-time,
-  fully unit-tested on fake producers) fed by a demand-driven MF reader thread (pb-decode):
-  one credit = one frame over a **single merged command channel** (Stop/SeekTo can never be
-  deafened by backpressure), byte/frame-budgeted queue (constant memory at any clip
-  length), rebuffer-don't-drift, audio = a shell WinRT `MediaPlayer` (video tracks
-  deselected — audio only) whose position is the master clock via ~4 Hz
-  `AudioClockSample`s. Seek recreates the reader positioned at the target (repositioning a
-  warm HEVC reader blocks ~1 s — spike-measured); the producer parks after EOS so `P`
-  replays via seek-to-0. 4K30 software decode is comfortable; 4K60 is borderline — NV12 +
-  in-shader YUV or hardware decode is the reserved escalation (ADR-012).
-  **macOS routing (2026-07-16, macos-video-smoothness plan):** MP4/MOV → `AVPlayer`;
-  **everything else (MKV/WebM included) → the Session route** (FFmpeg → wgpu → Metal). The
-  `AVSampleBufferDisplayLayer` "sample-buffer" presenter is **parked, opt-in only**
-  (`PB_SAMPLE_BUFFER=1`) — it dropped ~3 frames/sec that both other routes play flawlessly;
-  it is kept as the on-device Dolby-Vision **reference renderer** (DoVi itself is deferred;
-  detection ships — a DoVi Profile-5 file on the Session route toasts an honest
-  colors-can't-be-shown warning and the Details panel names every DoVi profile).
-  `PB_TRACE=1` prints a per-2s Session dropped-frames diag (the `sb-play diag` analog).
-- **Archives are "doors" in the deck** (tasks.json #104, 2026-07-16): an archive **on disk** is a
-  typed item — `LibraryItemKind::Archive(ArchiveKind)`, the third arm beside `Image`/`Video` — so
-  a folder's `.zip`/`.7z`/`.cbz`/… are *visible while browsing* instead of reachable only via Open
-  File. It decodes to the owner's **folder artwork** (`pb-app-core/assets/folder-zip-*.webp`,
-  `cfg(windows)` = manila / else blue, matching each OS's own folder colour; decoded + composited
-  onto an opaque backdrop **once** per process), and **`P` enters it** (routed through
-  `open_plan(Source::Archive)`, so it is the same operation as the picker's open — password
-  prompt, RAM pre-flight and progress dialog all included). `Alt+Up` climbs back out to the
-  folder (`open_parent_cmd` anchors on `source.container()`), which is how you reach the next
-  archive. Doors also make a folder of *only* archives openable: it now yields scan items, where
-  before it hit the keep-deck rule and reported no images.
-  - **The affordance is the play-hint pill, not the tile** — `play_hint_kind` = `3` +
-    `play_hint_persistent` (the pill reads *Open*, and unlike an animation's flash the shells
-    hold it open, because a door's picture alone never says "press P"). The tile briefly carried
-    a Font Awesome glyph instead: an icon drawn for 16 px stretched to the height of a 7680-wide
-    display. Don't go back.
-  - **The guarantee:** `decode_item_cancellable` returns the tile **above** the `source.bytes()`
-    request, so browsing past a door *never* decompresses. That — **not** the texture size — is
-    why doors are safe where blending archive contents into the deck was not (the prefetch ring
-    would have decompressed archives nobody clicked). Pinned by a panicking-`bytes()` source
-    driven through **every** decode entry point. ⚠️ The tile's *size* has been argued from three
-    times and been wrong three times; it only has to clear a comfort bar
-    (`a_full_ring_of_doors_fits_the_byte_budget`).
-  - ⚠️ **A new `LibraryItemKind` must opt *out* of byte reads, not into them.** The tree encodes a
-    two-kind world (video vs "everything else, therefore an image, therefore safe to read"). Guards
-    written `!matches!(…, Video(_))` or `if let Video(_)` silently drop a new kind in the *image*
-    bucket — which is how the thumbs strip and the `Shift+I` panel would each have `fs::read` every
-    archive in a folder. Read guards are **positive** (`Image` reads bytes) and kind matches are
-    **exhaustive** so the compiler lists the sites; note it only lists them *per platform* —
-    `macos_native_route`/`macos_sample_buffer_route` are `cfg(macos)` and invisible on Windows.
-  - Doors are typed off the item's **path**, not its name (unlike video, deliberately): an archive
-    entry has no path, so a `.zip` inside a `.zip` is unrepresentable rather than merely refused,
-    and `archive_kind` gets `.tar.gz` right where a name-based split sees `gz`.
-- **Archive viewing (ZIP + 7z + the tar family + RAR5 + RAR4)** (tasks.json #30, #102, #103) is
-  wired in the `pb-source` crate behind the `ItemSource` seam, decoded via
-  `pb_decode::decode_named_bytes` (bytes + extension hint). One classifier —
-  `pb_source::archive_kind` — answers every "is this an archive, and which kind?"
-  question (shell `is_archive` predicates, `scan::open_archive` dispatch, the `LibraryItemKind`
-  door arm, double extensions like `.tar.gz`, `.cbr`/`.cbz` comics). Two access models: **lazy** (ZIP via handle pool; plain
-  `.tar` via a seek-over-data header index) and **eager decode-to-RAM** (7z; `.tar.gz` /
-  `.tar.bz2` / `.tar.zst` / `.tar.xz` — solid streams have no cheap random access). 7z
-  pre-flights its RAM budget from the header; a compressed tar has no size table, so its
-  budget is enforced **mid-stream** (`OpenError::TooLarge`, still refuse-before-reserve).
-  Every kind but ZIP opens **off-thread** (`ArchiveKind::background_open`) through the
-  one worker entry `scan::load_archive`, with determinate progress + Cancel. Tar opens
-  are hardened against hostile bytes (metered PAX/GNU metadata quota, entry/name-table
-  caps, expanded-work cap, zstd window pre-check + frame-checksum verify, xz dict-size
-  pre-check; `fuzz/` has `tar_open` + `rar_open` targets) — see the #102 plan rev2.
-  **RAR5 + RAR4** (#103): two of our own container parsers (`pb-source/src/rar.rs` =
-  RAR5, `pb-source/src/rar4.rs` = RAR4 — completely different container shapes) over the
-  `compcol` codecs (`rar5` + `rar3`; exact-pinned fork rev on the `rar3-standard-filters`
-  branch until it merges + releases on crates.io). Both share one `RarSource`/`ItemSource`
-  via an `EntryData::Lazy { codec: RarCodec::{Rar5,Rar3} }` tag: non-solid lazy / solid
-  eager, header-CRC + entry-CRC32 verified, corpus-validated byte-identical to `unrar` (44
-  archives / 218 entries in the differential). RAR5 Delta/x86 filters decode (compcol's
-  `add_file_boundary` makes position-dependent filters file-relative in a solid group);
-  RAR4 LZ/PPMd + Delta/x86/audio filters + solid all decode. Multi-volume, encrypted RAR4
-  headers (`-hp`), and unsupported encryption versions refuse with honest messages
-  (`ArchiveOpenError::Unsupported`); a codec-refused member degrades per-entry (its
-  solid-group tail goes unavailable), the rest of the archive serves. **Encryption is
-  supported for RAR5** (`pb-source/src/rar_crypt.rs`): per-file (`-p`) and full-header
-  (`-hp`) RAR5 use standard PBKDF2-HMAC-SHA256 + AES-256-CBC (the tractable scheme, unlike
-  RAR4's bespoke SHA-1 KDF — RAR4 `-p` refuses per-entry, `-hp` refuses at open), so a
-  missing/wrong password returns `PasswordRequired` (prompts, like ZIP/7z) and a correct
-  one decrypts — validated byte-identical to `unrar` over the corpus and a committed
-  encrypted-solid fixture. RAR5 encrypted solid runs are padded to 16 bytes *between* files,
-  so each run is decrypted then stripped to its real block length (`rar5_stream_len`) before
-  the LZ decoder, which reads block framing eagerly and would choke on the padding. RAM-only
-  — never extracted to disk, so the no-trace guarantee holds
-  (`viewing_a_{zip,7z,tar,tar_gz,rar}_writes_nothing_to_disk`, the RAR one covering a
-  decrypt). Errors surface in the egui `Message` dialog. Passwords: ZIP/7z/RAR5 all prompt
-  in-app; RAR4 and the tar family have no in-app decryption. Crates: `zip` + `sevenz-rust2` +
-  `tar`/`flate2`/`bzip2`/`ruzstd`/`lzma-rust2` + `compcol` + `aes`/`cbc`/`hmac`/`sha2`
-  (all pure Rust, no C build risk).
-- **Known v1 limitations** (deliberate): Radiance-HDR / OpenEXR (image-crate, not WIC) still
-  clamped to SDR; CMYK JPEG mis-colored; first frame only (GIF/animated-WebP/Live-Photo/
-  multipage-TIFF). LUT/CLUT & gray/CMYK ICC profiles → sRGB passthrough (the `lcms2`-behind-a-
-  flag escalation). SDR-white level is a 200-nit default (real value via DisplayConfig = TODO).
-  ⚠ On an **HDR desktop**, GDI screen capture of the flip swapchain returns all-white — a
-  Windows limit, not a render bug (use the `offscreen_png` example to verify rendering).
-
+- **Dispatch** (`pb-decode`): sniff-registry + extension routing behind the
+  `ImageDecoder` seam; every backend funnels through shared
+  `finalize`/`finalize_oriented` (orientation + Lanczos decode-to-fit).
+  Decoders are wrapped in `catch_panics` — a hostile file becomes a
+  `DecodeError`, not a crash (release profile is `panic = "unwind"` for this).
+- **Backends:** the `image` crate covers commodity formats (PNG/GIF/BMP/TIFF/
+  WebP/TGA/QOI/…); specialty paths: `jxl-oxide`, `resvg` (SVG at display res),
+  hybrid RAW (full-size embedded preview, else demosaic on a 256 MB-stack
+  thread), Windows WIC / macOS ImageIO for AVIF+HEIC stills (`libheif` as the
+  parallel-decode ship feature), and our own fuzzed `avis` demuxer + vcpkg
+  dav1d for animated AVIF.
+- **Color + HDR are wired end-to-end:** per-backend ICC/CICP parse (`moxcms`)
+  → in-shader 3×3+TRC → fp16 scRGB intermediate → HDR `Rgba16Float` surface or
+  tone-mapped SDR present. P3 HEICs show correctly; HDR gets real headroom.
+- **Video** (Windows shipped; macOS routes MP4/MOV → AVPlayer, rest → the
+  FFmpeg→wgpu Session route): typed `LibraryItemKind::Video` items, MF poster
+  + ~20 ms header probe, demand-driven reader thread + unit-tested
+  `VideoSession`, WASAPI/FFmpeg-first audio (MF can't do AC-3/E-AC-3/DTS).
+- **Archives:** *doors* in the deck — `LibraryItemKind::Archive`; `P` enters
+  (same path as the picker: password prompt, RAM pre-flight, progress),
+  `Alt+Up` climbs out; **browsing past a door never decompresses** (the tile
+  returns above the `bytes()` request; pinned by a panicking-source test).
+  Behind the `ItemSource` seam: ZIP / 7z / tar family / RAR4 / RAR5, lazy vs
+  eager-to-RAM per kind, refuse-before-reserve budgets, RAM-only (no-trace
+  holds). ⚠️ **A new `LibraryItemKind` must opt *out* of byte reads, not into
+  them** — read guards are positive (`Image` reads), kind matches exhaustive.
+- **Known v1 limits** (deliberate): Radiance-HDR/EXR clamp to SDR; CMYK JPEG
+  mis-colored; GIF/animated-WebP first-frame only; exotic ICC → sRGB
+  passthrough. ⚠ On an HDR desktop, GDI capture of the flip swapchain is
+  all-white — a Windows limit, not a render bug (`offscreen_png` verifies).
 ## Build, test, bench
 
 > Rust toolchain required (`rustup`); `rust-toolchain.toml` pins stable + the
@@ -811,221 +606,29 @@ build-config footgun specifically.
 
 ## Cutting a release
 
-**Windows** ships **Velopack** (per-user installer + auto-update), built + signed **locally**
-(GitHub Actions credits are finite): `pwsh scripts/release-windows.ps1 -Upload` builds with
-libheif, signs the exe + `Setup.exe` + `Update.exe` via Azure Trusted Signing, `vpk pack`s a full
-release, and rsyncs the flat feed to `downloads.blazeviewer.app/win`. The app reads that
-feed over HTTP (`update.rs` `FEED_URL`) and self-updates — downloads in the background, installs on
-quit. Version comes from `crates/pb-app/Cargo.toml`, so it always matches the app; there is **no
-tag / GitHub Release for Windows**.
+All three platforms build + sign **locally** (hosted CI is billed money; the
+`v*`-tag auto-build was deliberately removed): Windows ships **Velopack**
+(channels `win` = x64, `win-arm64`), macOS a notarized DMG + **Sparkle**
+auto-update, Linux a self-updating **AppImage** — all served from
+`downloads.blazeviewer.app`. Every release script enforces the clean-tree gate
+(a `-dirty` build id refuses to ship, checked before *and* after the build).
 
-*Architecture:* the script defaults to the host arch and takes `-Arch x64|arm64`. **x64** ships as the
-historical `win` Velopack channel; **ARM64** as `win-arm64` — both land in the same flat feed dir, and
-an install only ever auto-updates within its own channel (Velopack tracks the channel the app was
-installed from, so `update.rs` needs no arch logic and the two never cross). Each arch is built on its
-own **native** box (no cross toolchain wired up), after building that arch's native decode libs
-(libheif, dav1d, **and FFmpeg** — tasks #76 / #100) once with `scripts/setup-libheif.ps1 -Triplet
-<arch>-windows` — the **DLL** triplet, *not* `-static-md` (task #77: LGPL relink; a static build
-cannot ship, and `release-windows.ps1` throws if it can't find `installed\<triplet>\bin\heif.dll`).
-The script pins the vcpkg tree to a recorded commit (`-VcpkgRef`) and installs all three ports;
-`pb-decode/build.rs` picks the vcpkg triplet from the target arch. The ship
-feature set is `--features libheif,dav1d,ffprobe`. ARM64 uses the `vcredist143-arm64` redist framework.
+**The full procedure — build commands, signing, feeds, verification, and every
+known trap (vpk re-run / cumulative feed / packId merge, YubiKey ssh from Git
+Bash, mid-build lockfile dirt, the EdDSA key backup) — is the
+`cutting-a-release` skill** (`.claude/skills/cutting-a-release/SKILL.md`).
+Load it before any release work; never work from memory.
 
-> **`ffprobe` needs a VS Developer shell — it's the first feature that does.** FFmpeg's
-> `bindgen` runs its own clang, which reads `INCLUDE` to find `stdint.h`; a plain `cargo build`
-> never needed that, because rustc finds the MSVC linker itself. `scripts/vs-dev-env.ps1` handles
-> it (release script + both CI lanes call it; it no-ops if you're already in a dev shell), and VS
-> already ships the required libclang at `VC\Tools\Llvm\{x64,ARM64}\bin` — nothing extra to install.
-> It also needs `VCPKG_ROOT` **exported**: the `vcpkg` crate `ffmpeg-sys-next` uses has no `~/vcpkg`
-> fallback, unlike our own build.rs. FFmpeg here is **demux/metadata only** (MF still decodes
-> everything) — the setup script patches the port to a trimmed build, which is the difference
-> between **+3.06 MB** and +16.42 MB on the exe.
-
-**macOS** is **built locally on the owner's Mac** via `scripts/release-macos.sh` (Developer ID +
-notarization), then published to `downloads.blazeviewer.app/mac` with
-`scripts/release-mac-upload.sh` — which scp's the DMG + appcast **straight from the Mac** to
-jdlien.com and repoints the `BlazeViewer-latest.dmg` symlink (the remote `mac/` dir is
-jdlien-owned, no sudo). No Windows detour: `scripts/release-mac-upload.ps1` is the equivalent for
-running the upload from the Windows box, but the whole Mac release now stays on the Mac. Hosted
-GitHub Actions is too expensive to use, so `.github/workflows/release.yml` — which builds the DMG
-on a hosted `macos-15` runner — is **`workflow_dispatch`-only (dormant)**; a `v*` tag no longer
-auto-triggers it. A GitHub Release for the DMG, if wanted, is created manually. Signing setup is
-in `.taskmaster/docs/release-signing.md`.
-
-macOS **auto-updates via Sparkle** (task #65) — the in-app equivalent of Windows' Velopack. The
-`.app` embeds `Sparkle.framework` (assembled by `build-swift-host.sh`, since a SwiftPM executable
-has no Xcode "Embed Frameworks" phase) and reads an EdDSA-signed `appcast.xml` next to the DMG
-(`SUFeedURL` in `Info-swift-host.plist`). `release-macos.sh` re-signs Sparkle's nested helpers with
-the Developer ID (inside-out, before the app) and, after notarizing, EdDSA-signs the DMG and writes
-`dist/appcast.xml` (`scripts/generate-mac-appcast.sh`); `release-mac-upload.ps1` publishes that
-appcast alongside the DMG. The **private EdDSA signing key lives only in the release Mac's login
-keychain** (generated once via Sparkle's `generate_keys`; the public `SUPublicEDKey` is committed in
-the plist) — **back it up** (`generate_keys -x`); losing it means no future build can be signed for
-auto-update without shipping a new public key via a stopgap manual update.
-
-**Linux** ships a self-contained **AppImage** — one executable the user downloads, `chmod +x`es, and
-runs; **no `apt install`, no dependency hunt.** Built locally with `scripts/release-linux.sh` (→
-`dist/BlazeViewer-<version>-<arch>.AppImage`). It builds the full-feature release binary
-(`--features livephoto,pb-decode/libheif`) and uses **linuxdeploy** (fetched to `dist/appimage-tools`)
-to bundle the *specialized* decode libraries — libheif, FFmpeg, and the AV1/HEVC codecs — while
-leaving the ~universal system stack (glibc, GTK, Mesa/GL, X11, Wayland) to the host, per the AppImage
-excludelist. Two things linuxdeploy/`ldd` can't see are handled by the script: **libheif's dlopen'd
-plugins** (`libheif-libde265.so` etc.) are copied into `usr/lib/libheif/plugins` with their own deps
-(libde265/libaom/…), and a **custom `AppRun`** exports `LIBHEIF_PLUGIN_PATH` + `LD_LIBRARY_PATH` so
-they resolve inside the bundle. Live Photo *audio* still needs `pw-cat` (PipeWire) on the user's PATH
-— present on any modern desktop, degrades to silent motion if absent, so it's intentionally **not**
-bundled. **Unsigned** (no Developer-ID/GPG equivalent yet), but it **does self-update** now (below).
-`dist/` is git-ignored, so the artifacts never get committed.
-
-`release-linux.sh` builds for the **host arch**, so from a Mac/Windows box (no Linux VM needed) use
-**`scripts/release-linux-docker.sh [amd64|arm64|both] [--upload]`** — it builds an **Ubuntu 26.04**
-container (`scripts/appimage.Dockerfile`, matching the FFmpeg 8 / libheif 1.21 the code targets) and
-runs `release-linux.sh` inside it. `both` builds x86_64 then aarch64; `--upload` publishes the
-result afterwards (see below). On **Apple Silicon + OrbStack** `linux/amd64` runs under **Rosetta**,
-so the **x86_64** artifact (what most Linux users need) builds at near-native speed; `arm64` is
-native. It uses a container-only `CARGO_TARGET_DIR` (a cached volume) so it never clashes with the
-host's macOS `target/`, and `APPIMAGE_EXTRACT_AND_RUN=1` so no FUSE/`--privileged` is required. The
-build distro sets the glibc floor (2.43 here → recent-distro runtime); dropping it means building
-FFmpeg/libheif from source on an older base. **AppImages can only be built on Linux** (the container
-*is* that Linux) — there's no native macOS/Windows AppImage build. ⚠ The container build image
-pre-installs the Rust toolchain via `rustup-init`, whose `--component` takes a **comma-separated**
-list (`rustfmt,clippy,…`) — a space-separated list makes it reject the second component.
-
-**Publishing + auto-update (Linux) — the JSON-feed self-replace model** (the Velopack/Sparkle analog
-for AppImages). `scripts/release-linux-upload.sh` (or `release-linux-docker.sh … --upload`) scp's the
-versioned AppImage(s) + a `.sha256` sidecar each to `downloads.blazeviewer.app/linux`, writes a
-shared `latest.json` manifest (version + per-arch url/sha256/size), and repoints the
-`BlazeViewer-latest-<arch>.AppImage` symlinks; Caddy redirects `/latest/linux` (x86_64) and
-`/latest/linux-arm64` (aarch64) at them. The app's `update.rs` `linux` module reads
-`latest.json` in a background thread, and if it advertises a newer build for this arch it downloads
-the AppImage, **verifies the sha256**, and swaps `$APPIMAGE` in place on quit (atomic rename — the
-next launch is the new version). Self-gates when `$APPIMAGE` is unset (a `cargo run` / extracted
-binary) or the AppImage's directory isn't writable (installed read-only) — then it just stays put.
-`PB_UPDATE_FEED` overrides the feed base URL for offline testing.
-
-> **Release only from a clean, committed workspace — now enforced, not remembered.**
-> `crates/pb-app/build.rs` stamps the build id `-dirty` on **any** `git status --porcelain`
-> output — **untracked files included** — and that ships in the About dialog. Every release
-> script refuses to run from a dirty tree; `scripts/release-preflight.sh` is the shared bash
-> gate (release-windows.ps1 mirrors it inline — PowerShell can't source bash).
->
-> ⚠️ **Why the gate is two-sided — a pre-flight `git status` is NOT enough.** Bumping
-> `crates/pb-app/Cargo.toml` changes `pb-app`'s entry in `Cargo.lock`, but *nothing rewrites
-> the lockfile until a cargo command runs* — which is the release build itself. So a tree that
-> is genuinely clean when checked goes dirty **mid-build**, and the DMG ships
-> `0.2.1 (abc1234-dirty)` having been verified clean minutes earlier (hit on 0.2.1,
-> 2026-07-14). Hence:
-> 1. **`release_preflight`** runs `cargo metadata` *first* to settle the lockfile, *then*
->    checks — turning that mid-build rewrite into an up-front, actionable failure.
-> 2. **`assert_build_id_clean` / `assert_tree_clean_after_build`** run *after* the build and
->    assert what was actually stamped, so causes we haven't thought of still get caught.
->    Placed **before** codesign/notarize, so a doomed build never costs an Apple round-trip.
->
-> Both honour an escape hatch — `--allow-dirty` (mac), `PB_ALLOW_DIRTY=1` (linux),
-> `-AllowDirty` (windows) — for a deliberate throwaway build. **Never for a real release:** it
-> only downgrades the abort to a warning; the artifact is still stamped `-dirty`.
-
-> **Never let a tool auto-invoke a paid CI run.** Hosted runners cost real money (a macOS run is
-> billed at 10×), so releases are scripted and run locally — the `v*`-tag trigger was removed from
-> release.yml precisely so a tag push (or `gh release create`) can't quietly start a hosted build.
-> Don't re-add an automatic hosted trigger; script the build instead.
-
-To cut a release:
-
-1. **Roll the `CHANGELOG.md`.** Move `## [Unreleased]` into `## [<version>] - <YYYY-MM-DD>`,
-   leave a fresh empty `[Unreleased]`, and update the compare links at the bottom. The crate
-   version (`crates/pb-app/Cargo.toml`) must match the tag's numeric core (a `-beta.N` suffix
-   lives only on the tag). **Write a `### Highlights` block** (a ~7-line, plain-English "what's
-   new" — regular users, not contributors) as the first subsection of the version, above
-   `### Added` — the macOS **Sparkle** update dialog shows *only* that block
-   (`generate-mac-appcast.sh` extracts it; it falls back to the whole section if absent), while the
-   full `Added/Changed/Fixed` detail stays in the file for the curious and the GitHub release body.
-2. **Windows:** `pwsh scripts/release-windows.ps1 -Upload` from this machine (with `.env.release`
-   signing creds). **Run it from native PowerShell, not the Bash tool / Git Bash** — the ssh
-   config's YubiKey `Match exec` hook has a Windows path that Git Bash mangles, so the upload fails
-   `Permission denied (publickey)`. The build + sign + pack still succeed there; only the `-Upload`
-   scp/rsync needs native PowerShell.
-   > ⚠️ **A re-run is NOT upload-only.** `-Upload` is the last step of the *whole* pipeline, and
-   > `vpk pack` **hard-fails** on a second run — *"There is a release in channel win which is equal
-   > or greater to the current version"* — because the version it just packed is sitting in
-   > `dist\feed`. So if the pack succeeded and only the upload failed, do **not** re-run the script:
-   > `scp` the already-signed feed yourself (`cd dist\feed; scp * jdlien.com:/var/www/downloads.blazeviewer.app/win/`).
-   > Re-running means clearing `dist\feed` first, which re-signs everything for no gain (hit on 0.2.1).
-
-   > ⚠️ **`dist\feed` is a *cumulative* feed, and `vpk` merges whatever it finds there — including a
-   > different product.** On 0.2.1 the dir still held the PhotoBlaze packages, so `releases.win.json`
-   > advertised PhotoBlaze 0.1.0/0.1.1/0.2.0 *beside* BlazeViewer 0.2.1 and vpk built a delta **across
-   > the packId rename** (PhotoBlaze 0.2.0 → BlazeViewer 0.2.1). Upload sends the whole directory, so
-   > that would have published the old product to the new feed. `vpk` keys deltas on channel+version,
-   > **not packId**. Check `dist\feed` holds only this product before packing.
-
-   Prune superseded packages on the server periodically.
-3. **macOS (all on your Mac):** `./scripts/release-macos.sh --release` builds the signed +
-   notarized DMG **and** EdDSA-signs it into `dist/appcast.xml` (Sparkle auto-update, task #65),
-   then `./scripts/release-mac-upload.sh` scp's the DMG **and the appcast** to jdlien.com and
-   repoints `BlazeViewer-latest.dmg` — no Windows box needed. (Optionally verify the seed's updater
-   first with `./scripts/test-sparkle-update.sh dist/BlazeViewer-<version>.dmg`.) A GitHub Release is
-   **optional and manual** — nothing auto-builds from a tag:
-   `gh release create v<version> dist/BlazeViewer-<version>.dmg* --notes-file <(bash
-   scripts/changelog-section.sh <version>)`. Write **real, curated, user-facing** CHANGELOG notes
-   before tagging so `changelog-section.sh` has a body. **Never** enable `generate_release_notes`.
-4. **Linux (from your Mac via OrbStack):** `./scripts/release-linux-docker.sh both --upload` builds
-   both AppImages and publishes them + `latest.json` to the feed (repointing the `latest-<arch>`
-   symlinks). Needs your ssh keys for the scp step (it runs host-side, after the container work). A
-   launched older AppImage then self-updates on next quit.
-5. **Tag for posterity** (optional): `git tag -a v<version> -m "…" && git push origin v<version>`.
-   Windows never needs it (Velopack reads the version from `Cargo.toml`); it's a record + the anchor
-   for a manual macOS GitHub Release. Safe to push now that release.yml doesn't auto-build on tags.
-6. **Verify:** the Windows feed serves the new `releases.win.json` + `.nupkg` (and a launched build
-   self-updates); the macOS DMG is genuinely notarized — `xcrun stapler validate <dmg>` and
-   `spctl -a -t open --context context:primary-signature -vv <dmg>` → `source=Notarized Developer
-   ID`; the macOS feed serves the new `appcast.xml` (curl it) and a launched older build detects →
-   downloads → installs-on-quit the update; the Linux feed serves the new `latest.json` +
-   `latest-<arch>` symlinks (curl `…/latest/linux`). A `-` in a tag marks a pre-release; a
-   clean `vX.Y.Z` is a full release.
+**Never let a tool auto-invoke a paid CI run** — no tag triggers, no hosted
+builds from `gh release create`. Script it and run it locally.
 
 
 ## Project Task Tracking
 
-This project uses [taskmaster](https://github.com/eyaltoledano/claude-task-master) conventions for tracking tasks, with a `.taskmaster/tasks/tasks.json` using the following structure:
-
-### Directory Structure
-
-```
-.taskmaster/
-├── tasks/
-│   └── tasks.json    # Active tasks
-├── docs/             # Documentation or notes
-└── archive.json      # Completed tasks (optional)
-```
-
-### Schema
-
-**Important:** Task and subtask IDs must be numbers, not strings. Task Studio cannot look up individual tasks if IDs are quoted strings like `"25"` instead of `25`.
-
-```json
-{
-  "master": {
-    "tasks": [
-      {
-        "id": 1,
-        "title": "Brief task title",
-        "description": "What needs to be done",
-        "status": "pending|in-progress|done|review|deferred|cancelled",
-        "priority": "high|medium|low",
-        "dependencies": [],
-        "subtasks": [
-          {
-            "id": 1,
-            "title": "Subtask title",
-            "description": "Subtask details",
-            "status": "pending"
-          }
-        ]
-      }
-    ]
-  }
-}
-```
-
----
+Tasks live in `.taskmaster/tasks/tasks.json`, following
+[taskmaster](https://github.com/eyaltoledano/claude-task-master) conventions:
+`master.tasks[]`, each with numeric `id`, `title`, `description`,
+`status` (`pending|in-progress|done|review|deferred|cancelled`), `priority`,
+`dependencies`, and `subtasks` (same shape, numeric ids). Plans + research
+notes live in `.taskmaster/docs/`; completed tasks may move to `archive.json`.
+⚠️ IDs must be **numbers, not strings** — Task Studio can't look up `"25"`.
