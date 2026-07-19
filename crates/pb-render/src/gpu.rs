@@ -3672,9 +3672,16 @@ impl Renderer for WgpuRenderer {
         hdr: bool,
         peak: f32,
         mip: bool,
-    ) {
+    ) -> bool {
         if slot >= self.ring.len() {
-            return;
+            // A slot this ring doesn't have is a core↔renderer capacity desync (caller bug).
+            // Refuse loudly so the divergence surfaces at the upload — a silent no-op here is
+            // how the core ends up believing in residency the renderer lacks (#109 item 4).
+            eprintln!(
+                "[pb-render] upload_slot refused: slot {slot} >= ring capacity {}",
+                self.ring.len()
+            );
+            return false;
         }
         let scale = self.scene_scale(hdr);
         // `mip` (only the full-res Original rep passes true) builds a mipmap chain so trilinear
@@ -3704,6 +3711,7 @@ impl Renderer for WgpuRenderer {
             mode: uploaded.mode,
             content_hdr: hdr,
         });
+        true
     }
 
     fn remap_ring(&mut self, new_capacity: usize, remaps: &[pb_core::SlotRemap]) -> Vec<usize> {

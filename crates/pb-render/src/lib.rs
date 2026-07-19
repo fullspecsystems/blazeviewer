@@ -26,6 +26,11 @@ pub use upload::{StagingUpload, UploadStrategy};
 pub use view::{Placement, Rotation, ViewTransform, MAX_ZOOM, MIN_ZOOM};
 pub use yuv::{PlanarFormat, PlanarTransfer, YuvMatrix, YuvParams};
 
+// The `Renderer` trait names wgpu types in its signatures (`device()`, `queue()`,
+// `set_egui_overlay`), so an external impl (a shell presenter, a test double) needs the
+// exact same wgpu — re-export it rather than force downstreams to pin a matching copy.
+pub use wgpu;
+
 /// Everything [`Renderer::set_video_planar`] needs to display one planar video
 /// frame (task #91 Phase 2): the storage precision, the transfer to invert, the
 /// YUV matrix + range, the primaries/parametric `color` transform, and the HDR
@@ -266,6 +271,12 @@ pub trait Renderer {
     /// `mip` = build a mipmap chain for this texture (gpu-mipmap-hq-scaling). Only the full-res
     /// `Original` rep passes `true`, so trilinear fit-downscaling of it is near-Lanczos; the
     /// `Fit`/preview reps (shown ~1:1) pass `false` and stay single-level.
+    ///
+    /// Returns whether the texture landed in `slot`. `false` = the upload was **refused**
+    /// (`slot` out of bounds — the caller's ring and this one have desynced capacities, a
+    /// caller bug). A refused upload must never be recorded as resident
+    /// (`ResidentRing::mark_resident`): that mirror-says-resident / renderer-has-nothing
+    /// drift is the silent-desync class task #109 exists to close.
     #[allow(clippy::too_many_arguments)]
     fn upload_slot(
         &mut self,
@@ -277,7 +288,7 @@ pub trait Renderer {
         hdr: bool,
         peak: f32,
         mip: bool,
-    );
+    ) -> bool;
     /// #110 (Phase 110b) + item-6: derive an exact-size Fit from a retained Original on the GPU
     /// — no decode, no upload — and install it in ring slot `dst_slot`. The source is either a
     /// retained ring slot ([`DeriveSource::Ring`], item-6's compacted Original) or the held
