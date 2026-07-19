@@ -616,6 +616,26 @@ pub fn poster_judge(rgba: &[u8], w: u32, h: u32) -> (bool, f32) {
 /// native-variant walk and the replay both negotiate within this box.
 pub const POSTER_NATIVE_CAP_EDGE: u32 = 4096;
 
+/// One rational timestamp → **absolute 100 ns units** (`hns`), the canonical unit
+/// a `PosterChoice` locator speaks (task #115). The single conversion every
+/// backend uses: MF already hands over hns, FFmpeg has `pts` + a stream time
+/// base, AVFoundation has a `CMTime`'s value + timescale.
+///
+/// Deliberately **signed `i128`** with explicit saturation, not the convenient
+/// `f64` round-trip: a locator is compared for identity on replay (0.5 s
+/// tolerance), so silent precision loss or a clamped negative would make a
+/// replay miss and fall back to a full scored walk. `None` on a non-positive
+/// denominator (an invalid time base / `CMTime` timescale) — the caller decides
+/// whether that is a synthesized timestamp or a hard error, because "0" is a
+/// legitimate timestamp and must never be a stand-in for "unknown".
+pub fn rational_to_hns(value: i64, num: i64, den: i64) -> Option<i64> {
+    if den <= 0 || num <= 0 {
+        return None;
+    }
+    let hns = (value as i128) * 10_000_000i128 * (num as i128) / (den as i128);
+    Some(hns.clamp(i64::MIN as i128, i64::MAX as i128) as i64)
+}
+
 // --- Deep-seek walk policy (shared by every backend's poster) --------------
 // A feature film opens black/logo/fade for its first 30–90 s, so a head-only
 // walk hands back a black frame. When the head walk finds nothing good, seek
@@ -664,6 +684,42 @@ pub fn poster_deep_cap(duration: Duration) -> Duration {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The locator conversion (task #115). Exactness matters: a replay claims the
+    /// stored locator only if a decoded frame's timestamp matches it, so drift
+    /// here becomes a silent fall-back to a multi-second scored walk.
+    #[test]
+    fn rational_to_hns_converts_exactly_in_both_directions_of_scale() {
+        // A CMTime-style value/timescale: 90000/600 = 150 s.
+        assert_eq!(rational_to_hns(90_000, 1, 600), Some(1_500_000_000));
+        // An FFmpeg-style pts + time base (1/1000): 12_345 ms.
+        assert_eq!(rational_to_hns(12_345, 1, 1_000), Some(123_450_000));
+        // Zero is a legitimate timestamp, not a missing one.
+        assert_eq!(rational_to_hns(0, 1, 600), Some(0));
+    }
+
+    /// Negative timestamps survive (containers with a nonzero/negative start),
+    /// rather than being clamped to zero the way an f64 helper would.
+    #[test]
+    fn rational_to_hns_preserves_negative_timestamps() {
+        assert_eq!(rational_to_hns(-600, 1, 600), Some(-10_000_000));
+    }
+
+    /// An invalid time base / timescale is `None` — never a silent 0, which would
+    /// be indistinguishable from the legitimate zero timestamp above.
+    #[test]
+    fn rational_to_hns_refuses_a_non_positive_denominator() {
+        assert_eq!(rational_to_hns(1, 1, 0), None);
+        assert_eq!(rational_to_hns(1, 1, -600), None);
+        assert_eq!(rational_to_hns(1, 0, 600), None);
+    }
+
+    /// A hostile/absurd timestamp saturates instead of wrapping (the i128
+    /// intermediate is what makes this a clamp rather than UB-adjacent nonsense).
+    #[test]
+    fn rational_to_hns_saturates_rather_than_wrapping() {
+        assert_eq!(rational_to_hns(i64::MAX, 1, 1), Some(i64::MAX));
+    }
 
     /// A bright title card with a subtle vignette and film grain — the Ali Wong
     /// opening. At full resolution the GRAIN alone clears the detail gate; the

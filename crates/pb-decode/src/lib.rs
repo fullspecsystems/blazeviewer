@@ -114,6 +114,9 @@ mod jxl;
 mod libheif;
 pub mod metadata;
 pub mod orientation;
+/// The one poster walk policy (task #115), shared by the MF / FFmpeg /
+/// AVFoundation backends. Pure: no unsafe, no cfg, no I/O.
+pub mod poster_walk;
 // Video playback frame contract (task #79 phase 0): the VideoFrame/VideoColorInfo
 // types every platform video producer emits. Pure data — producers come later.
 mod psd;
