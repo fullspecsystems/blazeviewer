@@ -78,12 +78,15 @@ mod win {
             Some("spike") => spike(&args[1..]),
             Some("sweep") => sweep(&args[1..]),
             Some("copybench") => copybench(&args[1..]),
+            Some("seekbench") => seekbench(&args[1..]),
+            Some("hdrprobe") => hdrprobe(&args[1..]),
             _ => {
                 eprintln!(
                     "usage: video_probe spike <file> [--fit W H] [--frames N] [--dump <dir>]"
                 );
                 eprintln!("       video_probe sweep <file>...");
                 eprintln!("       video_probe copybench <file> [--fit W H] [--frames N]");
+                eprintln!("       video_probe seekbench <file> [--fit W H] [--frac 0.5]");
                 std::process::exit(2);
             }
         }
@@ -730,6 +733,373 @@ mod win {
             let row = std::slice::from_raw_parts(uv_base.offset(y as isize * pitch_i), w);
             uv_out[y * w..(y + 1) * w].copy_from_slice(row);
         }
+    }
+
+    // ---------------------------------------------------------------- seekbench
+    //
+    // Task #4 (seek gap): the producer's recreate-seek opens a fresh reader
+    // positioned at the target (spike E: ~0 ms), then decodes FORWARD discarding
+    // frames to the landing — the cost is dominated by those run-up frames. This
+    // A/Bs the run-up under {software RGB32, hardware NV12} × {convert every frame
+    // (the old producer), convert only the landing frame (the fix)}, so the saving
+    // from skipping the discarded frames' readback/swizzle is a measured number
+    // per path. The hw path is the one 4K60 SDR clips actually take.
+
+    fn seekbench(args: &[String]) {
+        let mut file = None;
+        let mut fit = (3840u32, 2160u32);
+        let mut frac = 0.5f64;
+        let mut it = args.iter();
+        while let Some(a) = it.next() {
+            match a.as_str() {
+                "--fit" => {
+                    fit = (
+                        it.next().and_then(|s| s.parse().ok()).unwrap_or(3840),
+                        it.next().and_then(|s| s.parse().ok()).unwrap_or(2160),
+                    )
+                }
+                "--frac" => frac = it.next().and_then(|s| s.parse().ok()).unwrap_or(0.5),
+                f => file = Some(f.to_string()),
+            }
+        }
+        let Some(file) = file else {
+            eprintln!("seekbench: no file given");
+            std::process::exit(2);
+        };
+        let path = Path::new(&file);
+        println!(
+            "== seekbench {file} (fit {}x{}, seek to {:.0}%)",
+            fit.0,
+            fit.1,
+            frac * 100.0
+        );
+        unsafe {
+            if let Err(e) = seekbench_inner(path, fit, frac) {
+                println!("  SEEKBENCH FAILED: {}", hr_name(&e));
+            }
+        }
+    }
+
+    unsafe fn seekbench_inner(
+        path: &Path,
+        fit_box: (u32, u32),
+        frac: f64,
+    ) -> windows::core::Result<()> {
+        let reader = open_reader(path, true)?;
+        let info = native_info(&reader)?;
+        drop(reader);
+        let Some(dur) = info.duration else {
+            println!("  no duration — cannot seek");
+            return Ok(());
+        };
+        let fitted = fit_dims(info.w, info.h, fit_box);
+        let target_hns = ((dur.as_nanos() as f64 * frac) / 100.0) as i64;
+        println!(
+            "  native: {} {}x{} {:.3}fps dur={:?} → fitted {}x{}, target {:.1}s",
+            info.codec,
+            info.w,
+            info.h,
+            info.fps,
+            info.duration,
+            fitted.0,
+            fitted.1,
+            target_hns as f64 / 1e7,
+        );
+        // Each combo uses a FRESH reader (an equally cold decode pipeline), so the
+        // run-up ms are comparable. convert-all = the old producer; skip = the fix.
+        for hw in [false, true] {
+            for convert in [true, false] {
+                match seek_run_up(path, fitted, target_hns, hw, convert) {
+                    Ok((discarded, open_ms, run_ms)) => println!(
+                        "  {:<8} {:<12}: open+neg+pos={open_ms:.0}ms run-up={run_ms:.0}ms discarded={discarded}",
+                        if hw { "hw nv12" } else { "sw rgb32" },
+                        if convert { "convert-all" } else { "skip (fix)" },
+                    ),
+                    Err(e) => println!(
+                        "  {:<8} {}: FAILED {}",
+                        if hw { "hw nv12" } else { "sw rgb32" },
+                        if convert { "convert-all" } else { "skip" },
+                        hr_name(&e),
+                    ),
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Open a fresh reader (sw RGB32 or hw NV12), position at `target_hns`, and
+    /// decode forward to the landing frame. When `convert`, every discarded run-up
+    /// frame is read back/swizzled (the old producer); otherwise only the landing
+    /// frame is (the task-#4 fix). Returns (discarded, open+negotiate+position ms,
+    /// run-up ms).
+    unsafe fn seek_run_up(
+        path: &Path,
+        fitted: (u32, u32),
+        target_hns: i64,
+        hw: bool,
+        convert: bool,
+    ) -> windows::core::Result<(u32, f64, f64)> {
+        use windows::core::Interface;
+        use windows::Win32::Media::MediaFoundation::{
+            IMF2DBuffer2, MF2DBuffer_LockFlags_Read, MFVideoFormat_NV12, MFVideoFormat_RGB32,
+        };
+        let t_open = Instant::now();
+        let manager = if hw { Some(dxgi_manager()?) } else { None };
+        let mut attrs: Option<IMFAttributes> = None;
+        MFCreateAttributes(&mut attrs, 3)?;
+        let attrs = attrs.expect("attrs");
+        attrs.SetUINT32(&MF_SOURCE_READER_ENABLE_ADVANCED_VIDEO_PROCESSING, 1)?;
+        if let Some(mgr) = &manager {
+            attrs.SetUnknown(&MF_SOURCE_READER_D3D_MANAGER, mgr)?;
+            attrs.SetUINT32(&MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS, 1)?;
+        }
+        let reader: IMFSourceReader =
+            MFCreateSourceReaderFromURL(&HSTRING::from(path.as_os_str()), &attrs)?;
+        reader.SetStreamSelection(MF_SOURCE_READER_ALL_STREAMS.0 as u32, false)?;
+        reader.SetStreamSelection(MF_SOURCE_READER_FIRST_VIDEO_STREAM.0 as u32, true)?;
+        let (sub, subtype) = if hw {
+            (BenchSub::Nv12, &MFVideoFormat_NV12)
+        } else {
+            (BenchSub::Rgb32, &MFVideoFormat_RGB32)
+        };
+        let (w, h, stride) = negotiate_sub(&reader, subtype, Some(fitted), sub)
+            .or_else(|_| negotiate_sub(&reader, subtype, None, sub))?;
+        // Recreate strategy: position BEFORE the first read (spike E: ~0 ms).
+        let pos = propvariant_i8(target_hns.max(0));
+        reader.SetCurrentPosition(&GUID::zeroed(), &pos)?;
+        let open_ms = t_open.elapsed().as_secs_f64() * 1000.0;
+
+        let mut out = match sub {
+            BenchSub::Rgb32 => vec![0u8; w as usize * h as usize * 4],
+            BenchSub::Nv12 => vec![0u8; w as usize * h as usize * 3 / 2],
+        };
+        let video = MF_SOURCE_READER_FIRST_VIDEO_STREAM.0 as u32;
+        let t_run = Instant::now();
+        let mut discarded = 0u32;
+        for _ in 0..2400 {
+            let mut flags = 0u32;
+            let mut ts = 0i64;
+            let mut sample: Option<IMFSample> = None;
+            reader.ReadSample(
+                video,
+                0,
+                None,
+                Some(&mut flags),
+                Some(&mut ts),
+                Some(&mut sample),
+            )?;
+            if flags & (MF_SOURCE_READERF_ENDOFSTREAM.0 as u32) != 0 {
+                break;
+            }
+            let Some(sample) = sample else { continue };
+            let landing = ts >= target_hns;
+            // Both modes convert the landing frame (it's displayed); convert-all
+            // also converts the discarded run-up — the cost the fix removes.
+            if convert || landing {
+                match sub {
+                    BenchSub::Rgb32 => {
+                        let buffer = sample.ConvertToContiguousBuffer()?;
+                        let mut data: *mut u8 = std::ptr::null_mut();
+                        let mut len = 0u32;
+                        buffer.Lock(&mut data, None, Some(&mut len))?;
+                        let src = std::slice::from_raw_parts(data, len as usize);
+                        swizzle_bgrx_rows(src, stride, w, h, &mut out);
+                        buffer.Unlock()?;
+                    }
+                    BenchSub::Nv12 => {
+                        let buffer = sample.GetBufferByIndex(0)?;
+                        let b2d: IMF2DBuffer2 = buffer.cast()?;
+                        let mut scan0: *mut u8 = std::ptr::null_mut();
+                        let mut pitch: i32 = 0;
+                        let mut startp: *mut u8 = std::ptr::null_mut();
+                        let mut len2: u32 = 0;
+                        b2d.Lock2DSize(
+                            MF2DBuffer_LockFlags_Read,
+                            &mut scan0,
+                            &mut pitch,
+                            &mut startp,
+                            &mut len2,
+                        )?;
+                        copy_nv12_2d(scan0, pitch, w, h, &mut out);
+                        b2d.Unlock2D()?;
+                    }
+                }
+            }
+            if landing {
+                break;
+            }
+            discarded += 1;
+        }
+        let run_ms = t_run.elapsed().as_secs_f64() * 1000.0;
+        Ok((discarded, open_ms, run_ms))
+    }
+
+    // ---------------------------------------------------------------- hdrprobe
+    //
+    // Task 79.10 Track B (Windows HDR→P010): the pivotal question is whether MF's
+    // P010 output PASSES PQ/HLG through raw (our shader does the EOTF) or SDR-
+    // converts it (double application). Negotiate P010 on the hw reader and print
+    // the OUTPUT media type's transfer/primaries/matrix/range vs the native ones.
+    // If the output keeps 2084/HLG, the shader-EOTF path is valid.
+
+    fn hdrprobe(args: &[String]) {
+        let mut file = None;
+        let mut fit = (3840u32, 2160u32);
+        let mut it = args.iter();
+        while let Some(a) = it.next() {
+            match a.as_str() {
+                "--fit" => {
+                    fit = (
+                        it.next().and_then(|s| s.parse().ok()).unwrap_or(3840),
+                        it.next().and_then(|s| s.parse().ok()).unwrap_or(2160),
+                    )
+                }
+                f => file = Some(f.to_string()),
+            }
+        }
+        let Some(file) = file else {
+            eprintln!("hdrprobe: no file given");
+            std::process::exit(2);
+        };
+        let path = Path::new(&file);
+        println!("== hdrprobe {file}");
+        unsafe {
+            if let Err(e) = hdrprobe_inner(path, fit) {
+                println!("  HDRPROBE FAILED: {}", hr_name(&e));
+            }
+        }
+    }
+
+    /// MFVideoTransFunc value → a readable name (the ones we care about).
+    fn transfer_name(t: u32) -> &'static str {
+        match t {
+            0 => "unknown",
+            1 => "10 (linear)",
+            4 => "709",
+            5 => "240M",
+            6 => "sRGB",
+            7 => "28",
+            15 => "2020_const",
+            16 => "2084/PQ",
+            17 => "HLG",
+            _ => "other",
+        }
+    }
+
+    unsafe fn hdrprobe_inner(path: &Path, fit_box: (u32, u32)) -> windows::core::Result<()> {
+        use windows::core::Interface;
+        use windows::Win32::Media::MediaFoundation::{
+            IMF2DBuffer2, MF2DBuffer_LockFlags_Read, MFVideoFormat_P010,
+        };
+        // Native colorimetry (a plain reader).
+        let reader0 = open_reader(path, true)?;
+        let info = native_info(&reader0)?;
+        drop(reader0);
+        let fitted = fit_dims(info.w, info.h, fit_box);
+        println!(
+            "  native: {} {}x{} {:.3}fps  prim={:?} trans={:?}{} matrix={:?} range={:?}",
+            info.codec,
+            info.w,
+            info.h,
+            info.fps,
+            info.primaries,
+            info.transfer,
+            info.transfer
+                .map(|t| format!(" [{}]", transfer_name(t)))
+                .unwrap_or_default(),
+            info.matrix,
+            info.range,
+        );
+
+        // Hardware reader, P010 output, advanced video processing ON (as the
+        // producer would run it).
+        let manager = dxgi_manager()?;
+        let mut attrs: Option<IMFAttributes> = None;
+        MFCreateAttributes(&mut attrs, 3)?;
+        let attrs = attrs.expect("attrs");
+        attrs.SetUINT32(&MF_SOURCE_READER_ENABLE_ADVANCED_VIDEO_PROCESSING, 1)?;
+        attrs.SetUnknown(&MF_SOURCE_READER_D3D_MANAGER, &manager)?;
+        attrs.SetUINT32(&MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS, 1)?;
+        let reader: IMFSourceReader =
+            MFCreateSourceReaderFromURL(&HSTRING::from(path.as_os_str()), &attrs)?;
+        reader.SetStreamSelection(MF_SOURCE_READER_ALL_STREAMS.0 as u32, false)?;
+        reader.SetStreamSelection(MF_SOURCE_READER_FIRST_VIDEO_STREAM.0 as u32, true)?;
+
+        let video = MF_SOURCE_READER_FIRST_VIDEO_STREAM.0 as u32;
+        let out = MFCreateMediaType()?;
+        out.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video)?;
+        out.SetGUID(&MF_MT_SUBTYPE, &MFVideoFormat_P010)?;
+        out.SetUINT64(
+            &MF_MT_FRAME_SIZE,
+            (((fitted.0 & !1) as u64) << 32) | (fitted.1 & !1) as u64,
+        )?;
+        match reader.SetCurrentMediaType(video, None, &out) {
+            Ok(()) => println!("  P010 negotiation: ACCEPTED"),
+            Err(e) => {
+                println!("  P010 negotiation: REJECTED {}", hr_name(&e));
+                return Ok(());
+            }
+        }
+        let cur = reader.GetCurrentMediaType(video)?;
+        let packed = cur.GetUINT64(&MF_MT_FRAME_SIZE).unwrap_or(0);
+        let (ow, oh) = ((packed >> 32) as u32, (packed & 0xFFFF_FFFF) as u32);
+        let otrans = cur.GetUINT32(&MF_MT_TRANSFER_FUNCTION).ok();
+        let oprim = cur.GetUINT32(&MF_MT_VIDEO_PRIMARIES).ok();
+        let omatrix = cur.GetUINT32(&MF_MT_YUV_MATRIX).ok();
+        let orange = cur.GetUINT32(&MF_MT_VIDEO_NOMINAL_RANGE).ok();
+        println!(
+            "  P010 output: {ow}x{oh}  prim={oprim:?} trans={otrans:?}{} matrix={omatrix:?} range={orange:?}",
+            otrans.map(|t| format!(" [{}]", transfer_name(t))).unwrap_or_default(),
+        );
+        println!(
+            "  >>> {}",
+            match otrans {
+                Some(16) | Some(17) =>
+                    "output KEEPS PQ/HLG → MF passes HDR through raw → shader-EOTF path VALID",
+                Some(_) | None =>
+                    "output is NOT PQ/HLG → MF converted → shader would double-apply (gate stays)",
+            }
+        );
+
+        // Read one frame + report a few 16-bit sample codes (10-bit high-aligned).
+        let mut flags = 0u32;
+        let mut ts = 0i64;
+        let mut sample: Option<IMFSample> = None;
+        reader.ReadSample(
+            video,
+            0,
+            None,
+            Some(&mut flags),
+            Some(&mut ts),
+            Some(&mut sample),
+        )?;
+        if let Some(sample) = sample {
+            let buffer = sample.GetBufferByIndex(0)?;
+            if let Ok(b2d) = buffer.cast::<IMF2DBuffer2>() {
+                let mut scan0: *mut u8 = std::ptr::null_mut();
+                let mut pitch: i32 = 0;
+                let mut startp: *mut u8 = std::ptr::null_mut();
+                let mut len: u32 = 0;
+                b2d.Lock2DSize(
+                    MF2DBuffer_LockFlags_Read,
+                    &mut scan0,
+                    &mut pitch,
+                    &mut startp,
+                    &mut len,
+                )?;
+                let row = std::slice::from_raw_parts(scan0, (ow as usize * 2).min(len as usize));
+                let codes: Vec<u16> = row
+                    .chunks_exact(2)
+                    .take(6)
+                    .map(|c| u16::from_le_bytes([c[0], c[1]]) >> 6)
+                    .collect();
+                println!("  first Y 10-bit codes: {codes:?} (0..=1023)");
+                b2d.Unlock2D()?;
+            } else {
+                println!("  (sample buffer is not IMF2DBuffer2 — no sample dump)");
+            }
+        }
+        Ok(())
     }
 
     // ---------------------------------------------------------------- spike
