@@ -186,43 +186,72 @@ backend, cache/eviction policy, present mode, upload strategy.
 
 ## Instrumentation & A/B methodology (first-class, not an afterthought)
 
-- **Live profiling:** `tracing` + `tracing-tracy` (Tracy) with **wgpu timestamp
-  queries** (+ `wgpu-profiler`) for unified CPU+GPU zones and frame markers. Behind a
-  feature; compiles out of release.
-- **keypress → photon:** timestamp input via QPC, read true scanout time from
-  DXGI `GetFrameStatistics().SyncQPCTime` (flip-model swapchain + waitable object
-  + max-frame-latency = 1). Validate against Intel **PresentMon** as an oracle.
-  GPU pass split (upload vs draw) via wgpu timestamp queries. macOS later uses
-  the same seam with `CAMetalDrawable.presentedTime`.
-- **Microbenchmarks:** **Criterion** locally over the pinned corpus (decode from
-  memory). **CI regression gate** runs deterministic instruction-count benches
-  (**CodSpeed** / iai-callgrind) on *platform-independent* code on Linux — never
-  gate on Windows wall-clock noise.
-- **A/B pattern:** `Box<dyn Trait>` at the swap seam (decode backend, cache
-  policy, present mode), generics in the hot inner loop, cargo features only for
-  whole-program/profiler toggles. One runner replays a scripted keypress workload
-  per variant and logs **per-frame NDJSON**; report **p50/p95/p99**, never means.
+Wired today (all opt-in, RAM-only, privacy-clean — durations, never paths or
+pixels):
 
-## Minimal UI (the entire user-facing surface)
+- **Per-stage timing** (`pb-app-core::metrics`, the `--metrics` flag):
+  scan / read / decode / upload / render durations summarized as
+  **p50/p95/p99 — never means**.
+- **Episodic latency timers** (`pb-app-core::perf`, gated by `PB_PERF`):
+  whole user-visible operations — open → first photo on screen, open → every
+  photo cached, a Fit↔1:1 or resize switch → back on screen. These measure
+  the Prime Directive directly; add a new episode when a new interaction is
+  supposed to feel instant.
+- **A/B at the seams:** `Box<dyn Trait>` at the swap seam (decode backend,
+  cache policy, present mode), generics in the hot inner loop, cargo features
+  only for whole-program toggles. `pb-render`'s `ab_report` (an `--ignored`
+  test run with `--nocapture`) prints the full A/B/X resample-quality matrix —
+  the GPU-Lanczos decision (#110) came from it.
+- **Targeted diag env vars** (`PB_TRACE`, `PB_DOOR_DIAG`, …): cheap stderr
+  diagnostics scoped to one subsystem; the house pattern for a new
+  investigation.
 
-- Borderless, chrome-less window; borderless-fullscreen at native res (enables
-  DXGI Independent Flip for lowest latency).
-- Image fit to screen, centered, **never cropped** (`pb-render::fit_rect`).
-- Keymap (defaults; fully remappable via `keymap.toml` — `keymap.rs` is the source of truth):
-  - `space` — next photo · `backspace` — previous photo
-  - `enter` — random photo (precomputed shuffle order; reversible)
-  - arrows — pan; while a **video** plays with no horizontal overflow, `←`/`→` become
-    seek (±2 s, `Shift` ±10 s, hold to scrub — contextual, not a separate binding)
-  - `P` — play/pause (animations, Live Photos, video)
-  - `esc` — quit
-- Hold any nav key to iterate as fast as frames become ready.
-- Key handling tracks **held physical keys** (`Pressed`/`Released`), ignoring OS
-  key-repeat events, plus a focus-loss release net (avoids known winit repeat/lost
-  key-up bugs).
+Designed but **not yet wired** (don't cite these as existing):
+
+- **keypress → photon:** QPC input timestamps + DXGI
+  `GetFrameStatistics().SyncQPCTime` (flip-model + waitable object +
+  max-frame-latency 1), validated against Intel **PresentMon**; macOS via
+  `CAMetalDrawable.presentedTime` behind the same seam.
+- **Tracy** (`tracing-tracy` + wgpu timestamp queries / `wgpu-profiler`) for
+  unified CPU+GPU zones, behind a feature that compiles out of release.
+- **Criterion microbenches over the pinned corpus** (`benches/` is empty
+  today) and a **CI regression gate** (CodSpeed / iai-callgrind on
+  platform-independent code, on Linux — never gate on Windows wall-clock
+  noise).
+
+## The UI model — minimal when you want it, everything when you ask
+
+The POC was "a chrome-less window and five keys." That is no longer the truth
+and shouldn't be defended: today there are menus, a toolbar, a thumbnail
+strip, info/EXIF/details panels, overlays, HUD toasts, and a full Settings
+window. What survived the growth is the philosophy:
+
+- **Easily made minimal — not always minimal.** The viewing surface is a
+  borderless window (borderless-fullscreen at native res → DXGI Independent
+  Flip), and every piece of chrome is dismissible: the app collapses to
+  "just the image," and nothing forces itself back on screen.
+- **All the information they want, when they ask.** Info panel, full-EXIF
+  panel, media details, text-in-image, help overlay — each one keypress away,
+  each dismissible.
+- **Keyboard-first, fully remappable** (`keymap.toml`), and every surface —
+  menu, toolbar, mouse — dispatches the same `Action` vocabulary
+  (`pb-app-core::action`), so the keymap, menus, and toolbar can't drift
+  apart. The canonical spine: `space`/`backspace` next/prev, `enter` random
+  (precomputed shuffle, reversible), `P` play / enter a door, `Esc` quit.
+  Bindings are contextual where that reads naturally (arrows pan; over a
+  playing video with no horizontal overflow `←`/`→` seek). **`keymap.rs` is
+  the source of truth — don't restate the full map here; it drifts.**
+- Image fit to screen, centered, never cropped **by default**
+  (`pb-render::fit_rect`); fill and 1:1 are a keypress away, all prefetched.
+- Hold any nav key to blaze — advance as fast as frames become ready.
+- Key handling tracks **held physical keys** (`Pressed`/`Released`), ignoring
+  OS key-repeat events, plus a focus-loss release net (avoids known winit
+  repeat/lost key-up bugs).
 
 ### HUD / toast icons — Font Awesome solid (codified workflow)
 
-Overlay panels (`hud.rs`) composite white outlined text **and optional icons** into
+Overlay panels (the `pb-hud` crate — shell-neutral since NS0) composite white
+outlined text **and optional icons** into
 one software RGBA8 pill, drawn as a single alpha-blended quad — rebuilt only on
 change, never per frame (off the photo hot path). Icons are **Font Awesome `solid`**
 SVGs (the house style): a single `currentColor` path tinted white, with the text's
@@ -238,9 +267,9 @@ the same `resvg`/`usvg`/`tiny-skia` stack `pb-decode` uses (`icon::rasterize`).
 1. Find it in the local FA library:
    `D:\Media\fontawesome-pro-plus-7.3.0-web\svgs\solid\<name>.svg`
    (`ls svgs/solid | grep <kw>` to search; always the `solid` weight).
-2. Copy it **verbatim** into `crates/pb-app/icons/<name>.svg`.
+2. Copy it **verbatim** into `crates/pb-hud/icons/<name>.svg`.
 3. Add `pub const <NAME>: &str = include_str!("../icons/<name>.svg");` to
-   `icon::assets` (`crates/pb-app/src/icon.rs`).
+   `icon::assets` (`crates/pb-hud/src/icon.rs`).
 4. Show it: `show_toast_icon(msg, Some(icon::assets::<NAME>), ..)` for icon+text, or
    `show_toast_icon("", Some(..), ..)` for an icon-only square pill (e.g. rotate).
 
@@ -252,8 +281,12 @@ solid set (most of these icons, including the ones used here, are in FA Free).
 
 ## Chrome design system — the `pb-ui` crate (don't reinvent components)
 
-The viewer hot path is custom wgpu (above). The **chrome** — Settings, About, and
-the Confirm / Message / Password dialogs — is **egui**, in a second winit window
+The viewer hot path is custom wgpu (above). The **chrome** — the tabbed Settings
+window (General / Display / Subtitles / AI / Shortcuts; the Shortcuts tab *is* the
+keymap editor, and edits auto-save live), About, the Confirm / Message / Password
+dialogs, the Loading / Scanning progress views (determinate bar + Cancel; a
+Password dialog turns into Loading in place once accepted), and Ask About Image —
+is **egui**, in a second winit window
 (`pb-app/src/dialog.rs`), and it is **component-based on `crates/pb-ui`**. The rule:
 **when you need a button / field / toggle / card / section, reach for the `pb-ui`
 component — never hand-roll one in a dialog.** That's the whole point of the crate; a
@@ -286,8 +319,11 @@ single-theme dialog can't show.
   `CARD_WRAP_WIDTH`), `toggle` / `toggle_with_label`, `page_title` / `section_label` (type ramp: page title
   30 / section 17 — both semibold via the bundled Segoe UI Semibold face / card title 14.5
   / description 12.5), `primary_button` / `secondary_button` / `danger_button`,
-  `text_field`, `slider` (stable-width value box + solid-accent fill — no jitter),
-  `icon_sized`. Section headings are Title Case; setting labels stay sentence case.
+  `text_field`, `slider` / `slider_stepped` (stable-width value box + solid-accent
+  fill — no jitter), `tab_bar` (the Settings tabs), `progress_bar` (the Loading /
+  Scanning views), `icon_sized`. Section headings are Title Case; setting labels
+  stay sentence case. `lib.rs` is the full token/component list — trust it over
+  this paragraph.
 - **Icons (`pb-ui/src/icon.rs`):** Font Awesome SVGs **vendored per family**
   (`icons/<family>/<name>.svg`), rasterized to a **white square sprite** and **tinted at
   draw time** — one texture serves every tone and theme (cached in the egui ctx). A
@@ -298,7 +334,7 @@ single-theme dialog can't show.
   **no per-call nudging or top-clipping** (the old pain). The square render is our own
   `fa-fw` — FA glyphs aren't all square (lock is 384×512), so we center every glyph in a
   square box. **Switch families** by flipping `icon::ACTIVE_FAMILY` (vendor that family
-  first). The HUD toasts keep their own CPU-composite rasterizer (`pb-app/src/icon.rs`);
+  first). The HUD toasts keep their own CPU-composite rasterizer (`pb-hud/src/icon.rs`);
   only the egui chrome uses `pb-ui::icon`.
 
 **Conventions:** primary = accent default action (Save/OK/Unlock); secondary = neutral
@@ -315,10 +351,14 @@ family from the FA library (`D:\Media\fontawesome-pro-plus-7.3.0-web\svgs\<famil
 `pb-ui/icons/<family>/`, add a variant to `icon::Icon` + a `glyph!` arm, show it in the
 gallery's Icons row.
 
-> **Provisional (2026-06-28):** the theme currently leans *native-Windows*
-> (Segoe UI + an OS-ish accent). An *own-brand* identity (a tuned palette + Inter,
-> Rerun-`re_ui` style) is on the table; it's a one-file token+font swap in `pb-ui`.
-> Accent colors are explicitly flagged for a later revisit.
+> **Accent (resolved — brand-first):** the accent defaults to the logo orange
+> (`BRAND_ACCENT`, `#FF4915`), with an OS/custom override chosen in Settings.
+> Every candidate passes a legibility guard (`ensure_legible`) that falls back
+> to the brand color rather than ship unreadable chrome. Process-wide
+> (`set_accent`, lock-free), read live by every `Palette::new`, so overlay
+> panels and dialogs track an accent change with no plumbing. The face is
+> still native Segoe UI and the visual target remains the Windows 11
+> settings-card look.
 
 ## Privacy guarantee (no record of viewed photos) — tasks.json #2
 
