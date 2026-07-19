@@ -292,10 +292,13 @@ impl AppCore {
             Arc::new(|src, item, fit, allow_preview, purpose, cancel| {
                 crate::engine::decode_item_for(src, item, fit, allow_preview, purpose, cancel)
             });
-        let (pool, results) = crate::decode_pool::DecodePool::new(
+        let select: Arc<crate::decode_pool::SelectFn> =
+            Arc::new(|src, item, fit, cancel| crate::engine::select_item(src, item, fit, cancel));
+        let (pool, results) = crate::decode_pool::DecodePool::new_with_select(
             crate::decode_pool::recommended_workers(),
             POOL_BUDGET_BYTES,
             decode,
+            select,
         );
         core.pool = pool;
         core.results = results;
@@ -3230,6 +3233,7 @@ impl AppCore {
         self.playlist = Playlist::new(0, 0);
         self.rotations.clear();
         self.video_resume.clear();
+        self.poster_sel.reset(self.content_gen); // task #114: index-keyed, deck-scoped
         self.meta_cache.clear();
         self.exif_cache.clear();
         self.dovi_warned.clear();
@@ -3349,6 +3353,7 @@ impl AppCore {
         // Indices are reassigned — drop everything keyed by item index.
         self.rotations.clear();
         self.video_resume.clear();
+        self.poster_sel.reset(self.content_gen); // task #114: index-keyed, deck-scoped
         self.meta_cache.clear();
         self.exif_cache.clear();
         self.dovi_warned.clear();
@@ -5788,6 +5793,10 @@ impl AppCore {
         type Job = crate::decode_pool::Want;
         let (mut head, mut previews, mut fulls): (Vec<Job>, Vec<Job>, Vec<Job>) =
             (Vec::new(), Vec::new(), Vec::new());
+        // Video items whose poster-selection want is already in this pass's list
+        // (task #114): the thumb tier must union its demand into the ledger, not
+        // push a second want for the same identity.
+        let mut sel_pushed: HashSet<usize> = HashSet::new();
         for &t in &self.targets {
             if self.failed.contains(&t) || pending_reps.contains(&(t, dk)) {
                 continue;
@@ -5798,6 +5807,31 @@ impl AppCore {
                 continue; // already the definitive full (see `decode_is_definitive_full`)
             }
             if !resident {
+                // A video's display want IS its poster want. On selection-capable
+                // platforms that becomes the ONE walk (task #114): purpose-neutral,
+                // level-triggered (re-emitted every pass while selecting), shared
+                // with the thumb tier below. `Chosen` with no resident pixels means
+                // the artifact was evicted — phase 1 reopens for one fresh walk
+                // (phases 2–3 replace this with replay / GPU derive).
+                if crate::engine::poster_select_supported()
+                    && matches!(
+                        crate::video::item_kind(self.source.as_ref(), t),
+                        crate::video::LibraryItemKind::Video(_)
+                    )
+                {
+                    if !self
+                        .poster_sel
+                        .want(t, crate::poster_select::Demand::Display)
+                    {
+                        self.poster_sel.reopen(t);
+                        let _ = self
+                            .poster_sel
+                            .want(t, crate::poster_select::Demand::Display);
+                    }
+                    sel_pushed.insert(t);
+                    previews.push(Job::poster_select(t, fit, self.content_gen, true));
+                    continue;
+                }
                 // Preview-first (`allow_preview`) is a FIT-scale concept: an embedded ~256px
                 // thumbnail is a fine instant stand-in for a fit-to-window view, but it is NEVER a
                 // valid `Original` (1:1 / Fill decodes at native res). Gating on `fit.is_some()`
@@ -5873,6 +5907,39 @@ impl AppCore {
                         || self.thumbs.failed.contains(&it)
                         || pending_items.contains(&it)
                     {
+                        continue;
+                    }
+                    // A video's thumb IS its poster (task #114): union the thumb
+                    // demand into the selection instead of a second walk. If the
+                    // display tier already pushed this pass, the ledger union is
+                    // all that's needed; a thumb-only selection parks under the
+                    // thumb cap (display_class stays false).
+                    if crate::engine::poster_select_supported()
+                        && matches!(
+                            crate::video::item_kind(self.source.as_ref(), it),
+                            crate::video::LibraryItemKind::Video(_)
+                        )
+                    {
+                        // `fill_plan` only yields items with no tile, so a
+                        // `Chosen` here means the tile was evicted after the
+                        // walk: phase-1 reopens for one fresh walk.
+                        if !self
+                            .poster_sel
+                            .want(it, crate::poster_select::Demand::Thumb)
+                        {
+                            self.poster_sel.reopen(it);
+                            let _ = self
+                                .poster_sel
+                                .want(it, crate::poster_select::Demand::Thumb);
+                        }
+                        if sel_pushed.insert(it) {
+                            jobs.push(Job::poster_select(
+                                it,
+                                Some(crate::thumbs::thumb_fit()),
+                                self.content_gen,
+                                self.poster_sel.display_class(it),
+                            ));
+                        }
                         continue;
                     }
                     jobs.push(Job::thumb(it, crate::thumbs::thumb_fit()));
@@ -7015,6 +7082,72 @@ impl AppCore {
         }
     }
 
+    /// Fan out one finished poster-selection payload (task #114): install the
+    /// choice, offer the thumb tile, and hand the geometry-fresh Fit artifact to
+    /// the normal display upload path as a synthetic outcome. A stale-deck
+    /// payload drops wholesale; a stale-GEOMETRY Fit drops alone (the choice
+    /// survives — phase 1 recuts via one fresh walk). Failures map to the legacy
+    /// per-domain failed sets until the phase-4 retry machine lands.
+    fn route_poster_selection(
+        &mut self,
+        o: crate::decode_pool::Outcome,
+        ready: &mut Vec<crate::decode_pool::Outcome>,
+    ) {
+        let item = o.key.item;
+        let gen = o.key.epoch;
+        if gen != self.content_gen {
+            return; // another deck's walk — nothing here may touch this deck
+        }
+        let (thumb_want, display_want) = self.poster_sel.demands(item);
+        match o.selection {
+            Some(Ok(sel)) => {
+                let _ = self.poster_sel.choose(item, gen, sel.choice);
+                if let Some(t) = sel.thumb_img {
+                    // The cache's own deck generation fences the insert.
+                    self.thumbs.offer(item, t);
+                }
+                if display_want {
+                    match sel.fit_img {
+                        Some(img) if o.fit_tag_epoch == self.epoch => {
+                            ready.push(crate::decode_pool::Outcome::synthetic(
+                                item,
+                                self.epoch,
+                                pb_core::RepKind::Fit,
+                                Ok(img),
+                            ));
+                        }
+                        _ => {
+                            // Resized mid-walk: the Fit artifact alone is stale.
+                            // Reopen so the next prefetch pass runs one recut
+                            // (phase 1; the phase-2 replay makes this a single
+                            // seek-decode instead).
+                            self.poster_sel.reopen(item);
+                        }
+                    }
+                }
+            }
+            Some(Err(e)) => {
+                if e.is_cancelled() {
+                    return; // belt-and-braces; the pool discards these upstream
+                }
+                // Legacy failure mapping per recorded demand domain (phase 4
+                // replaces this with the WaitingForReentry retry machine).
+                if display_want {
+                    eprintln!("poster selection failed for item {item}: {e}");
+                    self.failed.insert(item);
+                    if self.target_item == Some(item) {
+                        self.present_failed(item);
+                    }
+                }
+                if thumb_want {
+                    self.thumbs.failed.insert(item);
+                }
+                self.poster_sel.forget(item);
+            }
+            None => {} // unreachable by construction (PosterSelect always carries it)
+        }
+    }
+
     /// Drain finished decodes: discard stale/duplicate results, handle decode
     /// errors, then upload the highest-priority ready images (**current target
     /// first**) into ring slots — at most `UPLOADS_PER_TICK` per tick so a burst
@@ -7030,6 +7163,21 @@ impl AppCore {
         let mut ready: Vec<Outcome> = std::mem::take(&mut self.pending_uploads);
         while let Ok(o) = self.results.try_recv() {
             ready.push(o);
+        }
+        // Poster-selection payloads (task #114) are matched FIRST — before the
+        // thumb branch and the display routing. They carry multiple artifacts,
+        // their key.epoch is the CONTENT generation (not geometry), and their
+        // image slot is a placeholder no consumer may read; the router fans the
+        // artifacts out (and may push a synthetic display outcome back into
+        // `ready` for the normal upload path below).
+        let mut i = 0;
+        while i < ready.len() {
+            if ready[i].key.purpose == crate::decode_pool::Purpose::PosterSelect {
+                let o = ready.remove(i);
+                self.route_poster_selection(o, &mut ready);
+            } else {
+                i += 1;
+            }
         }
         // Thumb-purpose results (task #83) feed the thumb store, never the ring.
         // Geometry-epoch staleness doesn't apply to them (thumbs are display-
@@ -7460,6 +7608,10 @@ impl AppCore {
     /// anywhere index `N` may now name different pixels.
     pub fn invalidate_content(&mut self) {
         self.content_gen = self.content_gen.wrapping_add(1);
+        // Poster selections are content-scoped (task #114): every choice and
+        // in-flight walk from the old generation is wiped here (the pool's
+        // level-triggered emission stops re-asking, which cancels the walks).
+        self.poster_sel.reset(self.content_gen);
         self.rebuild_ring(false);
     }
 
@@ -15423,6 +15575,184 @@ mod tests {
             codec: "JPEG",
             animated: None,
         }
+    }
+
+    // --- Poster selection (task #114, phase 1) ------------------------------
+
+    fn poster_payload(item: usize, fitted: (u32, u32)) -> pb_decode::PosterSelection {
+        let img = |w: u32, h: u32| pb_decode::DecodedImage {
+            width: w,
+            height: h,
+            orig_width: 3840,
+            orig_height: 2160,
+            codec: "HEVC",
+            format: pb_decode::PixelFormat::Rgba8,
+            pixels: vec![128; (w * h * 4) as usize],
+            is_preview: false,
+            color: pb_decode::ColorTransform::srgb(),
+            peak: 1.0,
+            animated: None,
+        };
+        pb_decode::PosterSelection {
+            choice: pb_decode::PosterChoice {
+                origin_hns: 0,
+                relative_hns: item as i64 * 10_000_000,
+                native_w: 3840,
+                native_h: 2160,
+                content_hdr: false,
+            },
+            fit_img: Some(img(fitted.0, fitted.1)),
+            thumb_img: Some(img(64, 36)),
+            native: None,
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_video_display_want_becomes_one_selection_not_an_image_decode() {
+        // Emission (Windows-gated: poster_select_supported): a non-resident video
+        // in the window records display demand in the ledger; photos never enter.
+        let mut core = test_core();
+        core.source = photos_named(&["a.jpg", "clip.mkv", "b.jpg"]);
+        core.playlist = Playlist::new(3, 0).with_cursor(1);
+        core.fit = Some(FitBox {
+            max_width: 800,
+            max_height: 600,
+        });
+        core.request_prefetch();
+        assert_eq!(
+            core.poster_sel.demands(1),
+            (false, true),
+            "the video is selecting with display demand"
+        );
+        assert_eq!(
+            core.poster_sel.demands(0),
+            (false, false),
+            "photos never enter the selection ledger"
+        );
+        // Level-triggered: a second pass keeps it selecting (no panic, no dupe).
+        core.request_prefetch();
+        assert_eq!(core.poster_sel.demands(1), (false, true));
+    }
+
+    #[test]
+    fn a_selection_payload_fans_out_choice_and_display_fit() {
+        let mut core = test_core();
+        core.source = photos_named(&["clip.mkv"]);
+        core.playlist = Playlist::new(1, 0);
+        core.fit = Some(FitBox {
+            max_width: 800,
+            max_height: 600,
+        });
+        core.targets = vec![0];
+        core.ring = ResidentRing::new(4); // headless cores start with 0 slots
+        core.poster_sel.reset(core.content_gen);
+        core.poster_sel
+            .want(0, crate::poster_select::Demand::Display);
+        core.pending_uploads.push(Outcome::synthetic_selection(
+            0,
+            core.content_gen,
+            core.epoch,
+            Ok(poster_payload(0, (800, 450))),
+        ));
+        core.drain_results();
+        assert!(core.poster_sel.choice(0).is_some(), "the choice installed");
+        assert!(
+            core.ring.slot_for_rep(0, pb_core::RepKind::Fit).is_some(),
+            "the Fit artifact rode the normal upload path into the ring"
+        );
+        assert!(
+            !core.preview_resident.contains(&0),
+            "a selected poster is a definitive full, never a preview"
+        );
+    }
+
+    #[test]
+    fn a_stale_deck_selection_payload_is_dropped_wholesale() {
+        let mut core = test_core();
+        core.source = photos_named(&["clip.mkv"]);
+        core.playlist = Playlist::new(1, 0);
+        core.poster_sel.reset(core.content_gen);
+        core.poster_sel
+            .want(0, crate::poster_select::Demand::Display);
+        let stale_gen = core.content_gen.wrapping_sub(1);
+        core.pending_uploads.push(Outcome::synthetic_selection(
+            0,
+            stale_gen,
+            core.epoch,
+            Ok(poster_payload(0, (800, 450))),
+        ));
+        core.drain_results();
+        assert!(
+            core.poster_sel.choice(0).is_none(),
+            "another deck's walk must not install a choice under a recycled index"
+        );
+        assert!(
+            core.ring.slot_for_rep(0, pb_core::RepKind::Fit).is_none(),
+            "and its pixels must not reach the ring"
+        );
+    }
+
+    #[test]
+    fn a_stale_geometry_fit_artifact_drops_alone_and_reopens() {
+        // The selection survives a resize; its Fit artifact does not. The choice
+        // installs, the stale Fit is dropped, and the selector reopens so the
+        // next pass runs one recut.
+        let mut core = test_core();
+        core.source = photos_named(&["clip.mkv"]);
+        core.playlist = Playlist::new(1, 0);
+        core.poster_sel.reset(core.content_gen);
+        core.poster_sel
+            .want(0, crate::poster_select::Demand::Display);
+        let stale_epoch = core.epoch.wrapping_sub(1);
+        core.pending_uploads.push(Outcome::synthetic_selection(
+            0,
+            core.content_gen,
+            stale_epoch,
+            Ok(poster_payload(0, (800, 450))),
+        ));
+        core.drain_results();
+        assert!(
+            core.ring.slot_for_rep(0, pb_core::RepKind::Fit).is_none(),
+            "the old-viewport Fit never uploads"
+        );
+        assert!(
+            core.poster_sel.choice(0).is_none() && core.poster_sel.demands(0) == (false, false),
+            "reopened: the next want() starts one fresh walk"
+        );
+        assert!(
+            core.poster_sel
+                .want(0, crate::poster_select::Demand::Display),
+            "and it does want a fresh walk"
+        );
+    }
+
+    #[test]
+    fn a_failed_selection_maps_to_the_demand_domains_and_forgets() {
+        let mut core = test_core();
+        core.source = photos_named(&["clip.mkv"]);
+        core.playlist = Playlist::new(1, 0);
+        core.poster_sel.reset(core.content_gen);
+        core.poster_sel.want(0, crate::poster_select::Demand::Thumb);
+        core.poster_sel
+            .want(0, crate::poster_select::Demand::Display);
+        core.pending_uploads.push(Outcome::synthetic_selection(
+            0,
+            core.content_gen,
+            core.epoch,
+            Err(pb_decode::DecodeError::Corrupt("truncated".into())),
+        ));
+        core.drain_results();
+        assert!(
+            core.failed.contains(&0),
+            "display domain: legacy failed set"
+        );
+        assert!(core.thumbs.failed.contains(&0), "thumb domain: legacy set");
+        assert_eq!(
+            core.poster_sel.demands(0),
+            (false, false),
+            "the ledger forgot the item (the failed sets gate re-emission)"
+        );
     }
 
     #[test]

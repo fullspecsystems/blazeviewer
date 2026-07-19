@@ -235,6 +235,30 @@ impl Outcome {
         self
     }
 
+    /// A pool-less poster-selection outcome (task #114) for drain-routing tests:
+    /// `gen` is the content generation (the selection's `key.epoch`),
+    /// `fit_tag_epoch` the geometry epoch its Fit artifact was cut for.
+    pub fn synthetic_selection(
+        item: usize,
+        gen: u64,
+        fit_tag_epoch: u64,
+        selection: Result<pb_decode::PosterSelection, DecodeError>,
+    ) -> Self {
+        Outcome {
+            key: DecodeKey {
+                item,
+                epoch: gen,
+                purpose: Purpose::PosterSelect,
+                rep_kind: pb_core::RepKind::Fit,
+            },
+            result: Err(DecodeError::Corrupt("poster-selection payload".into())),
+            selection: Some(selection),
+            fit_tag_epoch,
+            preview: false,
+            _budget: None,
+        }
+    }
+
     /// Move the decoded image out, dropping the pool byte-budget reservation —
     /// the T0 handoff (task #83): after the ring upload, the CPU buffer travels
     /// to the thumb-derive thread without cloning, and the budget frees here so

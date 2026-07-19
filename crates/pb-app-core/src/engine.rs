@@ -456,6 +456,48 @@ pub fn decode_item(
     decode_item_cancellable(source, item, fit, allow_preview, &AtomicBool::new(false))
 }
 
+/// Whether this platform's decode layer implements the one-walk poster
+/// selection (task #114). Windows (MF) only for now: the scheduler emits
+/// selection wants only when true, so the other platforms keep the legacy
+/// per-consumer poster walks bit-for-bit until the parity phase (plan §phases).
+pub fn poster_select_supported() -> bool {
+    cfg!(windows)
+}
+
+/// The pool's `PosterSelect` entry (task #114): the ONE scored walk for a video
+/// item — chooses the frame, remembers the absolute locator, cuts the fitted
+/// poster + thumb tile from the same winner on this worker. Only scheduled for
+/// video items where [`poster_select_supported`] is true.
+pub fn select_item(
+    source: &dyn ItemSource,
+    item: usize,
+    fit: Option<FitBox>,
+    cancel: &AtomicBool,
+) -> Result<pb_decode::PosterSelection, DecodeError> {
+    #[cfg(windows)]
+    {
+        let input = match source.path(item) {
+            Some(p) => pb_decode::VideoInput::Path(p.to_path_buf()),
+            // An archive entry: the container bytes are fetched into RAM for the
+            // walk and dropped with the job (playback re-fetches its own Arc).
+            None => pb_decode::VideoInput::Bytes {
+                data: std::sync::Arc::new(
+                    source
+                        .bytes(item)
+                        .map_err(|e| DecodeError::Corrupt(format!("read failed: {e}")))?,
+                ),
+                name: source.name(item).to_string(),
+            },
+        };
+        pb_decode::decode_video_poster_select(&input, fit, crate::thumbs::thumb_fit(), cancel)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (source, item, fit, cancel);
+        Err(DecodeError::Unsupported)
+    }
+}
+
 /// The pool's purpose-aware decode entry (task #83): a `Thumb`-purpose request
 /// first tries the cheap embedded-thumbnail extraction (the EXIF IFD1 JPEG —
 /// header-parse only, no full decode) before falling through to the normal
