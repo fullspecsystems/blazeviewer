@@ -6209,8 +6209,16 @@ impl AppCore {
                             continue;
                         }
                         // `fill_plan` only yields items with no tile, so a
-                        // `Chosen` here means the tile was evicted after the
-                        // walk: phase-1 reopens for one fresh walk.
+                        // `Chosen` here means the tile is genuinely gone. The
+                        // hint makes the refill a REPLAY of the same frame —
+                        // never a fresh walk that could pick differently (the
+                        // missing hint here was the "thumbnail arrives way
+                        // after the video" report: a dropped tile re-walked the
+                        // whole film at bottom priority).
+                        let hint = self
+                            .poster_sel
+                            .choice(it)
+                            .map(|c| (c.origin_hns, c.relative_hns));
                         if !self
                             .poster_sel
                             .want(it, crate::poster_select::Demand::Thumb)
@@ -6221,12 +6229,15 @@ impl AppCore {
                                 .want(it, crate::poster_select::Demand::Thumb);
                         }
                         if sel_pushed.insert(it) {
-                            jobs.push(Job::poster_select(
-                                it,
-                                Some(crate::thumbs::thumb_fit()),
-                                self.content_gen,
-                                self.poster_sel.display_class(it),
-                            ));
+                            jobs.push(
+                                Job::poster_select(
+                                    it,
+                                    Some(crate::thumbs::thumb_fit()),
+                                    self.content_gen,
+                                    self.poster_sel.display_class(it),
+                                )
+                                .with_replay(hint),
+                            );
                         }
                         continue;
                     }
@@ -7373,6 +7384,47 @@ impl AppCore {
         }
     }
 
+    /// Land a selection's ready-made tile. It is already thumb-sized (cut on
+    /// the worker from the chosen frame), so a passthrough-color tile inserts
+    /// STRAIGHT into the cache — same tick as the poster. It used to ride the
+    /// derive queue, which is bounded and silently DROPS under a browse burst
+    /// (every photo's T0 capture shares it): the app was throwing away a tile
+    /// it was literally holding, then re-walking the whole film for it later at
+    /// bottom priority — the owner's "the thumbnail arrives way after the
+    /// video" report. An enabled-transform tile still routes through the
+    /// derive thread for its color bake.
+    fn land_selection_tile(&mut self, item: usize, img: pb_decode::DecodedImage) {
+        if !self.thumbs.enabled {
+            return;
+        }
+        if img.color.enabled {
+            self.thumbs.offer(item, img);
+            return;
+        }
+        let Some(cur) = self.playlist.current() else {
+            return;
+        };
+        let demand = self.thumbs.demand(cur);
+        let bytes = img.pixels.len() as u64;
+        self.thumbs.cache.insert(
+            item,
+            pb_core::ThumbTier::Full,
+            img.width,
+            img.height,
+            bytes,
+            crate::thumbs::ThumbPixels {
+                rgba: img.pixels,
+                orig_w: img.orig_width,
+                orig_h: img.orig_height,
+                codec: img.codec,
+            },
+            &demand,
+        );
+        if self.thumbs_visible() {
+            self.emit_panels_changed(); // the strip re-pulls tiles on this signal
+        }
+    }
+
     /// Fan out one finished poster-selection payload (task #114): install the
     /// choice, offer the thumb tile, and hand the geometry-fresh Fit artifact to
     /// the normal display upload path as a synthetic outcome. A stale-deck
@@ -7402,8 +7454,7 @@ impl AppCore {
                 }
                 self.retry_recover(item);
                 if let Some(t) = sel.thumb_img {
-                    // The cache's own deck generation fences the insert.
-                    self.thumbs.offer(item, t);
+                    self.land_selection_tile(item, t);
                 }
                 if display_want {
                     // BOTH halves of the artifact tag must match (review f1): the
@@ -16017,6 +16068,7 @@ mod tests {
             core.decode_fit(),
             Ok(poster_payload(0, (800, 450))),
         ));
+        core.thumbs.enabled = true; // the tile must land the same tick
         core.drain_results();
         assert!(core.poster_sel.choice(0).is_some(), "the choice installed");
         assert!(
@@ -16026,6 +16078,12 @@ mod tests {
         assert!(
             !core.preview_resident.contains(&0),
             "a selected poster is a definitive full, never a preview"
+        );
+        assert_eq!(
+            core.thumbs.cache.tier(0),
+            Some(pb_core::ThumbTier::Full),
+            "the ready-made tile lands DIRECTLY in the cache (no droppable \
+             derive-queue round trip — the poster and its thumb arrive together)"
         );
     }
 
