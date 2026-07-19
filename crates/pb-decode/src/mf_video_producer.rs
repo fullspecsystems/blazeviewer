@@ -28,9 +28,15 @@ use crate::mf_poster::{
 use crate::mf_video::{ensure_mf, sample_to_rgba};
 use crate::video::{
     SeekGeneration, VideoColorInfo, VideoFrame, VideoInput, VideoProducerEvent, VideoProducerMsg,
-    VideoSessionId,
+    VideoProducerOptions, VideoSessionId,
 };
 use crate::{FitBox, PixelFormat};
+
+/// HDR tone-map peak in scene-linear scRGB (1.0 = 203-nit BT.2408 graphics white).
+/// MF mastering / content-light metadata isn't read yet, so the P010 path uses the
+/// 1000-nit default the FFmpeg planar path falls back to when a container carries
+/// none (`resolve_hdr_peak`); reading `MF_MT_MAX_LUMINANCE_LEVEL` is a follow-up.
+const HDR_DEFAULT_PEAK: f32 = 1000.0 / 203.0;
 
 /// A forward seek no larger than this decodes forward from the **live** reader
 /// instead of recreating it (task #4, the "short-forward-hop"). Two costs vanish:
@@ -74,6 +80,7 @@ pub fn run_video_producer(
     generation: SeekGeneration,
     events: Sender<VideoProducerEvent>,
     msgs: Receiver<VideoProducerMsg>,
+    options: VideoProducerOptions,
 ) {
     ensure_mf();
     let fail = |error: String| {
@@ -94,49 +101,93 @@ pub fn run_video_producer(
     let (disp_w, disp_h) = info.display_dims();
     let fitted = fit.map(|f| fit_dims(disp_w, disp_h, f));
 
-    // 79.10: heavy **SDR** clips take the hardware path (NVDEC via the DXGI
-    // device manager + NV12 output + in-shader YUV) when the whole setup chain
-    // succeeds. Anything else — the pixel-rate policy saying no, a PQ/HLG
-    // transfer (the shader must not mis-map HDR; MF SDR-converts it on the RGB32
-    // path), a device/negotiation failure, odd output dims — stays on the
-    // software RGB32 path byte-for-byte unchanged. `PB_VIDEO_FORCE_HW` overrides
-    // the policy (A/B + tests), never the failure fallbacks.
-    let (yuv_matrix, full_range, sdr) = unsafe { crate::mf_hw::native_yuv(&reader, info.height) };
+    // Pick the output format from the source colorimetry and the decode-load
+    // policy (79.10 + Track B):
+    //   HDR (PQ/HLG) + a 10-bit-capable renderer → P010 — hardware when the clip is
+    //     heavy enough for NVDEC, else software (the video processor emits P010
+    //     without a D3D device). The shader applies the EOTF, so HDR survives
+    //     instead of being SDR-clamped.
+    //   heavy SDR → NV12 via NVDEC (unchanged).
+    //   everything else (light SDR, or HDR with no 10-bit renderer / planar off) →
+    //     software RGB32, byte-for-byte unchanged (MF SDR-clamps HDR here).
+    // `PB_VIDEO_FORCE_HW` overrides the decode-load policy; `PB_VIDEO_NO_PLANAR`
+    // (via `options.planar`) forces HDR back to the RGB32 path.
+    let nc = unsafe { crate::mf_hw::native_color(&reader, info.height) };
+    let is_hdr = matches!(
+        nc.transfer,
+        crate::VideoTransfer::Pq | crate::VideoTransfer::Hlg
+    );
     let want_hw = crate::mf_hw::hw_override()
-        .unwrap_or_else(|| crate::mf_hw::pixel_rate_wants_hw(info.width, info.height, info.fps))
-        && sdr;
+        .unwrap_or_else(|| crate::mf_hw::pixel_rate_wants_hw(info.width, info.height, info.fps));
+    let use_p010 = is_hdr && options.planar && options.supports_p010;
+
+    // NV12/P010 subsample chroma 2×2 — odd output dims fall back to software.
+    let even = |w: u32, h: u32| w > 0 && h > 0 && w.is_multiple_of(2) && h.is_multiple_of(2);
+
+    // Hardware attempts open a NEW reader (retiring the probe reader); a software
+    // path reuses the probe reader below.
     let mut manager = None;
-    let mut hw_open = None;
+    let mut hw_opened: Option<(IMFSourceReader, OutKind, u32, u32)> = None;
     if want_hw {
         if let Some(mgr) = unsafe { crate::mf_hw::dxgi_manager() } {
-            match unsafe { crate::mf_hw::open_nv12_reader(input, &mgr, fitted) } {
-                Ok((r, hw_w, hw_h)) if hw_w > 0 && hw_h > 0 && hw_w % 2 == 0 && hw_h % 2 == 0 => {
-                    hw_open = Some((r, hw_w, hw_h));
+            let opened = if use_p010 {
+                unsafe { crate::mf_hw::open_p010_reader(input, &mgr, fitted) }
+                    .ok()
+                    .map(|(r, w, h)| (r, OutKind::P010, w, h))
+            } else {
+                unsafe { crate::mf_hw::open_nv12_reader(input, &mgr, fitted) }
+                    .ok()
+                    .map(|(r, w, h)| (r, OutKind::Nv12, w, h))
+            };
+            match opened {
+                Some((r, k, w, h)) if even(w, h) => {
+                    hw_opened = Some((r, k, w, h));
                     manager = Some(mgr);
                 }
-                Ok((r, _, _)) => retire_reader(r), // odd/zero dims → software
-                Err(_) => {}
+                Some((r, _, _, _)) => retire_reader(r), // odd/zero dims → software
+                None => {}
             }
         }
     }
-    let (active_reader, mut kind, w, h) = match hw_open {
-        Some((hw_reader, hw_w, hw_h)) => {
+
+    let (active_reader, mut kind, w, h) = match hw_opened {
+        Some((hw_reader, k, hw_w, hw_h)) => {
             retire_reader(reader); // the plain probe reader is done
-            (hw_reader, OutKind::Nv12, hw_w, hw_h)
+            (hw_reader, k, hw_w, hw_h)
         }
         None => {
-            let negotiated = unsafe {
-                match fitted {
-                    Some(dims) => negotiate_rgb32(&reader, Some(dims))
-                        .or_else(|_| negotiate_rgb32(&reader, None)),
-                    None => negotiate_rgb32(&reader, None),
+            // Software path — reuse the probe reader. Prefer P010 for an HDR source
+            // (so it isn't SDR-clamped); fall back to RGB32 if P010 won't negotiate.
+            let p010 = if use_p010 {
+                unsafe {
+                    match fitted {
+                        Some(dims) => crate::mf_hw::negotiate_p010(&reader, Some(dims))
+                            .or_else(|_| crate::mf_hw::negotiate_p010(&reader, None)),
+                        None => crate::mf_hw::negotiate_p010(&reader, None),
+                    }
                 }
+                .ok()
+                .filter(|&(w, h)| even(w, h))
+            } else {
+                None
             };
-            match negotiated {
-                Ok((w, h, stride)) => (reader, OutKind::Rgb32 { stride }, w, h),
-                Err(e) => {
-                    retire_reader(reader);
-                    return fail(mf_open_msg(e));
+            match p010 {
+                Some((w, h)) => (reader, OutKind::P010, w, h),
+                None => {
+                    let negotiated = unsafe {
+                        match fitted {
+                            Some(dims) => negotiate_rgb32(&reader, Some(dims))
+                                .or_else(|_| negotiate_rgb32(&reader, None)),
+                            None => negotiate_rgb32(&reader, None),
+                        }
+                    };
+                    match negotiated {
+                        Ok((w, h, stride)) => (reader, OutKind::Rgb32 { stride }, w, h),
+                        Err(e) => {
+                            retire_reader(reader);
+                            return fail(mf_open_msg(e));
+                        }
+                    }
                 }
             }
         }
@@ -154,20 +205,37 @@ pub fn run_video_producer(
         has_audio: info.has_audio,
         frame_bytes: format.frame_bytes(w, h) as u64,
     });
-    let color = VideoColorInfo {
-        transform: info.color,
-        cicp: None,
-        // The single-application contract: RGB32 output arrives with the YUV
-        // matrix + range already applied by MF (fields inert); NV12 arrives raw
-        // and the renderer's convert applies exactly these, exactly once.
-        full_range: match kind {
-            OutKind::Nv12 => full_range,
-            OutKind::Rgb32 { .. } => true,
+    // The single-application contract, per output kind.
+    let color = match kind {
+        // P010: pixels arrive raw (PQ/HLG-encoded BT.2020 10-bit YUV) — the renderer
+        // applies matrix + range + EOTF + primaries in-shader exactly once (mirrors
+        // the FFmpeg planar path's `video_color_info_planar`).
+        OutKind::P010 => VideoColorInfo {
+            transform: crate::ColorTransform::from_cicp(nc.primaries, 8, 0, true),
+            cicp: None,
+            full_range: nc.full_range,
+            yuv_matrix: nc.yuv_matrix,
+            transfer: nc.transfer,
+            peak: HDR_DEFAULT_PEAK,
         },
-        yuv_matrix,
-        // The MF paths are SDR (PQ/HLG stays on RGB32, SDR-converted by MF).
-        transfer: crate::VideoTransfer::SrgbLike,
-        peak: 1.0,
+        // NV12: raw YUV, the renderer applies matrix + range once (SDR).
+        OutKind::Nv12 => VideoColorInfo {
+            transform: info.color,
+            cicp: None,
+            full_range: nc.full_range,
+            yuv_matrix: nc.yuv_matrix,
+            transfer: crate::VideoTransfer::SrgbLike,
+            peak: 1.0,
+        },
+        // RGB32: MF already applied matrix + range (fields inert); SDR-clamped.
+        OutKind::Rgb32 { .. } => VideoColorInfo {
+            transform: info.color,
+            cicp: None,
+            full_range: true,
+            yuv_matrix: nc.yuv_matrix,
+            transfer: crate::VideoTransfer::SrgbLike,
+            peak: 1.0,
+        },
     };
 
     // The credit/command/seek loop. Blocking recv IS the select: a Stop or a
@@ -232,17 +300,17 @@ pub fn run_video_producer(
                 if let Some(r) = active.take() {
                     retire_reader(r);
                 }
-                let reader = match unsafe { reopen_at(input, (w, h), abs_target, manager.as_ref()) }
-                {
-                    Ok((r, k)) => {
-                        kind = k;
-                        r
-                    }
-                    Err(e) => {
-                        fail(e);
-                        break 'outer;
-                    }
-                };
+                let reader =
+                    match unsafe { reopen_at(input, (w, h), abs_target, manager.as_ref(), kind) } {
+                        Ok((r, k)) => {
+                            kind = k;
+                            r
+                        }
+                        Err(e) => {
+                            fail(e);
+                            break 'outer;
+                        }
+                    };
                 active = Some(reader);
                 // The fresh reader sits on a keyframe ≤ abs_target; its exact ts isn't
                 // known until the first read, so a subsequent hop must not trust a
@@ -413,8 +481,11 @@ pub fn run_video_producer(
 enum OutKind {
     /// Software decode, RGB32 output, BGRX→RGBA swizzle (the shipping path).
     Rgb32 { stride: i32 },
-    /// Hardware decode (DXGI manager), NV12 planes via `Lock2DSize`.
+    /// NV12 planes via `Lock2DSize` — SDR, hardware decode (DXGI manager).
     Nv12,
+    /// P010 (10-bit) planes via `Lock2DSize` — HDR (PQ/HLG). Hardware when the clip
+    /// is heavy, else software (the video processor emits P010 with no D3D device).
+    P010,
 }
 
 impl OutKind {
@@ -422,6 +493,7 @@ impl OutKind {
         match self {
             OutKind::Rgb32 { .. } => PixelFormat::Rgba8,
             OutKind::Nv12 => PixelFormat::Nv12,
+            OutKind::P010 => PixelFormat::P010,
         }
     }
 }
@@ -510,6 +582,9 @@ unsafe fn convert_sample(
         OutKind::Nv12 => {
             crate::mf_hw::sample_to_nv12(sample, w, h).map_err(|e| format!("Media Foundation: {e}"))
         }
+        OutKind::P010 => {
+            crate::mf_hw::sample_to_p010(sample, w, h).map_err(|e| format!("Media Foundation: {e}"))
+        }
     }
 }
 
@@ -531,14 +606,16 @@ unsafe fn read_one(
 
 /// Fresh reader for a seek landing: open + negotiate the SAME output kind and
 /// geometry the session fixed at start, then position **before the first read**
-/// (~0 ms; spike E). The hw path reuses the producer's one DXGI manager. An
-/// in-RAM input reopens over the same shared bytes (a fresh stream instance —
-/// no re-read, no copy).
+/// (~0 ms; spike E). `kind` picks the format (a P010 seek reopens P010, etc.);
+/// `manager` (present only for a hardware session) picks hardware vs software for
+/// the planar formats. An in-RAM input reopens over the same shared bytes (a fresh
+/// stream instance — no re-read, no copy).
 unsafe fn reopen_at(
     input: &VideoInput,
     dims: (u32, u32),
     position_hns: i64,
     manager: Option<&windows::Win32::Media::MediaFoundation::IMFDXGIDeviceManager>,
+    kind: OutKind,
 ) -> Result<
     (
         windows::Win32::Media::MediaFoundation::IMFSourceReader,
@@ -546,24 +623,47 @@ unsafe fn reopen_at(
     ),
     String,
 > {
-    let (reader, kind) = match manager {
-        Some(mgr) => {
+    let size_changed = || "video output size changed across a seek".to_string();
+    let (reader, new_kind) = match kind {
+        OutKind::Nv12 => {
+            let mgr = manager.ok_or_else(|| "NV12 seek without a device manager".to_string())?;
             let (reader, nw, nh) =
                 crate::mf_hw::open_nv12_reader(input, mgr, Some(dims)).map_err(mf_open_msg)?;
             if (nw, nh) != dims {
                 retire_reader(reader);
-                return Err("video output size changed across a seek".into());
+                return Err(size_changed());
             }
             (reader, OutKind::Nv12)
         }
-        None => {
+        OutKind::P010 => {
+            // Hardware P010 reuses the manager; a software P010 session (a light HDR
+            // clip) reopens a plain reader and negotiates P010 on it.
+            let (reader, nw, nh) = match manager {
+                Some(mgr) => {
+                    crate::mf_hw::open_p010_reader(input, mgr, Some(dims)).map_err(mf_open_msg)?
+                }
+                None => {
+                    let reader = open_video_reader(input).map_err(|e| e.to_string())?;
+                    let (nw, nh) = crate::mf_hw::negotiate_p010(&reader, Some(dims))
+                        .or_else(|_| crate::mf_hw::negotiate_p010(&reader, None))
+                        .map_err(mf_open_msg)?;
+                    (reader, nw, nh)
+                }
+            };
+            if (nw, nh) != dims {
+                retire_reader(reader);
+                return Err(size_changed());
+            }
+            (reader, OutKind::P010)
+        }
+        OutKind::Rgb32 { .. } => {
             let reader = open_video_reader(input).map_err(|e| e.to_string())?;
             let (nw, nh, stride) = negotiate_rgb32(&reader, Some(dims))
                 .or_else(|_| negotiate_rgb32(&reader, None))
                 .map_err(mf_open_msg)?;
             if (nw, nh) != dims {
                 retire_reader(reader);
-                return Err("video output size changed across a seek".into());
+                return Err(size_changed());
             }
             (reader, OutKind::Rgb32 { stride })
         }
@@ -573,7 +673,7 @@ unsafe fn reopen_at(
         retire_reader(reader);
         return Err(mf_open_msg(e));
     }
-    Ok((reader, kind))
+    Ok((reader, new_kind))
 }
 
 /// Re-read the negotiated output geometry/stride after a media-type-change tick.
@@ -613,7 +713,15 @@ mod tests {
         let (events_tx, events_rx) = channel();
         let (msgs_tx, msgs_rx) = channel();
         std::thread::spawn(move || {
-            run_video_producer(&input, None, SID, GEN, events_tx, msgs_rx);
+            run_video_producer(
+                &input,
+                None,
+                SID,
+                GEN,
+                events_tx,
+                msgs_rx,
+                VideoProducerOptions::default(),
+            );
         });
         (msgs_tx, events_rx)
     }
@@ -686,7 +794,9 @@ mod tests {
             // ── A. The CURRENT strategy: recreate the reader at ~40%, then run up.
             let mid = origin + dur_hns * 2 / 5;
             let t = Instant::now();
-            let (reader_a, mut kind_a) = reopen_at(&input, (w, h), mid, None).expect("reopen_at");
+            let (reader_a, mut kind_a) =
+                reopen_at(&input, (w, h), mid, None, OutKind::Rgb32 { stride: 0 })
+                    .expect("reopen_at");
             let reopen_wall = t.elapsed();
             let (fa, run_a, land_a) = run_up(&reader_a, &mut kind_a, mid);
             eprintln!(
@@ -741,7 +851,8 @@ mod tests {
             // C2: a fresh warm reader positioned at `here`, then decode-forward 2 s
             // WITHOUT seeking (what a short-forward-hop would do from the live reader).
             let (reader_c, mut kind_c) =
-                reopen_at(&input, (w, h), here, None).expect("reopen at here");
+                reopen_at(&input, (w, h), here, None, OutKind::Rgb32 { stride: 0 })
+                    .expect("reopen at here");
             let _ = run_up(&reader_c, &mut kind_c, here); // land at `here`
             let (fc2, run_c2, _) = run_up(&reader_c, &mut kind_c, here + 2 * 10_000_000);
             eprintln!(

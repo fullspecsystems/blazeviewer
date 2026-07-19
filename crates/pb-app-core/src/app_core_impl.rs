@@ -10707,12 +10707,13 @@ fn run_platform_video_producer(
     // The FFmpeg reader honors `cancel` via its interrupt callback (plan 1F). The
     // Windows MF reader has its own Stop/disconnect teardown and isn't wired to
     // this flag yet — its reads are local and don't block on network the way SMB
-    // does; revisit if MF network sources need it. MF already emits its own NV12
-    // (task 79.10); the planar `options` drive only the FFmpeg producer for now.
+    // does; revisit if MF network sources need it. `options` now drives the MF
+    // producer too: `supports_p010` (+ `planar`) selects the HDR P010 path
+    // (task 79.10 Track B).
     #[cfg(windows)]
     {
-        let _ = (cancel, options);
-        pb_decode::run_video_producer(input, fit, id, generation, events, msgs);
+        let _ = cancel;
+        pb_decode::run_video_producer(input, fit, id, generation, events, msgs, options);
     }
     #[cfg(all(unix, feature = "ffvideo"))]
     pb_decode::run_ff_video_producer(input, fit, id, generation, events, msgs, cancel, options);

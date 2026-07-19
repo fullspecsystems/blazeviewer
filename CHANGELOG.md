@@ -25,6 +25,10 @@ with any pre-release suffix carried only by the tag.
   now processes just the single frame you land on. Seeks that pass through many frames — big
   jumps, and any seek on a hardware-decoded 4K video — are noticeably quicker (measured on a
   4K60 clip: the skipped-over decode dropped from ~200 ms to ~80 ms).
+- **Heavy 4K video plays more smoothly.** Demanding 4K clips (roughly 4K30 and up) now decode
+  on the graphics card instead of the CPU, so they hold full frame rate where before they
+  could stutter. Lighter videos are unchanged — the CPU path is actually faster for them, so
+  the app picks whichever is quicker for each clip.
 
 ### Fixed
 - **Moving to the next photo right after a fullscreen change stays sharp.** Toggling
@@ -41,6 +45,11 @@ with any pre-release suffix carried only by the tag.
   otherwise.
 
 ### Added
+- **HDR videos play in HDR.** Video mastered in HDR — most 4K movies (HDR10/PQ or HLG) and
+  clips from recent iPhones — used to be flattened to standard range, dulling its colour and
+  highlights. It now plays with full HDR colour and brightness on an HDR display (and is mapped
+  correctly on a standard display). The app decodes the 10-bit video and applies the HDR curve
+  on the graphics card, so it costs nothing on the way.
 - **Switching between fit-to-screen and 1:1 is instant now.** When you stop on a photo, the
   app keeps its full resolution ready in the background, so toggling to actual pixels (and
   back) is immediate instead of pausing to re-decode each time — the same when you land on the

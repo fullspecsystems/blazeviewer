@@ -2100,6 +2100,7 @@ mod tests {
                 SeekGeneration::FIRST,
                 io.events,
                 io.msgs,
+                pb_decode::VideoProducerOptions::default(),
             );
         });
 
@@ -2178,6 +2179,7 @@ mod tests {
                     SeekGeneration::FIRST,
                     io.events,
                     io.msgs,
+                    pb_decode::VideoProducerOptions::default(),
                 );
             });
             let t0 = Instant::now();
