@@ -8,6 +8,19 @@ with any pre-release suffix carried only by the tag.
 ## [Unreleased]
 
 ### Changed
+- **Movie posters are chosen once and stay consistent.** A video's poster frame is now picked
+  by a single scan per film, and its thumbnail is cut from the same frame — the strip and the
+  main view can no longer show different pictures for the same movie. The pick itself is
+  smarter about bright title cards (it judges every candidate at one fixed size, so film grain
+  can no longer sneak a white intro card past the check), and once chosen, the frame is
+  remembered for the session: showing it again after a resize or a long browse takes a fraction
+  of a second instead of re-scanning the file.
+- **Browsing movie folders never waits on posters.** Landing on a video now shows something
+  instantly — its thumbnail if one exists, otherwise a placeholder tile — and the real poster
+  appears in place when ready. Paging quickly through a folder of films no longer pauses on
+  clips whose posters haven't been generated yet, and parking on a film quietly prepares its
+  full-quality frame so fullscreen and window-size changes are as instant as they are for
+  photos.
 - **Fullscreen and window-size changes sharpen instantly.** Toggling fullscreen (or resizing
   the window) used to show a slightly soft image for about a second while the photo was
   re-processed at the new size. The sharp version is now produced directly on the graphics
@@ -31,6 +44,12 @@ with any pre-release suffix carried only by the tag.
   the app picks whichever is quicker for each clip.
 
 ### Fixed
+- **A failed thumbnail or photo gets a second chance.** A momentary network hiccup used to
+  leave that photo's tile blank (or the photo showing an error) for the rest of the session.
+  Coming back to it now retries once; only a genuinely unreadable file stays marked failed.
+- **Raw Blu-ray rips (`BDMV` folders) show real posters.** Their stream files refuse the
+  skip-ahead scanning used on normal videos; the poster is now taken from the opening frames
+  instead of failing outright.
 - **Moving to the next photo right after a fullscreen change stays sharp.** Toggling
   fullscreen used to throw away the high-quality copies of the neighbouring photos, so
   pressing next/previous immediately afterwards showed a small blurry thumbnail for a couple
