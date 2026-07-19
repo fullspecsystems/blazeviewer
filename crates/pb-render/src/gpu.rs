@@ -5321,6 +5321,540 @@ mod tests {
         );
     }
 
+    // ---- 110c A/B/X harness: downscale-quality comparison across ScalePolicy variants ----
+    //
+    // Candidates: BoxMipTrilinear (today's instant frame — trilinear sample of the box mip
+    // chain), GpuDeriveLanczos {L2,L3} × {bias 0,−1} (the #110 derive), against two references:
+    // the LINEAR-LIGHT CPU Lanczos3 (correctness ground truth — `cpu_derive_mode0`) and the
+    // incumbent ENCODED-space Lanczos3 (`fast_image_resize`, compat). Metrics: NVIDIA FLIP mean
+    // (perceptual), linear-light RMSE, and a detail ratio (candidate stddev / reference stddev —
+    // >1 reads as aliasing, <1 as blur; a zone plate alone would reward blur, per the plan §8).
+    //
+    // Run the full matrix report with:
+    //   cargo test -p pb-render --release -- --ignored ab_report --nocapture
+    // The always-run tests below pin the two load-bearing facts (derive ≥ trilinear on a zone
+    // plate; derive ≡ linear Lanczos when sourcing L0) with adapter-tolerant margins.
+
+    /// One shared GPU context for the harness (device + the real mipgen/derive pipelines + a
+    /// trilinear-sampler pass that reproduces the present path's instant frame).
+    struct AbCtx {
+        device: wgpu::Device,
+        queue: wgpu::Queue,
+        mipgen: MipGen,
+        derive: DeriveLanczos,
+        tri_pipeline: wgpu::RenderPipeline,
+        tri_bgl: wgpu::BindGroupLayout,
+    }
+
+    const TRI_WGSL: &str = r#"
+struct VsOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> };
+@vertex
+fn vs(@builtin(vertex_index) vi: u32) -> VsOut {
+    let uv = vec2<f32>(f32((vi << 1u) & 2u), f32(vi & 2u));
+    return VsOut(vec4<f32>(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0, 0.0, 1.0), uv);
+}
+@group(0) @binding(0) var src: texture_2d<f32>;
+@group(0) @binding(1) var samp: sampler;
+struct P { lod: f32, _p0: f32, _p1: f32, _p2: f32 };
+@group(0) @binding(2) var<uniform> p: P;
+@fragment
+fn fs(in: VsOut) -> @location(0) vec4<f32> {
+    return textureSampleLevel(src, samp, in.uv, p.lod);
+}
+"#;
+
+    impl AbCtx {
+        async fn new() -> Self {
+            let instance = instance();
+            let adapter = instance
+                .request_adapter(&wgpu::RequestAdapterOptions {
+                    power_preference: wgpu::PowerPreference::HighPerformance,
+                    force_fallback_adapter: false,
+                    compatible_surface: None,
+                })
+                .await
+                .expect("no GPU adapter");
+            let (device, queue, _p010) = request_device_p010(&adapter).await;
+            let mipgen = build_mipgen(&device);
+            let derive = build_derive(&device);
+            let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("ab-tri"),
+                source: wgpu::ShaderSource::Wgsl(TRI_WGSL.into()),
+            });
+            let tri_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("ab-tri-bgl"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 2,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                ],
+            });
+            let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("ab-tri-layout"),
+                bind_group_layouts: &[&tri_bgl],
+                push_constant_ranges: &[],
+            });
+            let tri_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("ab-tri-pipeline"),
+                layout: Some(&layout),
+                vertex: wgpu::VertexState {
+                    module: &module,
+                    entry_point: "vs",
+                    compilation_options: Default::default(),
+                    buffers: &[],
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &module,
+                    entry_point: "fs",
+                    compilation_options: Default::default(),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: wgpu::TextureFormat::Rgba8Unorm,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                }),
+                primitive: wgpu::PrimitiveState::default(),
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState::default(),
+                multiview: None,
+                cache: None,
+            });
+            AbCtx {
+                device,
+                queue,
+                mipgen,
+                derive,
+                tri_pipeline,
+                tri_bgl,
+            }
+        }
+
+        /// Upload an opaque RGBA8 source and build its full box mip chain (the real MIPGEN).
+        fn mipped_source(&self, src: &[[u8; 4]], w: u32, h: u32) -> wgpu::Texture {
+            let levels = mip_levels(w, h);
+            let tex = self.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("ab-src"),
+                size: wgpu::Extent3d {
+                    width: w,
+                    height: h,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: levels,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba8Unorm,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING
+                    | wgpu::TextureUsages::COPY_DST
+                    | wgpu::TextureUsages::RENDER_ATTACHMENT,
+                view_formats: &[],
+            });
+            let bytes: Vec<u8> = src.iter().flatten().copied().collect();
+            self.queue.write_texture(
+                wgpu::ImageCopyTexture {
+                    texture: &tex,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                &bytes,
+                wgpu::ImageDataLayout {
+                    offset: 0,
+                    bytes_per_row: Some(w * 4),
+                    rows_per_image: Some(h),
+                },
+                wgpu::Extent3d {
+                    width: w,
+                    height: h,
+                    depth_or_array_layers: 1,
+                },
+            );
+            generate_mips(&self.device, &self.queue, &self.mipgen, &tex, levels, true);
+            tex
+        }
+
+        /// Today's instant frame: trilinear-sample the encoded mip chain at LOD = log2(ratio).
+        async fn box_trilinear(&self, src: &wgpu::Texture, dw: u32, dh: u32) -> Vec<[u8; 4]> {
+            let lod = (src.width() as f32 / dw as f32).log2().max(0.0);
+            let out = self.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("ab-tri-out"),
+                size: wgpu::Extent3d {
+                    width: dw,
+                    height: dh,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba8Unorm,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+                view_formats: &[],
+            });
+            let sampler = self.device.create_sampler(&wgpu::SamplerDescriptor {
+                mag_filter: wgpu::FilterMode::Linear,
+                min_filter: wgpu::FilterMode::Linear,
+                mipmap_filter: wgpu::FilterMode::Linear,
+                ..Default::default()
+            });
+            let pbuf = self
+                .device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("ab-tri-p"),
+                    contents: bytemuck::cast_slice(&[lod, 0.0, 0.0, 0.0]),
+                    usage: wgpu::BufferUsages::UNIFORM,
+                });
+            let view = src.create_view(&wgpu::TextureViewDescriptor::default());
+            let bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("ab-tri-bg"),
+                layout: &self.tri_bgl,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(&view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::Sampler(&sampler),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: pbuf.as_entire_binding(),
+                    },
+                ],
+            });
+            let out_view = out.create_view(&wgpu::TextureViewDescriptor::default());
+            let mut encoder = self
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+            {
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("ab-tri-pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &out_view,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                });
+                pass.set_pipeline(&self.tri_pipeline);
+                pass.set_bind_group(0, &bg, &[]);
+                pass.draw(0..3, 0..1);
+            }
+            self.queue.submit(Some(encoder.finish()));
+            to_px(read_texture(&self.device, &self.queue, &out, dw, dh, 4).await)
+        }
+
+        /// The #110 derive at (kernel, bias), timed submit→completion (a rough GPU-cost bound).
+        async fn gpu_derive(
+            &self,
+            src: &wgpu::Texture,
+            dw: u32,
+            dh: u32,
+            a: u32,
+            bias: i32,
+        ) -> (Vec<[u8; 4]>, std::time::Duration) {
+            let level = select_derive_mip(
+                src.width(),
+                src.height(),
+                src.mip_level_count(),
+                dw,
+                dh,
+                bias,
+            );
+            let t0 = std::time::Instant::now();
+            let out = derive_fit_texture(
+                &self.device,
+                &self.queue,
+                &self.derive,
+                src,
+                level,
+                true,
+                dw,
+                dh,
+                a,
+            );
+            self.device.poll(wgpu::Maintain::Wait);
+            let elapsed = t0.elapsed();
+            (
+                to_px(read_texture(&self.device, &self.queue, &out, dw, dh, 4).await),
+                elapsed,
+            )
+        }
+    }
+
+    fn to_px(bytes: Vec<u8>) -> Vec<[u8; 4]> {
+        bytes
+            .chunks_exact(4)
+            .map(|c| [c[0], c[1], c[2], c[3]])
+            .collect()
+    }
+
+    /// The incumbent encoded-space Lanczos3 (`fast_image_resize`, exactly what pb-decode ships).
+    fn cpu_encoded_lanczos3(src: &[[u8; 4]], sw: u32, sh: u32, dw: u32, dh: u32) -> Vec<[u8; 4]> {
+        use fast_image_resize::images::Image;
+        use fast_image_resize::{FilterType, PixelType, ResizeAlg, ResizeOptions, Resizer};
+        let bytes: Vec<u8> = src.iter().flatten().copied().collect();
+        let s = Image::from_vec_u8(sw, sh, bytes, PixelType::U8x4).unwrap();
+        let mut d = Image::new(dw, dh, PixelType::U8x4);
+        let opts = ResizeOptions::new().resize_alg(ResizeAlg::Convolution(FilterType::Lanczos3));
+        Resizer::new().resize(&s, &mut d, &opts).unwrap();
+        to_px(d.into_vec())
+    }
+
+    fn luma_lin(p: &[u8; 4]) -> f64 {
+        0.2126 * ref_s2l(p[0] as f32 / 255.0) as f64
+            + 0.7152 * ref_s2l(p[1] as f32 / 255.0) as f64
+            + 0.0722 * ref_s2l(p[2] as f32 / 255.0) as f64
+    }
+
+    /// Linear-light RGB RMSE (0..1 scale).
+    fn rmse_linear(a: &[[u8; 4]], b: &[[u8; 4]]) -> f64 {
+        let mut acc = 0.0f64;
+        for (x, y) in a.iter().zip(b) {
+            for c in 0..3 {
+                let d = ref_s2l(x[c] as f32 / 255.0) as f64 - ref_s2l(y[c] as f32 / 255.0) as f64;
+                acc += d * d;
+            }
+        }
+        (acc / (a.len() as f64 * 3.0)).sqrt()
+    }
+
+    /// NVIDIA FLIP perceptual mean (0 = identical).
+    fn flip_mean(a: &[[u8; 4]], b: &[[u8; 4]], w: u32, h: u32) -> f32 {
+        let rgb =
+            |v: &[[u8; 4]]| -> Vec<u8> { v.iter().flat_map(|p| [p[0], p[1], p[2]]).collect() };
+        let fa = nv_flip::FlipImageRgb8::with_data(w, h, &rgb(a));
+        let fb = nv_flip::FlipImageRgb8::with_data(w, h, &rgb(b));
+        let map = nv_flip::flip(fa, fb, nv_flip::DEFAULT_PIXELS_PER_DEGREE);
+        nv_flip::FlipPool::from_image(&map).mean()
+    }
+
+    /// Detail proxy: linear-luma standard deviation. candidate/reference > 1 ⇒ aliasing energy,
+    /// < 1 ⇒ blur — the counterweight the plan demands so a zone plate can't reward blur alone.
+    fn stddev_lin(v: &[[u8; 4]]) -> f64 {
+        let n = v.len() as f64;
+        let mean = v.iter().map(luma_lin).sum::<f64>() / n;
+        (v.iter().map(|p| (luma_lin(p) - mean).powi(2)).sum::<f64>() / n).sqrt()
+    }
+
+    // Deterministic test patterns (opaque; alpha correctness is covered by the unit tests).
+    fn pat_zone_plate(w: u32, h: u32) -> Vec<[u8; 4]> {
+        let (cx, cy) = (w as f64 / 2.0, h as f64 / 2.0);
+        // Sweep to ~Nyquist at the corners.
+        let kmax = std::f64::consts::PI;
+        let rmax2 = cx * cx + cy * cy;
+        (0..w * h)
+            .map(|i| {
+                let (x, y) = ((i % w) as f64 - cx, (i / w) as f64 - cy);
+                let r2 = x * x + y * y;
+                let v = 0.5 + 0.5 * (kmax * r2 / rmax2.sqrt()).cos();
+                let e = (ref_l2s(v as f32) * 255.0).round() as u8;
+                [e, e, e, 255]
+            })
+            .collect()
+    }
+    fn pat_slanted_edge(w: u32, h: u32) -> Vec<[u8; 4]> {
+        (0..w * h)
+            .map(|i| {
+                let (x, y) = ((i % w) as f64, (i / w) as f64);
+                // ~1:3 slope edge, plus a coloured edge in the lower half (gamma check).
+                let dark = x + y / 3.0 < w as f64 * 0.5;
+                if y < h as f64 / 2.0 {
+                    if dark {
+                        [16, 16, 16, 255]
+                    } else {
+                        [240, 240, 240, 255]
+                    }
+                } else if dark {
+                    [200, 30, 30, 255]
+                } else {
+                    [30, 200, 30, 255]
+                }
+            })
+            .collect()
+    }
+    fn pat_diag_1px(w: u32, h: u32) -> Vec<[u8; 4]> {
+        (0..w * h)
+            .map(|i| {
+                let v = if ((i % w) + (i / w)) % 2 == 0 {
+                    235
+                } else {
+                    20
+                };
+                [v, v, v, 255]
+            })
+            .collect()
+    }
+    fn pat_foliage(w: u32, h: u32) -> Vec<[u8; 4]> {
+        // Two octaves of hashed value noise — photographic-ish mid-frequency texture.
+        let hash = |x: u32, y: u32, s: u32| -> f64 {
+            let mut v = x
+                .wrapping_mul(0x9E37_79B9)
+                .wrapping_add(y.wrapping_mul(0x85EB_CA6B))
+                .wrapping_add(s.wrapping_mul(0xC2B2_AE35));
+            v ^= v >> 15;
+            v = v.wrapping_mul(0x2545_F491);
+            v ^= v >> 13;
+            (v & 0xFFFF) as f64 / 65535.0
+        };
+        let value = |x: u32, y: u32, cell: u32, s: u32| -> f64 {
+            let (gx, gy) = (x / cell, y / cell);
+            let (fx, fy) = (
+                (x % cell) as f64 / cell as f64,
+                (y % cell) as f64 / cell as f64,
+            );
+            let lerp = |a: f64, b: f64, t: f64| a + (b - a) * (t * t * (3.0 - 2.0 * t));
+            let top = lerp(hash(gx, gy, s), hash(gx + 1, gy, s), fx);
+            let bot = lerp(hash(gx, gy + 1, s), hash(gx + 1, gy + 1, s), fx);
+            lerp(top, bot, fy)
+        };
+        (0..w * h)
+            .map(|i| {
+                let (x, y) = (i % w, i / w);
+                let v =
+                    0.35 * value(x, y, 13, 1) + 0.45 * value(x, y, 5, 2) + 0.2 * value(x, y, 2, 3);
+                let g = (ref_l2s(v.clamp(0.0, 1.0) as f32) * 255.0).round() as u8;
+                [g / 3, g, g / 4, 255]
+            })
+            .collect()
+    }
+
+    /// The full A/B/X matrix report (run explicitly with `--ignored ab_report --nocapture`).
+    /// Prints FLIP / RMSE / detail-ratio for every candidate × pattern × ratio against the
+    /// linear-light reference, plus the encoded compat reference and a rough derive cost.
+    #[test]
+    #[ignore = "110c measurement harness — run explicitly with --nocapture"]
+    fn ab_report() {
+        pollster::block_on(async {
+            let ctx = AbCtx::new().await;
+            let (sw, sh) = (1024u32, 768u32);
+            let patterns: [(&str, Vec<[u8; 4]>); 4] = [
+                ("zone-plate", pat_zone_plate(sw, sh)),
+                ("slant-edge", pat_slanted_edge(sw, sh)),
+                ("diag-1px", pat_diag_1px(sw, sh)),
+                ("foliage", pat_foliage(sw, sh)),
+            ];
+            let ratios = [1.25f64, 1.5, 2.0, 2.2, 2.8, 3.7, 5.1, 6.9];
+            println!("== 110c A/B/X: candidate vs LINEAR-light Lanczos3 reference ==");
+            println!("(flip: lower=better · rmse: lower=better · detail: 1.0=reference, >1 alias, <1 blur)");
+            for (pname, src) in &patterns {
+                let tex = ctx.mipped_source(src, sw, sh);
+                for &r in &ratios {
+                    let (dw, dh) = (
+                        ((sw as f64 / r).round() as u32).max(1),
+                        ((sh as f64 / r).round() as u32).max(1),
+                    );
+                    let lin_ref = cpu_derive_mode0(src, sw, sh, dw, dh, 3);
+                    let enc_ref = cpu_encoded_lanczos3(src, sw, sh, dw, dh);
+                    let ref_sd = stddev_lin(&lin_ref).max(1e-9);
+                    let tri = ctx.box_trilinear(&tex, dw, dh).await;
+                    let mut rows: Vec<(String, Vec<[u8; 4]>, f64)> = vec![
+                        ("box-trilinear".into(), tri, 0.0),
+                        ("cpu-encoded-l3".into(), enc_ref, 0.0),
+                    ];
+                    for (a, bias) in [(3u32, 0i32), (3, -1), (2, 0), (2, -1)] {
+                        let (px, cost) = ctx.gpu_derive(&tex, dw, dh, a, bias).await;
+                        rows.push((format!("gpu-L{a}b{bias}"), px, cost.as_secs_f64() * 1e3));
+                    }
+                    for (name, px, cost_ms) in &rows {
+                        println!(
+                            "{pname:>10} x{r:<4} {name:<15} flip={:.4} rmse={:.4} detail={:.3}{}",
+                            flip_mean(&lin_ref, px, dw, dh),
+                            rmse_linear(&lin_ref, px),
+                            stddev_lin(px) / ref_sd,
+                            if *cost_ms > 0.0 {
+                                format!("  (~{cost_ms:.2} ms)")
+                            } else {
+                                String::new()
+                            }
+                        );
+                    }
+                }
+            }
+        });
+    }
+
+    /// Always-run regression, load-bearing fact #1: on a zone plate at a non-power-of-two ratio
+    /// the derive is perceptually CLOSER to ground-truth linear Lanczos than the trilinear
+    /// instant frame — the whole reason #110 exists. Adapter-tolerant margin (strictly less,
+    /// not a fixed threshold).
+    #[test]
+    fn derive_beats_trilinear_against_the_linear_reference() {
+        pollster::block_on(async {
+            let ctx = AbCtx::new().await;
+            let (sw, sh) = (512u32, 384u32);
+            let src = pat_zone_plate(sw, sh);
+            let tex = ctx.mipped_source(&src, sw, sh);
+            let r = 3.7f64;
+            let (dw, dh) = (
+                (sw as f64 / r).round() as u32,
+                (sh as f64 / r).round() as u32,
+            );
+            let lin_ref = cpu_derive_mode0(&src, sw, sh, dw, dh, 3);
+            let tri = ctx.box_trilinear(&tex, dw, dh).await;
+            let (gpu, _) = ctx.gpu_derive(&tex, dw, dh, 3, 0).await;
+            let f_tri = flip_mean(&lin_ref, &tri, dw, dh);
+            let f_gpu = flip_mean(&lin_ref, &gpu, dw, dh);
+            assert!(
+                f_gpu < f_tri,
+                "the derive (flip {f_gpu:.4}) must beat box-trilinear (flip {f_tri:.4}) at {r}x"
+            );
+        });
+    }
+
+    /// Always-run regression, load-bearing fact #2: when the derive sources L0 (ratio < 2 —
+    /// no box-prefilter in the chain), it IS linear-light Lanczos3, so it must match the CPU
+    /// reference almost exactly (fp16 intermediate quantization only).
+    #[test]
+    fn derive_from_l0_matches_linear_lanczos_exactly() {
+        pollster::block_on(async {
+            let ctx = AbCtx::new().await;
+            let (sw, sh) = (512u32, 384u32);
+            let src = pat_foliage(sw, sh);
+            let tex = ctx.mipped_source(&src, sw, sh);
+            let (dw, dh) = (341, 256); // 1.5x — select_derive_mip stays at L0
+            assert_eq!(
+                select_derive_mip(sw, sh, tex.mip_level_count(), dw, dh, 0),
+                0,
+                "test premise: 1.5x sources L0"
+            );
+            let lin_ref = cpu_derive_mode0(&src, sw, sh, dw, dh, 3);
+            let (gpu, _) = ctx.gpu_derive(&tex, dw, dh, 3, 0).await;
+            let rmse = rmse_linear(&lin_ref, &gpu);
+            assert!(
+                rmse < 0.004,
+                "L0-sourced derive must equal linear Lanczos3 (rmse {rmse:.5})"
+            );
+        });
+    }
+
     /// Generate mip 1 of a `w`×`h` sRGB L0 and read it back (rows tightly packed, RGBA8).
     async fn gen_mip1_srgb(w: u32, h: u32, texels: &[[u8; 4]]) -> Vec<u8> {
         let instance = instance();

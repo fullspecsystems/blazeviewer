@@ -33,3 +33,7 @@ windows = { version = "0.62.2", features = [
 objc2 = "0.6"
 
 [dev-dependencies]
+# 110c A/B/X harness (gpu.rs tests::ab): perceptual diff (NVIDIA FLIP) + the incumbent
+# encoded-space Lanczos3 (the same fast_image_resize pb-decode ships) as the compat reference.
+nv-flip = "0.1"
+fast_image_resize = "5"

@@ -6978,7 +6978,15 @@ impl AppCore {
                 let m = meta_for(self.source.as_ref(), item, &self.root, img);
                 self.meta_cache.insert(item, m);
             }
-            let item_bytes = img.pixels.len() as u64;
+            // Byte accounting (mip plan §4d): an Original uploads WITH its mip chain (unless
+            // source-ICC mode 1, which is never mipped), so its true VRAM is ~4/3× L0 — record
+            // the exact chain sum, not `pixels.len()`. Fit/preview textures stay single-level.
+            let mode1 = render_color(&img.color).enabled && !is_hdr(img);
+            let item_bytes = if rk == pb_core::RepKind::Original && !mode1 {
+                mip_chain_bytes(img.width, img.height, if is_hdr(img) { 8 } else { 4 })
+            } else {
+                img.pixels.len() as u64
+            };
             let rep = self.rep_of(rk);
             let cg = self.content_gen;
             if upgrade {
@@ -6986,6 +6994,11 @@ impl AppCore {
                     .ring
                     .slot_for_rep(item, rk)
                     .expect("resident as preview");
+                // §4d: an in-place preview→full upgrade GROWS the slot — evict lower-priority
+                // slots first so the ring is never left over budget (`set_slot_bytes` below
+                // adjusts the count but performs no eviction itself).
+                self.ring
+                    .make_room_for_upgrade(item, rk, item_bytes, &self.targets);
                 if let Some(a) = self.renderer.as_mut() {
                     let t0 = Instant::now();
                     a.upload_slot(

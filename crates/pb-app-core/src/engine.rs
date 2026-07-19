@@ -85,7 +85,9 @@ pub fn gpu_derive_enabled() -> bool {
 }
 
 /// `PB_DERIVE_KERNEL` — Lanczos lobe count for the GPU derive: 2 (safer, less halo) or
-/// 3 (more detail, more ring). Default 3 until the 110c A/B decides.
+/// 3 (more detail, more ring). **Default 3, confirmed by the 110c A/B data** (`ab_report`):
+/// L3 beat L2 on every pattern × ratio at equal measured cost (L2's narrower kernel also
+/// leaked visible aliasing on 1-px diagonals below 2×, detail ratio up to 15.8×).
 pub fn derive_kernel() -> u32 {
     static K: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
     *K.get_or_init(|| {
@@ -99,7 +101,12 @@ pub fn derive_kernel() -> u32 {
 
 /// `PB_DERIVE_MIP_BIAS` — source-mip policy for the GPU derive: 0 = last eligible box mip
 /// (fastest, most box-prefiltered), −1 = one level finer (residual 2–4×, wider scale-aware
-/// kernel — the real quality/perf fork per the #110 plan §3a). Default 0 until 110c decides.
+/// kernel — the #110 §3a quality/perf fork). **Default −1, picked from the 110c A/B data**
+/// (`pb-render ab_report`, 2026-07-18, RTX 5090): L3b−1 lands FLIP ≤ 0.012 vs the linear-light
+/// Lanczos reference on every pattern × ratio (zone plate, slanted/coloured edges, 1-px
+/// diagonals, foliage noise; 1.25–6.9×) with detail ratio ≈ 1.00, where bias 0 inherits the
+/// box chain's softness/phase error above 2× (FLIP 0.013–0.024) and collapses to the raw box
+/// mip at exactly 2×; measured cost was equal (~0.4 ms at 1024×768-scale outputs).
 pub fn derive_mip_bias() -> i32 {
     static B: std::sync::OnceLock<i32> = std::sync::OnceLock::new();
     *B.get_or_init(|| {
@@ -107,8 +114,19 @@ pub fn derive_mip_bias() -> i32 {
             .ok()
             .and_then(|v| v.parse().ok())
             .filter(|b| (-2..=1).contains(b))
-            .unwrap_or(0)
+            .unwrap_or(-1)
     })
+}
+
+/// Exact VRAM of a mip-chained texture: `Σ_levels max(1, w>>l)·max(1, h>>l)·bpp` (mip plan
+/// §4d). The Original rep is uploaded WITH a full mip chain, so recording only L0
+/// (`img.pixels.len()`) under-counted true residency by ~4/3× — enough to blow the ring's
+/// byte budget once several full-res Originals are retained (item-6).
+pub fn mip_chain_bytes(w: u32, h: u32, bpp: u64) -> u64 {
+    let levels = 32 - w.max(h).max(1).leading_zeros();
+    (0..levels)
+        .map(|l| ((w >> l).max(1) as u64) * ((h >> l).max(1) as u64) * bpp)
+        .sum()
 }
 
 /// How long a resize settle waits after a **discrete fullscreen toggle** before the crisp
