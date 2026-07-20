@@ -195,11 +195,17 @@ is for.
    > removed deliberately — see the paid-CI warning above), so a tag push cannot start a
    > billed hosted run.
 
-3. **Windows:** `pwsh scripts/release-windows.ps1 -Upload` from this machine (with `.env.release`
-   signing creds). **Run it from native PowerShell, not the Bash tool / Git Bash** — the ssh
-   config's YubiKey `Match exec` hook has a Windows path that Git Bash mangles, so the upload fails
-   `Permission denied (publickey)`. The build + sign + pack still succeed there; only the `-Upload`
-   scp/rsync needs native PowerShell.
+3. **Windows:** `pwsh scripts/release-windows.ps1 -Upload` (with `.env.release` signing creds) —
+   on the **x64 desktop**, or `-Arch arm64` on the **ARM64 VM**. **Run it from native PowerShell,
+   not the Bash tool / Git Bash.**
+   > **Why native PowerShell — and where it actually bites.** On the **x64 desktop** the ssh
+   > config's YubiKey `Match exec` hook has a Windows path that Git Bash mangles, so `-Upload`
+   > fails `Permission denied (publickey)`; build + sign + pack still succeed there, only the
+   > scp/rsync needs native PowerShell. **The ARM64 VM has no such hook** — plain
+   > `IdentityFile ~/.ssh/jdlien_com` + `IdentitiesOnly yes`, a bare `ssh-ed25519` key, so the
+   > upload runs unattended with no touch prompt (verified cutting ARM64 0.3.0, 2026-07-18).
+   > Native PowerShell is still the house rule on both boxes — it costs nothing and the two
+   > configs are free to drift.
    > ⚠️ **A re-run is NOT upload-only.** `-Upload` is the last step of the *whole* pipeline, and
    > `vpk pack` **hard-fails** on a second run — *"There is a release in channel win which is equal
    > or greater to the current version"* — because the version it just packed is sitting in
