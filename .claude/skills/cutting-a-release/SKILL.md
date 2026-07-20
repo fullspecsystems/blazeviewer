@@ -16,8 +16,9 @@ platform section you're releasing, then the numbered procedure at the end.
 `Update.exe` via Azure Trusted Signing, `vpk pack`s a full release, and rsyncs the flat feed to
 `downloads.blazeviewer.app/win`. The app reads that feed over HTTP (`update.rs` `FEED_URL`) and
 self-updates — downloads in the background, installs on quit. Version comes from
-`crates/pb-app/Cargo.toml`, so it always matches the app; there is **no tag / GitHub Release for
-Windows**.
+`crates/pb-app/Cargo.toml`, so it always matches the app; the Windows *feed* needs **no tag and no
+GitHub Release** to work. (We still tag every release — step 2 — but as a record of what was built,
+not because Velopack reads it.)
 
 *Architecture:* the script defaults to the host arch and takes `-Arch x64|arm64`. **x64** ships as the
 historical `win` Velopack channel; **ARM64** as `win-arm64` — both land in the same flat feed dir, and
@@ -135,6 +136,28 @@ binary) or the AppImage's directory isn't writable (installed read-only) — the
 > release.yml precisely so a tag push (or `gh release create`) can't quietly start a hosted build.
 > Don't re-add an automatic hosted trigger; script the build instead.
 
+## Which machine builds what
+
+A release is built on **four machines**, and only one of the four artifacts comes off the
+Windows desktop. Plan for that: the release is not a single sitting at one keyboard.
+
+| Artifact | Built on | Command |
+|---|---|---|
+| **Windows x64** (`win` channel) | the **Windows desktop** | `pwsh scripts/release-windows.ps1 -Upload` |
+| **Windows ARM64** (`win-arm64`) | a **Windows VM on the Mac** | `pwsh scripts/release-windows.ps1 -Arch arm64 -Upload` |
+| **macOS** (DMG + appcast) | the **Mac**, natively | `./scripts/release-macos.sh --release` |
+| **Linux** (both AppImages) | **OrbStack containers on the Mac** | `./scripts/release-linux-docker.sh both --upload` |
+
+So the Mac (host + its VM + its containers) produces **three of the four**. There is no cross
+toolchain for either Windows arch — each is built on a native Windows box, which is what the VM
+is for.
+
+> **This is exactly why step 2 tags before building.** Four machines must build the *same
+> commit*, and the only thing that guarantees that is a pushed tag each one checks out —
+> `git fetch --tags && git checkout v<version>`. Bumping the version separately on each box, or
+> letting the Mac build from whatever `main` happens to be that evening, is how the ARM64 and
+> x64 packages silently diverge. Tag, push, then fan out.
+
 ## The procedure
 
 1. **Roll the `CHANGELOG.md`.** Move `## [Unreleased]` into `## [<version>] - <YYYY-MM-DD>`,
@@ -145,7 +168,34 @@ binary) or the AppImage's directory isn't writable (installed read-only) — the
    `### Added` — the macOS **Sparkle** update dialog shows *only* that block
    (`generate-mac-appcast.sh` extracts it; it falls back to the whole section if absent), while the
    full `Added/Changed/Fixed` detail stays in the file for the curious and the GitHub release body.
-2. **Windows:** `pwsh scripts/release-windows.ps1 -Upload` from this machine (with `.env.release`
+2. **Commit the bump, then tag it — before any build.** Run `cargo metadata` first so the
+   lockfile settles into the *same* commit (see the clean-tree gate above), then commit
+   `crates/pb-app/Cargo.toml` + `Cargo.lock` + `CHANGELOG.md` together and tag that commit:
+
+   ```sh
+   cargo metadata --format-version 1 >/dev/null      # settle Cargo.lock
+   git add crates/pb-app/Cargo.toml Cargo.lock CHANGELOG.md
+   git commit -m "release: <version> — <one-line theme>"
+   git tag -a v<version> -m "Blaze Viewer <version>"
+   git push origin main v<version>
+   ```
+
+   > **Tag every release. This is not optional.** The tag is the only durable record of
+   > *which commit* an artifact was built from — the repo is private and the binaries ship
+   > from `downloads.blazeviewer.app`, so there is no GitHub Release doing that job for us.
+   > Without it, "what shipped in 0.2.1?" is unanswerable a month later. (0.1.1 was the last
+   > tagged release; 0.2.0 and 0.2.1 shipped untagged and were backfilled after the fact.)
+   >
+   > **Tag before building, not after.** The clean-tree gate stamps the build id from
+   > `git describe`/`git status`, so building from the tagged commit is what makes the shipped
+   > About-dialog string and the tag agree. Tagging afterwards risks pointing the tag at a
+   > commit that isn't what you signed.
+   >
+   > Pushing a tag is safe: `release.yml` no longer auto-builds on `v*` (that trigger was
+   > removed deliberately — see the paid-CI warning above), so a tag push cannot start a
+   > billed hosted run.
+
+3. **Windows:** `pwsh scripts/release-windows.ps1 -Upload` from this machine (with `.env.release`
    signing creds). **Run it from native PowerShell, not the Bash tool / Git Bash** — the ssh
    config's YubiKey `Match exec` hook has a Windows path that Git Bash mangles, so the upload fails
    `Permission denied (publickey)`. The build + sign + pack still succeed there; only the `-Upload`
@@ -165,7 +215,7 @@ binary) or the AppImage's directory isn't writable (installed read-only) — the
    > **not packId**. Check `dist\feed` holds only this product before packing.
 
    Prune superseded packages on the server periodically.
-3. **macOS (all on your Mac):** `./scripts/release-macos.sh --release` builds the signed +
+4. **macOS (all on your Mac** — start with `git fetch --tags && git checkout v<version>`**):** `./scripts/release-macos.sh --release` builds the signed +
    notarized DMG **and** EdDSA-signs it into `dist/appcast.xml` (Sparkle auto-update, task #65),
    then `./scripts/release-mac-upload.sh` scp's the DMG **and the appcast** to jdlien.com and
    repoints `BlazeViewer-latest.dmg` — no Windows box needed. (Optionally verify the seed's updater
@@ -174,13 +224,10 @@ binary) or the AppImage's directory isn't writable (installed read-only) — the
    `gh release create v<version> dist/BlazeViewer-<version>.dmg* --notes-file <(bash
    scripts/changelog-section.sh <version>)`. Write **real, curated, user-facing** CHANGELOG notes
    before tagging so `changelog-section.sh` has a body. **Never** enable `generate_release_notes`.
-4. **Linux (from your Mac via OrbStack):** `./scripts/release-linux-docker.sh both --upload` builds
+5. **Linux (from your Mac via OrbStack):** `./scripts/release-linux-docker.sh both --upload` builds
    both AppImages and publishes them + `latest.json` to the feed (repointing the `latest-<arch>`
    symlinks). Needs your ssh keys for the scp step (it runs host-side, after the container work). A
    launched older AppImage then self-updates on next quit.
-5. **Tag for posterity** (optional): `git tag -a v<version> -m "…" && git push origin v<version>`.
-   Windows never needs it (Velopack reads the version from `Cargo.toml`); it's a record + the anchor
-   for a manual macOS GitHub Release. Safe to push now that release.yml doesn't auto-build on tags.
 6. **Verify:** the Windows feed serves the new `releases.win.json` + `.nupkg` (and a launched build
    self-updates); the macOS DMG is genuinely notarized — `xcrun stapler validate <dmg>` and
    `spctl -a -t open --context context:primary-signature -vv <dmg>` → `source=Notarized Developer

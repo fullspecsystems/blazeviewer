@@ -7,27 +7,160 @@ with any pre-release suffix carried only by the tag.
 
 ## [Unreleased]
 
-### Fixed
+## [0.3.0] - 2026-07-19
 
-- **Movie thumbnails appear almost immediately instead of after a minute of blank placeholders.** A film's poster is now kept as its thumbnail the moment it's generated, even with the thumbnail strip closed, so opening the strip shows the films you've already browsed past straight away rather than re-scanning every one of them (macOS and Linux; Windows already worked this way). Measured over a network share: first thumbnail 0.2 s, down from roughly a minute.
-- **Toggling back to a size you were just at is instant.** Fullscreen/windowed is a
-  two-state switch, and the app now keeps the exact pixels each side was showing —
-  toggling back re-uses them immediately instead of re-processing the photo. This also
-  makes toggles instant for color-managed and RAW photos, which can't use the GPU
-  fast path.
-- **Parking on a photo arms its instant fullscreen toggle much sooner.** The full-quality
-  copy that makes toggles instant used to queue behind every neighbouring photo's refill
-  work, so on large photos the "toggle is now instant" moment could lag many seconds behind
-  the loading indicator. It now loads immediately after the photo you're parked on.
-- **Repeated fullscreen toggles no longer blur over and over.** Toggling fullscreen (or
-  resizing) used to cancel the full-resolution copy the app was quietly preparing for the
-  photo you're parked on — so each toggle re-blurred and re-sharpened, sometimes four or
-  five times in a row, and advancing right after a toggle was blurry too. Work that doesn't
-  depend on the window size (full-resolution copies, thumbnails, movie poster picks) now
-  survives those changes, so after the first sharpening a toggle is instantly crisp and
-  neighbouring photos stay ready.
+### Highlights
+
+**Everything you do to a photo you've stopped on is instant now.** Fullscreen, resizing, and
+the 1:1 toggle used to pause and re-sharpen every single time. They no longer do: the app keeps
+the full-resolution photo ready and scales it on the graphics card, so the crisp picture is
+there immediately, and toggling back to a size you were just at costs nothing at all.
+
+**Video grew up.** HDR films play in real HDR, heavy 4K decodes on the graphics card instead of
+stuttering, seeking lands faster, and films with Dolby or DTS sound are no longer silent on
+Windows. You can pick the audio track (`A`) and the subtitle track, and subtitles themselves are
+new: press `C` for captions, from inside the file or an `.srt` sitting beside it, styled however
+you like in Settings.
+
+**Movies show up straight away.** Browsing a folder of films no longer waits on poster frames,
+and thumbnails appear in a fraction of a second rather than after a minute of blank tiles.
+
+**More archives open, and they open in place.** RAR (including old RAR4), `.cbr`/`.cbz` comics,
+and tarballs join ZIP and 7z. Archives now appear as cards while you browse, press `P` to step
+inside one and `Alt+↑` to come back out, and a password you've already entered is tried
+automatically on the next archive in the folder. Nothing is ever unpacked to disk.
+
+### Added
+
+- **HDR videos play in HDR.** Video mastered in HDR — most 4K movies (HDR10/PQ or HLG) and
+  clips from recent iPhones — used to be flattened to standard range, dulling its colour and
+  highlights. It now plays with full HDR colour and brightness on an HDR display (and is mapped
+  correctly on a standard display). The app decodes the 10-bit video and applies the HDR curve
+  on the graphics card, so it costs nothing on the way.
+- **Switching between fit-to-screen and 1:1 is instant now.** When you stop on a photo, the
+  app keeps its full resolution ready in the background, so toggling to actual pixels (and
+  back) is immediate instead of pausing to re-decode each time — the same when you land on the
+  next photo. How many nearby photos are kept ready is a new setting (default: the current one
+  plus its immediate neighbours); a slower or lower-memory machine can dial it down. Videos,
+  archives, vector art and enormous gigapixel images are left out (there's no meaningful "1:1"
+  to hold), so they never balloon memory.
+- **Big photos show instantly instead of a black screen.** Opening a large JPEG — especially
+  over a network share — used to sit on black for several seconds while the whole file loaded.
+  Now the photo's own embedded thumbnail appears right away (blurry but there), the loading
+  dial keeps spinning so you know the sharp version is still coming, and it snaps into full
+  detail the moment it finishes. Opening a folder's Thumbnails panel also shows the photos
+  you've already seen immediately and fills in the rest as it goes.
+- **Pick a video's audio track on Windows and Linux.** Films with several audio tracks
+  (other languages, commentaries) can now switch between them mid-playback: the new
+  **Playback ▸ Audio Track** menu lists every track with a check on the one playing, and
+  `A` / `Shift+A` cycle through them (on Linux the menu shows **Next Audio Track**, since
+  its menu bar has no submenus). The switch keeps your place in the video, and the app
+  only confirms a change that really happened: a rare track that can't be decoded is
+  refused with a message while the current sound keeps playing. This brings Windows and
+  Linux up to par with the Mac.
+- **Archives show up while you browse, and `P` opens them.** A `.zip`, `.7z`, `.rar`, `.cbz`,
+  `.cbr` or `.tar.*` sitting in a folder is no longer invisible: it shows a card in the middle
+  of the screen — a zippered folder, the file's name, and an **Open** button — and pressing `P`
+  opens the archive as its own deck, exactly as if you had picked it from Open File. `Alt+Up`
+  takes you back out to the folder, so you can go straight into the next one. Encrypted archives
+  ask for the password the same way they always have. A folder that holds nothing but archives
+  now opens instead of reporting no images. Browsing past an archive never opens or unpacks it —
+  only pressing `P` does.
+- **`Cmd+↓` / `Alt+↓` open, the way Finder does.** Both now do whatever `P` does — go into an
+  archive, play a video or an animation — so the chord your fingers already know works here, and
+  pairs with the `Cmd+↑` / `Alt+↑` that go back out to the enclosing folder. `P` still does
+  everything it did.
+- **Enter an archive password once for a whole folder.** When you unlock an encrypted archive,
+  the app remembers that password for the rest of the session and tries it automatically on the
+  next encrypted archive, so a folder of same-password archives only asks once. It's silent
+  when a saved password works, and it falls back to asking if none fit. The passwords are kept
+  in memory only, never written anywhere, and are wiped when you quit — matching how 7-Zip and
+  WinRAR behave.
+- **Turn off archives in the deck when you don't want them.** A new **View ▸ Show Archives**
+  toggle (also in Settings, under Recursive) controls whether archives show as cards while you
+  browse a folder. It's on by default; turn it off in a folder like Downloads that's full of
+  archives you'll never flick through, and they stay out of your way. There's also a shortcut:
+  when you open an archive that has no images, the "no images" notice now offers a **Don't show
+  archives** checkbox that flips the setting right there. Opening an archive from Open File still
+  works either way — this only changes whether a folder *lists* them.
+- **Move between archives like you move between folders.** With Show Archives on, `Alt+←/→`
+  (`⌘←/→`) steps through an archive's own folders, and once you're past the last one it moves to
+  the previous / next archive in the same folder on disk. Pressing `Alt+↑` (`⌘↑`) to leave an
+  archive drops you back on that archive in the folder, so `space` carries on to the next one
+  instead of restarting at the top.
+- **Archives show in the folder tree.** With Show Archives on, the `⇧F` folder tree now lists
+  archives alongside folders, drawn with a zipper icon; clicking one opens the archive. Toggling
+  the setting updates the tree live.
+- **RAR archives open too, including older RAR4.** `.rar` files (both the modern RAR5 format
+  and the older RAR4 format) and `.cbr`/`.cbz` comic books now open as browsable decks, with
+  the contents verified byte-for-byte against the reference unrar tool during development —
+  including archives that use RAR's compression filters, solid compression, and PPMd. RAR4
+  archives whose headers are encrypted, multi-volume sets, and unsupported encryption are
+  declined with a plain message saying exactly what is not supported, instead of a generic
+  error or garbled images.
+- **Password-protected RAR archives open.** RAR5 archives encrypted with a password —
+  whether just the file contents (`-p`) or the whole archive including the file names
+  (`-hp`) — now prompt for the password and decrypt in memory, the same way ZIP and 7z
+  already do. A wrong password re-prompts rather than showing a confusing error.
+- **Tarballs open like folders.** Blaze Viewer now views images and plays videos inside
+  `.tar`, `.tar.gz` (`.tgz`), `.tar.bz2` (`.tbz2`), `.tar.zst` (`.tzst`), and `.tar.xz`
+  (`.txz`) archives, alongside the existing ZIP and 7z support. A plain `.tar` opens
+  near-instantly even when huge; compressed tarballs show a progress bar with a working
+  Cancel while they load into memory, and one that would not fit in memory is refused
+  up front with a clear message. Everything stays in RAM — nothing is ever extracted to
+  disk, damaged or malicious archives fail with an honest error instead of a crash, and
+  archive opens no longer freeze the app while a large file is read. The Details panel now names a Dolby Vision stream's
+  profile and what its base layer amounts to ("Profile 8 — HDR10-compatible base layer"),
+  and playing a **Profile 5** file — the one flavor whose colors cannot be shown correctly
+  without Dolby's own processing — says so in a toast instead of leaving you wondering why
+  the picture looks green and purple.
+- **Subtitles on videos.** Press `C` to turn captions on and off; your choice is remembered.
+  Blaze Viewer reads both the subtitle tracks stored **inside** an MKV or MP4 and a subtitle file sitting **beside** the video (the usual `Movie.eng.srt` or
+  `Movie.vtt`) — SubRip (`.srt`), WebVTT (`.vtt`), ASS/SSA, and MP4's own timed text, all
+  including non-Latin scripts and right-to-left languages. Text is rendered sharply at your
+  display's real resolution, with a black outline so it stays readable over bright scenes.
+  `C` prefers a forced/signs track matching the audio, then the file's own default track,
+  then whatever it can read. (Image-based subtitles — PGS, VobSub — are not text and are
+  still not shown.)
+- **Forced subtitles now show on their own**, the way every other video player does it. The
+  signs and foreign dialogue a film means everyone to read (the Elvish in *Lord of the
+  Rings*) appear even with subtitles switched off. Pressing `C` still gives you the full
+  dialogue track, and **Settings ▸ Subtitles ▸ Always show forced subtitles** turns the
+  behavior off if you want a guaranteed-clean picture.
+- **Pick a subtitle track from a list.** The new **Playback ▸ Subtitle Track** menu lists
+  every track the file carries — named by language and format ("English · SubRip · Forced"),
+  with a tick on the one you're watching. On macOS a button on the playback bar, just right of
+  the running time, opens the same list. `Shift+C` steps through those very same tracks
+  everywhere. Turning subtitles off and on again brings back the track *you* chose, rather
+  than reverting to the app's guess.
+- **Your subtitle language follows you to the next film.** Choose "Arabic (SDH)" on one
+  episode and the next one starts on its Arabic track — even though the two files number
+  their tracks differently, and even if one says `ara` where the other says `ar`. If a film
+  hasn't got that language, it falls back to its usual choice instead of showing nothing.
+- **Choose the audio track** (macOS): **Playback ▸ Audio** lists every track a film carries —
+  the director's commentary, the second language, the stereo mix beside the 5.1 — with a tick
+  on the one you're hearing, or press **`A`** to step through them (**`Shift+A`** goes back).
+  It changes the sound without interrupting the picture. Blaze Viewer only ever says a track
+  changed once it actually has, so the message can be trusted.
+- **A new Playback menu** gathers the things that only apply to something playing —
+  Play/Pause, frame stepping, subtitle tracks, and Live Photo audio — instead of leaving them
+  scattered through View and Image. (Choosing the **audio** track from the menu is macOS-only
+  for now.)
+- **Garbled subtitles repair themselves.** Subtitle text that arrives mangled — `â™ª`
+  instead of `♪`, `Iâ€™m` instead of `I'm` — is a mis-encoding that has been quietly
+  breaking subtitles everywhere for decades. Blaze Viewer now detects and undoes it, and
+  only ever when it can prove the text really was mangled, so correctly-written text
+  (`café`, `señor`) is never touched.
+- **Subtitle appearance is yours to set**: a new **Settings ▸ Subtitles** tab with
+  font, size, colour and opacity, outline, drop shadow, background, and vertical position —
+  including **below the picture, down in the black letterbox bar**, which almost no player
+  lets you do. Outline, shadow, and background scale with the text, so changing the size
+  keeps everything in proportion. A live preview shows exactly what you'll get, drawn by the
+  same renderer that draws the real thing, so it can't mislead you. Your choices are
+  remembered.
 
 ### Changed
+
 - **Holding a pan or zoom key ramps up more gently.** The hold-to-pan/hold-to-zoom
   acceleration now starts slower, takes a bit longer to build, and tops out lower, so
   fine framing at the start of a hold feels more controlled instead of lurching to speed.
@@ -65,8 +198,40 @@ with any pre-release suffix carried only by the tag.
   on the graphics card instead of the CPU, so they hold full frame rate where before they
   could stutter. Lighter videos are unchanged — the CPU path is actually faster for them, so
   the app picks whichever is quicker for each clip.
+- **Sharper GPU downscaling when a photo is fit to the window.** The full-resolution copy the
+  app keeps ready is now mip-mapped, so when it's scaled to fit (a fullscreen toggle, a resize,
+  or 1:1→fit) it uses high-quality trilinear filtering instead of plain bilinear — no more soft,
+  faintly-aliased look on the instant frame. The result is close enough to the full re-decode
+  that the brief re-sharpen after a fullscreen toggle is now hard to notice.
+- **The side panels resize narrower now (macOS).** The folder / thumbnails pane shrinks all
+  the way to 120 pt (was 200 pt) — once it's too narrow for the "Folders" / "Thumbnails" tab
+  labels, they give way to just their icons rather than truncating. The info inspector goes a
+  touch narrower too, down to 260 pt (was 280 pt).
 
 ### Fixed
+
+- **Movie thumbnails appear almost immediately instead of after a minute of blank placeholders.** A film's poster is now kept as its thumbnail the moment it's generated, even with the thumbnail strip closed, so opening the strip shows the films you've already browsed past straight away rather than re-scanning every one of them (macOS and Linux; Windows already worked this way). Measured over a network share: first thumbnail 0.2 s, down from roughly a minute.
+- **Films are no longer scanned twice over the network (macOS and Linux).** Every film in view
+  was being scanned once for its main poster and again, at the same time, for its thumbnail —
+  two trips over the network for a picture the first scan was already going to produce. The
+  second scan is gone, so posters and thumbnails on a network share arrive appreciably sooner
+  and no longer compete with each other for the same workers.
+- **Toggling back to a size you were just at is instant.** Fullscreen/windowed is a
+  two-state switch, and the app now keeps the exact pixels each side was showing —
+  toggling back re-uses them immediately instead of re-processing the photo. This also
+  makes toggles instant for color-managed and RAW photos, which can't use the GPU
+  fast path.
+- **Parking on a photo arms its instant fullscreen toggle much sooner.** The full-quality
+  copy that makes toggles instant used to queue behind every neighbouring photo's refill
+  work, so on large photos the "toggle is now instant" moment could lag many seconds behind
+  the loading indicator. It now loads immediately after the photo you're parked on.
+- **Repeated fullscreen toggles no longer blur over and over.** Toggling fullscreen (or
+  resizing) used to cancel the full-resolution copy the app was quietly preparing for the
+  photo you're parked on — so each toggle re-blurred and re-sharpened, sometimes four or
+  five times in a row, and advancing right after a toggle was blurry too. Work that doesn't
+  depend on the window size (full-resolution copies, thumbnails, movie poster picks) now
+  survives those changes, so after the first sharpening a toggle is instantly crisp and
+  neighbouring photos stay ready.
 - **A failed thumbnail or photo gets a second chance.** A momentary network hiccup used to
   leave that photo's tile blank (or the photo showing an error) for the rest of the session.
   Coming back to it now retries once; only a genuinely unreadable file stays marked failed.
@@ -85,83 +250,6 @@ with any pre-release suffix carried only by the tag.
   notices any photo that has lingered blurry for a couple of seconds and fetches its sharp
   version on its own — even when its own bookkeeping (or the keyboard tracking) claims
   otherwise.
-
-### Added
-- **HDR videos play in HDR.** Video mastered in HDR — most 4K movies (HDR10/PQ or HLG) and
-  clips from recent iPhones — used to be flattened to standard range, dulling its colour and
-  highlights. It now plays with full HDR colour and brightness on an HDR display (and is mapped
-  correctly on a standard display). The app decodes the 10-bit video and applies the HDR curve
-  on the graphics card, so it costs nothing on the way.
-- **Switching between fit-to-screen and 1:1 is instant now.** When you stop on a photo, the
-  app keeps its full resolution ready in the background, so toggling to actual pixels (and
-  back) is immediate instead of pausing to re-decode each time — the same when you land on the
-  next photo. How many nearby photos are kept ready is a new setting (default: the current one
-  plus its immediate neighbours); a slower or lower-memory machine can dial it down. Videos,
-  archives, vector art and enormous gigapixel images are left out (there's no meaningful "1:1"
-  to hold), so they never balloon memory.
-- **Big photos show instantly instead of a black screen.** Opening a large JPEG — especially
-  over a network share — used to sit on black for several seconds while the whole file loaded.
-  Now the photo's own embedded thumbnail appears right away (blurry but there), the loading
-  dial keeps spinning so you know the sharp version is still coming, and it snaps into full
-  detail the moment it finishes. Opening a folder's Thumbnails panel also shows the photos
-  you've already seen immediately and fills in the rest as it goes.
-
-- **Pick a video's audio track on Windows and Linux.** Films with several audio tracks
-  (other languages, commentaries) can now switch between them mid-playback: the new
-  **Playback ▸ Audio Track** menu lists every track with a check on the one playing, and
-  `A` / `Shift+A` cycle through them (on Linux the menu shows **Next Audio Track**, since
-  its menu bar has no submenus). The switch keeps your place in the video, and the app
-  only confirms a change that really happened: a rare track that can't be decoded is
-  refused with a message while the current sound keeps playing. This brings Windows and
-  Linux up to par with the Mac.
-- **Archives show up while you browse, and `P` opens them.** A `.zip`, `.7z`, `.rar`, `.cbz`,
-  `.cbr` or `.tar.*` sitting in a folder is no longer invisible: it shows a card in the middle
-  of the screen — a zippered folder, the file's name, and an **Open** button — and pressing `P`
-  opens the archive as its own deck, exactly as if you had picked it from Open File. `Alt+Up`
-  takes you back out to the folder, so you can go straight into the next one. Encrypted archives
-  ask for the password the same way they always have. A folder that holds nothing but archives
-  now opens instead of reporting no images. Browsing past an archive never opens or unpacks it —
-  only pressing `P` does.
-- **`Cmd+↓` / `Alt+↓` open, the way Finder does.** Both now do whatever `P` does — go into an
-  archive, play a video or an animation — so the chord your fingers already know works here, and
-  pairs with the `Cmd+↑` / `Alt+↑` that go back out to the enclosing folder. `P` still does
-  everything it did.
-- **Enter an archive password once for a whole folder.** When you unlock an encrypted archive,
-  the app remembers that password for the rest of the session and tries it automatically on the
-  next encrypted archive, so a folder of same-password archives only asks once. It's silent
-  when a saved password works, and it falls back to asking if none fit. The passwords are kept
-  in memory only, never written anywhere, and are wiped when you quit — matching how 7-Zip and
-  WinRAR behave.
-- **Turn off archives in the deck when you don't want them.** A new **View ▸ Show Archives**
-  toggle (also in Settings, under Recursive) controls whether archives show as cards while you
-  browse a folder. It's on by default; turn it off in a folder like Downloads that's full of
-  archives you'll never flick through, and they stay out of your way. There's also a shortcut:
-  when you open an archive that has no images, the "no images" notice now offers a **Don't show
-  archives** checkbox that flips the setting right there. Opening an archive from Open File still
-  works either way — this only changes whether a folder *lists* them.
-
-### Changed
-- **Sharper GPU downscaling when a photo is fit to the window.** The full-resolution copy the
-  app keeps ready is now mip-mapped, so when it's scaled to fit (a fullscreen toggle, a resize,
-  or 1:1→fit) it uses high-quality trilinear filtering instead of plain bilinear — no more soft,
-  faintly-aliased look on the instant frame. The result is close enough to the full re-decode
-  that the brief re-sharpen after a fullscreen toggle is now hard to notice.
-- **The side panels resize narrower now (macOS).** The folder / thumbnails pane shrinks all
-  the way to 120 pt (was 200 pt) — once it's too narrow for the "Folders" / "Thumbnails" tab
-  labels, they give way to just their icons rather than truncating. The info inspector goes a
-  touch narrower too, down to 260 pt (was 280 pt).
-
-### Added
-- **Move between archives like you move between folders.** With Show Archives on, `Alt+←/→`
-  (`⌘←/→`) steps through an archive's own folders, and once you're past the last one it moves to
-  the previous / next archive in the same folder on disk. Pressing `Alt+↑` (`⌘↑`) to leave an
-  archive drops you back on that archive in the folder, so `space` carries on to the next one
-  instead of restarting at the top.
-- **Archives show in the folder tree.** With Show Archives on, the `⇧F` folder tree now lists
-  archives alongside folders, drawn with a zipper icon; clicking one opens the archive. Toggling
-  the setting updates the tree live.
-
-### Fixed
 - **Fullscreen and window resizing stay sharp now — no blurry reload.** Toggling fullscreen (or
   resizing the window) on a large photo used to flash the photo's low-resolution embedded
   thumbnail and then re-sharpen, the same reload the Fit↔1:1 (`0`) toggle already avoids.
@@ -232,77 +320,6 @@ with any pre-release suffix carried only by the tag.
   offset by the resume position — leaving it churning through minutes of sound or ending
   early. Both seeks are now measured from the start of the file, as they always should have
   been.
-
-### Added
-- **RAR archives open too, including older RAR4.** `.rar` files (both the modern RAR5 format
-  and the older RAR4 format) and `.cbr`/`.cbz` comic books now open as browsable decks, with
-  the contents verified byte-for-byte against the reference unrar tool during development —
-  including archives that use RAR's compression filters, solid compression, and PPMd. RAR4
-  archives whose headers are encrypted, multi-volume sets, and unsupported encryption are
-  declined with a plain message saying exactly what is not supported, instead of a generic
-  error or garbled images.
-- **Password-protected RAR archives open.** RAR5 archives encrypted with a password —
-  whether just the file contents (`-p`) or the whole archive including the file names
-  (`-hp`) — now prompt for the password and decrypt in memory, the same way ZIP and 7z
-  already do. A wrong password re-prompts rather than showing a confusing error.
-- **Tarballs open like folders.** Blaze Viewer now views images and plays videos inside
-  `.tar`, `.tar.gz` (`.tgz`), `.tar.bz2` (`.tbz2`), `.tar.zst` (`.tzst`), and `.tar.xz`
-  (`.txz`) archives, alongside the existing ZIP and 7z support. A plain `.tar` opens
-  near-instantly even when huge; compressed tarballs show a progress bar with a working
-  Cancel while they load into memory, and one that would not fit in memory is refused
-  up front with a clear message. Everything stays in RAM — nothing is ever extracted to
-  disk, damaged or malicious archives fail with an honest error instead of a crash, and
-  archive opens no longer freeze the app while a large file is read. The Details panel now names a Dolby Vision stream's
-  profile and what its base layer amounts to ("Profile 8 — HDR10-compatible base layer"),
-  and playing a **Profile 5** file — the one flavor whose colors cannot be shown correctly
-  without Dolby's own processing — says so in a toast instead of leaving you wondering why
-  the picture looks green and purple.
-- **Subtitles on videos.** Press `C` to turn captions on and off; your choice is remembered.
-  Blaze Viewer reads both the subtitle tracks stored **inside** an MKV or MP4 and a subtitle file sitting **beside** the video (the usual `Movie.eng.srt` or
-  `Movie.vtt`) — SubRip (`.srt`), WebVTT (`.vtt`), ASS/SSA, and MP4's own timed text, all
-  including non-Latin scripts and right-to-left languages. Text is rendered sharply at your
-  display's real resolution, with a black outline so it stays readable over bright scenes.
-  `C` prefers a forced/signs track matching the audio, then the file's own default track,
-  then whatever it can read. (Image-based subtitles — PGS, VobSub — are not text and are
-  still not shown.)
-- **Forced subtitles now show on their own**, the way every other video player does it. The
-  signs and foreign dialogue a film means everyone to read (the Elvish in *Lord of the
-  Rings*) appear even with subtitles switched off. Pressing `C` still gives you the full
-  dialogue track, and **Settings ▸ Subtitles ▸ Always show forced subtitles** turns the
-  behavior off if you want a guaranteed-clean picture.
-- **Pick a subtitle track from a list.** The new **Playback ▸ Subtitle Track** menu lists
-  every track the file carries — named by language and format ("English · SubRip · Forced"),
-  with a tick on the one you're watching. On macOS a button on the playback bar, just right of
-  the running time, opens the same list. `Shift+C` steps through those very same tracks
-  everywhere. Turning subtitles off and on again brings back the track *you* chose, rather
-  than reverting to the app's guess.
-- **Your subtitle language follows you to the next film.** Choose "Arabic (SDH)" on one
-  episode and the next one starts on its Arabic track — even though the two files number
-  their tracks differently, and even if one says `ara` where the other says `ar`. If a film
-  hasn't got that language, it falls back to its usual choice instead of showing nothing.
-- **Choose the audio track** (macOS): **Playback ▸ Audio** lists every track a film carries —
-  the director's commentary, the second language, the stereo mix beside the 5.1 — with a tick
-  on the one you're hearing, or press **`A`** to step through them (**`Shift+A`** goes back).
-  It changes the sound without interrupting the picture. Blaze Viewer only ever says a track
-  changed once it actually has, so the message can be trusted.
-- **A new Playback menu** gathers the things that only apply to something playing —
-  Play/Pause, frame stepping, subtitle tracks, and Live Photo audio — instead of leaving them
-  scattered through View and Image. (Choosing the **audio** track from the menu is macOS-only
-  for now.)
-- **Garbled subtitles repair themselves.** Subtitle text that arrives mangled — `â™ª`
-  instead of `♪`, `Iâ€™m` instead of `I'm` — is a mis-encoding that has been quietly
-  breaking subtitles everywhere for decades. Blaze Viewer now detects and undoes it, and
-  only ever when it can prove the text really was mangled, so correctly-written text
-  (`café`, `señor`) is never touched.
-- **Subtitle appearance is yours to set**: a new **Settings ▸ Subtitles** tab with
-  font, size, colour and opacity, outline, drop shadow, background, and vertical position —
-  including **below the picture, down in the black letterbox bar**, which almost no player
-  lets you do. Outline, shadow, and background scale with the text, so changing the size
-  keeps everything in proportion. A live preview shows exactly what you'll get, drawn by the
-  same renderer that draws the real thing, so it can't mislead you. Your choices are
-  remembered.
-
-### Fixed
 - **A click on the playback bar seeks once, not twice** (macOS). Clicking used to seek on the
   press and again on the release; it now seeks immediately on press, previews live while you
   drag, and only re-seeks on release if you actually moved to a new spot.
@@ -1300,7 +1317,8 @@ Initial beta — a fast, keyboard-driven Windows photo viewer.
 - Signed WiX/MSI installer with file associations and an "Open with PhotoBlaze"
   folder verb.
 
-[Unreleased]: https://github.com/fullspecsystems/blazeviewer/compare/v0.2.1...HEAD
+[Unreleased]: https://github.com/fullspecsystems/blazeviewer/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/fullspecsystems/blazeviewer/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/fullspecsystems/blazeviewer/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/fullspecsystems/blazeviewer/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/fullspecsystems/blazeviewer/compare/v0.1.0...v0.1.1
