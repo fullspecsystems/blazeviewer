@@ -465,6 +465,25 @@ pub struct AppCore {
     /// stale even when the item index is unchanged, forcing an async re-present at the new
     /// fit instead of silently keeping the old-scale frame (task #18 finding #5).
     pub presented_epoch: Option<u64>,
+    /// The ring [`RepKind`](pb_core::RepKind) currently **bound to the renderer** for
+    /// [`displayed_item`](Self::displayed_item) — the authoritative answer to "which
+    /// representation is on screen right now" (task #124).
+    ///
+    /// It is NOT derivable from [`display_kind`](crate::AppCore::display_kind): that is
+    /// mode-derived and still reports `Fit` while a zoom past 1.0 has us bound to the
+    /// full-res `Original`. Background quality work (`try_gpu_sharpen`,
+    /// `try_gpu_derive_fit`, the `drain_results` sharpen landing) reads this to know it
+    /// must not rebind its freshly-derived `Fit` over a zoom-selected `Original` — the
+    /// house rule being that background work may change **residency** or **quality**, but
+    /// never the **presented representation**, which belongs to user state alone.
+    ///
+    /// `None` when nothing is presented (startup, teardown, a failed present).
+    pub presented_kind: Option<pb_core::RepKind>,
+    /// Test-only tally of same-item representation rebinds (task #124), so a test can assert
+    /// that a hold-to-zoom ramp rebinds ONCE on the way past 1:1 rather than on every tick.
+    /// Not reachable through `Box<dyn Renderer>`, hence counted here.
+    #[cfg(test)]
+    pub rebind_count: usize,
     /// The item we're trying to show (== `displayed_item` once caught up).
     pub target_item: Option<usize>,
     /// Flicker-compare pin (task #43): the pinned photo's playlist index. `Y` flips
