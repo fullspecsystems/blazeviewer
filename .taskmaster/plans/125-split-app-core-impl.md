@@ -300,12 +300,23 @@ an answerable question.
 This raises the stakes on the §5 triage: the unassigned methods are the difference between a
 charter and a remainder, not bookkeeping.
 
-### The lightweight complement (not a test)
+### The lightweight complement — DONE 2026-07-20: `docs/where-code-goes.md`
 
-When the split settles, record the convention where the crate's guidance already lives
-(`crates/pb-app-core/CLAUDE.md`): which concern owns which file, and that a new `AppCore`
-method goes beside its logic module rather than into `app_core_impl.rs`. Documentation of a
-structure that exists, not a nag about one that does not.
+Written before the split finished rather than after, because the guidance is what stops the
+*next* feature defaulting into the kitchen sink, and features do not wait for refactors.
+
+It is an ordered decision procedure (pure logic → existing subsystem → new subsystem →
+orchestration → shell; first match wins), a map of the ~49 modules that already exist so "I
+didn't know where" is never the reason, the smells that mean you are about to choose wrong, and
+the **two-halves rule**: a new subsystem module gets its `app_core_impl/<name>.rs` concern file
+in the same commit, even if nearly empty. That rule *is* §9's structural mechanism, stated
+operationally.
+
+It also carries this file's **charter** — "lifecycle, dispatch, and the residency & present
+engine; nothing else" — with the explicit note that the file being mid-split is a known state,
+not licence to add to it.
+
+`CLAUDE.md`'s *Working norms* links it in one bullet, keeping the root file light.
 
 ## 10. Risks
 

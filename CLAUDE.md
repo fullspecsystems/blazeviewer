@@ -654,6 +654,16 @@ it to the Mac — not attempt it blind.
 
 ## Working norms
 
+- **Know where code goes before you write it — `docs/where-code-goes.md`.**
+  **"Put it on `AppCore`" is the LAST answer, not the first.** That doc is an
+  ordered decision procedure (pure logic → existing subsystem → new subsystem →
+  orchestration → shell), a map of the ~49 modules that already exist, and the
+  **two-halves rule**: a new subsystem module gets its `app_core_impl/` concern
+  file in the same commit, even if nearly empty. That rule is the anti-regrowth
+  mechanism — deliberately structural, not a line-count lint. It exists because
+  `app_core_impl.rs` reached 22k lines: task #126 created three new modules and
+  *still* added ~1,170 lines to it, because the logic had a home and the
+  `impl AppCore` methods didn't.
 - **Test first.** New `pb-core` logic without a failing-then-passing test is not
   done.
 - **No per-frame heap allocations on the hot path.** Pre-allocate pools; reuse.
