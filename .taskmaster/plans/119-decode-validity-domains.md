@@ -1,7 +1,10 @@
 # 119 — Decode validity domains: geometry-immortal Originals, one staleness law
 
-_Status: **rev 3 — IMPLEMENTED** (2026-07-19; owner manual verify pending — the
-engagement-shoot repro with `PB_SHARP_DIAG=1`, expected ≤1 blurry toggle ever). Codex rounds
+_Status: **rev 3 — SHIPPED + OWNER-VERIFIED** (2026-07-19, engagement-shoot smoke: the
+toggle storm is gone; residual blur only when outrunning the banked window fast on high-res
+photos — the designed decode-throughput envelope). #122 (the follow-ups the verify log
+surfaced: the parked-tier refusal livelock + derive-before-preview on the tap window) also
+shipped + verified the same day. Codex rounds
 1–2 folded (review log at the bottom; round 2 verdict: "implement with edits" — this rev IS
 those edits, and the implementation includes them). Task #119 (high);
 lands #109 item 3 (decode content identity) as a side effect. Owner directive: "holistically
