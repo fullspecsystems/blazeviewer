@@ -106,3 +106,11 @@ done
 mcode="$(curl -sL -o /dev/null -w '%{http_code}' "$BASE_URL/latest.json" || true)"
 [[ "$mcode" == "200" ]] || { echo "error: latest.json returned HTTP $mcode" >&2; exit 1; }
 echo "    $BASE_URL/latest.json   (HTTP 200, manifest)"
+
+# 7) Sync the version printed on blazeviewer.app/download. Idempotent, so if the mac
+#    upload already ran this is a no-op; it is here so a Linux-only release still
+#    updates the page. Never fatal — see the same call in release-mac-upload.sh.
+if ! "$REPO_ROOT/scripts/update-site-version.sh"; then
+	echo "warning: download page version NOT updated — bump it by hand:" >&2
+	echo "         scripts/update-site-version.sh" >&2
+fi

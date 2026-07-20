@@ -70,3 +70,13 @@ echo "    https://downloads.blazeviewer.app/mac/$NAME"
 if [[ -f "$DMG_DIR/appcast.xml" ]]; then
 	echo "    https://downloads.blazeviewer.app/mac/appcast.xml  (Sparkle feed)"
 fi
+
+# 6) Sync the version printed on blazeviewer.app/download. Idempotent, so the linux
+#    upload calling it too is a free no-op. Runs last, after the URLs above verified:
+#    the page must not announce a version before its binaries are downloadable.
+#    Never fatal — this release is already published, and a stale marketing string is
+#    not worth a non-zero exit that reads as "the upload failed".
+if ! "$REPO_ROOT/scripts/update-site-version.sh"; then
+	echo "warning: download page version NOT updated — bump it by hand:" >&2
+	echo "         scripts/update-site-version.sh" >&2
+fi
