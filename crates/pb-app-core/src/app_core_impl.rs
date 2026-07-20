@@ -4680,7 +4680,7 @@ fn run_platform_video_producer(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use test_support::{clipboard_text_effects, core_with_a_native_video, five_photos, make_resident, photos_named, poster_payload, rgba_full, seed_details, stuck_preview_core, test_core, text_result, track};
+    use test_support::{FakeArchive, clipboard_text_effects, core_with_a_native_video, five_photos, make_resident, photos_named, poster_payload, rgba_full, seed_details, stuck_preview_core, test_core, text_result, track};
     use crate::contract::{CoreEvent, Modifiers};
     use crate::{PbKey, Viewport};
 
@@ -6192,31 +6192,6 @@ mod tests {
             core.descriptions[&0].is_err(),
             "the question re-ran the describe"
         );
-    }
-
-    /// A fake archive source: named entries with no fs paths and a container —
-    /// exactly what a Zip/SevenZSource looks like to the core, without disk.
-    struct FakeArchive {
-        names: Vec<String>,
-        container: PathBuf,
-    }
-
-    impl ItemSource for FakeArchive {
-        fn len(&self) -> usize {
-            self.names.len()
-        }
-        fn name(&self, i: usize) -> &str {
-            self.names.get(i).map(String::as_str).unwrap_or("")
-        }
-        fn container(&self) -> Option<&Path> {
-            Some(&self.container)
-        }
-        fn bytes(&self, i: usize) -> std::io::Result<Vec<u8>> {
-            self.names
-                .get(i)
-                .map(|_| vec![0u8])
-                .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "oob"))
-        }
     }
 
     /// A headless core over a fake archive deck, installed the way a real

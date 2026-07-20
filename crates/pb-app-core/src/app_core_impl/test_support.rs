@@ -205,3 +205,29 @@ pub(super) fn stuck_preview_core() -> AppCore {
     core.initial_delay = Duration::from_secs(3600);
     core
 }
+
+/// A fake archive source: named entries with no fs paths and a container —
+/// exactly what a Zip/SevenZSource looks like to the core, without disk.
+pub(super) struct FakeArchive {
+    pub(super) names: Vec<String>,
+    pub(super) container: PathBuf,
+}
+
+impl ItemSource for FakeArchive {
+    fn len(&self) -> usize {
+        self.names.len()
+    }
+    fn name(&self, i: usize) -> &str {
+        self.names.get(i).map(String::as_str).unwrap_or("")
+    }
+    fn container(&self) -> Option<&Path> {
+        Some(&self.container)
+    }
+    fn bytes(&self, i: usize) -> std::io::Result<Vec<u8>> {
+        self.names
+            .get(i)
+            .map(|_| vec![0u8])
+            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "oob"))
+    }
+}
+
