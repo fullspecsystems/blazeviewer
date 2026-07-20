@@ -158,4 +158,34 @@ impl AppCore {
             .map(|c| c.shortcut_label())
             .unwrap_or_default()
     }
+
+    /// The light/dark preference in effect: a `--theme` launch override wins for this session,
+    /// else the saved [`settings::AppearanceMode`]. Read at every place the theme is applied so a
+    /// scripted `--theme dark` holds without ever touching (or persisting) the saved value.
+    pub fn effective_appearance(&self) -> settings::AppearanceMode {
+        self.launch.theme.unwrap_or(self.settings.appearance_mode)
+    }
+
+    /// Whether Live Photo audio is muted right now: a `--mute` launch override wins for this
+    /// session, else the saved `mute_live_audio`. Cleared by an explicit user mute toggle.
+    pub fn effective_mute(&self) -> bool {
+        self.launch.mute.unwrap_or(self.settings.mute_live_audio)
+    }
+
+    /// The **resolved** dark/light flag (task #46): the `Appearance` preference against
+    /// the live OS theme — `System` follows [`os_dark`](AppCore::os_dark) (kept current
+    /// by the shell's `OsThemeChanged` reports); `Light`/`Dark` pin it.
+    pub fn effective_dark(&self) -> bool {
+        match self.effective_appearance() {
+            settings::AppearanceMode::System => self.os_dark,
+            settings::AppearanceMode::Light => false,
+            settings::AppearanceMode::Dark => true,
+        }
+    }
+
+    /// The letterbox / background fill for the resolved theme (task #46) — what the
+    /// shells hand `Renderer::set_letterbox` when the renderer first stands up.
+    pub fn effective_letterbox(&self) -> [u8; 3] {
+        self.settings.letterbox_for(self.effective_dark())
+    }
 }
