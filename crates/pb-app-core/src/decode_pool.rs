@@ -472,6 +472,11 @@ struct Inner {
     /// EVERYTHING (both validity domains die with the deck).
     content_gen: u64,
     shutdown: bool,
+    /// TEST ONLY: cumulative log of every enqueued job identity, so scheduler tests
+    /// can assert a want was (or was NOT) emitted regardless of how fast a worker
+    /// completes and untracks it (#122).
+    #[cfg(test)]
+    enqueue_log: Vec<(usize, Purpose, pb_core::RepKind)>,
 }
 
 struct Shared {
@@ -561,6 +566,8 @@ impl DecodePool {
                 epoch: 0,
                 content_gen: 0,
                 shutdown: false,
+                #[cfg(test)]
+                enqueue_log: Vec::new(),
             }),
             cv: Condvar::new(),
             decode,
@@ -710,6 +717,8 @@ impl DecodePool {
                     content_gen,
                 },
             );
+            #[cfg(test)]
+            inner.enqueue_log.push(key);
             let prio = wanted[&key].0;
             inner.queue.push(Job {
                 key: DecodeKey {
@@ -754,6 +763,13 @@ impl DecodePool {
     #[cfg(test)]
     pub(crate) fn test_sender(&self) -> Sender<Outcome> {
         self.shared.results_tx.clone()
+    }
+
+    /// TEST ONLY: every job identity ever enqueued (#122) — the race-free way to assert
+    /// a want was or wasn't emitted (tracked/queued empty out as workers finish).
+    #[cfg(test)]
+    pub(crate) fn enqueued(&self) -> Vec<(usize, Purpose, pb_core::RepKind)> {
+        self.shared.inner.lock().unwrap().enqueue_log.clone()
     }
 }
 
@@ -1035,6 +1051,7 @@ mod tests {
             epoch: 0,
             content_gen: 0,
             shutdown: false,
+            enqueue_log: Vec::new(),
         };
         let old = Arc::new(AtomicBool::new(false));
         let new = Arc::new(AtomicBool::new(false));
