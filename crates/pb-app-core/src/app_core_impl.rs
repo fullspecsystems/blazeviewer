@@ -7273,7 +7273,7 @@ impl AppCore {
     /// in-flight scan (another item's) drops its receiver — the worker's send fails
     /// and its thread exits quietly. Decode + OCR + QR all run on the worker; the
     /// event loop never blocks.
-    fn ensure_text_scan(&mut self) {
+    pub(super) fn ensure_text_scan(&mut self) {
         let Some(item) = self.displayed_item else {
             return;
         };
@@ -7424,7 +7424,7 @@ impl AppCore {
     /// that same describe is already running. `prompt_override` is the Ask question; `None`
     /// builds the default accessibility prompt from salient EXIF (`prompt::build_prompt`).
     /// A misconfigured backend caches a one-line error rather than a description.
-    fn ensure_describe_scan(&mut self, prompt_override: Option<String>) {
+    pub(super) fn ensure_describe_scan(&mut self, prompt_override: Option<String>) {
         let Some(item) = self.displayed_item else {
             return;
         };
