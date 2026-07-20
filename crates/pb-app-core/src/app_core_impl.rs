@@ -375,6 +375,11 @@ impl AppCore {
             // batches (and the delayed Scanning-dialog reveal) even when the event queue is
             // quiet — without this, a slow walk on an idle app waits for the next OS event.
             || self.scanning
+            // An archive open in flight (task #126 step 2) keeps the loop polling so
+            // `poll_archive_load` lands its result — and its progress chrome stays live —
+            // without waiting for the next OS event. Both shells had this as
+            // `archive_load.is_some()` in their own `work_pending` override.
+            || self.archive_load.is_some()
             // A thumbnail derive in flight (task #83) keeps the loop polling so
             // `tick` lands it into the strip promptly.
             || self.thumbs.working()

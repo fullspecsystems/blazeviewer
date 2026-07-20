@@ -26,14 +26,11 @@
 #![allow(clippy::unnecessary_cast)]
 
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::Receiver;
 use std::time::Instant;
 
-use pb_app_core::archive::ArchiveOpenError;
 use pb_app_core::contract::{self, CoreEvent, Modifiers};
 use pb_app_core::dir_scan::ScanDialogRequest;
 use pb_app_core::engine;
-use pb_app_core::scan::{self, Resolved};
 use pb_app_core::{Action, AppCore, PbKey, SecretString, Viewport};
 use pb_core::open::{self, Cursor, LaunchInput, Source};
 use pb_core::ResidentRing;
@@ -44,25 +41,9 @@ use pb_render::Renderer as _;
 // (`pb_app_core::dir_scan`), which owns the whole walk lifecycle — spawn, pump, supersession,
 // cancel, and the slow-walk timer. This shell keeps only its own chrome.
 
-/// An in-flight background archive open — the mirror of the winit shell's `ArchiveLoad`.
-/// (Step 2 moves this one into the core the same way.)
-struct ArchiveLoad {
-    generation: u64,
-    /// The worker's result plus the auto-try **winner** — the cached session password (if any)
-    /// that unlocked the archive, for MRU promotion (session-archive-password-cache).
-    #[allow(clippy::type_complexity)]
-    rx: Receiver<(
-        u64,
-        (Result<Resolved, ArchiveOpenError>, Option<SecretString>),
-    )>,
-    /// The archive being opened — kept for the password prompt (a `PasswordRequired`
-    /// failure re-opens this path with the entered password).
-    path: PathBuf,
-    /// The user-entered password this open carried, if any — harvested on success and used to
-    /// decide the wrong-password re-prompt (mirrors the winit shell).
-    attempted_password: Option<SecretString>,
-    progress: pb_source::OpenProgress,
-}
+// NOTE (task #126 step 2): `struct ArchiveLoad` lived here, field-for-field identical to
+// the winit shell's copy. Both are gone; the core owns the open
+// (`pb_app_core::archive_open`), including the SecretString it carries.
 
 /// The opaque handle the Swift host holds — it owns the entire `AppCore` engine **plus the
 /// shell's Rust half**: the scan/archive worker threads the `Begin*` effects spawn. Those
@@ -72,13 +53,10 @@ struct ArchiveLoad {
 /// clipboard, …).
 pub struct AppCoreHandle {
     core: AppCore,
-    // The folder walk's handle and generation counter now live on `AppCore` (task #126
-    // step 1) — `core.dir_scan` and the shared `core.bg` generation space, which the
-    // archive open below will join in step 2. Until it does, `archive_gen` remains the
-    // shell's second, *separate* counter, which is exactly the split the core's one
-    // generation space exists to end.
-    archive_load: Option<ArchiveLoad>,
-    archive_gen: u64,
+    // Both worker handles and their generation counters now live on `AppCore` (task #126):
+    // `core.dir_scan`, `core.archive_load`, and the single `core.bg` generation space they
+    // share — which is what lets the core cancel a displaced worker of EITHER kind itself,
+    // instead of each shell remembering to.
     /// The payload of an in-flight `WriteClipboard` effect. Stashed here (the drain emits a
     /// bare marker) because a `Vec<u8>` inside a transparent-enum payload is exactly the
     /// shape swift-bridge mis-generates (gotcha #3); the host pulls it via the
@@ -190,8 +168,6 @@ impl AppCoreHandle {
         core.native_play = true;
         AppCoreHandle {
             core,
-            archive_load: None,
-            archive_gen: 0,
             pending_clipboard: None,
             last_menu_state: contract::MenuState::default(),
             shown_dialog: None,
@@ -1100,7 +1076,7 @@ impl AppCoreHandle {
     /// the host keeps the display link running while true, pauses when idle (the frame
     /// pump's continuous-vs-on-demand decision, NS1 item 7).
     fn work_pending(&self) -> bool {
-        self.core.work_pending() || self.archive_load.is_some()
+        self.core.work_pending()
     }
 
     /// The displayed photo's on-disk path ("" for an archive entry or the empty deck) —
@@ -1568,13 +1544,13 @@ impl AppCoreHandle {
 
     /// A live snapshot of whichever progress the shown dialog tracks — the host polls this
     /// each pump while a Loading (fraction) or Scanning (found + current dir) dialog is up.
-    /// The handles live in this crate (the workers are Rust-side), so this is just a read.
+    /// Both workers live in the core now (task #126), so this reads its status queries.
     fn dialog_progress(&self) -> ffi::DialogProgressFfi {
         ffi::DialogProgressFfi {
             fraction: self
-                .archive_load
-                .as_ref()
-                .map(|l| l.progress.fraction())
+                .core
+                .archive_status()
+                .map(|a| a.fraction)
                 .unwrap_or(0.0),
             found: self.core.scan_status().map(|s| s.found as u64).unwrap_or(0),
             current_dir: self
@@ -2223,7 +2199,8 @@ impl AppCoreHandle {
     /// re-opens it; a retry sets the inline error (the host re-shows the same sheet in
     /// place — state-driven SwiftUI makes winit's promote-in-place dance implicit).
     fn prompt_archive_password(&mut self, path: PathBuf, wrong: bool) {
-        self.core.password_archive = Some(path.clone());
+        // `password_archive` is set by the core's NeedPassword transition; this only dresses
+        // the sheet.
         self.password_error = if wrong && self.shown_dialog == Some(contract::DialogKind::Password)
         {
             "Incorrect password. Please try again.".to_string()
@@ -2738,10 +2715,7 @@ impl AppCoreHandle {
     /// missing this cancel is the "door card over a photo" corruption (#109 item 1).
     /// Step 2 replaces this with the `superseded` return, once that return can be true.
     fn begin_dir_scan(&mut self, source: Source, cursor: Cursor) {
-        if let Some(prev) = self.archive_load.take() {
-            prev.progress.request_cancel();
-        }
-        let _superseded = self.core.begin_dir_scan(source, cursor);
+        self.core.begin_dir_scan(source, cursor);
     }
 
     /// Drain the walk's channel into the core each `tick`, then reconcile this shell's chrome.
@@ -2766,178 +2740,61 @@ impl AppCoreHandle {
         self.core.cancel_dir_scan();
     }
 
-    /// Start opening an archive (`CoreEffect::BeginArchiveOpen`): a `.zip`
-    /// synchronously; 7z and the tar family on a worker thread
-    /// (`ArchiveKind::background_open` — even a lazy plain tar's index walk is
-    /// O(entries) of file I/O). The per-kind dispatch, including the 7z RAM
-    /// pre-flight, is `scan::load_archive`, shared with the winit shell.
+    /// Start opening an archive (`CoreEffect::BeginArchiveOpen`).
+    ///
+    /// The whole lifecycle is `AppCore`'s since task #126 step 2 — kind dispatch, the RAM
+    /// pre-flight, the synchronous-ZIP fast path, the cached-password auto-try, generation and
+    /// supersession, and the `SecretString` handling (which never crosses back into this
+    /// crate). What is left here is chrome.
+    ///
+    /// Note there is no cross-cancel of an in-flight folder scan any more: the core owns both
+    /// workers and cancels the displaced one itself. Doing it here as well would be a
+    /// double-cancel (task #126 §12.6).
     fn begin_archive_open(&mut self, path: PathBuf, password: Option<SecretString>) {
-        let kind = pb_source::archive_kind(&path).unwrap_or(pb_source::ArchiveKind::Zip);
-        // Auto-try cached session passwords (MRU-first) only on an INITIAL open
-        // (session-archive-password-cache).
-        let cached = if password.is_none() {
-            self.core.archive_passwords_snapshot()
-        } else {
-            Vec::new()
-        };
-        let attempted_password = password.clone();
-        // Anti-stacking: a newer open supersedes (and cancels) an in-flight one. `take()`
-        // (not `as_ref()`) drops the old handle + rx now, so a result the old worker already
-        // sent can never be polled after this newer open overwrites `archive_load` — including
-        // the now-possibly-async ZIP path below (winit parity).
-        if let Some(prev) = self.archive_load.take() {
-            prev.progress.request_cancel();
+        let name = pb_app_core::archive_open::archive_display_name(&path);
+        match self.core.begin_archive_open(path, password) {
+            // Still in flight: the determinate "Opening…" progress + Cancel sheet. If the
+            // password prompt is still up, the same ShowDialog replaces its content in place —
+            // SwiftUI's state-driven sheet makes winit's `become_loading` implicit.
+            pb_app_core::archive_open::ArchiveOutcome::Pending => {
+                self.dialog_message = format!("Opening \u{201c}{name}\u{201d}\u{2026}");
+                self.core.effects.push(contract::CoreEffect::ShowDialog(
+                    contract::DialogKind::Loading,
+                ));
+            }
+            // The synchronous ZIP path already finished — never show a sheet at all.
+            done => self.apply_archive_outcome(done),
         }
-        // Cross-type supersession (#109 item 1, winit parity — `8293a662`): a folder scan is a
-        // DIFFERENT worker than an archive open, so the `archive_gen` bump below never cancels
-        // it. Left alive, its next cumulative batch reaches the core and bootstraps/extends over
-        // *this* archive deck while both GPU rings still hold the archive's textures. The core's
-        // `apply_scan_batch` extend guard already covers mode A on macOS; this closes mode B (a
-        // stale scan's FIRST batch bootstrapping over an archive opened just after it started)
-        // and stops the worker sooner. Placed before the synchronous ZIP shortcut so that path
-        // supersedes the scan too.
-        self.cancel_dir_scan();
-        // The synchronous ZIP shortcut is only safe when no auto-try will run (a wrong-password
-        // ZIP attempt decrypts the whole first entry — must go off-thread). Empty cache + no
-        // user password = today's fast path.
-        let will_autotry = password.is_none() && !cached.is_empty();
-        if !kind.background_open() && !will_autotry {
-            let pw = password.as_ref().map(|p| p.expose().to_owned());
-            let result = scan::open_archive(&path, pw);
-            self.finish_archive_open((result, None), attempted_password, path);
-            return;
-        }
-        self.archive_gen += 1;
-        let generation = self.archive_gen;
-        let progress = pb_source::OpenProgress::new();
-        let (tx, rx) = std::sync::mpsc::channel();
-        let worker_path = path.clone();
-        let worker_progress = progress.clone();
-        std::thread::spawn(move || {
-            let out = match password {
-                Some(pw) => (
-                    scan::load_archive(
-                        &worker_path,
-                        kind,
-                        Some(pw.expose().to_owned()),
-                        &worker_progress,
-                    ),
-                    None,
-                ),
-                None => {
-                    scan::load_archive_with_cache(&worker_path, kind, &cached, &worker_progress)
-                }
-            };
-            let _ = tx.send((generation, out));
-        });
-        // The determinate "Opening…" progress + Cancel dialog. If the password prompt is
-        // still up (a just-verified entry), the same ShowDialog replaces its content in
-        // place — SwiftUI's state-driven sheet makes winit's `become_loading` implicit.
-        let name = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("archive");
-        self.dialog_message = format!("Opening \u{201c}{name}\u{201d}\u{2026}");
-        self.core.effects.push(contract::CoreEffect::ShowDialog(
-            contract::DialogKind::Loading,
-        ));
-        self.archive_load = Some(ArchiveLoad {
-            generation,
-            rx,
-            path,
-            attempted_password,
-            progress,
-        });
     }
 
     /// Pick up a finished background archive open (each `tick`).
     fn poll_archive_load(&mut self) {
-        use std::sync::mpsc::TryRecvError;
-        let (load_gen, recv) = match self.archive_load.as_ref() {
-            Some(load) => (load.generation, load.rx.try_recv()),
-            None => return,
-        };
-        match recv {
-            Ok((generation, result)) => {
-                let load = self.archive_load.take();
-                if generation != load_gen {
-                    return; // superseded by a newer open
-                }
-                let (path, attempted) = match load {
-                    Some(l) => (l.path, l.attempted_password),
-                    None => return,
-                };
-                self.finish_archive_open(result, attempted, path);
-            }
-            Err(TryRecvError::Empty) => {}
-            Err(TryRecvError::Disconnected) => {
-                // Worker died without a result (a panic inside the decompressor). Drop the
-                // handle and don't strand its Loading dialog (winit parity).
-                self.archive_load = None;
-                self.close_dialog_kinds(&[contract::DialogKind::Loading]);
-            }
-        }
+        let outcome = self.core.poll_archive_load();
+        self.apply_archive_outcome(outcome);
     }
 
-    /// Act on a finished archive open (zip-sync or 7z-async) — the winit shell's
-    /// `finish_archive_open` mirrored: a non-empty success closes the loading/password
-    /// dialog and installs the playlist via `ArchiveResolved`; `PasswordRequired` opens
-    /// (or re-prompts, after a wrong attempt) the password dialog; any other failure
-    /// replaces the dialog with the error notice.
-    fn finish_archive_open(
-        &mut self,
-        result: (Result<Resolved, ArchiveOpenError>, Option<SecretString>),
-        attempted: Option<SecretString>,
-        path: PathBuf,
-    ) {
+    /// Reconcile this shell's chrome to an archive-open outcome. The core decided *what*
+    /// happened; this decides only what the host shows.
+    fn apply_archive_outcome(&mut self, outcome: pb_app_core::archive_open::ArchiveOutcome) {
         use contract::DialogKind as K;
-        let (result, winner) = result;
-        // Remember the unlocking password whenever the archive actually OPENED — `Ok` (with
-        // images) or `Empty` (opened, no images): a correct password is worth reusing even if
-        // this archive had nothing to show. A wrong password is `PasswordRequired` (no winner;
-        // `attempted` drives the re-prompt), so this never remembers a wrong one.
-        let opened = matches!(result, Ok(_) | Err(ArchiveOpenError::Empty));
-        if opened {
-            if let Some(pw) = attempted.as_ref().or(winner.as_ref()) {
-                self.core.remember_archive_password(pw);
-            }
-        }
-        match result {
-            Ok(r) if !r.source.is_empty() => {
+        use pb_app_core::archive_open::ArchiveOutcome as O;
+        match outcome {
+            O::Pending => {}
+            O::Opened => self.close_dialog_kinds(&[K::Loading, K::Password]),
+            O::NeedPassword { path, wrong } => self.prompt_archive_password(path, wrong),
+            // User cancelled, or the operation was superseded: drop quietly, keeping whatever
+            // is on screen.
+            O::Cancelled => self.close_dialog_kinds(&[K::Loading]),
+            O::Failed(e) => {
                 self.close_dialog_kinds(&[K::Loading, K::Password]);
-                self.core.handle(CoreEvent::ArchiveResolved(r));
+                self.report_error(e.user_message());
             }
-            Ok(_) | Err(ArchiveOpenError::Empty) => {
-                self.fail_archive_open(&ArchiveOpenError::Empty)
-            }
-            Err(ArchiveOpenError::PasswordRequired) => {
-                self.prompt_archive_password(path, attempted.is_some());
-            }
-            // User cancelled: drop quietly, keeping whatever is on screen.
-            Err(ArchiveOpenError::Cancelled) => {
-                self.core.password_archive = None;
-                self.close_dialog_kinds(&[K::Loading]);
-            }
-            Err(e) => self.fail_archive_open(&e),
         }
     }
 
-    /// A terminal archive-open failure (not a password retry): forget the pending archive
-    /// and replace any loading/password dialog with the error notice.
-    fn fail_archive_open(&mut self, e: &ArchiveOpenError) {
-        self.core.password_archive = None;
-        self.close_dialog_kinds(&[
-            contract::DialogKind::Loading,
-            contract::DialogKind::Password,
-        ]);
-        self.report_error(e.user_message());
-    }
-
-    /// Ask the in-flight archive open (if any) to stop; the poll drops it quietly.
+    /// Ask the in-flight archive open (if any) to stop.
     fn cancel_archive_load(&mut self) {
-        if let Some(load) = self.archive_load.as_ref() {
-            load.progress.request_cancel();
-        }
+        self.core.cancel_archive_load();
     }
 
     fn report_error(&mut self, msg: String) {
@@ -5111,13 +4968,13 @@ mod tests {
         let mut h = test_handle(1920, 1080, 2.0);
         let progress = pb_source::OpenProgress::new();
         let (_tx, rx) = std::sync::mpsc::channel();
-        h.archive_load = Some(ArchiveLoad {
-            generation: 1,
+        h.core.arm_archive_open(
+            1,
             rx,
-            path: std::env::temp_dir().join("pb_ffi_superseded.7z"),
-            attempted_password: None,
-            progress: progress.clone(),
-        });
+            progress.clone(),
+            std::env::temp_dir().join("pb_ffi_superseded.7z"),
+            None,
+        );
 
         let dir = std::env::temp_dir().join("pb_ffi_scan_supersedes");
         std::fs::create_dir_all(&dir).unwrap();
@@ -5130,7 +4987,7 @@ mod tests {
         );
 
         assert!(
-            h.archive_load.is_none(),
+            h.core.archive_load.is_none(),
             "the archive-open worker must be dropped by a superseding folder scan"
         );
         assert!(
@@ -5737,11 +5594,11 @@ mod tests {
         let mut h = test_handle(800, 600, 1.0);
         let path = PathBuf::from("/nonexistent/locked.7z");
 
-        h.finish_archive_open(
-            (Err(ArchiveOpenError::PasswordRequired), None),
-            None,
-            path.clone(),
-        );
+        h.apply_archive_outcome(pb_app_core::archive_open::ArchiveOutcome::NeedPassword {
+            path: path.clone(),
+            wrong: false,
+        });
+        h.core.password_archive = Some(path.clone()); // the core's transition sets this
         let effects = drain(&mut h);
         assert!(has_dialog(&effects, "password"));
         assert!(h.dialog_message().contains("locked.7z"));
@@ -5752,11 +5609,10 @@ mod tests {
         assert_eq!(h.core.password_archive.as_deref(), Some(path.as_path()));
 
         // A wrong attempt (a user-entered password) re-prompts with the inline error.
-        h.finish_archive_open(
-            (Err(ArchiveOpenError::PasswordRequired), None),
-            Some(SecretString::new("wrong")),
-            path.clone(),
-        );
+        h.apply_archive_outcome(pb_app_core::archive_open::ArchiveOutcome::NeedPassword {
+            path: path.clone(),
+            wrong: true,
+        });
         let effects = drain(&mut h);
         assert!(has_dialog(&effects, "password"));
         assert!(
@@ -5781,7 +5637,7 @@ mod tests {
         let mut effects = Vec::new();
         let mut settled = false;
         for _ in 0..400 {
-            if h.archive_load.is_none() {
+            if h.core.archive_load.is_none() {
                 settled = true;
                 break;
             }
