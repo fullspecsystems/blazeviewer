@@ -9,7 +9,10 @@
 //! - **Priority + dedup:** the current image jumps the queue; an item already
 //!   queued or in-flight *for the same purpose* is never decoded twice.
 //! - **Cancellation:** `set_targets` flags jobs no longer wanted; queued ones are
-//!   dropped and an in-flight one's result is discarded when it finishes.
+//!   dropped and an in-flight one's result is discarded when it finishes. Staleness
+//!   is per-[`Validity`] domain (#119): a content-generation change kills everything,
+//!   a geometry-epoch change kills only decode-to-fit work — Originals, thumbs, and
+//!   poster walks survive a resize/fullscreen toggle.
 //! - **Byte-budget backpressure:** workers park rather than decode further ahead
 //!   than the uploader can drain, so memory stays bounded no matter how deep the
 //!   prefetch window is (worker count is capped too — see `recommended_workers`).
@@ -24,7 +27,7 @@
 //!   `max(1, workers - 2)` concurrent, so a display job always finds a free worker.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
@@ -43,12 +46,36 @@ pub enum Purpose {
     Thumb,
     /// A poster-selection walk (task #114): the ONE scored walk per movie that
     /// chooses the poster frame and cuts every consumer's artifact from it.
-    /// Geometry-NEUTRAL — keyed by content generation, exempt from the epoch
-    /// cancel in [`DecodePool::set_targets`] (a resize must not kill a
-    /// multi-second walk whose choice is viewport-independent) — and
-    /// class-mutable (thumb-cap occupancy until display demand joins; see
-    /// `Want::poster_select`).
+    /// Geometry-NEUTRAL ([`Validity::Content`]) and class-mutable (thumb-cap
+    /// occupancy until display demand joins; see `Want::poster_select`).
     PosterSelect,
+}
+
+/// The staleness domain of a decode job — **what invalidates its result** (task #119, the
+/// one staleness law). Declared per work kind by [`validity`], enforced everywhere staleness
+/// is judged: the [`DecodePool::set_targets`] cancel arms, the core's ingestion/staging,
+/// ring-rebuild retention, and the drain admit gate. A resize must never kill or discard
+/// viewport-independent work (the fullscreen-toggle storm, task #119); a deck change kills
+/// everything.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Validity {
+    /// Depends on the viewport: stale when the geometry epoch moves OR the deck changes
+    /// (a decode-to-fit `Fit` — its pixels are sized to a specific viewport).
+    Geometry,
+    /// Depends only on the content: stale only when the deck (content generation) changes
+    /// (an `Original`'s native pixels, a fixed-box thumb, a poster-selection choice).
+    Content,
+}
+
+/// The one place a work kind's staleness domain is declared. Exhaustive on purpose — a new
+/// [`Purpose`] or `RepKind` does not compile until someone decides what invalidates it.
+pub fn validity(purpose: Purpose, rep: pb_core::RepKind) -> Validity {
+    match (purpose, rep) {
+        (Purpose::Display, pb_core::RepKind::Fit) => Validity::Geometry,
+        (Purpose::Display, pb_core::RepKind::Original) => Validity::Content,
+        (Purpose::Thumb, _) => Validity::Content,
+        (Purpose::PosterSelect, _) => Validity::Content,
+    }
 }
 
 /// The injected decode step (resolves the item's bytes from the source, then
@@ -74,16 +101,23 @@ pub type DecodeFn = dyn Fn(
     + Sync;
 
 /// Identifies a unit of decode work: which item, for which consumer, at which
-/// geometry epoch, in which representation. The epoch rides back on the [`Outcome`]
-/// so the main thread can discard a result decoded for a stale geometry (after a
-/// resize / fit toggle); the purpose routes the result to its consumer (ring vs
-/// thumb cache); the `rep_kind` (#106.7 §5) keeps a full-res `Original` want and a
-/// decode-to-`Fit` want for the *same* item from deduping each other away — the
-/// parked full-res tier requests the Original alongside the on-screen Fit.
+/// geometry epoch and content generation, in which representation. Both generations
+/// ride back on the [`Outcome`] so the main thread can judge staleness by the job's
+/// [`Validity`] domain (#119): a `Fit` decoded for a stale geometry is discarded; an
+/// `Original`/thumb/selection is discarded only when the *deck* changed. The purpose
+/// routes the result to its consumer (ring vs thumb cache); the `rep_kind` (#106.7 §5)
+/// keeps a full-res `Original` want and a decode-to-`Fit` want for the *same* item from
+/// deduping each other away — the parked full-res tier requests the Original alongside
+/// the on-screen Fit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct DecodeKey {
     pub item: usize,
+    /// The geometry epoch at enqueue. Meaningful for [`Validity::Geometry`] staleness;
+    /// informational for `Content` jobs (their fitted artifacts carry their own tag).
     pub epoch: u64,
+    /// The content generation at enqueue — the deck identity (#109.3). Every job carries
+    /// it; `Content` jobs are judged by it alone.
+    pub content_gen: u64,
     pub purpose: Purpose,
     pub rep_kind: pb_core::RepKind,
 }
@@ -106,10 +140,6 @@ pub struct Want {
     pub fit: Option<FitBox>,
     pub preview: bool,
     pub purpose: Purpose,
-    /// [`Purpose::PosterSelect`] only: the CONTENT generation this selection is
-    /// for (its `DecodeKey.epoch` — selections are deck-scoped, not
-    /// geometry-scoped). Ignored for other purposes.
-    pub sel_gen: u64,
     /// [`Purpose::PosterSelect`] only: whether display demand exists. `false` =
     /// thumb-only, scheduled under the thumb occupancy cap; `true` = display
     /// class. Mutating this across `set_targets` calls PROMOTES a queued
@@ -142,7 +172,6 @@ impl Want {
             fit,
             preview,
             purpose: Purpose::Display,
-            sel_gen: 0,
             display_class: true,
             replay: None,
             native_class: false,
@@ -157,7 +186,6 @@ impl Want {
             fit: Some(fit),
             preview: true,
             purpose: Purpose::Thumb,
-            sel_gen: 0,
             display_class: false,
             replay: None,
             native_class: false,
@@ -167,18 +195,15 @@ impl Want {
     /// A poster-selection walk (task #114). `fit` is the display fit the Fit
     /// artifact should be cut for (the pool tags that artifact with the geometry
     /// epoch at enqueue — it alone goes stale on resize; the choice does not).
-    pub fn poster_select(
-        item: usize,
-        fit: Option<FitBox>,
-        content_gen: u64,
-        display_class: bool,
-    ) -> Want {
+    /// The content generation it belongs to is the batch's `set_targets`
+    /// `content_gen` — a selection is deck-scoped like every `Content` job (#119
+    /// retired the per-want `sel_gen` smuggling).
+    pub fn poster_select(item: usize, fit: Option<FitBox>, display_class: bool) -> Want {
         Want {
             item,
             fit,
             preview: false,
             purpose: Purpose::PosterSelect,
-            sel_gen: content_gen,
             display_class,
             replay: None,
             native_class: false,
@@ -255,6 +280,7 @@ impl Outcome {
     pub fn synthetic(
         item: usize,
         epoch: u64,
+        content_gen: u64,
         rep_kind: pb_core::RepKind,
         result: Result<DecodedImage, DecodeError>,
     ) -> Self {
@@ -262,6 +288,7 @@ impl Outcome {
             key: DecodeKey {
                 item,
                 epoch,
+                content_gen,
                 purpose: Purpose::Display,
                 rep_kind,
             },
@@ -287,7 +314,10 @@ impl Outcome {
         rep_kind: pb_core::RepKind,
         result: Result<DecodedImage, DecodeError>,
     ) -> Self {
-        let mut o = Outcome::synthetic(item, epoch, rep_kind, result);
+        // The child inherits the DONOR's content generation (Codex #119 r2): a fanned-out
+        // artifact belongs to the deck its walk ran against, never to whatever generation
+        // is current at fan-out time.
+        let mut o = Outcome::synthetic(item, epoch, donor.key.content_gen, rep_kind, result);
         o._budget = donor._budget.take();
         o
     }
@@ -304,14 +334,12 @@ impl Outcome {
         result: Result<DecodedImage, DecodeError>,
         bytes: usize,
     ) -> Self {
-        let mut o = Outcome::synthetic(item, epoch, rep_kind, result);
+        // Content generation from the donor, like `synthetic_from` (Codex #119 r2).
+        let mut o = Outcome::synthetic(item, epoch, donor.key.content_gen, rep_kind, result);
         if let Some(g) = donor._budget.as_mut() {
             let carved = bytes.min(g.bytes);
             g.bytes -= carved;
-            o._budget = Some(BudgetGuard {
-                shared: g.shared.clone(),
-                bytes: carved,
-            });
+            o._budget = Some(BudgetGuard::new(g.shared.clone(), carved));
         }
         o
     }
@@ -324,8 +352,9 @@ impl Outcome {
     }
 
     /// A pool-less poster-selection outcome (task #114) for drain-routing tests:
-    /// `gen` is the content generation (the selection's `key.epoch`),
-    /// `fit_tag_epoch` the geometry epoch its Fit artifact was cut for.
+    /// `gen` is the content generation (`key.content_gen` since #119 retired the
+    /// epoch smuggling), `fit_tag_epoch` the geometry epoch its Fit artifact was
+    /// cut for (also stamped as `key.epoch`, the enqueue-time geometry).
     pub fn synthetic_selection(
         item: usize,
         gen: u64,
@@ -336,7 +365,8 @@ impl Outcome {
         Outcome {
             key: DecodeKey {
                 item,
-                epoch: gen,
+                epoch: fit_tag_epoch,
+                content_gen: gen,
                 purpose: Purpose::PosterSelect,
                 rep_kind: pb_core::RepKind::Fit,
             },
@@ -363,8 +393,21 @@ struct BudgetGuard {
     bytes: usize,
 }
 
+impl BudgetGuard {
+    /// Every live guard counts one **outstanding** outcome (#119, Codex r2 h1): ordinary
+    /// jobs untrack BEFORE their outcome is sent, so `queue`/`tracked` can both be empty
+    /// while a result sits undrained in the channel — `outstanding` is what keeps
+    /// [`DecodePool::has_work`] (and with it the host pump) honest across that handoff.
+    /// Counted even at `bytes == 0` (decode errors charge nothing but still need draining).
+    fn new(shared: Arc<Shared>, bytes: usize) -> Self {
+        shared.outstanding.fetch_add(1, Ordering::AcqRel);
+        BudgetGuard { shared, bytes }
+    }
+}
+
 impl Drop for BudgetGuard {
     fn drop(&mut self) {
+        self.shared.outstanding.fetch_sub(1, Ordering::AcqRel);
         if self.bytes == 0 {
             return;
         }
@@ -403,13 +446,13 @@ struct Job {
     native_class: bool,
 }
 
-/// A tracked (queued or in-flight) job's dedup entry: the cancel flag plus the
-/// job's `key.epoch` (geometry epoch, or content generation for selections) so
-/// `set_targets` can cancel a stale-generation selection whose replacement wants
-/// the same identity (in-flight jobs aren't visible in `queue`).
+/// A tracked (queued or in-flight) job's dedup entry: the cancel flag plus the job's
+/// **content generation** (#119 — every purpose, not just selections), so `set_targets`
+/// can cancel a stale-deck job whose replacement wants the same identity (in-flight jobs
+/// aren't visible in `queue`). This is what closes the cross-deck dedup hole (#109.3).
 struct TrackedEntry {
     flag: Arc<AtomicBool>,
-    gen: u64,
+    content_gen: u64,
 }
 
 struct Inner {
@@ -425,6 +468,9 @@ struct Inner {
     /// Native-class selections currently decoding (the phase-2 RAM permit).
     native_inflight: usize,
     epoch: u64,
+    /// The content generation of the last `set_targets` (#119): moving it cancels
+    /// EVERYTHING (both validity domains die with the deck).
+    content_gen: u64,
     shutdown: bool,
 }
 
@@ -442,6 +488,9 @@ struct Shared {
     /// Max concurrent thumb-purpose decodes: `max(1, workers - 2)`, so display
     /// jobs always find a free worker (the anti-inversion guard, task #83).
     thumb_cap: usize,
+    /// Sent-but-not-yet-dropped outcomes (#119, Codex r2 h1) — see [`BudgetGuard::new`].
+    /// Read lock-free by [`DecodePool::has_work`].
+    outstanding: AtomicUsize,
 }
 
 /// The injected poster-selection step (task #114): run the scored walk for
@@ -510,6 +559,7 @@ impl DecodePool {
                 thumb_inflight: 0,
                 native_inflight: 0,
                 epoch: 0,
+                content_gen: 0,
                 shutdown: false,
             }),
             cv: Condvar::new(),
@@ -518,6 +568,7 @@ impl DecodePool {
             results_tx,
             byte_budget: byte_budget.max(1),
             thumb_cap: workers.saturating_sub(2).max(1),
+            outstanding: AtomicUsize::new(0),
         });
         let workers = (0..workers)
             .map(|_| {
@@ -529,66 +580,90 @@ impl DecodePool {
     }
 
     /// Replace the want-set with `prioritized` (highest priority first), at
-    /// `epoch`. Cancels jobs no longer wanted, re-prioritizes queued ones, and
-    /// enqueues newly-wanted items. An epoch change cancels everything stale.
-    /// Identity is `(item, purpose)`: a thumb want and a display want for the
-    /// same item coexist, and dropping one never cancels the other.
-    pub fn set_targets(&self, epoch: u64, source: &Arc<dyn ItemSource>, prioritized: &[Want]) {
+    /// `epoch`/`content_gen`. Cancels jobs no longer wanted, re-prioritizes queued
+    /// ones, and enqueues newly-wanted items. Staleness is per-[`Validity`] domain
+    /// (#119): a content-generation change cancels **everything**; a geometry-epoch
+    /// change cancels only `Validity::Geometry` jobs — an in-flight Original, thumb
+    /// fill, or poster walk survives a resize/fullscreen toggle (the toggle storm).
+    /// Identity is `(item, purpose, rep_kind)`: a thumb want and a display want for
+    /// the same item coexist, and dropping one never cancels the other.
+    pub fn set_targets(
+        &self,
+        epoch: u64,
+        content_gen: u64,
+        source: &Arc<dyn ItemSource>,
+        prioritized: &[Want],
+    ) {
         let mut inner = self.shared.inner.lock().unwrap();
 
-        if epoch != inner.epoch {
-            // Geometry changed: every queued/in-flight job is for the old size —
-            // EXCEPT poster selections (task #114): a selection's choice is
-            // viewport-independent and keyed by content generation, so a resize
-            // must not kill a multi-second walk. Its Fit ARTIFACT carries its own
-            // staleness tag (`fit_tag_epoch`) instead.
+        if content_gen != inner.content_gen {
+            // Deck changed: index N names different pixels — every job in every
+            // validity domain is for the old deck. Kill it all.
+            for entry in inner.tracked.values() {
+                entry.flag.store(true, Ordering::Release);
+            }
+            inner.queue.clear();
+            inner.tracked.clear();
+            inner.content_gen = content_gen;
+            inner.epoch = epoch;
+        } else if epoch != inner.epoch {
+            // Geometry changed: only `Validity::Geometry` work (decode-to-fit) is
+            // for the old size. Content-domain jobs — Originals, thumbs, poster
+            // selections — are viewport-independent and MUST survive: killing the
+            // parked Original here was the #119 fullscreen-toggle storm (every F
+            // press restarted a multi-hundred-ms native decode from zero). A
+            // selection's Fit ARTIFACT carries its own staleness tag
+            // (`fit_tag_epoch`) instead.
             for (key, entry) in inner.tracked.iter() {
-                if key.1 != Purpose::PosterSelect {
+                if validity(key.1, key.2) == Validity::Geometry {
                     entry.flag.store(true, Ordering::Release);
                 }
             }
             inner
                 .queue
-                .retain(|j| j.key.purpose == Purpose::PosterSelect);
+                .retain(|j| validity(j.key.purpose, j.key.rep_kind) == Validity::Content);
             inner
                 .tracked
-                .retain(|key, _| key.1 == Purpose::PosterSelect);
+                .retain(|key, _| validity(key.1, key.2) == Validity::Content);
             inner.epoch = epoch;
         }
 
         // Want lookup: priority + the want itself, LAST duplicate wins (the
         // preview/full pair for one item shares an identity; parity with the old
-        // collect() behavior). A selection want also carries its content
-        // generation: a tracked selection from the previous deck must be
-        // cancelled and replaced, never deduped against.
+        // collect() behavior).
         let mut wanted: HashMap<(usize, Purpose, pb_core::RepKind), (u32, &Want)> =
             HashMap::with_capacity(prioritized.len());
         for (i, w) in prioritized.iter().enumerate() {
             wanted.insert(want_key(w), (i as u32, w));
         }
-        let gen_ok = |key: &(usize, Purpose, pb_core::RepKind), gen: u64| match wanted.get(key) {
-            Some((_, w)) if key.1 == Purpose::PosterSelect => w.sel_gen == gen,
-            Some(_) => true,
-            None => false,
+        // A tracked job is still good only if it's wanted AND from the current deck
+        // (#109.3: a stale-deck in-flight job must be cancelled and replaced, never
+        // deduped against — uniformly, not just for selections).
+        let gen_ok = |key: &(usize, Purpose, pb_core::RepKind), gen: u64| {
+            wanted.contains_key(key) && gen == content_gen
         };
 
-        // Cancel anything no longer wanted (or wanted at a different selection
-        // generation); drop those still queued.
+        // Cancel anything no longer wanted (or from a stale deck); drop those
+        // still queued.
         for (key, entry) in inner.tracked.iter() {
-            if !gen_ok(key, entry.gen) {
+            if !gen_ok(key, entry.content_gen) {
                 entry.flag.store(true, Ordering::Release);
             }
         }
-        inner
-            .queue
-            .retain(|j| gen_ok(&(j.key.item, j.key.purpose, j.key.rep_kind), j.key.epoch));
+        inner.queue.retain(|j| {
+            gen_ok(
+                &(j.key.item, j.key.purpose, j.key.rep_kind),
+                j.key.content_gen,
+            )
+        });
         let live: std::collections::HashSet<(usize, Purpose, pb_core::RepKind)> = inner
             .queue
             .iter()
             .map(|j| (j.key.item, j.key.purpose, j.key.rep_kind))
             .collect();
         inner.tracked.retain(|key, entry| {
-            gen_ok(key, entry.gen) && (live.contains(key) || !entry.flag.load(Ordering::Acquire))
+            gen_ok(key, entry.content_gen)
+                && (live.contains(key) || !entry.flag.load(Ordering::Acquire))
         });
 
         // Re-prioritize jobs still queued. A queued selection also refreshes its
@@ -616,19 +691,14 @@ impl DecodePool {
             }
         }
 
-        // Enqueue newly-wanted items (dedup against queued + in-flight; a
-        // selection dedups only against its own generation).
+        // Enqueue newly-wanted items (dedup against queued + in-flight, same-deck
+        // only — a surviving stale-deck entry never blocks its replacement).
         for w in prioritized {
             let key = want_key(w);
-            let job_gen = if w.purpose == Purpose::PosterSelect {
-                w.sel_gen
-            } else {
-                epoch
-            };
             if inner
                 .tracked
                 .get(&key)
-                .is_some_and(|e| key.1 != Purpose::PosterSelect || e.gen == job_gen)
+                .is_some_and(|e| e.content_gen == content_gen)
             {
                 continue;
             }
@@ -637,14 +707,15 @@ impl DecodePool {
                 key,
                 TrackedEntry {
                     flag: flag.clone(),
-                    gen: job_gen,
+                    content_gen,
                 },
             );
             let prio = wanted[&key].0;
             inner.queue.push(Job {
                 key: DecodeKey {
                     item: w.item,
-                    epoch: job_gen,
+                    epoch,
+                    content_gen,
                     purpose: w.purpose,
                     rep_kind: key.2,
                 },
@@ -662,6 +733,27 @@ impl DecodePool {
 
         drop(inner);
         self.shared.cv.notify_all();
+    }
+
+    /// Whether the pool holds ANY live work the host pump must stay awake for:
+    /// queued jobs, in-flight jobs, or sent-but-undrained outcomes (#119, Codex r2
+    /// h1 — ordinary jobs untrack BEFORE the send, so `outstanding` is the only
+    /// witness of a result sitting in the channel). Cheap: one lock-free load on
+    /// the common busy path, one uncontended lock when idle.
+    pub fn has_work(&self) -> bool {
+        if self.shared.outstanding.load(Ordering::Acquire) > 0 {
+            return true;
+        }
+        let inner = self.shared.inner.lock().unwrap();
+        !inner.queue.is_empty() || !inner.tracked.is_empty()
+    }
+
+    /// TEST ONLY: a clone of the results-channel sender, so core tests can place an
+    /// outcome in the REAL channel (pinning receiver-ingestion ordering, Codex #119 r2)
+    /// instead of hand-inserting into `pending_uploads`.
+    #[cfg(test)]
+    pub(crate) fn test_sender(&self) -> Sender<Outcome> {
+        self.shared.results_tx.clone()
     }
 }
 
@@ -757,23 +849,27 @@ fn worker_loop(shared: Arc<Shared>) {
         // where a prefetch pass sees no tracked job while the payload sits
         // undrained in the channel — and starts a second full walk.
         let is_selection = job.key.purpose == Purpose::PosterSelect;
-        {
+        let budget = {
             let mut inner = shared.inner.lock().unwrap();
-            if !is_selection {
-                untrack(&mut inner, &job);
-            }
             release_thumb_slot(&mut inner, took_thumb_slot);
             release_native_slot(&mut inner, took_native_slot);
             if job.cancel.load(Ordering::Acquire) {
-                if is_selection {
-                    untrack(&mut inner, &job);
-                }
+                untrack(&mut inner, &job);
                 drop(inner);
                 shared.cv.notify_all();
                 continue;
             }
+            // The guard (and with it `outstanding`) is created BEFORE the untrack
+            // (#119 diff review, Codex bug 2): at every instant either `tracked` or
+            // `outstanding` witnesses this result, so `has_work` can never read
+            // all-empty while the outcome is between untrack and drain.
+            let budget = BudgetGuard::new(shared.clone(), bytes);
             inner.inflight_bytes += bytes;
-        }
+            if !is_selection {
+                untrack(&mut inner, &job);
+            }
+            budget
+        };
         // A freed thumb/native slot may unblock a parked worker even while the
         // byte budget is unchanged.
         if took_thumb_slot || took_native_slot {
@@ -787,10 +883,7 @@ fn worker_loop(shared: Arc<Shared>) {
             fit_tag_epoch: job.fit_tag_epoch,
             fit_tag: job.fit,
             preview: job.preview,
-            _budget: Some(BudgetGuard {
-                shared: shared.clone(),
-                bytes,
-            }),
+            _budget: Some(budget),
         };
         if shared.results_tx.send(outcome).is_err() {
             return; // receiver gone; the guard frees the bytes as it drops
@@ -867,6 +960,9 @@ mod tests {
     use std::sync::Mutex as StdMutex;
     use std::time::Duration;
 
+    /// The fixed content generation for tests that never change decks.
+    const CG: u64 = 1;
+
     /// A stand-in source for the pool tests, which exercise scheduling /
     /// cancellation / budget only — the decode fns key off the item index and
     /// never touch the source's bytes.
@@ -937,6 +1033,7 @@ mod tests {
             thumb_inflight: 0,
             native_inflight: 0,
             epoch: 0,
+            content_gen: 0,
             shutdown: false,
         };
         let old = Arc::new(AtomicBool::new(false));
@@ -945,6 +1042,7 @@ mod tests {
             key: DecodeKey {
                 item: 5,
                 epoch: 0,
+                content_gen: 0,
                 purpose: Purpose::Display,
                 rep_kind: pb_core::RepKind::Original,
             },
@@ -964,7 +1062,7 @@ mod tests {
             k,
             TrackedEntry {
                 flag: new.clone(),
-                gen: 0,
+                content_gen: 0,
             },
         );
         // The old, cancelled job finishing must NOT drop the new job's entry.
@@ -980,7 +1078,7 @@ mod tests {
         let decode: Arc<DecodeFn> = Arc::new(|_s, item, _, _, _, _| Ok(image(item, 16)));
         let (pool, rx) = DecodePool::new(3, 1 << 20, decode);
         let src = source();
-        pool.set_targets(1, &src, &targets(&[0, 1, 2, 3, 4]));
+        pool.set_targets(1, CG, &src, &targets(&[0, 1, 2, 3, 4]));
         let mut got = drain_n(&rx, 5);
         got.sort();
         assert_eq!(got, vec![0, 1, 2, 3, 4]);
@@ -996,7 +1094,7 @@ mod tests {
         });
         let (pool, rx) = DecodePool::new(1, 1 << 20, decode);
         let src = source();
-        pool.set_targets(1, &src, &targets(&[0, 1, 2, 3]));
+        pool.set_targets(1, CG, &src, &targets(&[0, 1, 2, 3]));
         drain_n(&rx, 4);
         assert_eq!(*order.lock().unwrap(), vec![0, 1, 2, 3]);
     }
@@ -1018,10 +1116,10 @@ mod tests {
         });
         let (pool, rx) = DecodePool::new(1, 1 << 20, decode);
         let src = source();
-        pool.set_targets(1, &src, &targets(&[0, 1, 2, 3, 4]));
+        pool.set_targets(1, CG, &src, &targets(&[0, 1, 2, 3, 4]));
         started_rx.recv_timeout(Duration::from_secs(5)).unwrap(); // item 0 in-flight
                                                                   // Swap to a disjoint set: 0 (in-flight) + 1..4 (queued) are all cancelled.
-        pool.set_targets(1, &src, &targets(&[10, 11]));
+        pool.set_targets(1, CG, &src, &targets(&[10, 11]));
         release_tx.send(()).unwrap();
 
         let mut got = drain_n(&rx, 2);
@@ -1049,10 +1147,10 @@ mod tests {
         });
         let (pool, rx) = DecodePool::new(1, 1 << 20, decode);
         let src = source();
-        pool.set_targets(1, &src, &targets(&[0, 1, 2]));
+        pool.set_targets(1, CG, &src, &targets(&[0, 1, 2]));
         started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
         // Re-request the same set while 0 is in-flight and 1,2 are queued.
-        pool.set_targets(1, &src, &targets(&[0, 1, 2]));
+        pool.set_targets(1, CG, &src, &targets(&[0, 1, 2]));
         release_tx.send(()).unwrap();
         drain_n(&rx, 3);
         assert_eq!(*count.lock().unwrap(), 3, "each item decoded exactly once");
@@ -1063,9 +1161,10 @@ mod tests {
         let decode: Arc<DecodeFn> = Arc::new(|_s, item, _, _, _, _| Ok(image(item, 16)));
         let (pool, rx) = DecodePool::new(2, 1 << 20, decode);
         let src = source();
-        pool.set_targets(7, &src, &targets(&[0]));
+        pool.set_targets(7, CG, &src, &targets(&[0]));
         let o = rx.recv_timeout(Duration::from_secs(5)).unwrap();
         assert_eq!(o.key.epoch, 7);
+        assert_eq!(o.key.content_gen, CG, "the deck identity rides the outcome");
     }
 
     fn selection_output(item: usize) -> pb_decode::PosterSelection {
@@ -1089,13 +1188,14 @@ mod tests {
         let select: Arc<SelectFn> = Arc::new(|_s, item, _, _, _, _| Ok(selection_output(item)));
         let (pool, rx) = DecodePool::new_with_select(2, 1 << 20, decode, select);
         let src = source();
-        pool.set_targets(7, &src, &[Want::poster_select(3, None, 42, true)]);
+        pool.set_targets(7, 42, &src, &[Want::poster_select(3, None, true)]);
         let o = rx.recv_timeout(Duration::from_secs(5)).unwrap();
         assert_eq!(o.key.purpose, Purpose::PosterSelect);
         assert_eq!(
-            o.key.epoch, 42,
-            "a selection's key carries the CONTENT generation"
+            o.key.content_gen, 42,
+            "a selection's key carries the content generation (real field since #119)"
         );
+        assert_eq!(o.key.epoch, 7, "and the enqueue-time geometry epoch");
         assert_eq!(
             o.fit_tag_epoch, 7,
             "the Fit artifact is tagged with the geometry epoch"
@@ -1131,15 +1231,17 @@ mod tests {
         let src = source();
         pool.set_targets(
             1,
+            CG,
             &src,
             &[
-                Want::poster_select(5, None, 1, true),
-                Want::display(9, None, false),
+                Want::poster_select(5, None, true),
+                Want::display(9, Some(thumb_box()), false),
             ],
         );
         started_rx.recv_timeout(Duration::from_secs(5)).unwrap(); // walk in flight
-                                                                  // Resize: new epoch, selection re-emitted (level-triggered), item 9 gone.
-        pool.set_targets(2, &src, &[Want::poster_select(5, None, 1, true)]);
+                                                                  // Resize: new epoch, selection re-emitted (level-triggered), item 9 gone
+                                                                  // (a decode-to-fit job — Geometry validity — AND no longer wanted).
+        pool.set_targets(2, CG, &src, &[Want::poster_select(5, None, true)]);
         release_tx.send(()).unwrap();
         let o = rx.recv_timeout(Duration::from_secs(5)).unwrap();
         assert_eq!(o.key.purpose, Purpose::PosterSelect, "the walk survived");
@@ -1163,9 +1265,9 @@ mod tests {
         });
         let (pool, rx) = DecodePool::new_with_select(1, 1 << 20, decode, select);
         let src = source();
-        pool.set_targets(1, &src, &[Want::poster_select(5, None, 1, true)]);
+        pool.set_targets(1, CG, &src, &[Want::poster_select(5, None, true)]);
         started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
-        pool.set_targets(1, &src, &targets(&[9])); // selection absent -> cancelled
+        pool.set_targets(1, CG, &src, &targets(&[9])); // selection absent -> cancelled
         release_tx.send(()).unwrap();
         let o = rx.recv_timeout(Duration::from_secs(5)).unwrap();
         assert_eq!(o.key.item, 9, "only the live display job delivers");
@@ -1193,12 +1295,15 @@ mod tests {
         });
         let (pool, rx) = DecodePool::new_with_select(1, 1 << 20, decode, select);
         let src = source();
-        pool.set_targets(1, &src, &[Want::poster_select(5, None, 1, true)]);
+        pool.set_targets(1, 1, &src, &[Want::poster_select(5, None, true)]);
         started_rx.recv_timeout(Duration::from_secs(5)).unwrap(); // gen-1 walk in flight
-        pool.set_targets(1, &src, &[Want::poster_select(5, None, 2, true)]); // new deck
+        pool.set_targets(1, 2, &src, &[Want::poster_select(5, None, true)]); // new deck
         release_tx.send(()).unwrap();
         let o = rx.recv_timeout(Duration::from_secs(5)).unwrap();
-        assert_eq!(o.key.epoch, 2, "only the new generation's payload delivers");
+        assert_eq!(
+            o.key.content_gen, 2,
+            "only the new generation's payload delivers"
+        );
         assert!(rx.recv_timeout(Duration::from_millis(200)).is_err());
         assert_eq!(
             *count.lock().unwrap(),
@@ -1226,13 +1331,13 @@ mod tests {
         let (pool, rx) = DecodePool::new_with_select(3, 1 << 20, decode, select);
         let src = source();
         let thumb = Want::thumb(0, thumb_box());
-        pool.set_targets(1, &src, &[thumb, Want::poster_select(5, None, 1, false)]);
+        pool.set_targets(1, CG, &src, &[thumb, Want::poster_select(5, None, false)]);
         started_rx.recv_timeout(Duration::from_secs(5)).unwrap(); // cap (1) is full
         assert!(
             rx.recv_timeout(Duration::from_millis(200)).is_err(),
             "a thumb-only selection is parked behind the thumb cap"
         );
-        pool.set_targets(1, &src, &[thumb, Want::poster_select(5, None, 1, true)]);
+        pool.set_targets(1, CG, &src, &[thumb, Want::poster_select(5, None, true)]);
         let o = rx.recv_timeout(Duration::from_secs(5)).unwrap();
         assert_eq!(
             o.key.purpose,
@@ -1260,9 +1365,10 @@ mod tests {
         });
         let (pool, rx) = DecodePool::new_with_select(4, 1 << 20, decode, select);
         let src = source();
-        let native = |i| Want::poster_select(i, None, 1, true).with_native_class(true);
+        let native = |i| Want::poster_select(i, None, true).with_native_class(true);
         pool.set_targets(
             1,
+            CG,
             &src,
             &[
                 native(1),
@@ -1293,7 +1399,7 @@ mod tests {
         let decode: Arc<DecodeFn> = Arc::new(|_s, item, _, _, _, _| Ok(image(item, 256)));
         let (pool, rx) = DecodePool::new(3, 300, decode); // ~1 image of headroom
         let src = source();
-        pool.set_targets(1, &src, &targets(&[0, 1, 2, 3, 4, 5]));
+        pool.set_targets(1, CG, &src, &targets(&[0, 1, 2, 3, 4, 5]));
         let mut got = Vec::new();
         for _ in 0..6 {
             let o = rx.recv_timeout(Duration::from_secs(5)).expect("delivered");
@@ -1319,7 +1425,7 @@ mod tests {
         let src = source();
         let mut wants = targets(&[7]);
         wants.push(Want::thumb(7, thumb_box()));
-        pool.set_targets(1, &src, &wants);
+        pool.set_targets(1, CG, &src, &wants);
         let got = drain_n(&rx, 2);
         assert_eq!(got, vec![7, 7], "both jobs for item 7 ran");
         let mut p = purposes.lock().unwrap().clone();
@@ -1347,14 +1453,14 @@ mod tests {
         });
         let (pool, rx) = DecodePool::new(1, 1 << 20, decode);
         let src = source();
-        pool.set_targets(1, &src, &targets(&[0, 1, 2]));
+        pool.set_targets(1, CG, &src, &targets(&[0, 1, 2]));
         started_rx.recv_timeout(Duration::from_secs(5)).unwrap(); // 0 in-flight
                                                                   // Re-issue the same display wants PLUS thumb wants — the display jobs
                                                                   // (queued and in-flight) must be untouched: no cancellation, no re-decode.
         let mut wants = targets(&[0, 1, 2]);
         wants.push(Want::thumb(1, thumb_box()));
         wants.push(Want::thumb(2, thumb_box()));
-        pool.set_targets(1, &src, &wants);
+        pool.set_targets(1, CG, &src, &wants);
         release_tx.send(()).unwrap();
         drain_n(&rx, 5); // 3 display + 2 thumb
         assert_eq!(
@@ -1374,9 +1480,9 @@ mod tests {
         let src = source();
         let mut wants = targets(&[0, 1]);
         wants.push(Want::thumb(5, thumb_box()));
-        pool.set_targets(1, &src, &wants);
+        pool.set_targets(1, CG, &src, &wants);
         // Immediately drop the thumb want (e.g. the panel closed).
-        pool.set_targets(1, &src, &targets(&[0, 1]));
+        pool.set_targets(1, CG, &src, &targets(&[0, 1]));
         let mut got = drain_n(&rx, 2);
         got.sort();
         assert_eq!(got, vec![0, 1], "display outcomes still delivered");
@@ -1408,7 +1514,7 @@ mod tests {
             Want::thumb(11, thumb_box()),
             Want::thumb(12, thumb_box()),
         ];
-        pool.set_targets(1, &src, &wants);
+        pool.set_targets(1, CG, &src, &wants);
         std::thread::sleep(Duration::from_millis(150));
         {
             let s = started.lock().unwrap();
@@ -1419,7 +1525,7 @@ mod tests {
         // in real composition — order here puts displays first as AppCore does).
         let mut wants2 = targets(&[0, 1]);
         wants2.extend(wants);
-        pool.set_targets(1, &src, &wants2);
+        pool.set_targets(1, CG, &src, &wants2);
         std::thread::sleep(Duration::from_millis(150));
         {
             let s = started.lock().unwrap();
@@ -1437,6 +1543,264 @@ mod tests {
         drain_n(&rx, 5);
     }
 
+    // ---- #119: validity domains (one staleness law) ----
+
+    #[test]
+    fn synthetic_children_inherit_the_donor_content_generation() {
+        // Codex #119 r2: a fanned-out artifact belongs to the deck its walk ran
+        // against — stamping fan-out-time "current" would let a cross-deck artifact
+        // pass the content gate.
+        let mut donor = Outcome::synthetic(3, 9, 42, pb_core::RepKind::Fit, Ok(image(3, 16)));
+        let from =
+            Outcome::synthetic_from(&mut donor, 3, 11, pb_core::RepKind::Fit, Ok(image(3, 16)));
+        assert_eq!(
+            from.key.content_gen, 42,
+            "synthetic_from inherits the donor's deck"
+        );
+        let mut donor2 = Outcome::synthetic(4, 9, 7, pb_core::RepKind::Fit, Ok(image(4, 16)));
+        let carved = Outcome::synthetic_carved(
+            &mut donor2,
+            4,
+            11,
+            pb_core::RepKind::Original,
+            Ok(image(4, 8)),
+            8,
+        );
+        assert_eq!(
+            carved.key.content_gen, 7,
+            "synthetic_carved inherits the donor's deck"
+        );
+    }
+
+    #[test]
+    fn an_epoch_change_kills_fit_jobs_but_content_jobs_survive() {
+        // 1 worker; the first decode (a Fit) blocks, so the epoch change lands while a
+        // second Fit, an Original, and a thumb sit queued behind it. The Fits must die
+        // with the epoch (wrong size); the Original and the thumb must survive
+        // untouched — killing them was the #119 fullscreen-toggle storm.
+        let counts = Arc::new(StdMutex::new(std::collections::HashMap::<
+            (usize, Purpose),
+            usize,
+        >::new()));
+        let (started_tx, started_rx) = channel::<()>();
+        let (release_tx, release_rx) = channel::<()>();
+        let gate = Arc::new(AtomicBool::new(true));
+        let release_rx = StdMutex::new(release_rx);
+        let c = counts.clone();
+        let decode: Arc<DecodeFn> = Arc::new(move |_s, item, _, _, purpose, _| {
+            *c.lock().unwrap().entry((item, purpose)).or_insert(0) += 1;
+            if gate.swap(false, Ordering::SeqCst) {
+                started_tx.send(()).unwrap();
+                release_rx.lock().unwrap().recv().unwrap();
+            }
+            Ok(image(item, 16))
+        });
+        let (pool, rx) = DecodePool::new(1, 1 << 20, decode);
+        let src = source();
+        let wants = vec![
+            Want::display(0, Some(thumb_box()), false), // Fit — blocks in-flight
+            Want::display(1, Some(thumb_box()), false), // Fit — queued
+            Want::display(2, None, false),              // Original — queued
+            Want::thumb(3, thumb_box()),                // Thumb — queued
+        ];
+        pool.set_targets(1, CG, &src, &wants);
+        started_rx.recv_timeout(Duration::from_secs(5)).unwrap(); // Fit 0 in flight
+        pool.set_targets(2, CG, &src, &wants); // the fullscreen toggle
+        release_tx.send(()).unwrap();
+        let mut got = drain_n(&rx, 4);
+        got.sort();
+        assert_eq!(got, vec![0, 1, 2, 3]);
+        assert!(rx.recv_timeout(Duration::from_millis(200)).is_err());
+        let c = counts.lock().unwrap();
+        assert_eq!(
+            c[&(0, Purpose::Display)],
+            2,
+            "in-flight Fit killed + redecoded"
+        );
+        assert_eq!(
+            c[&(1, Purpose::Display)],
+            1,
+            "queued Fit re-enqueued, decoded once"
+        );
+        assert_eq!(
+            c[&(2, Purpose::Display)],
+            1,
+            "the Original SURVIVED — never restarted"
+        );
+        assert_eq!(
+            c[&(3, Purpose::Thumb)],
+            1,
+            "the thumb SURVIVED — never restarted"
+        );
+    }
+
+    #[test]
+    fn a_surviving_original_outcome_carries_its_stale_epoch_and_current_gen() {
+        // The survivor's outcome still says which epoch it was enqueued at (stale) and
+        // which deck it belongs to (current) — the drain judges it by the latter (#119).
+        let (started_tx, started_rx) = channel::<()>();
+        let (release_tx, release_rx) = channel::<()>();
+        let release_rx = StdMutex::new(release_rx);
+        let decode: Arc<DecodeFn> = Arc::new(move |_s, item, _, _, _, _| {
+            if item == 0 {
+                started_tx.send(()).unwrap();
+                release_rx.lock().unwrap().recv().unwrap();
+            }
+            Ok(image(item, 16))
+        });
+        let (pool, rx) = DecodePool::new(1, 1 << 20, decode);
+        let src = source();
+        pool.set_targets(1, CG, &src, &[Want::display(0, None, false)]);
+        started_rx.recv_timeout(Duration::from_secs(5)).unwrap(); // Original in flight
+        pool.set_targets(2, CG, &src, &[Want::display(0, None, false)]); // resize
+        release_tx.send(()).unwrap();
+        let o = rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert_eq!(o.key.epoch, 1, "enqueued under the old epoch");
+        assert_eq!(o.key.content_gen, CG, "same deck — the drain admits it");
+        assert!(
+            rx.recv_timeout(Duration::from_millis(200)).is_err(),
+            "one decode total: the survivor was never cancelled or duplicated"
+        );
+    }
+
+    #[test]
+    fn a_content_change_kills_every_domain() {
+        // Same epoch, new content generation: Original + thumb + Fit all die — a deck
+        // change invalidates both validity domains.
+        let counts = Arc::new(StdMutex::new(0usize));
+        let (started_tx, started_rx) = channel::<()>();
+        let (release_tx, release_rx) = channel::<()>();
+        let gate = Arc::new(AtomicBool::new(true));
+        let release_rx = StdMutex::new(release_rx);
+        let c = counts.clone();
+        let decode: Arc<DecodeFn> = Arc::new(move |_s, item, _, _, _, _| {
+            *c.lock().unwrap() += 1;
+            if gate.swap(false, Ordering::SeqCst) {
+                started_tx.send(()).unwrap();
+                release_rx.lock().unwrap().recv().unwrap();
+            }
+            Ok(image(item, 16))
+        });
+        let (pool, rx) = DecodePool::new(1, 1 << 20, decode);
+        let src = source();
+        let wants = vec![
+            Want::display(0, None, false), // Original — blocks in-flight
+            Want::display(1, None, false), // Original — queued
+            Want::thumb(2, thumb_box()),   // Thumb — queued
+            Want::display(3, Some(thumb_box()), false), // Fit — queued
+        ];
+        pool.set_targets(5, 1, &src, &wants);
+        started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        pool.set_targets(5, 2, &src, &wants); // new deck, same epoch
+        release_tx.send(()).unwrap();
+        let outcomes: Vec<Outcome> = (0..4)
+            .map(|_| rx.recv_timeout(Duration::from_secs(5)).expect("delivered"))
+            .collect();
+        assert!(
+            outcomes.iter().all(|o| o.key.content_gen == 2),
+            "only new-deck outcomes deliver"
+        );
+        assert!(rx.recv_timeout(Duration::from_millis(200)).is_err());
+        assert_eq!(
+            *counts.lock().unwrap(),
+            5,
+            "4 fresh decodes + the discarded in-flight"
+        );
+    }
+
+    #[test]
+    fn a_stale_deck_in_flight_job_never_dedups_its_replacement() {
+        // #109.3, the cross-deck dedup hole: the same (item, purpose, rep) wanted under
+        // a NEW content generation must cancel-and-replace the old job, never dedup
+        // against it.
+        let counts = Arc::new(StdMutex::new(0usize));
+        let (started_tx, started_rx) = channel::<()>();
+        let (release_tx, release_rx) = channel::<()>();
+        let gate = Arc::new(AtomicBool::new(true));
+        let release_rx = StdMutex::new(release_rx);
+        let c = counts.clone();
+        let decode: Arc<DecodeFn> = Arc::new(move |_s, item, _, _, _, _| {
+            *c.lock().unwrap() += 1;
+            if gate.swap(false, Ordering::SeqCst) {
+                started_tx.send(()).unwrap();
+                release_rx.lock().unwrap().recv().unwrap();
+            }
+            Ok(image(item, 16))
+        });
+        let (pool, rx) = DecodePool::new(1, 1 << 20, decode);
+        let src = source();
+        pool.set_targets(1, 1, &src, &[Want::display(5, None, false)]);
+        started_rx.recv_timeout(Duration::from_secs(5)).unwrap(); // gen-1 job in flight
+        pool.set_targets(1, 2, &src, &[Want::display(5, None, false)]); // new deck
+        release_tx.send(()).unwrap();
+        let o = rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert_eq!(
+            o.key.content_gen, 2,
+            "only the replacement's outcome delivers"
+        );
+        assert!(rx.recv_timeout(Duration::from_millis(200)).is_err());
+        assert_eq!(
+            *counts.lock().unwrap(),
+            2,
+            "the stale job ran once, the replacement once"
+        );
+    }
+
+    #[test]
+    fn empty_wants_quiesce_the_pool() {
+        // The content-boundary quiesce contract (#119): `set_targets(.., &[])` cancels
+        // every queued and in-flight job — `invalidate_content` relies on this.
+        let (started_tx, started_rx) = channel::<()>();
+        let (release_tx, release_rx) = channel::<()>();
+        let release_rx = StdMutex::new(release_rx);
+        let decode: Arc<DecodeFn> = Arc::new(move |_s, item, _, _, _, _| {
+            if item == 0 {
+                started_tx.send(()).unwrap();
+                release_rx.lock().unwrap().recv().unwrap();
+            }
+            Ok(image(item, 16))
+        });
+        let (pool, rx) = DecodePool::new(1, 1 << 20, decode);
+        let src = source();
+        pool.set_targets(1, CG, &src, &targets(&[0, 1, 2]));
+        started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        pool.set_targets(1, CG, &src, &[]);
+        release_tx.send(()).unwrap();
+        assert!(
+            rx.recv_timeout(Duration::from_millis(300)).is_err(),
+            "nothing survives an empty want-set"
+        );
+        assert!(!pool.has_work(), "fully quiesced");
+    }
+
+    #[test]
+    fn has_work_covers_the_send_to_drain_handoff() {
+        // Codex #119 r2 h1: ordinary jobs untrack BEFORE the send, so by the time the
+        // receiver holds the outcome, queue and tracked are both empty — `outstanding`
+        // (guard-counted, including zero-byte error outcomes) must keep `has_work` true
+        // until the outcome is actually consumed, or the host pump sleeps on a stranded
+        // result.
+        let decode: Arc<DecodeFn> = Arc::new(|_s, item, _, _, _, _| {
+            if item == 0 {
+                Err(DecodeError::Corrupt("zero-byte error outcome".into()))
+            } else {
+                Ok(image(item, 16))
+            }
+        });
+        let (pool, rx) = DecodePool::new(1, 1 << 20, decode);
+        let src = source();
+        pool.set_targets(1, CG, &src, &targets(&[0]));
+        let o = rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        // Received (so the worker has already sent + untracked) but not yet consumed:
+        assert!(o.result.is_err(), "the zero-byte error case");
+        assert!(
+            pool.has_work(),
+            "an undrained outcome must keep the pump awake (queue + tracked are empty here)"
+        );
+        drop(o);
+        assert!(!pool.has_work(), "consumed — the pool is genuinely idle");
+    }
+
     #[test]
     fn outcome_into_image_frees_budget() {
         let decode: Arc<DecodeFn> = Arc::new(|_s, item, _, _, _, _| Ok(image(item, 256)));
@@ -1444,7 +1808,7 @@ mod tests {
         // would park forever.
         let (pool, rx) = DecodePool::new(1, 300, decode);
         let src = source();
-        pool.set_targets(1, &src, &targets(&[0, 1]));
+        pool.set_targets(1, CG, &src, &targets(&[0, 1]));
         let o = rx.recv_timeout(Duration::from_secs(5)).unwrap();
         let img = o.into_image().expect("ok result");
         assert_eq!(img.pixels.len(), 256);

@@ -76,6 +76,21 @@ fn sharp_diag() -> bool {
     *ON.get_or_init(|| std::env::var_os("PB_SHARP_DIAG").is_some())
 }
 
+/// The ONE staleness predicate for a decode outcome (#119): judged by the job's declared
+/// [`Validity`](crate::decode_pool::Validity) domain, applied at every gate — channel
+/// ingestion (`absorb_results` / `drain_results`), `rebuild_ring` retention, and the drain
+/// admit — never re-derived inline. Geometry work dies with the epoch OR the deck; content
+/// work (Originals, thumbs, poster selections) dies only with the deck, which is what lets
+/// a parked Original survive a fullscreen toggle (the #119 storm).
+fn outcome_stale(epoch: u64, content_gen: u64, o: &crate::decode_pool::Outcome) -> bool {
+    match crate::decode_pool::validity(o.key.purpose, o.key.rep_kind) {
+        crate::decode_pool::Validity::Geometry => {
+            o.key.epoch != epoch || o.key.content_gen != content_gen
+        }
+        crate::decode_pool::Validity::Content => o.key.content_gen != content_gen,
+    }
+}
+
 /// `PB_PERF=1` → live one-shot latency lines to stderr (open→first-photo, open→all-cached,
 /// resize→on-screen). Shell-agnostic (works on the macOS host too, read via a captured
 /// stderr), unlike the winit-only `--metrics` summary. Zero cost when off (see [`perf`]).
@@ -128,7 +143,7 @@ impl AppCore {
             pending_video_bytes: None,
             pending_poster_bytes: std::collections::HashMap::new(),
             poster_req_seq: 0,
-            poster_inflight: std::collections::HashSet::new(),
+            poster_inflight: std::collections::HashMap::new(),
             poster_read_tx,
             poster_read_rx,
             video_read_tx,
@@ -337,6 +352,15 @@ impl AppCore {
         // retry in `tick` actually runs — without this, an idle host (empty screen,
         // paused pump) composites the stale frame forever.
         self.redraw_pending
+            // Live pool work — queued, in-flight, or sent-but-undrained (#119, Codex
+            // r2 h1): a parked Original can still be decoding (or sitting in the
+            // results channel) after every display slot is resident and caught-up;
+            // without this arm the pump sleeps on it and the texture lands only on
+            // the next input.
+            || self.pool.has_work()
+            // Staged outcomes awaiting the next drain must keep the pump awake for
+            // the same reason (they hold pool byte-budget until uploaded, too).
+            || !self.pending_uploads.is_empty()
             || self.archive_loading
             // A streaming dir scan keeps the loop polling too, so `poll_dir_scan` picks up
             // batches (and the delayed Scanning-dialog reveal) even when the event queue is
@@ -2344,6 +2368,7 @@ impl AppCore {
                         .push(crate::decode_pool::Outcome::synthetic(
                             item,
                             self.epoch,
+                            self.content_gen,
                             rep_kind,
                             Ok(img),
                         ));
@@ -4388,6 +4413,12 @@ impl AppCore {
 
         // 1. Finished reads: stash the bytes + ask the shell to generate the poster.
         while let Ok((request_id, item, bytes)) = self.poster_read_rx.try_recv() {
+            // A read whose request is no longer the tracked one (the deck changed and a
+            // new-deck request re-used the index) is a straggler — drop it whole rather
+            // than stash bytes / clear a marker that now belongs to the replacement.
+            if self.poster_inflight.get(&item) != Some(&request_id) {
+                continue;
+            }
             if bytes.is_empty() {
                 self.poster_inflight.remove(&item); // read failed — allow a later retry
                 continue;
@@ -4420,7 +4451,7 @@ impl AppCore {
             if self.poster_inflight.len() >= MAX_INFLIGHT {
                 break;
             }
-            if self.poster_inflight.contains(&item) // already in flight (also dedups this list)
+            if self.poster_inflight.contains_key(&item) // already in flight (also dedups this list)
                 || self.source.path(item).is_some() // loose file — the pool posters those
                 || !self.preview_resident.contains(&item) // placeholder not resident yet
                 || !self.item_is_video(item)
@@ -4429,7 +4460,7 @@ impl AppCore {
             }
             self.poster_req_seq += 1;
             let request_id = self.poster_req_seq;
-            self.poster_inflight.insert(item);
+            self.poster_inflight.insert(item, request_id);
             let source = self.source.clone();
             let tx = self.poster_read_tx.clone();
             // Off the event loop: a ZIP entry inflates here (7z copies from resident RAM).
@@ -4452,13 +4483,15 @@ impl AppCore {
         h: u32,
         rgba: Vec<u8>,
     ) {
-        let _ = request_id; // paired the round-trip; the stash was consumed on pull
-                            // Drop a straggler whose request we no longer expect (a deck change cleared the
-                            // in-flight set) — item indices are deck-relative, so it must not upgrade a same-
-                            // index item in a new deck. The normal callback's item is still in the set here.
-        if !self.poster_inflight.remove(&item) {
+        // Drop a straggler whose request we no longer expect — item indices are
+        // deck-relative, so it must not upgrade a same-index item in a new deck. The id
+        // check (not just item membership, #119 diff review) is what makes this hold when
+        // the NEW deck has already re-requested the same index: the straggler's stale id
+        // no longer matches the marker's owner, so the replacement's marker survives.
+        if self.poster_inflight.get(&item) != Some(&request_id) {
             return;
         }
+        self.poster_inflight.remove(&item);
         if w == 0 || h == 0 || rgba.len() != (w as usize) * (h as usize) * 4 {
             return;
         }
@@ -4480,6 +4513,7 @@ impl AppCore {
             .push(crate::decode_pool::Outcome::synthetic(
                 item,
                 self.epoch,
+                self.content_gen,
                 rep_kind,
                 Ok(img),
             ));
@@ -5772,6 +5806,12 @@ impl AppCore {
     /// `pending_uploads` for the normal drain, exactly as before.
     fn absorb_results(&mut self) {
         while let Ok(o) = self.results.try_recv() {
+            // #119: staleness is judged AT INGESTION, by the job's validity domain —
+            // a stale outcome staged into `pending_uploads` would suppress the very
+            // want that replaces it (`pending_reps` in `request_prefetch`).
+            if outcome_stale(self.epoch, self.content_gen, &o) {
+                continue;
+            }
             self.pending_uploads.push(o);
         }
         let mut staged: Vec<crate::decode_pool::Outcome> = Vec::new();
@@ -5855,9 +5895,14 @@ impl AppCore {
         // Items decoded but not yet uploaded must not be re-requested (the pool no
         // longer tracks them, so it would decode them again). Rep-aware (#106.7): an item's
         // Original being in-flight must not block a request for its Fit, and vice-versa.
+        // DISPLAY outcomes only (#119 diff review, Codex bug 1): a staged Thumb shares the
+        // `(item, Fit)` shape but routes to the thumb cache, never the ring — counting it
+        // here would suppress the display decode it can't satisfy. (Reachable since #119:
+        // thumbs survive geometry rebuilds, so one can be staged across a toggle.)
         let pending_reps: HashSet<(usize, pb_core::RepKind)> = self
             .pending_uploads
             .iter()
+            .filter(|o| o.key.purpose == crate::decode_pool::Purpose::Display)
             .map(|o| (o.key.item, o.key.rep_kind))
             .collect();
         let pending_items: HashSet<usize> = pending_reps.iter().map(|&(i, _)| i).collect();
@@ -5986,6 +6031,7 @@ impl AppCore {
                                 crate::decode_pool::Outcome::synthetic(
                                     t,
                                     self.epoch,
+                                    self.content_gen,
                                     pb_core::RepKind::Fit,
                                     Ok(img),
                                 )
@@ -5999,7 +6045,7 @@ impl AppCore {
                         }
                     }
                     previews.push(
-                        Job::poster_select(t, fit, self.content_gen, true)
+                        Job::poster_select(t, fit, true)
                             .with_replay(hint)
                             .with_native_class(
                                 crate::engine::poster_walk_native() || fit.is_none(),
@@ -6047,7 +6093,7 @@ impl AppCore {
                     }
                     if sel_pushed.insert(t) {
                         head.push(
-                            Job::poster_select(t, fit, self.content_gen, true)
+                            Job::poster_select(t, fit, true)
                                 .with_replay(hint)
                                 .with_native_class(
                                     crate::engine::poster_walk_native() || fit.is_none(),
@@ -6094,7 +6140,7 @@ impl AppCore {
                 }
                 if sel_pushed.insert(t) {
                     fulls.push(
-                        Job::poster_select(t, fit, self.content_gen, true)
+                        Job::poster_select(t, fit, true)
                             .with_replay(hint)
                             .with_native_class(
                                 crate::engine::poster_walk_native() || fit.is_none(),
@@ -6168,7 +6214,7 @@ impl AppCore {
                                 .want(it, crate::poster_select::Demand::Display);
                             if selecting && sel_pushed.insert(it) {
                                 parked.push(
-                                    Job::poster_select(it, fit, self.content_gen, true)
+                                    Job::poster_select(it, fit, true)
                                         .with_replay(hint)
                                         .with_native_class(true),
                                 );
@@ -6214,7 +6260,7 @@ impl AppCore {
                     {
                         // A tile still in the derive queue is NOT evicted
                         // (review f8): skip until it lands or is dropped.
-                        if self.thumbs.pending.contains(&it) {
+                        if self.thumbs.pending_now(it) {
                             continue;
                         }
                         // `fill_plan` only yields items with no tile, so a
@@ -6242,7 +6288,6 @@ impl AppCore {
                                 Job::poster_select(
                                     it,
                                     Some(crate::thumbs::thumb_fit()),
-                                    self.content_gen,
                                     self.poster_sel.display_class(it),
                                 )
                                 .with_replay(hint),
@@ -6260,7 +6305,8 @@ impl AppCore {
         // Selections no live consumer re-asked for this pass drop to Absent —
         // their pool jobs die by level-triggered non-re-emission (review f3).
         self.poster_sel.end_pass();
-        self.pool.set_targets(self.epoch, &self.source, &jobs);
+        self.pool
+            .set_targets(self.epoch, self.content_gen, &self.source, &jobs);
     }
 
     /// The decode-to-fit target for the current mode: the display size in Fit mode
@@ -7446,7 +7492,10 @@ impl AppCore {
         ready: &mut Vec<crate::decode_pool::Outcome>,
     ) {
         let item = o.key.item;
-        let gen = o.key.epoch;
+        // #119: the deck identity is a real field now (`key.epoch` no longer smuggles
+        // it). The ingestion/drain gates already reject cross-deck outcomes; this stays
+        // as the authoritative back-stop for the direct-routing paths.
+        let gen = o.key.content_gen;
         if gen != self.content_gen {
             return; // another deck's walk — nothing here may touch this deck
         }
@@ -7571,11 +7620,15 @@ impl AppCore {
         // "is item resident / which slot" query below is against the display rep.
         let dk = self.display_kind();
         // Gather everything ready plus last tick's leftovers, dropping stale /
-        // duplicate / errored results so only live decoded images remain.
+        // duplicate / errored results so only live decoded images remain. The
+        // staleness gate runs BEFORE any purpose-specific routing (#119, Codex r1
+        // f1): PosterSelect and Thumb are peeled off below, so a gate after them
+        // would never judge them at all.
         let mut ready: Vec<Outcome> = std::mem::take(&mut self.pending_uploads);
         while let Ok(o) = self.results.try_recv() {
             ready.push(o);
         }
+        ready.retain(|o| !outcome_stale(self.epoch, self.content_gen, o));
         // Poster-selection payloads (task #114) are matched FIRST — before the
         // thumb branch and the display routing. They carry multiple artifacts,
         // their key.epoch is the CONTENT generation (not geometry), and their
@@ -7618,8 +7671,17 @@ impl AppCore {
         }
         let mut target_failed: Option<usize> = None;
         ready.retain(|o| {
-            if o.key.epoch != self.epoch {
-                return false; // stale geometry
+            if outcome_stale(self.epoch, self.content_gen, o) {
+                return false; // stale per its validity domain (#119)
+            }
+            if sharp_diag() && o.key.epoch != self.epoch {
+                // The #119 fix firing in the wild: a viewport-independent decode that
+                // outlived a geometry change (a fullscreen toggle) is being admitted
+                // instead of thrown away and restarted.
+                eprintln!(
+                    "[sharp-diag] cross-epoch {:?} admitted item={} (content-valid survivor)",
+                    o.key.rep_kind, o.key.item
+                );
             }
             let item = o.key.item;
             let rk = o.key.rep_kind;
@@ -8054,9 +8116,10 @@ impl AppCore {
     /// (`drop_fit_slots` + `compact_to`) and the renderer relocates their textures
     /// (`remap_ring`) instead of dropping them. This is what lets the settle re-present the
     /// current photo's Original instantly and lets advance-after-toggle find a neighbour's
-    /// Original resident instead of re-decoding its preview. In-flight decodes for the old
-    /// geometry are discarded (epoch mismatch at drain); still-wanted Originals that were only
-    /// `Pending` are re-requested by the caller's follow-up `request_prefetch`.
+    /// Original resident instead of re-decoding its preview. In-flight FIT decodes for the
+    /// old geometry are discarded (Geometry validity); in-flight Originals/thumbs/selections
+    /// survive the epoch change and land normally (#119 — killing them was the
+    /// fullscreen-toggle blur storm).
     pub fn invalidate_geometry(&mut self) {
         self.rebuild_ring(true);
     }
@@ -8076,6 +8139,17 @@ impl AppCore {
         self.poster_sel.reset(self.content_gen);
         self.retry.reset();
         self.rebuild_ring(false);
+        // #119: a content boundary explicitly quiesces the pool (an empty want-set
+        // cancels every queued/in-flight job in both validity domains). Content jobs
+        // no longer die by the epoch coincidence, and paths that never re-prefetch
+        // (`enter_empty_state`) must not leave old-deck decodes running.
+        self.pool
+            .set_targets(self.epoch, self.content_gen, &self.source, &[]);
+        // ...and advances the thumb derive fence (single owner — `clear_deck`'s own
+        // bump on deck rebuilds is redundant-but-harmless): an in-flight derive from
+        // pre-change pixels is rejected on landing; the strip re-derives. View/follow
+        // state survives — a save-rotation must not yank the strip.
+        self.thumbs.invalidate_content();
     }
 
     /// The shared geometry-rebuild tail: bump the epoch, size the new ring, then either RETAIN
@@ -8105,8 +8179,14 @@ impl AppCore {
         let (ahead, behind) = window_for_capacity(cap);
         self.ahead = ahead;
         self.behind = behind;
-        // Drop decodes staged for the old geometry; they free their pool budget.
-        self.pending_uploads.clear();
+        // Staged-outcome retention by validity domain (#119): a geometry rebuild keeps
+        // content-valid staged work (an already-paid-for Original/thumb/selection
+        // artifact survives a toggle); geometry-bound Fits drop. A content rebuild's
+        // generation mismatch clears everything through the same predicate. Dropped
+        // outcomes free their pool budget as they drop.
+        let (epoch, content_gen) = (self.epoch, self.content_gen);
+        self.pending_uploads
+            .retain(|o| !outcome_stale(epoch, content_gen, o));
     }
 
     /// Start / stop the slideshow (task #23, the `S` key + View ▸ Slideshow). Starting
@@ -15194,10 +15274,10 @@ mod tests {
         let mut core = test_core();
 
         // Wrong pixel count (claims 4x4 but sends 10 bytes) → dropped, guard still cleared.
-        core.poster_inflight.insert(3);
+        core.poster_inflight.insert(3, 1);
         core.video_poster_ready(1, 3, 4, 4, vec![0u8; 10]);
         assert!(
-            !core.poster_inflight.contains(&3),
+            !core.poster_inflight.contains_key(&3),
             "in-flight cleared even on a bad frame"
         );
         assert!(
@@ -15205,10 +15285,21 @@ mod tests {
             "bad pixel count is dropped"
         );
 
+        // A STALE request id (the marker now belongs to a newer request, #119 diff
+        // review): dropped whole — the replacement's marker survives.
+        core.poster_inflight.insert(4, 9);
+        core.video_poster_ready(2, 4, 2, 2, vec![255u8; 16]);
+        assert!(
+            core.poster_inflight.contains_key(&4),
+            "a straggler with a stale id must not consume the replacement's marker"
+        );
+        assert!(core.pending_uploads.is_empty(), "and installs nothing");
+        core.poster_inflight.remove(&4);
+
         // Correct 2x2 RGBA8 (16 bytes) → queued as a full (non-preview) outcome for item 5.
-        core.poster_inflight.insert(5);
+        core.poster_inflight.insert(5, 2);
         core.video_poster_ready(2, 5, 2, 2, vec![255u8; 16]);
-        assert!(!core.poster_inflight.contains(&5));
+        assert!(!core.poster_inflight.contains_key(&5));
         assert_eq!(core.pending_uploads.len(), 1);
         let o = &core.pending_uploads[0];
         assert_eq!(o.key.item, 5);
@@ -16731,6 +16822,7 @@ mod tests {
         core.pending_uploads.push(Outcome::synthetic(
             0,
             core.epoch,
+            core.content_gen,
             pb_core::RepKind::Fit,
             Ok(rgba_full(100, 67, 6000, 4000)),
         ));
@@ -16747,6 +16839,463 @@ mod tests {
         );
     }
 
+    // ── #119: decode validity domains (one staleness law) ──
+
+    #[test]
+    fn outcome_stale_truth_table() {
+        use crate::decode_pool::Purpose;
+        let err = || Err(pb_decode::DecodeError::Corrupt("x".into()));
+        let mk = |purpose, rep, epoch, cg| {
+            let mut o = Outcome::synthetic(0, epoch, cg, rep, err());
+            o.key.purpose = purpose;
+            o
+        };
+        let (e, cg) = (5u64, 3u64); // the current generations
+                                    // Stale epoch, current content: Fit stale; Original/Thumb/PosterSelect valid.
+        assert!(outcome_stale(
+            e,
+            cg,
+            &mk(Purpose::Display, pb_core::RepKind::Fit, 4, 3)
+        ));
+        assert!(!outcome_stale(
+            e,
+            cg,
+            &mk(Purpose::Display, pb_core::RepKind::Original, 4, 3)
+        ));
+        assert!(!outcome_stale(
+            e,
+            cg,
+            &mk(Purpose::Thumb, pb_core::RepKind::Fit, 4, 3)
+        ));
+        assert!(!outcome_stale(
+            e,
+            cg,
+            &mk(Purpose::PosterSelect, pb_core::RepKind::Fit, 4, 3)
+        ));
+        // Stale content: all four stale, current epoch or not.
+        assert!(outcome_stale(
+            e,
+            cg,
+            &mk(Purpose::Display, pb_core::RepKind::Fit, 5, 2)
+        ));
+        assert!(outcome_stale(
+            e,
+            cg,
+            &mk(Purpose::Display, pb_core::RepKind::Original, 5, 2)
+        ));
+        assert!(outcome_stale(
+            e,
+            cg,
+            &mk(Purpose::Thumb, pb_core::RepKind::Fit, 5, 2)
+        ));
+        assert!(outcome_stale(
+            e,
+            cg,
+            &mk(Purpose::PosterSelect, pb_core::RepKind::Fit, 5, 2)
+        ));
+        // Current everything: valid.
+        assert!(!outcome_stale(
+            e,
+            cg,
+            &mk(Purpose::Display, pb_core::RepKind::Fit, 5, 3)
+        ));
+        assert!(!outcome_stale(
+            e,
+            cg,
+            &mk(Purpose::Display, pb_core::RepKind::Original, 5, 3)
+        ));
+    }
+
+    /// THE #119 repro pin: the parked Original decoded before a fullscreen toggle lands
+    /// AFTER it — stale `key.epoch`, same deck. It must be admitted, reserved, and marked
+    /// resident. Before the fix the drain discarded it as "stale geometry", so every
+    /// toggle re-blurred until an Original finally squeaked through between presses.
+    #[test]
+    fn a_cross_epoch_original_is_admitted_and_marked_resident() {
+        let mut core = test_core();
+        core.source = photos_named(&["a.jpg"]);
+        core.playlist = Playlist::new(1, 0).with_cursor(0);
+        core.ring = ResidentRing::new(4);
+        core.fit = Some(FitBox {
+            max_width: 100,
+            max_height: 100,
+        });
+        core.view.mode = ScaleMode::Fit; // display rep = Fit; the Original is the parked tier
+        core.targets = vec![0];
+        let stale_epoch = core.epoch;
+        core.epoch = core.epoch.wrapping_add(1); // the toggle happened mid-decode
+        core.pending_uploads.push(Outcome::synthetic(
+            0,
+            stale_epoch,
+            core.content_gen,
+            pb_core::RepKind::Original,
+            Ok(rgba_full(600, 400, 600, 400)),
+        ));
+
+        core.drain_results();
+
+        assert!(
+            core.ring
+                .slot_for_rep(0, pb_core::RepKind::Original)
+                .is_some(),
+            "the survivor lands — later toggles are a derive/rebind, never a re-decode"
+        );
+    }
+
+    /// The counterpart pin: a stale-epoch FIT is wrong-size garbage and must still drop.
+    #[test]
+    fn a_stale_epoch_fit_is_still_dropped() {
+        let mut core = test_core();
+        core.source = photos_named(&["a.jpg"]);
+        core.playlist = Playlist::new(1, 0).with_cursor(0);
+        core.ring = ResidentRing::new(4);
+        core.fit = Some(FitBox {
+            max_width: 100,
+            max_height: 100,
+        });
+        core.view.mode = ScaleMode::Fit;
+        core.targets = vec![0];
+        let stale_epoch = core.epoch;
+        core.epoch = core.epoch.wrapping_add(1);
+        core.pending_uploads.push(Outcome::synthetic(
+            0,
+            stale_epoch,
+            core.content_gen,
+            pb_core::RepKind::Fit,
+            Ok(rgba_full(50, 34, 600, 400)),
+        ));
+        core.drain_results();
+        assert!(
+            core.ring.slot_for_rep(0, pb_core::RepKind::Fit).is_none(),
+            "a Fit decoded for the old viewport never installs"
+        );
+    }
+
+    /// The cross-deck pin (#109.3): a stale-content Original — even at the current epoch —
+    /// is another deck's pixels and must drop.
+    #[test]
+    fn a_cross_deck_original_is_dropped() {
+        let mut core = test_core();
+        core.source = photos_named(&["a.jpg"]);
+        core.playlist = Playlist::new(1, 0).with_cursor(0);
+        core.ring = ResidentRing::new(4);
+        core.fit = Some(FitBox {
+            max_width: 100,
+            max_height: 100,
+        });
+        core.view.mode = ScaleMode::Fit;
+        core.targets = vec![0];
+        core.pending_uploads.push(Outcome::synthetic(
+            0,
+            core.epoch,
+            core.content_gen.wrapping_sub(1),
+            pb_core::RepKind::Original,
+            Ok(rgba_full(600, 400, 600, 400)),
+        ));
+        core.drain_results();
+        assert!(
+            core.ring
+                .slot_for_rep(0, pb_core::RepKind::Original)
+                .is_none(),
+            "another deck's pixels never install under this deck's index"
+        );
+    }
+
+    /// Codex r1 f1: thumb outcomes are judged by the shared gate BEFORE the thumb routing —
+    /// a cross-deck thumb can no longer be relabeled current by `offer`'s arrival-time
+    /// generation stamp.
+    #[test]
+    fn a_cross_deck_thumb_outcome_never_reaches_the_thumb_store() {
+        let mut core = test_core();
+        core.thumbs.enable();
+        let mut stale = Outcome::synthetic(
+            0,
+            core.epoch,
+            core.content_gen.wrapping_sub(1),
+            pb_core::RepKind::Fit,
+            Ok(rgba_full(64, 64, 64, 64)),
+        );
+        stale.key.purpose = crate::decode_pool::Purpose::Thumb;
+        core.pending_uploads.push(stale);
+        core.drain_results();
+        assert!(
+            !core.thumbs.working(),
+            "the gate dropped it before any derive was offered"
+        );
+        let mut current = Outcome::synthetic(
+            0,
+            core.epoch,
+            core.content_gen,
+            pb_core::RepKind::Fit,
+            Ok(rgba_full(64, 64, 64, 64)),
+        );
+        current.key.purpose = crate::decode_pool::Purpose::Thumb;
+        core.pending_uploads.push(current);
+        core.drain_results();
+        assert!(
+            core.thumbs.working(),
+            "a current-deck thumb still flows to the derive thread"
+        );
+    }
+
+    /// Codex r1 f2: `rebuild_ring` retention follows the validity domains — a geometry
+    /// rebuild keeps content-valid staged outcomes (paid-for work) and drops staged Fits;
+    /// a content rebuild clears all four kinds.
+    #[test]
+    fn rebuild_retention_follows_the_validity_domains() {
+        let mut core = test_core();
+        core.source = photos_named(&["a.jpg", "b.jpg"]);
+        core.playlist = Playlist::new(2, 0).with_cursor(0);
+        core.fit = Some(FitBox {
+            max_width: 100,
+            max_height: 100,
+        });
+        let (e, cg) = (core.epoch, core.content_gen);
+        let img = || Ok(rgba_full(32, 32, 64, 64));
+        core.pending_uploads
+            .push(Outcome::synthetic(0, e, cg, pb_core::RepKind::Fit, img()));
+        core.pending_uploads.push(Outcome::synthetic(
+            0,
+            e,
+            cg,
+            pb_core::RepKind::Original,
+            img(),
+        ));
+        let mut thumb = Outcome::synthetic(1, e, cg, pb_core::RepKind::Fit, img());
+        thumb.key.purpose = crate::decode_pool::Purpose::Thumb;
+        core.pending_uploads.push(thumb);
+        core.pending_uploads.push(Outcome::synthetic_selection(
+            1,
+            cg,
+            e,
+            None,
+            Ok(poster_payload(1, (32, 32))),
+        ));
+
+        core.invalidate_geometry();
+        let kinds: Vec<_> = core
+            .pending_uploads
+            .iter()
+            .map(|o| (o.key.purpose, o.key.rep_kind))
+            .collect();
+        assert_eq!(
+            core.pending_uploads.len(),
+            3,
+            "the staged Fit died with its epoch; Original/Thumb/selection survive: {kinds:?}"
+        );
+        assert!(!kinds.contains(&(crate::decode_pool::Purpose::Display, pb_core::RepKind::Fit)));
+
+        // Content rebuild: re-stage ALL FOUR kinds fresh at the current generations, then
+        // prove every one drops (Codex diff review: the first phase already removed the
+        // Fit, so without a re-stage this wouldn't test all four).
+        let (e2, cg2) = (core.epoch, core.content_gen);
+        core.pending_uploads.clear();
+        core.pending_uploads
+            .push(Outcome::synthetic(0, e2, cg2, pb_core::RepKind::Fit, img()));
+        core.pending_uploads.push(Outcome::synthetic(
+            0,
+            e2,
+            cg2,
+            pb_core::RepKind::Original,
+            img(),
+        ));
+        let mut thumb2 = Outcome::synthetic(1, e2, cg2, pb_core::RepKind::Fit, img());
+        thumb2.key.purpose = crate::decode_pool::Purpose::Thumb;
+        core.pending_uploads.push(thumb2);
+        core.pending_uploads.push(Outcome::synthetic_selection(
+            1,
+            cg2,
+            e2,
+            None,
+            Ok(poster_payload(1, (32, 32))),
+        ));
+        core.invalidate_content();
+        assert!(
+            core.pending_uploads.is_empty(),
+            "a content boundary clears every staged outcome — all four kinds"
+        );
+    }
+
+    /// Codex r2: Fill and Original modes DISPLAY the Original rep — a cross-epoch survivor
+    /// must not just install, it must present (table-driven over both modes).
+    #[test]
+    fn fill_and_original_modes_present_a_cross_epoch_original() {
+        for mode in [ScaleMode::Fill, ScaleMode::Original] {
+            let mut core = test_core();
+            core.source = photos_named(&["a.jpg"]);
+            core.playlist = Playlist::new(1, 0).with_cursor(0);
+            core.ring = ResidentRing::new(4);
+            core.fit = Some(FitBox {
+                max_width: 100,
+                max_height: 100,
+            });
+            core.view.mode = mode; // decode_fit() = None → display rep = Original
+            core.targets = vec![0];
+            core.target_item = Some(0);
+            let stale_epoch = core.epoch;
+            core.epoch = core.epoch.wrapping_add(1);
+            core.pending_uploads.push(Outcome::synthetic(
+                0,
+                stale_epoch,
+                core.content_gen,
+                pb_core::RepKind::Original,
+                Ok(rgba_full(600, 400, 600, 400)),
+            ));
+            core.drain_results();
+            assert!(core.ring.original_slot(0).is_some(), "{mode:?}: resident");
+            assert_eq!(core.displayed_item, Some(0), "{mode:?}: presented");
+            assert!(core.target_caught_up(), "{mode:?}: resolved");
+        }
+    }
+
+    /// Codex r2 (channel-fed, not hand-staged): stale outcomes are judged AT INGESTION —
+    /// staged stale work would suppress the very want that replaces it (`pending_reps`).
+    #[test]
+    fn stale_channel_outcomes_are_dropped_at_ingestion() {
+        let mut core = test_core();
+        core.source = photos_named(&["a.jpg"]);
+        core.playlist = Playlist::new(1, 0).with_cursor(0);
+        core.fit = Some(FitBox {
+            max_width: 100,
+            max_height: 100,
+        });
+        let tx = core.pool.test_sender();
+        tx.send(Outcome::synthetic(
+            0,
+            core.epoch.wrapping_sub(1),
+            core.content_gen,
+            pb_core::RepKind::Fit,
+            Ok(rgba_full(50, 34, 600, 400)),
+        ))
+        .unwrap();
+        tx.send(Outcome::synthetic(
+            0,
+            core.epoch,
+            core.content_gen.wrapping_sub(1),
+            pb_core::RepKind::Original,
+            Ok(rgba_full(600, 400, 600, 400)),
+        ))
+        .unwrap();
+        core.request_prefetch(); // absorbs the channel before building wants
+        assert!(
+            core.pending_uploads.is_empty(),
+            "a stale Fit (old epoch) and a cross-deck Original both die at the door"
+        );
+    }
+
+    /// #119 diff review (Codex bug 1): a content-valid THUMB outcome staged across a
+    /// toggle shares the `(item, Fit)` shape with the display decode but can never feed
+    /// the ring — it must not suppress the display want. Pinned through the real pool:
+    /// the emitted display job's (headless, erroring) outcome is the proof the want
+    /// actually went out.
+    #[test]
+    fn a_staged_thumb_never_suppresses_the_display_want() {
+        let mut core = test_core();
+        core.source = photos_named(&["a.jpg"]);
+        core.playlist = Playlist::new(1, 0).with_cursor(0);
+        core.fit = Some(FitBox {
+            max_width: 100,
+            max_height: 100,
+        });
+        core.view.mode = ScaleMode::Fit;
+        let mut thumb = Outcome::synthetic(
+            0,
+            core.epoch,
+            core.content_gen,
+            pb_core::RepKind::Fit,
+            Ok(rgba_full(64, 64, 64, 64)),
+        );
+        thumb.key.purpose = crate::decode_pool::Purpose::Thumb;
+        core.pending_uploads.push(thumb);
+        core.request_prefetch(); // must still emit the display want for item 0
+        for _ in 0..200 {
+            core.drain_results();
+            if core.failed.contains(&0) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(
+            core.failed.contains(&0),
+            "the display want was emitted despite the staged thumb (its erroring decode landed)"
+        );
+    }
+
+    /// Codex r1 f5: a staged outcome keeps the pump awake until drained — without this a
+    /// parked Original landing after every Fit is resident sleeps in `pending_uploads`
+    /// until the next input.
+    #[test]
+    fn staged_outcomes_keep_the_pump_awake() {
+        let mut core = test_core();
+        core.source = photos_named(&["a.jpg"]);
+        core.playlist = Playlist::new(1, 0).with_cursor(0);
+        core.ring = ResidentRing::new(4);
+        core.fit = Some(FitBox {
+            max_width: 100,
+            max_height: 100,
+        });
+        core.view.mode = ScaleMode::Fit;
+        // The real scenario: the parked photo is sharp on screen (its display Fit is
+        // resident, so the unresident-target pump arm is quiet) while the parked-tier
+        // Original arrives late.
+        core.targets = vec![0];
+        let fit_rep = core.rep_of(pb_core::RepKind::Fit);
+        make_resident(&mut core, 0, fit_rep, &[0]);
+        assert!(!core.work_pending(), "an idle core lets the pump sleep");
+        core.pending_uploads.push(Outcome::synthetic(
+            0,
+            core.epoch,
+            core.content_gen,
+            pb_core::RepKind::Original,
+            Ok(rgba_full(600, 400, 600, 400)),
+        ));
+        assert!(
+            core.work_pending(),
+            "a staged outcome must keep the pump polling to its drain"
+        );
+        core.drain_results();
+        assert!(core.ring.original_slot(0).is_some(), "…which lands it");
+        assert!(
+            !core.work_pending(),
+            "drained and resident — the pump may sleep"
+        );
+    }
+
+    /// Codex r1 f4: every content boundary explicitly quiesces the pool — pinned through
+    /// the exact path with no follow-up prefetch, `enter_empty_state` (the last-photo-
+    /// deleted flow), which routes through `invalidate_content`.
+    #[test]
+    fn invalidate_content_quiesces_the_pool() {
+        let mut core = test_core();
+        core.source = photos_named(&["a.jpg", "b.jpg"]);
+        core.playlist = Playlist::new(2, 0).with_cursor(0);
+        core.fit = Some(FitBox {
+            max_width: 100,
+            max_height: 100,
+        });
+        core.request_prefetch(); // the real pool now holds display jobs
+
+        core.enter_empty_state();
+
+        // Already-sent (error) outcomes may still sit in the channel holding their
+        // guards; drain + briefly poll until the flagged worker finishes discarding.
+        for _ in 0..200 {
+            core.drain_results();
+            if !core.pool.has_work() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(
+            !core.pool.has_work(),
+            "the content boundary cancelled every queued/in-flight pool job"
+        );
+        assert!(
+            core.pending_uploads.is_empty(),
+            "and nothing stale re-staged through the drain"
+        );
+    }
+
     /// #109 item 4, the in-place upgrade flavor: a refused preview→full upgrade upload must
     /// leave the upgrade bookkeeping untouched — the renderer still shows the preview, so
     /// recording "sharp now" would freeze the photo blurry with no retry.
@@ -16758,6 +17307,7 @@ mod tests {
         core.pending_uploads.push(Outcome::synthetic(
             0,
             core.epoch,
+            core.content_gen,
             pb_core::RepKind::Fit,
             Ok(rgba_full(100, 67, 6000, 4000)),
         ));
@@ -17413,8 +17963,14 @@ mod tests {
             animated: None,
         };
         core.pending_uploads.push(
-            Outcome::synthetic(0, core.epoch, pb_core::RepKind::Fit, Ok(dup))
-                .from_preview_request(),
+            Outcome::synthetic(
+                0,
+                core.epoch,
+                core.content_gen,
+                pb_core::RepKind::Fit,
+                Ok(dup),
+            )
+            .from_preview_request(),
         );
         core.drain_results();
 
@@ -17468,6 +18024,7 @@ mod tests {
         core.pending_uploads.push(Outcome::synthetic(
             0,
             core.epoch,
+            core.content_gen,
             pb_core::RepKind::Fit,
             Ok(best_is_preview),
         ));
@@ -17551,6 +18108,7 @@ mod tests {
             Outcome::synthetic(
                 0,
                 core.epoch,
+                core.content_gen,
                 pb_core::RepKind::Fit,
                 Err(pb_decode::DecodeError::Corrupt("smb hiccup".into())),
             )
@@ -17574,6 +18132,7 @@ mod tests {
         core.pending_uploads.push(Outcome::synthetic(
             0,
             core.epoch,
+            core.content_gen,
             pb_core::RepKind::Original,
             Err(pb_decode::DecodeError::Corrupt("dup original".into())),
         ));
@@ -17610,6 +18169,7 @@ mod tests {
             core.pending_uploads.push(Outcome::synthetic(
                 0,
                 core.epoch,
+                core.content_gen,
                 pb_core::RepKind::Fit,
                 Err(pb_decode::DecodeError::Corrupt("persistent".into())),
             ));
@@ -17826,6 +18386,7 @@ mod tests {
         core.pending_uploads.push(Outcome::synthetic(
             0,
             core.epoch,
+            core.content_gen,
             pb_core::RepKind::Fit,
             Ok(undersized),
         ));
@@ -17880,6 +18441,7 @@ mod tests {
         core.pending_uploads.push(Outcome::synthetic(
             0,
             core.epoch,
+            core.content_gen,
             pb_core::RepKind::Fit,
             Ok(full),
         ));
@@ -17926,6 +18488,7 @@ mod tests {
         core.pending_uploads.push(Outcome::synthetic(
             0,
             core.epoch,
+            core.content_gen,
             pb_core::RepKind::Fit,
             Ok(native),
         ));
@@ -17973,6 +18536,7 @@ mod tests {
         core.pending_uploads.push(Outcome::synthetic(
             0,
             core.epoch,
+            core.content_gen,
             pb_core::RepKind::Original,
             Ok(poster),
         ));
@@ -18337,6 +18901,7 @@ mod tests {
         core.thumbs_capture(Outcome::synthetic(
             2,
             core.epoch,
+            core.content_gen,
             pb_core::RepKind::Fit,
             Ok(img),
         ));
@@ -18443,6 +19008,7 @@ mod tests {
             core.thumbs_capture(Outcome::synthetic(
                 i,
                 core.epoch,
+                core.content_gen,
                 pb_core::RepKind::Fit,
                 Ok(img),
             ));

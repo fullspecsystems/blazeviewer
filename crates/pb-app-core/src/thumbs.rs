@@ -87,8 +87,12 @@ pub struct Thumbs {
     /// Items with an accepted offer whose derived tile has not yet landed in
     /// the cache (task #114, review f8): without this, a `Chosen` selection
     /// whose tile is still in the derive queue reads as EVICTED to the fill
-    /// planner and triggers another full walk. Per-item, unlike `in_flight`.
-    pub pending: HashSet<usize>,
+    /// planner and triggers another full walk. Keyed by `(deck generation, item)`
+    /// (#119, Codex r2 h2): a LATE stale-generation result must retire only its
+    /// own generation's marker — an item-only key let it erase the replacement
+    /// derive's marker before the generation check rejected it, re-triggering the
+    /// very walk the marker guards against.
+    pub pending: HashSet<(u64, usize)>,
 }
 
 impl Default for Thumbs {
@@ -180,15 +184,23 @@ impl Thumbs {
             return;
         }
         let Some(tx) = &self.tx else { return };
+        let gen = self.cache.deck_gen();
         let job = DeriveJob {
-            deck_gen: self.cache.deck_gen(),
+            deck_gen: gen,
             item,
             img,
         };
         if tx.try_send(job).is_ok() {
             self.in_flight += 1;
-            self.pending.insert(item);
+            self.pending.insert((gen, item));
         }
+    }
+
+    /// Whether `item` has an accepted offer in the derive queue **for the current
+    /// generation** — the fill planner's "already on its way" check. A stale
+    /// generation's marker never counts (its result will be rejected on landing).
+    pub fn pending_now(&self, item: usize) -> bool {
+        self.pending.contains(&(self.cache.deck_gen(), item))
     }
 
     /// Drain finished derives into the cache. Returns true when anything landed
@@ -200,7 +212,9 @@ impl Thumbs {
         let mut landed = Vec::new();
         while let Ok(r) = rx.try_recv() {
             self.in_flight = self.in_flight.saturating_sub(1);
-            self.pending.remove(&r.item);
+            // Generation-scoped retirement (#119, Codex r2 h2): a late stale result
+            // retires only ITS OWN generation's marker, never the replacement's.
+            self.pending.remove(&(r.deck_gen, r.item));
             landed.push(r);
         }
         let demand = self.demand(current);
@@ -238,12 +252,26 @@ impl Thumbs {
 
     /// Deck rebuilt / item deleted: indices are reassigned — drop everything
     /// (the v1 rule; in-flight derives are fenced by the deck generation).
+    /// The generation bump itself is [`invalidate_content`](Self::invalidate_content)'s
+    /// job (its caller runs on every content boundary); this adds the view-state
+    /// reset that only makes sense when indices were reassigned.
     pub fn clear_deck(&mut self) {
+        self.invalidate_content();
+        self.viewport = None;
+        self.pending_scroll = None;
+    }
+
+    /// A content boundary (#119): pixels behind one or more indices changed — a
+    /// save-rotation as much as a deck rebuild. Advance the derive fence (the cache
+    /// generation) so in-flight derives from pre-change pixels are rejected on
+    /// landing, and drop the tiles so the strip re-derives. Deliberately preserves
+    /// the strip's viewport / follow / pending-scroll state: a save-rotation must
+    /// not yank the panel (correctness over cache retention — a wrong-pixels tile
+    /// is a lie; a refill is cheap and rare).
+    pub fn invalidate_content(&mut self) {
         self.cache.clear();
         self.failed.clear();
         self.pending.clear();
-        self.viewport = None;
-        self.pending_scroll = None;
     }
 }
 
@@ -323,6 +351,70 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(50));
         t.poll(1);
         assert_eq!(t.cache.get(1).unwrap().gen, gen0, "no re-derive");
+    }
+
+    /// #119 (Codex r1 f6): a single-item content change (save-rotation) advances the
+    /// derive fence — in-flight pre-change pixels are rejected on landing — while the
+    /// strip's view state survives (the panel must not get yanked).
+    #[test]
+    fn invalidate_content_fences_in_flight_derives_but_keeps_view_state() {
+        let mut t = Thumbs::default();
+        t.enable();
+        t.viewport = Some(((0, 5), (0, 8)));
+        t.pending_scroll = Some(ScrollTo { item: 2, gen: 7 });
+        t.offer(3, img(256, 256));
+        t.invalidate_content(); // the rotation saved while the derive was in flight
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        assert!(!t.poll(3));
+        assert_eq!(t.cache.len(), 0, "pre-change pixels never install");
+        assert_eq!(
+            t.viewport,
+            Some(((0, 5), (0, 8))),
+            "the strip's viewport survives a content edit"
+        );
+        assert_eq!(
+            t.pending_scroll.map(|c| (c.item, c.gen)),
+            Some((2, 7)),
+            "an unpulled scroll command survives too — only clear_deck resets view state"
+        );
+        assert!(!t.pending_now(3), "the old generation's marker is gone");
+    }
+
+    /// #119 (Codex r2 h2): `pending` is keyed by (generation, item) — a LATE stale result
+    /// retires only its own generation's marker, never the replacement derive's. (An
+    /// item-only key let the stale arrival erase the replacement's marker, re-triggering
+    /// the poster walk the marker guards against.)
+    #[test]
+    fn a_late_stale_result_cannot_erase_the_replacement_marker() {
+        // The mechanism, pinned structurally on the real removal shape:
+        let mut t = Thumbs::default();
+        t.pending.insert((0, 9)); // the stale generation's marker
+        t.pending.insert((1, 9)); // the replacement's
+        t.pending.remove(&(0, 9)); // what `poll` does when the late gen-0 result lands
+        assert!(
+            t.pending.contains(&(1, 9)),
+            "the replacement's marker survives the stale retirement"
+        );
+
+        // And end-to-end through the real derive thread: the gen-1 replacement lands
+        // even though a stale gen-0 derive for the same item was still in flight.
+        let mut t = Thumbs::default();
+        t.enable();
+        t.offer(3, img(2048, 2048)); // gen-0 derive
+        t.invalidate_content(); // gen 1
+        t.offer(3, img(64, 64)); // the replacement
+        assert!(t.pending_now(3), "the replacement's marker is up");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while t.working() && std::time::Instant::now() < deadline {
+            t.poll(3);
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert_eq!(
+            t.cache.tier(3),
+            Some(ThumbTier::Full),
+            "the replacement landed; the stale result installed nothing"
+        );
+        assert!(!t.pending_now(3), "and retired its own marker");
     }
 
     #[test]

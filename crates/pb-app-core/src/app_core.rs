@@ -771,9 +771,13 @@ pub struct AppCore {
     /// Monotonic poster-request id (pairs a `RequestVideoPoster` with its `video_poster_ready`).
     pub poster_req_seq: u64,
     /// Archive-video items with a poster request **in flight** (macOS), so the tick doesn't
-    /// re-request while one is pending. Cleared when `video_poster_ready` lands (or the deck
-    /// changes) — so a revisit after ring eviction re-requests and regenerates the poster.
-    pub poster_inflight: std::collections::HashSet<usize>,
+    /// re-request while one is pending — mapped to the request id that owns the marker
+    /// (#119 diff review: item indices are deck-relative, so `video_poster_ready` validates
+    /// the id, or a pre-deck-change straggler for old-item-N could consume the NEW deck's
+    /// item-N marker and install another deck's pixels as current). Cleared when
+    /// `video_poster_ready` lands (or the deck changes) — so a revisit after ring eviction
+    /// re-requests and regenerates the poster.
+    pub poster_inflight: std::collections::HashMap<usize, u64>,
     /// Off-thread archive-video poster byte reads (macOS): a worker reads the entry's bytes
     /// (a ZIP inflate mustn't block the event loop, esp. when prefetching several ahead) and
     /// sends `(request_id, item, bytes)`; the tick drains this, stashes the bytes, and emits

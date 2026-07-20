@@ -159,8 +159,13 @@ return is now a loud diagnostic only, never a control-flow branch (`app_core_imp
   runs only after a successful upload and its return is checked; a refused upload rolls its
   reservation back (reserve path) or leaves the preview bookkeeping untouched (upgrade path).
   Both drain paths are pinned by regression tests (`a_refused_upload_*`).
-- **Epoch carries geometry identity but not deck identity**, so a cross-deck stale decode can
-  dedup as current (task #109 item 3).
+- ✅ **Epoch carries geometry AND deck identity now (#109.3 via task #119, landed
+  2026-07-19):** `DecodeKey` carries a real `content_gen`; staleness is a declared
+  per-work-kind `Validity` domain (`decode_pool::validity`, exhaustive match) enforced at the
+  pool cancel arms, ingestion, ring-rebuild retention, and the drain gate. Cross-deck decodes
+  can no longer dedup as current, and viewport-independent work (Originals/thumbs/poster
+  walks) survives geometry changes — the #119 fullscreen-toggle blur storm. See
+  `.taskmaster/plans/119-decode-validity-domains.md`.
 - A **known-open hole** remains: `apply_scan_batch`'s `BOOTSTRAP` branch while
   `archive_scope=true` ("mode B", `app_core_impl.rs:1146-1148`) — a stale scan's *first* batch
   can still bootstrap over an archive deck (low severity: a clean rebuild onto a valid-but-wrong
@@ -171,6 +176,7 @@ return is now a loud diagnostic only, never a control-flow branch (`app_core_imp
   - (#109.2) one **monotonic open generation** shared by both worker types, threaded through the
     contract, so any result whose generation ≠ latest is dropped in the core — the general,
     shell-neutral, race-proof fix that also closes mode B.
+  - ✅ (#109.3) **landed 2026-07-19 via #119** — see the epoch/deck-identity bullet above.
   - ✅ (#109.4) **landed 2026-07-19** — see the fill bullet above.
   - (#109.5) `present_item` returns success; `try_present_target`/`drain_results` propagate it; on a
     genuine miss, abort the drain and resync **once after the loop** (never mid-loop — that was the

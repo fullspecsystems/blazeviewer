@@ -7,6 +7,15 @@ with any pre-release suffix carried only by the tag.
 
 ## [Unreleased]
 
+### Fixed
+- **Repeated fullscreen toggles no longer blur over and over.** Toggling fullscreen (or
+  resizing) used to cancel the full-resolution copy the app was quietly preparing for the
+  photo you're parked on — so each toggle re-blurred and re-sharpened, sometimes four or
+  five times in a row, and advancing right after a toggle was blurry too. Work that doesn't
+  depend on the window size (full-resolution copies, thumbnails, movie poster picks) now
+  survives those changes, so after the first sharpening a toggle is instantly crisp and
+  neighbouring photos stay ready.
+
 ### Changed
 - **Holding a pan or zoom key ramps up more gently.** The hold-to-pan/hold-to-zoom
   acceleration now starts slower, takes a bit longer to build, and tops out lower, so

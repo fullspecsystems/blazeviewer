@@ -1,7 +1,9 @@
 # 119 — Decode validity domains: geometry-immortal Originals, one staleness law
 
-_Status: **rev 3 — IMPLEMENTATION-READY** (2026-07-19). Codex rounds 1–2 folded (review log at
-the bottom; round 2 verdict: "implement with edits" — this rev IS those edits). Task #119 (high);
+_Status: **rev 3 — IMPLEMENTED** (2026-07-19; owner manual verify pending — the
+engagement-shoot repro with `PB_SHARP_DIAG=1`, expected ≤1 blurry toggle ever). Codex rounds
+1–2 folded (review log at the bottom; round 2 verdict: "implement with edits" — this rev IS
+those edits, and the implementation includes them). Task #119 (high);
 lands #109 item 3 (decode content identity) as a side effect. Owner directive: "holistically
 address the root cause and bolster the architecture around this whole system so that we never
 hit this class of problem again." Executes on `main` (wt1 owns #120 the diagnostics panel; the
@@ -295,6 +297,32 @@ reads `content_gen`; synthetic constructor migration. Core tests (the Codex r1 m
 
 ## Review log
 
+- **r3 (Codex, 2026-07-19, implementation-diff review):** verdict **"ship with edits"** —
+  four findings, all dispositioned:
+  - **Bug 1 (fixed):** `pending_reps` ignored `Purpose`, so a staged content-valid Thumb
+    (same `(item, Fit)` shape) suppressed the display want it can't satisfy — reachable
+    since #119 lets thumbs survive toggles. Fixed with a `Purpose::Display` filter +
+    pinned (`a_staged_thumb_never_suppresses_the_display_want`, through the real pool).
+  - **Bug 2 (fixed):** the worker untracked BEFORE creating the outcome's guard, leaving
+    an instant where neither `tracked` nor `outstanding` witnessed the result. The guard
+    is now created inside the completion lock, before the untrack.
+  - **Bug 3 (fixed; pre-existing, surfaced by the review):** the macOS archive-poster
+    round-trip ignored `request_id` at both gates — after a deck change re-requested the
+    same index, a pre-change straggler could consume the NEW deck's marker and install
+    old pixels stamped current. `poster_inflight` is now `item → request_id` and both the
+    read drain and `video_poster_ready` validate the id (+ test). ⚠️ `request_archive_posters`
+    is `cfg(macos)` — compile-verified only up to the shared code on Windows; #113's
+    on-device pass should confirm.
+  - **Bug 4 (dispositioned, not changed):** queued-selection `native_class` can be
+    demoted by re-emission — pre-existing #114 behavior this diff never touched (the
+    admission-permit coupling is arguably intentional); flagged for the #114/#121 owner
+    rather than drive-by-changed here.
+  - Test edits folded: content-kill covers all four kinds; rebuild retention re-stages
+    all four before the content phase; the quiesce pin runs through `enter_empty_state`;
+    the thumbs fence test asserts `pending_scroll` survival. Deferred with rationale: a
+    combined queued-selection epoch+promotion+replay matrix test (pre-existing behavior,
+    unchanged, covered piecewise), and a real-pool byte-budget rebuild-retention test
+    (guard-drop RAII is pinned pool-side; `Vec::retain` drop semantics are the language's).
 - **r2 (Codex, 2026-07-19, same session):** verdict **"implement with edits"** — r1 folds
   confirmed correct; two remaining holes: (h1) `has_work` misses sent-but-undrained outcomes
   (untrack precedes send, `decode_pool.rs:759/:795`) → the `outstanding` atomic (counting
