@@ -777,3 +777,444 @@ impl AppCore {
             .unwrap_or_default()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Viewport;
+    use crate::app_core_impl::test_support::{test_core};
+    use crate::contract::{CoreEvent};
+
+    #[test]
+    fn info_line_fields_respect_the_settings_toggles() {
+        use crate::meta::PhotoMeta;
+        let mut core = test_core();
+        core.current = Some(PhotoMeta {
+            rel: "folder/photo.jpg".to_string(),
+            w: 4032,
+            h: 3024,
+            size: None,
+            codec: "JPEG",
+            animated: None,
+            recovered: None,
+        });
+        core.info_line = true;
+
+        // Default fields (folder off, filename/resolution/codec on): the file NAME only, not
+        // the relative dir.
+        assert_eq!(
+            core.info_line_content().as_deref(),
+            Some("photo.jpg · 4032×3024 · JPEG")
+        );
+        assert_eq!(
+            core.info_line_main().as_deref(),
+            Some("photo.jpg · 4032×3024")
+        );
+        assert_eq!(core.info_line_codec(), "JPEG");
+        assert!(core.info_line_visible());
+
+        // Folder on → the relative dir is prepended to the file name with a `/`.
+        core.settings.info_show_folder = true;
+        assert_eq!(
+            core.info_line_content().as_deref(),
+            Some("folder/photo.jpg · 4032×3024 · JPEG")
+        );
+        // Folder on, filename off → just the folder.
+        core.settings.info_show_filename = false;
+        assert_eq!(
+            core.info_line_content().as_deref(),
+            Some("folder · 4032×3024 · JPEG")
+        );
+        core.settings.info_show_filename = true;
+        core.settings.info_show_folder = false;
+
+        // Codec off → dropped from the string, and the pill accessor goes empty (folder is
+        // back off, so it's the file name alone again).
+        core.settings.info_show_codec = false;
+        assert_eq!(
+            core.info_line_content().as_deref(),
+            Some("photo.jpg · 4032×3024")
+        );
+        assert_eq!(core.info_line_codec(), "");
+
+        // Filename off too → only the resolution remains.
+        core.settings.info_show_filename = false;
+        assert_eq!(core.info_line_content().as_deref(), Some("4032×3024"));
+        assert_eq!(core.info_line_main().as_deref(), Some("4032×3024"));
+
+        // All fields off → the line hides (empty-pill guard) even though `i` is on.
+        core.settings.info_show_resolution = false;
+        assert!(!core.info_line_visible());
+    }
+
+    #[test]
+    fn recovered_notice_surfaces_a_malformed_files_reason() {
+        use crate::meta::PhotoMeta;
+        let mut core = test_core();
+        // A clean decode carries no reason → the details panel shows no notice.
+        core.current = Some(PhotoMeta {
+            rel: "trip/clean.jpg".to_string(),
+            w: 4032,
+            h: 3024,
+            size: None,
+            codec: "JPEG",
+            animated: None,
+            recovered: None,
+        });
+        assert_eq!(core.recovered_notice(), "");
+
+        // A malformed-but-recovered decode carries the reason → the notice shows it.
+        core.current = Some(PhotoMeta {
+            rel: "trip/ticket.jpg".to_string(),
+            w: 4864,
+            h: 3616,
+            size: None,
+            codec: "JPEG",
+            animated: None,
+            recovered: Some("Extra bytes between headers".to_string()),
+        });
+        assert_eq!(core.recovered_notice(), "Extra bytes between headers");
+
+        // No current photo → empty (no panic).
+        core.current = None;
+        assert_eq!(core.recovered_notice(), "");
+    }
+
+    #[test]
+    fn the_details_panel_shows_a_recovery_notice_for_a_malformed_file() {
+        use crate::meta::PhotoMeta;
+        let mut core = test_core();
+        core.source = Arc::new(FsSource::new(vec![PathBuf::from("trip/ticket.jpg")]));
+        core.displayed_item = Some(0);
+        core.current = Some(PhotoMeta {
+            rel: "trip/ticket.jpg".to_string(),
+            w: 4864,
+            h: 3616,
+            size: None,
+            codec: "JPEG",
+            animated: None,
+            recovered: Some("Extra bytes between headers".to_string()),
+        });
+
+        // A recovered file gets a "Recovered" row naming the reason, right in Details.
+        let rows = core.details_panel().rows;
+        assert!(
+            rows.iter().any(|r| matches!(r,
+                DetailRow::Pair { label, value }
+                    if label == "Recovered" && value.contains("Extra bytes between headers"))),
+            "a recovered file must show the notice row; got {rows:?}"
+        );
+
+        // A clean decode (no reason) shows no such row.
+        core.current.as_mut().unwrap().recovered = None;
+        let clean = core.details_panel().rows;
+        assert!(
+            !clean
+                .iter()
+                .any(|r| matches!(r, DetailRow::Pair { label, .. } if label == "Recovered")),
+            "a clean file must not show a Recovered row; got {clean:?}"
+        );
+    }
+
+    /// `info_line_visible()` is what the **native macOS shell** actually polls
+    /// (`CoreModel.swift`) to show/hide its SwiftUI info-line view — unlike the
+    /// winit HUD path, it never looks at `info_line_shown`. So `Tab` must suppress
+    /// it here directly, or the native line ignores Tab-hide entirely.
+    #[test]
+    fn info_line_visible_respects_tab_hidden() {
+        use crate::meta::PhotoMeta;
+        let mut core = test_core();
+        core.current = Some(PhotoMeta {
+            rel: "a.jpg".to_string(),
+            w: 100,
+            h: 100,
+            size: None,
+            codec: "JPEG",
+            animated: None,
+            recovered: None,
+        });
+        core.info_line = true;
+        assert!(core.info_line_visible());
+
+        core.dispatch_action(Action::TogglePanels); // Tab: the line alone counts as open
+        assert!(core.panels.hidden);
+        assert!(
+            !core.info_line_visible(),
+            "the native shell's actual gate must hide too"
+        );
+        assert!(core.info_line, "…without turning the toggle off");
+
+        core.dispatch_action(Action::TogglePanels); // Tab again reveals
+        assert!(!core.panels.hidden);
+        assert!(core.info_line_visible());
+    }
+
+    #[test]
+    fn native_help_suppresses_the_hud_and_signals_visibility() {
+        let mut core = test_core();
+        core.native_help = true;
+        // Opening Help does not rasterize a HUD overlay (the shell draws it).
+        core.dispatch_action(Action::Help);
+        assert!(core.panels.help, "Help is open in the model");
+        assert!(!core.overlay_shown, "…but nothing is rasterized to the HUD");
+        assert!(
+            core.help_panel_visible(),
+            "the native Help view should show"
+        );
+        // A tick emits the PanelsChanged marker on the show transition.
+        core.effects.clear();
+        core.handle(CoreEvent::Tick(std::time::Instant::now()));
+        assert!(
+            core.effects
+                .iter()
+                .any(|e| matches!(e, contract::CoreEffect::PanelsChanged)),
+            "the tick signals the host to re-pull the panel model"
+        );
+        // Tab-hide hides the native view without closing it; a tick re-signals.
+        core.dispatch_action(Action::TogglePanels);
+        assert!(core.panels.help && core.panels.hidden);
+        assert!(!core.help_panel_visible(), "hidden → the native view hides");
+        core.effects.clear();
+        core.handle(CoreEvent::Tick(std::time::Instant::now()));
+        assert!(core
+            .effects
+            .iter()
+            .any(|e| matches!(e, contract::CoreEffect::PanelsChanged)));
+    }
+
+    #[test]
+    fn native_inspector_suppresses_the_hud_and_signals_on_tab_and_content() {
+        use crate::overlay::InspectorTab;
+        use crate::panels::InspectorSnapshot;
+        let mut core = test_core();
+        core.native_inspector = true;
+        // Closed → not visible, no snapshot.
+        assert!(!core.inspector_panel_visible());
+        // Open the Details tab: visible, and the tick signals the host.
+        core.panels.open_inspector(InspectorTab::Details);
+        assert!(core.inspector_panel_visible());
+        assert!(matches!(
+            core.inspector_snapshot(),
+            InspectorSnapshot::Details(_)
+        ));
+        core.effects.clear();
+        core.handle(CoreEvent::Tick(std::time::Instant::now()));
+        assert!(
+            core.effects
+                .iter()
+                .any(|e| matches!(e, contract::CoreEffect::PanelsChanged)),
+            "opening the Inspector signals the host"
+        );
+        // Switching tabs changes the snapshot → re-signals.
+        core.panels.open_inspector(InspectorTab::Text);
+        assert!(matches!(
+            core.inspector_snapshot(),
+            InspectorSnapshot::Text(_)
+        ));
+        core.effects.clear();
+        core.handle(CoreEvent::Tick(std::time::Instant::now()));
+        assert!(
+            core.effects
+                .iter()
+                .any(|e| matches!(e, contract::CoreEffect::PanelsChanged)),
+            "a tab switch re-signals"
+        );
+        // Tab-hidden → not visible (the master switch wins).
+        core.panels.hidden = true;
+        assert!(!core.inspector_panel_visible());
+        // Winit (native_inspector off) never treats it as native-visible.
+        core.panels.hidden = false;
+        core.native_inspector = false;
+        assert!(!core.inspector_panel_visible());
+    }
+
+    #[test]
+    fn winit_keeps_help_on_the_hud_no_native_signal() {
+        // With native_help off (the winit shell), Help is a HUD panel and never a
+        // native-visible one, and the marker never fires.
+        let mut core = test_core();
+        core.dispatch_action(Action::Help);
+        assert!(core.panels.help);
+        assert!(
+            !core.help_panel_visible(),
+            "no native presentation on winit"
+        );
+        core.effects.clear();
+        core.handle(CoreEvent::Tick(std::time::Instant::now()));
+        assert!(!core
+            .effects
+            .iter()
+            .any(|e| matches!(e, contract::CoreEffect::PanelsChanged)));
+    }
+
+    #[test]
+    fn info_line_reserve_follows_the_horizontal_overlap() {
+        let mut core = test_core();
+        core.viewport = Viewport {
+            width: 1000,
+            height: 800,
+            scale_factor: 1.0,
+        };
+        core.info_line_shown = true;
+        core.info_line_w = 300;
+        core.info_line_h = 30;
+        let m = core.overlay_margin() as f32;
+        // Panel spans for a right-anchored Inspector and a left-anchored tree — narrow
+        // columns near the edges, so a short centered line clears both.
+        let right_panel = (1000.0 - m - 200.0, 1000.0 - m); // bottom-right, 200px wide
+        let left_tree = (m, m + 200.0); // top-left, 200px column
+
+        // Right-aligned line: overlaps the right panel, clears the left tree.
+        core.settings.info_line_align = settings::InfoLineAlign::Right;
+        assert!(core.info_line_reserve_for(right_panel.0, right_panel.1) > 0);
+        assert_eq!(core.info_line_reserve_for(left_tree.0, left_tree.1), 0);
+
+        // Left-aligned line: overlaps the tree, clears the right panel.
+        core.settings.info_line_align = settings::InfoLineAlign::Left;
+        assert!(core.info_line_reserve_for(left_tree.0, left_tree.1) > 0);
+        assert_eq!(core.info_line_reserve_for(right_panel.0, right_panel.1), 0);
+
+        // Narrow, short centered line: reaches neither corner.
+        core.settings.info_line_align = settings::InfoLineAlign::Center;
+        core.info_line_w = 200;
+        assert_eq!(core.info_line_reserve_for(left_tree.0, left_tree.1), 0);
+        assert_eq!(core.info_line_reserve_for(right_panel.0, right_panel.1), 0);
+
+        // The narrow-window case the owner flagged: a wide centered line (a long
+        // filename spanning most of the width) overlaps BOTH corner panels.
+        core.info_line_w = 900;
+        assert!(
+            core.info_line_reserve_for(left_tree.0, left_tree.1) > 0,
+            "a wide centered line reaches the left tree"
+        );
+        assert!(
+            core.info_line_reserve_for(right_panel.0, right_panel.1) > 0,
+            "…and the right panel too"
+        );
+
+        // Hidden line reserves nothing regardless of alignment.
+        core.info_line_shown = false;
+        assert_eq!(core.info_line_reserve_for(left_tree.0, left_tree.1), 0);
+        assert_eq!(core.info_line_reserve_for(right_panel.0, right_panel.1), 0);
+    }
+
+    #[test]
+    fn show_image_text_toggles_the_panel_mode() {
+        let mut core = test_core();
+        core.dispatch_action(Action::ShowImageText);
+        assert_eq!(
+            core.panels.inspector,
+            Some(InspectorTab::Text),
+            "T opens the Inspector on Text"
+        );
+        core.dispatch_action(Action::ShowImageText);
+        assert_eq!(core.panels.inspector, None, "T again closes it");
+        // The basic `i` line is now fully independent (task #54 decouple): pressing
+        // `i` while the Text panel is open turns the line on WITHOUT closing the
+        // panel — they coexist, the line sitting below the panel.
+        core.dispatch_action(Action::ShowImageText);
+        core.dispatch_action(Action::Info);
+        assert!(core.info_line, "i turns the line on");
+        assert_eq!(
+            core.panels.inspector,
+            Some(InspectorTab::Text),
+            "…and the Text panel stays open — no longer mutually exclusive"
+        );
+        assert_eq!(core.slot_content(), Some(SlotContent::Text));
+    }
+
+    #[test]
+    fn tab_hides_and_panel_toggles_reveal() {
+        let mut core = test_core();
+        core.dispatch_action(Action::TogglePanels);
+        assert!(!core.panels.hidden, "Tab with nothing open is a no-op");
+        core.dispatch_action(Action::ShowImageText);
+        core.dispatch_action(Action::TogglePanels);
+        assert!(core.panels.hidden, "Tab hides…");
+        assert_eq!(
+            core.panels.inspector,
+            Some(InspectorTab::Text),
+            "…without closing"
+        );
+        assert_eq!(core.slot_content(), None, "hidden panels draw nothing");
+        // T while hidden reveals and keeps the panel open — never closes.
+        core.dispatch_action(Action::ShowImageText);
+        assert!(!core.panels.hidden);
+        assert_eq!(core.panels.inspector, Some(InspectorTab::Text));
+        // `hidden` is one master flag shared with the basic line (task #54 follow-up):
+        // `i` while Tab-hidden follows the same reveal rule as `T`/Help/tree — it
+        // reveals everything (not just the line) and only ever ends up shown.
+        core.dispatch_action(Action::TogglePanels);
+        assert!(core.panels.hidden);
+        core.dispatch_action(Action::Info);
+        assert!(core.info_line, "i turns the line on…");
+        assert!(
+            !core.panels.hidden,
+            "…and reveals the rest too — same shared flag as Tab"
+        );
+        assert_eq!(
+            core.panels.inspector,
+            Some(InspectorTab::Text),
+            "the Text panel comes back with it"
+        );
+    }
+
+    #[test]
+    fn describe_image_toggles_the_panel_mode() {
+        let mut core = test_core();
+        core.displayed_item = Some(0);
+        // Pre-cache so `D` is a pure toggle (no worker/network kicked).
+        core.descriptions
+            .insert(0, Ok("A cat on a sofa.".to_string()));
+        core.dispatch_action(Action::DescribeImage);
+        assert_eq!(
+            core.panels.inspector,
+            Some(InspectorTab::Describe),
+            "D opens the Inspector on Describe"
+        );
+        core.dispatch_action(Action::DescribeImage);
+        assert_eq!(core.panels.inspector, None, "D again closes it");
+        // The basic line is independent — `i` while Describe is open turns the line
+        // on and the panel stays (task #54 decouple).
+        core.dispatch_action(Action::DescribeImage);
+        core.dispatch_action(Action::Info);
+        assert!(core.info_line);
+        assert_eq!(core.panels.inspector, Some(InspectorTab::Describe));
+        assert_eq!(core.slot_content(), Some(SlotContent::Describe));
+    }
+
+    /// A door reports its **size** where a photo reports dimensions — its frame is a 1×1
+    /// sentinel, so `1 × 1` would be the alternative. The size rides `PhotoMeta` from the
+    /// scan worker precisely because this runs on the frame path.
+    #[test]
+    fn the_info_line_reports_a_size_for_a_door_and_dimensions_for_a_photo() {
+        let core = test_core();
+        let door = crate::meta::PhotoMeta {
+            rel: "album.zip".to_string(),
+            w: 1,
+            h: 1,
+            size: Some(271_000_000),
+            codec: "ZIP",
+            animated: None,
+            recovered: None,
+        };
+        let parts = core.info_line_parts(&door);
+        assert!(parts.contains(&"271 MB".to_string()), "{parts:?}");
+        assert!(
+            !parts.iter().any(|p| p.contains('×')),
+            "never print 1 × 1: {parts:?}"
+        );
+
+        let photo = crate::meta::PhotoMeta {
+            rel: "a.jpg".to_string(),
+            w: 4032,
+            h: 3024,
+            size: None,
+            codec: "JPEG",
+            animated: None,
+            recovered: None,
+        };
+        let parts = core.info_line_parts(&photo);
+        assert!(parts.contains(&"4032×3024".to_string()), "{parts:?}");
+    }
+}
