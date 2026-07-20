@@ -127,7 +127,10 @@ mod ffi`) starts only at line 4376.
 - **Why it hurts:** the **single worst cross-platform liability** — every orchestration
   feature is written twice and drifts silently. This is what will make the macOS port a
   grind and what leaves macOS exposed to race variants Windows already closed (see #3, task
-  #109 item 1: the mac shell still lacks the cross-cancel that Windows got in `8293a662`).
+  #109 item 1). **CORRECTED 2026-07-20 — the mac-lacks-the-cross-cancel claim is FALSE.**
+  `pb-mac-ffi`'s `begin_archive_open` carries it, with an explicit "#109 item 1, winit
+  parity - `8293a662`" citation. Confirmed independently by two sessions during task
+  #126. macOS is at parity here; do not cite this as an open gap.
 - **Remediation:** this is the payoff of finishing #1. A shared `AppCore` that owns
   orchestration collapses both shells to thin, platform-specific I/O adapters. Until then,
   every change to a mirrored function must be applied to both files by hand — treat that as a

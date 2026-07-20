@@ -6768,6 +6768,38 @@ impl AppCore {
         superseded
     }
 
+    /// **User-initiated** stop of a folder scan (the pill's Cancel, File ▸ Stop Scanning, or a
+    /// bound key), keeping whatever streamed in so far — the partial playlist is already live.
+    ///
+    /// Distinct from the bare [`cancel_dir_scan`](Self::cancel_dir_scan), which is the
+    /// *mechanism* and is also used for teardown and for cross-type supersession where a new
+    /// deck is about to arrive. Only the user-initiated path restores the welcome hint,
+    /// because only it leaves the user looking at nothing on purpose.
+    ///
+    /// ⚠ The hint restore is the fix for a real gap (task #126 ledger item 3, found 2026-07-20):
+    /// [`finish_scan`](Self::finish_scan) restores the "Press O to open" hint when a walk ends
+    /// naturally with an empty deck, but **no cancel path did**. `show_open_hint` early-returns
+    /// while `scanning` is true, and cancelling never called it afterwards — so a cold launch
+    /// into a slow folder, cancelled before the first photo, left an empty canvas with the hint
+    /// still suppressed. Both shells had the same hole; fixing it here fixes both.
+    ///
+    /// Returns whether a scan was actually running, so the shell can skip its toast.
+    pub fn cancel_scan_command(&mut self) -> bool {
+        if self.dir_scan.is_none() {
+            return false;
+        }
+        let nothing_shown = !self.scan_bootstrapped && self.source.is_empty();
+        self.cancel_dir_scan();
+        // `cancel_dir_scan` cleared `scanning`, so `show_open_hint` will no longer suppress
+        // itself. Symmetric with `finish_scan`'s restore, and gated the same way: never blank
+        // an existing photo.
+        if nothing_shown {
+            self.show_open_hint();
+        }
+        self.request_prefetch();
+        true
+    }
+
     /// Cancel any in-flight walk. Idempotent, and — unlike the winit shell's version — it
     /// clears the handle itself, so no call site has to remember (task #126 §11.2).
     pub fn cancel_dir_scan(&mut self) {
@@ -19264,6 +19296,57 @@ mod tests {
         let (_tx, rx) = std::sync::mpsc::channel();
         core.arm_dir_scan(1, rx, crate::scan::ScanProgress::new(), "Photos".into());
         assert!(core.deleted.is_empty(), "fresh scan, fresh universe");
+    }
+
+    /// #126 ledger item 3, and the bug it turned out to be hiding. A scan that ends NATURALLY
+    /// with an empty deck restores the "Press O to open" hint (`finish_scan`), but no cancel
+    /// path did — `show_open_hint` suppresses itself while `scanning` is true, and cancelling
+    /// never called it again. A cold launch into a slow folder, cancelled before the first
+    /// photo, left an empty canvas with the hint still suppressed.
+    #[test]
+    fn cancelling_a_scan_with_an_empty_deck_restores_the_welcome_hint() {
+        let (mut core, _tx) = armed_scan_core();
+        assert!(core.source.is_empty() && !core.scan_bootstrapped);
+        core.effects.clear();
+
+        assert!(core.cancel_scan_command(), "a scan was running");
+
+        assert!(
+            core.effects
+                .iter()
+                .any(|e| matches!(e, contract::CoreEffect::PanelsChanged)),
+            "the welcome hint must be re-shown, or the user is left on a blank canvas"
+        );
+        assert!(core.dir_scan.is_none());
+        assert!(!core.scanning);
+    }
+
+    /// ...but a cancel that leaves a photo up must NOT blank it with a welcome hint. Same gate
+    /// `finish_scan` uses.
+    #[test]
+    fn cancelling_a_scan_that_found_photos_leaves_the_deck_alone() {
+        let (mut core, _tx) = armed_scan_core();
+        core.scan_bootstrapped = true; // photos streamed in
+        core.effects.clear();
+
+        assert!(core.cancel_scan_command());
+
+        assert!(
+            !core
+                .effects
+                .iter()
+                .any(|e| matches!(e, contract::CoreEffect::PanelsChanged)),
+            "a partial deck stays on screen - never replaced by the open hint"
+        );
+    }
+
+    /// The command is a no-op when nothing is running, so the menu item / key is safe to spam.
+    #[test]
+    fn cancelling_with_no_scan_running_is_inert() {
+        let mut core = test_core();
+        core.effects.clear();
+        assert!(!core.cancel_scan_command(), "nothing to cancel");
+        assert!(core.effects.is_empty());
     }
 
     // -- #124: smooth zoom binds the resident Original ----------------------------------

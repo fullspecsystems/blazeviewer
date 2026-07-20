@@ -586,6 +586,48 @@ build (films silent, no Developer shell); `-NoNative` skips every native lib. On
 macOS/Linux a bare `cargo run -p pb-app --features …` is fine — this is a Windows
 build-config footgun specifically.
 
+### Working across two machines (the cross-machine handoff)
+
+Most non-trivial work here spans **two machines**: `pb-mac-ffi` + `mac/` compile and run
+only on the Mac, and `pb-app` only on Windows/Linux. Neither box can type-check the other's
+shell, so a change to shared code is **half-verified by construction** until the other
+machine sees it. Sessions cannot talk to each other — there is no cross-machine agent
+channel — so **the repo is the message bus**, and it works well as long as everyone uses the
+same three conventions:
+
+1. **Read the plan's ledger first; write it last.** Each task plan carries one section
+   titled **`## Handoff`** — the *only* place cross-machine state lives, so nobody has to
+   guess whether it's §11 this time or §12.8 the next. It holds exactly three things:
+   *verified* (what was actually run, on which platform), *not verified* (what the next
+   machine must check, specifically enough to act on), and *decisions/corrections* (including
+   corrections to earlier sessions — those are welcome, and have caught real errors).
+2. **Never mark something verified that you could not run.** "Compiles" is not "works", and
+   `cargo check --target x86_64-pc-windows-msvc` from a Mac is not a Windows run. Say which
+   it was. A shell UX change is *behaviour-unverified* until someone launches the app.
+3. **Leave a revert lever for anything unverified.** If you ship a UX change the other
+   machine must confirm, keep the old path alive behind `#[allow(dead_code)]` and a one-line
+   gate, and say in the Handoff what flipping it restores and when it may be deleted.
+
+**⚠ The trap that has actually bitten (2026-07-20):** `pb-app` builds `AppCore` as a **struct
+literal** while `pb-mac-ffi` goes through `AppCore::new_host`. So **adding a field to
+`AppCore` breaks the winit build and not the Mac one** — and a Mac session gets no warning.
+Adding shared state is exactly the case where the cross-check below is not optional.
+
+**Cross-check before pushing shared-code changes**, so the other machine never pulls a red
+tree:
+
+```sh
+# From the Mac, for the winit shell (needs the temporary Cargo.toml edits, then revert them):
+cargo clippy -p pb-app --all-targets --target x86_64-pc-windows-msvc -- -D warnings
+# ureq must be default-features = false PLUS features = ["json"], or pb-app-core
+# fails on `send_json` before pb-app is even reached.
+```
+
+There is no equivalent from Windows: `pb-mac-ffi` is `#![cfg(target_os = "macos")]`, so on a
+non-Mac it compiles to an **empty staticlib** and a syntax error in it produces *zero*
+errors. Windows sessions must therefore treat every mac-shell edit as unverifiable and leave
+it to the Mac — not attempt it blind.
+
 ## Working norms
 
 - **Test first.** New `pb-core` logic without a failing-then-passing test is not

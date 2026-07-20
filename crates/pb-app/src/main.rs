@@ -1359,12 +1359,13 @@ impl App {
     /// playlist is already live). Resumes normal prefetch (the deck is final now) and flashes
     /// a confirmation. A no-op when no scan is running (the menu item is disabled then).
     fn cancel_scan_command(&mut self) {
-        if self.core.dir_scan.is_none() {
-            return;
+        // The core owns the policy now (task #126): cancel, keep the partial deck, resume
+        // normal prefetch, and — the 2026-07-20 fix — restore the welcome hint when the
+        // cancel leaves nothing on screen. Both shells share it, so both get the fix.
+        if !self.core.cancel_scan_command() {
+            return; // nothing was running
         }
-        self.cancel_dir_scan();
         self.close_scanning_dialog();
-        self.core.request_prefetch();
         self.core.show_toast("Scan stopped");
     }
 
