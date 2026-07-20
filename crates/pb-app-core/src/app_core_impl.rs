@@ -200,6 +200,8 @@ impl AppCore {
             bg: crate::background::BackgroundOps::new(),
             dir_scan: None,
             scan_wire_gen: 0,
+            archive_load: None,
+            archive_wire_gen: 0,
             #[cfg(test)]
             rebind_count: 0,
             target_item: None,
@@ -6748,14 +6750,16 @@ impl AppCore {
         // A fresh scan is a fresh universe: no stale tombstones from the previous deck.
         self.deleted.clear();
         let (id, superseded) = self.bg.begin(crate::background::OpKind::DirScan, self.now);
-        // Stop the previous walk *here*, inside the transition, rather than trusting each
-        // call site to remember. The winit shell's `cancel_dir_scan` relies on callers
-        // clearing the handle afterwards and its own comment overstates that they all do
-        // (two of five do not); the macOS copy clears it internally. This adopts the macOS
-        // shape, which is correct by construction (task #126 §11.2).
-        if let Some(prev) = self.dir_scan.take() {
-            prev.request_cancel();
-        }
+        // Stop whatever was displaced *here*, inside the transition, rather than trusting each
+        // call site to remember. The winit shell's `cancel_dir_scan` relied on callers clearing
+        // the handle afterwards and its own comment overstated that they all do (two of five do
+        // not); the macOS copy cleared it internally. This adopts the macOS shape, which is
+        // correct by construction (task #126 §11.2).
+        //
+        // Since step 2 this also stops a displaced ARCHIVE OPEN, because the core owns that
+        // worker too. Handling only the walk here was the exact §12.6 asymmetry — it type-checks
+        // and reads fine, and silently drops the cross-type cancel in one direction.
+        self.supersede(superseded);
         self.scanning = true; // sequential-only prefetch while streaming
         self.scan_bootstrapped = false; // the first non-empty batch bootstraps the view
         self.dir_scan = Some(crate::dir_scan::DirScanState::armed(
@@ -6858,6 +6862,254 @@ impl AppCore {
                 }
             }
         }
+    }
+
+    // ── Archive-open worker lifecycle (task #126 step 2) ──────────────────────────────────
+    //
+    // The companion to the dir-scan block above. Moved off the two shells, which each carried
+    // a byte-similar copy. Read `crate::archive_open`'s privacy note before touching the
+    // password path.
+
+    /// Start opening an archive — **the production entry point** both shells call.
+    ///
+    /// A plain `.zip` with no cached passwords to auto-try opens *synchronously* (that reads a
+    /// central directory, not entry data) and returns its terminal outcome without ever
+    /// spawning a worker or showing chrome. Everything else — 7z, the tar family, or any open
+    /// that will auto-try cached passwords — goes to a worker thread, returns
+    /// [`ArchiveOutcome::Pending`], and lands through [`poll_archive_load`](Self::poll_archive_load).
+    ///
+    /// The auto-try only runs on an *initial* open (`password.is_none()`), so a user-entered
+    /// password is never silently replaced by a cached one.
+    pub fn begin_archive_open(
+        &mut self,
+        path: std::path::PathBuf,
+        password: Option<crate::SecretString>,
+    ) -> crate::archive_open::ArchiveOutcome {
+        use crate::archive_open::ArchiveOutcome;
+
+        let kind = pb_source::archive_kind(&path).unwrap_or(pb_source::ArchiveKind::Zip);
+        // Auto-try cached session passwords (MRU-first) only on an INITIAL open, so a
+        // same-password folder asks once (session-archive-password-cache).
+        let cached = if password.is_none() {
+            self.archive_passwords_snapshot()
+        } else {
+            Vec::new()
+        };
+        let attempted_password = password.clone();
+
+        // Claim the shared generation space. Both flows are registered here now, which is what
+        // lets the core cancel a displaced walk ITSELF rather than each shell remembering to
+        // (task #126 §12.6 — the interim unconditional cancel in the shells retires with this).
+        let (id, superseded) = self
+            .bg
+            .begin(crate::background::OpKind::ArchiveOpen, self.now);
+        self.supersede(superseded);
+
+        // A wrong-password ZIP attempt decrypts the whole first entry, so it must go
+        // off-thread; an empty cache with no user password is the synchronous fast path.
+        let will_autotry = password.is_none() && !cached.is_empty();
+        if !kind.background_open() && !will_autotry {
+            let pw = password.as_ref().map(|p| p.expose().to_owned());
+            let result =
+                crate::scan::load_archive(&path, kind, pw, &pb_source::OpenProgress::new());
+            self.bg.finish(id);
+            return self.finish_archive_open((result, None), attempted_password, path);
+        }
+
+        let wire_gen = self.archive_wire_gen.wrapping_add(1);
+        self.archive_wire_gen = wire_gen;
+        let progress = pb_source::OpenProgress::new();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let worker_path = path.clone();
+        let worker_progress = progress.clone();
+        std::thread::spawn(move || {
+            let out = match password {
+                Some(pw) => (
+                    crate::scan::load_archive(
+                        &worker_path,
+                        kind,
+                        Some(pw.expose().to_owned()),
+                        &worker_progress,
+                    ),
+                    None,
+                ),
+                None => crate::scan::load_archive_with_cache(
+                    &worker_path,
+                    kind,
+                    &cached,
+                    &worker_progress,
+                ),
+            };
+            let _ = tx.send((wire_gen, out));
+        });
+        self.archive_load = Some(crate::archive_open::ArchiveOpenState {
+            id,
+            rx,
+            wire_gen,
+            path,
+            attempted_password,
+            progress,
+        });
+        ArchiveOutcome::Pending
+    }
+
+    /// Stop whatever operation `superseded` names. The core owns **both** workers now, so this
+    /// is the one place cross-type supersession is performed as well as decided — the split
+    /// that made it a per-call-site convention (and a recurring bug) is gone.
+    fn supersede(
+        &mut self,
+        superseded: Option<(crate::background::OpId, crate::background::OpKind)>,
+    ) {
+        match superseded {
+            Some((_, crate::background::OpKind::DirScan)) => {
+                if let Some(prev) = self.dir_scan.take() {
+                    prev.request_cancel();
+                }
+                self.scanning = false;
+            }
+            Some((_, crate::background::OpKind::ArchiveOpen)) => {
+                if let Some(prev) = self.archive_load.take() {
+                    prev.request_cancel();
+                }
+            }
+            None => {}
+        }
+    }
+
+    /// Install an archive open that is already running (or, in tests, one that never will),
+    /// so a test can drive the worker's channel itself — no thread, no filesystem, no sleeps.
+    /// The deterministic completion point Codex asked an injectable runtime for; the mpsc
+    /// channel already was one (§11.3).
+    #[doc(hidden)]
+    pub fn arm_archive_open(
+        &mut self,
+        wire_gen: u64,
+        rx: std::sync::mpsc::Receiver<(u64, crate::archive_open::ArchiveResult)>,
+        progress: pb_source::OpenProgress,
+        path: std::path::PathBuf,
+        attempted_password: Option<crate::SecretString>,
+    ) -> Option<(crate::background::OpId, crate::background::OpKind)> {
+        let (id, superseded) = self
+            .bg
+            .begin(crate::background::OpKind::ArchiveOpen, self.now);
+        self.supersede(superseded);
+        self.archive_load = Some(crate::archive_open::ArchiveOpenState {
+            id,
+            rx,
+            wire_gen,
+            path,
+            attempted_password,
+            progress,
+        });
+        superseded
+    }
+
+    /// Pick up a finished background archive open (called each `tick`).
+    pub fn poll_archive_load(&mut self) -> crate::archive_open::ArchiveOutcome {
+        use crate::archive_open::ArchiveOutcome;
+        use std::sync::mpsc::TryRecvError;
+
+        let (id, wire_gen, recv) = match self.archive_load.as_ref() {
+            Some(l) => (l.id, l.wire_gen, l.rx.try_recv()),
+            None => return ArchiveOutcome::Pending,
+        };
+        // One staleness gate for both flows: an open superseded by a newer open *or* by a
+        // folder scan fails this, so its result can never rebuild the deck underneath.
+        if !self.bg.is_current(id) {
+            self.archive_load = None;
+            return ArchiveOutcome::Cancelled;
+        }
+        match recv {
+            Ok((g, result)) => {
+                if g != wire_gen {
+                    return ArchiveOutcome::Pending; // defensive; the channel is per-open
+                }
+                let load = self.archive_load.take().expect("checked above");
+                self.bg.finish(id);
+                self.finish_archive_open(result, load.attempted_password, load.path)
+            }
+            Err(TryRecvError::Empty) => ArchiveOutcome::Pending,
+            Err(TryRecvError::Disconnected) => {
+                // The worker died without sending a terminal result. Never strand its chrome.
+                self.archive_load = None;
+                self.bg.finish(id);
+                ArchiveOutcome::Cancelled
+            }
+        }
+    }
+
+    /// Apply a completed open. Private: the password handling below must not be reachable from
+    /// a shell (`crate::archive_open`'s privacy note).
+    fn finish_archive_open(
+        &mut self,
+        result: crate::archive_open::ArchiveResult,
+        attempted: Option<crate::SecretString>,
+        path: std::path::PathBuf,
+    ) -> crate::archive_open::ArchiveOutcome {
+        use crate::archive::ArchiveOpenError;
+        use crate::archive_open::ArchiveOutcome;
+
+        let (outcome, winner) = result;
+        // An archive that opened at all — even to find nothing viewable — proves its password.
+        // Promote it here, inside the core: the winning secret is never returned to a shell.
+        if matches!(outcome, Ok(_) | Err(ArchiveOpenError::Empty)) {
+            if let Some(pw) = attempted.as_ref().or(winner.as_ref()) {
+                self.remember_archive_password(pw);
+            }
+        }
+        match outcome {
+            Ok(resolved) if !resolved.source.is_empty() => {
+                self.password_archive = None;
+                self.handle(contract::CoreEvent::ArchiveResolved(resolved));
+                ArchiveOutcome::Opened
+            }
+            Ok(_) => {
+                self.password_archive = None;
+                ArchiveOutcome::Failed(ArchiveOpenError::Empty)
+            }
+            Err(ArchiveOpenError::PasswordRequired) => {
+                // Remember the path so a submitted password re-opens it. `wrong` is true only
+                // when THIS attempt carried a password and it was rejected — a first prompt
+                // opens fresh chrome, a retry corrects the chrome already up.
+                self.password_archive = Some(path.clone());
+                ArchiveOutcome::NeedPassword {
+                    path,
+                    wrong: attempted.is_some(),
+                }
+            }
+            Err(ArchiveOpenError::Cancelled) => {
+                self.password_archive = None;
+                ArchiveOutcome::Cancelled
+            }
+            Err(e) => {
+                self.password_archive = None;
+                ArchiveOutcome::Failed(e)
+            }
+        }
+    }
+
+    /// Ask an in-flight archive open to stop. Idempotent, and it clears the handle itself so no
+    /// call site has to remember (the dir-scan lesson, §11.2).
+    pub fn cancel_archive_load(&mut self) {
+        if let Some(load) = self.archive_load.take() {
+            load.request_cancel();
+        }
+        if self.bg.active_is_archive() {
+            self.bg.cancel();
+        }
+    }
+
+    /// A live view of the open in flight, for whatever chrome a shell draws. `None` when none
+    /// is running. Cheap and non-mutating, so it is safe to call every frame.
+    pub fn archive_status(&self) -> Option<crate::archive_open::ArchiveStatus> {
+        let load = self.archive_load.as_ref()?;
+        Some(crate::archive_open::ArchiveStatus {
+            name: crate::archive_open::archive_display_name(&load.path),
+            fraction: load.progress.fraction(),
+            slow: self
+                .bg
+                .is_slow(self.now, crate::dir_scan::SCAN_DIALOG_DELAY),
+        })
     }
 
     /// The decode-to-fit target for the current mode: the display size in Fit mode
@@ -18538,6 +18790,214 @@ mod tests {
         let slot = core.ring.slot_for(0).expect("resident");
         core.present_item(0, slot); // displayed + the mock records the presented slot
         core
+    }
+
+    // -- #126 step 2: the archive-open lifecycle, now core-owned -----------------------------
+
+    use crate::archive_open::ArchiveOutcome;
+
+    /// Arm an archive open on a core with a channel the TEST drives.
+    fn armed_archive_core(
+        attempted: Option<crate::SecretString>,
+    ) -> (
+        AppCore,
+        std::sync::mpsc::Sender<(u64, crate::archive_open::ArchiveResult)>,
+    ) {
+        let mut core = test_core();
+        let (tx, rx) = std::sync::mpsc::channel();
+        core.arm_archive_open(
+            1,
+            rx,
+            pb_source::OpenProgress::new(),
+            std::path::PathBuf::from("/vault/holiday.7z"),
+            attempted,
+        );
+        (core, tx)
+    }
+
+    /// §12.6's whole point, now provable: the core cancels the displaced walk ITSELF, because
+    /// both flows share one generation space. The shells used to do this by hand, and the
+    /// interim step-1 code had to do it unconditionally because the open was not registered.
+    #[test]
+    fn an_archive_open_cancels_the_displaced_walk_inside_the_core() {
+        let mut core = test_core();
+        let (_tx, rx) = std::sync::mpsc::channel();
+        let progress = crate::scan::ScanProgress::new();
+        core.arm_dir_scan(1, rx, progress.clone(), "Photos".into());
+        assert!(core.scanning);
+
+        let (_tx2, rx2) = std::sync::mpsc::channel();
+        let superseded = core.arm_archive_open(
+            1,
+            rx2,
+            pb_source::OpenProgress::new(),
+            std::path::PathBuf::from("/a.7z"),
+            None,
+        );
+
+        assert!(
+            matches!(superseded, Some((_, crate::background::OpKind::DirScan))),
+            "the walk must be reported as displaced"
+        );
+        assert!(core.dir_scan.is_none(), "and dropped by the core");
+        assert!(
+            progress.is_cancelled(),
+            "and TOLD TO STOP — forgetting the handle leaves a real walk streaming batches"
+        );
+        assert!(!core.scanning, "and the prefetch mirror must follow");
+    }
+
+    /// The symmetric half: a folder scan displaces an in-flight open, through the same gate.
+    #[test]
+    fn a_walk_cancels_the_displaced_archive_open_inside_the_core() {
+        let (mut core, _tx) = armed_archive_core(None);
+        let progress = core
+            .archive_load
+            .as_ref()
+            .map(|l| l.progress.clone())
+            .unwrap();
+
+        let (_tx2, rx2) = std::sync::mpsc::channel();
+        core.arm_dir_scan(2, rx2, crate::scan::ScanProgress::new(), "Photos".into());
+
+        assert!(core.archive_load.is_none(), "the open is dropped");
+        assert!(progress.is_cancelled(), "and its worker told to stop");
+    }
+
+    /// A wrong password re-prompts for the SAME archive, and says so, so a shell corrects the
+    /// dialog already up instead of re-opening one.
+    #[test]
+    fn a_wrong_password_reprompts_for_the_same_operation() {
+        let (mut core, tx) = armed_archive_core(Some(crate::SecretString::from("wrong")));
+        tx.send((
+            1,
+            (
+                Err(crate::archive::ArchiveOpenError::PasswordRequired),
+                None,
+            ),
+        ))
+        .unwrap();
+
+        match core.poll_archive_load() {
+            ArchiveOutcome::NeedPassword { path, wrong } => {
+                assert!(wrong, "this attempt carried a password and it was rejected");
+                assert_eq!(path, std::path::PathBuf::from("/vault/holiday.7z"));
+            }
+            other => panic!("expected a re-prompt, got {other:?}"),
+        }
+        assert_eq!(
+            core.password_archive,
+            Some(std::path::PathBuf::from("/vault/holiday.7z")),
+            "the path is remembered so a submitted password re-opens it"
+        );
+    }
+
+    /// A FIRST prompt is not a retry — the distinction the inline-error chrome depends on.
+    #[test]
+    fn a_first_prompt_is_not_marked_wrong() {
+        let (mut core, tx) = armed_archive_core(None);
+        tx.send((
+            1,
+            (
+                Err(crate::archive::ArchiveOpenError::PasswordRequired),
+                None,
+            ),
+        ))
+        .unwrap();
+        assert!(matches!(
+            core.poll_archive_load(),
+            ArchiveOutcome::NeedPassword { wrong: false, .. }
+        ));
+    }
+
+    /// PRIVACY (plan §6): a winning password is promoted into the session cache exactly once,
+    /// and is NEVER handed back to the shell — the outcome carries no secret at all.
+    #[test]
+    fn a_winning_password_is_promoted_once_and_never_returned() {
+        let (mut core, tx) = armed_archive_core(Some(crate::SecretString::from("hunter2")));
+        // An archive that opened but held nothing viewable still proves its password.
+        tx.send((1, (Err(crate::archive::ArchiveOpenError::Empty), None)))
+            .unwrap();
+        let outcome = core.poll_archive_load();
+
+        assert_eq!(
+            core.archive_passwords.len(),
+            1,
+            "promoted exactly once, not per poll"
+        );
+        assert!(!format!("{outcome:?}").contains("hunter2"));
+        assert!(
+            !format!("{:?}", core.archive_passwords).contains("hunter2"),
+            "the session cache must not render its secrets even in Debug"
+        );
+    }
+
+    /// A superseded open's result must not rebuild the deck underneath whatever replaced it.
+    #[test]
+    fn a_superseded_open_applies_nothing() {
+        let (mut core, tx) = armed_archive_core(None);
+        // A walk supersedes it; the worker then finishes anyway.
+        let (_tx2, rx2) = std::sync::mpsc::channel();
+        core.arm_dir_scan(9, rx2, crate::scan::ScanProgress::new(), "Photos".into());
+        let _ = tx.send((1, (Err(crate::archive::ArchiveOpenError::Empty), None)));
+
+        assert!(matches!(core.poll_archive_load(), ArchiveOutcome::Pending));
+        assert!(
+            core.archive_passwords.is_empty(),
+            "a stale result must not promote anything either"
+        );
+    }
+
+    /// Cancel clears the handle itself and makes an in-flight result stale.
+    #[test]
+    fn cancelling_an_open_clears_it_and_is_idempotent() {
+        let (mut core, tx) = armed_archive_core(None);
+        let progress = core
+            .archive_load
+            .as_ref()
+            .map(|l| l.progress.clone())
+            .unwrap();
+
+        core.cancel_archive_load();
+        assert!(core.archive_load.is_none());
+        assert!(progress.is_cancelled());
+        assert_eq!(core.bg.active(), None, "the operation slot is released");
+
+        let _ = tx.send((1, (Err(crate::archive::ArchiveOpenError::Empty), None)));
+        assert!(matches!(core.poll_archive_load(), ArchiveOutcome::Pending));
+        core.cancel_archive_load(); // idempotent
+    }
+
+    /// A dead worker (sender dropped with no terminal message) must not strand chrome.
+    #[test]
+    fn a_dead_worker_ends_the_operation_rather_than_hanging() {
+        let (mut core, tx) = armed_archive_core(None);
+        drop(tx);
+        assert!(matches!(
+            core.poll_archive_load(),
+            ArchiveOutcome::Cancelled
+        ));
+        assert!(core.archive_load.is_none());
+        assert_eq!(
+            core.bg.active(),
+            None,
+            "every terminal path clears the slot"
+        );
+    }
+
+    /// The reconciliation query, matching `scan_status`: present while in flight, gone after.
+    #[test]
+    fn archive_status_tracks_the_open() {
+        let (mut core, _tx) = armed_archive_core(None);
+        let s = core.archive_status().expect("an open is in flight");
+        assert_eq!(s.name, "holiday.7z");
+        assert!(!s.slow, "a fresh open warrants no chrome yet");
+
+        core.now += crate::dir_scan::SCAN_DIALOG_DELAY;
+        assert!(core.archive_status().unwrap().slow);
+
+        core.cancel_archive_load();
+        assert!(core.archive_status().is_none());
     }
 
     // -- #126 step 1: the directory-scan lifecycle, now core-owned --------------------------

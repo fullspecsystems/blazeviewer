@@ -492,6 +492,12 @@ pub struct AppCore {
     /// The in-flight directory walk, if any (task #126 step 1). Previously duplicated as
     /// `struct DirScan` in *both* shells, field for field.
     pub dir_scan: Option<crate::dir_scan::DirScanState>,
+    /// The in-flight archive open, if any (task #126 step 2). Previously duplicated as
+    /// `struct ArchiveLoad` in *both* shells, field for field. Carries a `SecretString`, so it
+    /// is deliberately not `Debug` — see `archive_open`'s privacy note.
+    pub archive_load: Option<crate::archive_open::ArchiveOpenState>,
+    /// The wire generation for archive-open workers, matching [`Self::scan_wire_gen`].
+    pub archive_wire_gen: u64,
     /// The tag `scan::stream_scan` stamps on each update it sends. Distinct from the walk's
     /// [`OpId`](crate::background::OpId) because the worker is handed this *before*
     /// `arm_dir_scan` mints the id, and because `OpId` is deliberately opaque. Monotonic; the

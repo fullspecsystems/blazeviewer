@@ -140,6 +140,13 @@ impl BackgroundOps {
         self.active.is_some_and(|o| o.revealed)
     }
 
+    /// Whether the operation in flight is an archive open — so a cancel aimed at one does not
+    /// silently retire a folder scan that superseded it.
+    pub fn active_is_archive(&self) -> bool {
+        self.active
+            .is_some_and(|o| matches!(o.kind, OpKind::ArchiveOpen))
+    }
+
     /// Whether the in-flight operation has outlasted `delay` — the same "slow enough to tell
     /// the user" fact as [`should_reveal`](Self::should_reveal), but **as a continuous
     /// predicate rather than a one-shot latch**, and without `&mut`.

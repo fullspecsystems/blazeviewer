@@ -51,6 +51,10 @@ pub mod animation;
 pub mod app_core;
 pub mod app_core_impl;
 pub mod archive;
+// The archive-open worker lifecycle (task #126 step 2), the companion to `dir_scan`: one-shot,
+// retrying and secret-bearing where the walk is streaming. Read its privacy note before
+// touching the password path.
+pub mod archive_open;
 pub mod background;
 pub mod config;
 pub mod contract;
