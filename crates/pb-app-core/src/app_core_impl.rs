@@ -1667,11 +1667,14 @@ impl AppCore {
         // change-detection can't see an eligibility change that leaves the wanted-set equal.
         let watchdog_fired_now = self.update_preview_watchdog();
         let mut sharpen_pending = false;
+        // Sharpen-via-derive first ("+1 never waits"): a displayed preview whose Original
+        // is resident sharpens on the GPU in ~a millisecond, right here — the CPU sharpen
+        // below then never gets queued for it (`fulls_wanted` sees the preview gone).
+        // OUTSIDE the held gate (#122 item 1): the derive is rebind-class GPU cost, so a
+        // tap's advance sharpens on the same tick with the key still down — no preview
+        // flash. It self-defers during the actual auto-repeat (blaze) phase.
+        self.try_gpu_sharpen();
         if self.held_nav().is_none() || self.preview_watchdog_fired() {
-            // Sharpen-via-derive first ("+1 never waits"): a displayed preview whose Original
-            // is resident sharpens on the GPU in ~a millisecond, right here — the CPU sharpen
-            // below then never gets queued for it (`fulls_wanted` sees the preview gone).
-            self.try_gpu_sharpen();
             let upgrade = self.fulls_wanted();
             if upgrade != self.last_upgrade_set || watchdog_fired_now {
                 self.last_upgrade_set = upgrade.clone();
@@ -5652,9 +5655,15 @@ impl AppCore {
         if !gpu_derive_enabled() {
             return false;
         }
-        // `sharpen_now` bakes the gates: parked (or watchdog-fired), displayed, a resident
-        // preview, not `upgrade_done`.
-        let Some(item) = self.sharpen_now() else {
+        // #122 item 1: unlike the CPU sharpen (`sharpen_now`), the derive does NOT wait
+        // for key-up — a tap's advance sharpens with the key still down (rebind-class
+        // GPU cost). Only the actual auto-repeat (blaze) phase defers it: those frames
+        // are replaced too fast to be worth deriving. A fired ADR-024 watchdog
+        // overrides even that (the "held" key is a lie — the lost-key-up race).
+        if self.blaze_repeating() && !self.preview_watchdog_fired() {
+            return false;
+        }
+        let Some(item) = self.sharpen_candidate() else {
             return false;
         };
         let Some(fit) = self.decode_fit() else {
@@ -6222,8 +6231,33 @@ impl AppCore {
                         }
                         continue;
                     }
-                    if self.ring.is_tracked_rep(it, other_kind) || !self.full_res_eligible(it) {
+                    if self.ring.is_tracked_rep(it, other_kind)
+                        || !self.full_res_eligible(it)
+                        // #122: the ring refused this very reservation since the last
+                        // rebuild/nav — re-requesting it burns one full native decode
+                        // per prefetch pass (the owner's 30×-one-item livelock log).
+                        || self.ring.denied(it, other_kind)
+                    {
                         continue;
+                    }
+                    // #122 pre-flight (refuse-before-request): when the item's dims are
+                    // known, dry-run the reservation — a want the ring must refuse at
+                    // landing wastes the whole decode. Unknown meta passes (the first
+                    // landing teaches meta); an estimate that under-shoots the real
+                    // charge (rare: HDR sources at 8 B/px) costs one refused landing,
+                    // which the `denied` latch above then makes terminal.
+                    if other_kind == pb_core::RepKind::Original {
+                        if let Some(m) = self.meta_cache.get(&it) {
+                            let est = crate::engine::mip_chain_bytes(m.w, m.h, 4);
+                            if !self.ring.admittable(
+                                it,
+                                pb_core::RepKind::Original,
+                                est,
+                                &self.targets,
+                            ) {
+                                continue;
+                            }
+                        }
                     }
                     parked.push(Job::display(it, other_fit, false));
                 }
@@ -6421,11 +6455,28 @@ impl AppCore {
         if self.held_nav().is_some() && !self.preview_watchdog_fired() {
             return None;
         }
+        self.sharpen_candidate()
+    }
+
+    /// The sharpen-eligibility core minus the pacing gates (#122): the displayed photo
+    /// is a resident preview that hasn't been upgraded. `sharpen_now` (the CPU decode
+    /// want) adds the key-up gate; `try_gpu_sharpen` adds only the blaze-repeat gate —
+    /// a GPU derive is cheap enough to run with a key still down on a tap.
+    fn sharpen_candidate(&self) -> Option<usize> {
         let d = self.displayed_item?;
         (self.display_slot(d).is_some()
             && self.preview_resident.contains(&d)
             && !self.upgrade_done.contains(&d))
         .then_some(d)
+    }
+
+    /// Whether a held nav key is in the auto-repeat (blaze) phase — held AND past the
+    /// initial tap delay. The distinction #122 item 1 turns on: during the pre-repeat
+    /// window a press is a tap in progress, and the tap's photo deserves its instant
+    /// GPU sharpen; once auto-repeat runs, frames are replaced too fast to bother.
+    fn blaze_repeating(&self) -> bool {
+        self.held_nav().is_some()
+            && timing::elapsed_since(self.hold_start, self.now, self.initial_delay)
     }
 
     /// Drive the ADR-024 lingering-preview watchdog (level-triggered, from the tick): stamp when
@@ -7449,9 +7500,29 @@ impl AppCore {
     /// video" report. An enabled-transform tile still routes through the
     /// derive thread for its color bake.
     fn land_selection_tile(&mut self, item: usize, img: pb_decode::DecodedImage) {
-        if !self.thumbs.enabled {
-            return;
-        }
+        // Retain the tile even when the strip has never been opened. `thumbs.enabled`
+        // gates TWO different costs, and only one of them is worth gating here:
+        //
+        //  - scheduling thumb-FILL walks for a feature that may never be turned on —
+        //    genuinely expensive, and still gated (the fill planner checks
+        //    `thumbs_visible()`, so nothing extra is scheduled by this call);
+        //  - retaining a tile the poster walk ALREADY cut — nearly free, and dropping
+        //    it is pure waste.
+        //
+        // `cut_selection` cuts `thumb_img` on every selection regardless (the decode
+        // layer can't see the strip), and it is already counted against the pool's
+        // byte budget on the way back. Returning early here therefore threw away a
+        // thumbnail we had decoded and paid for — and every one discarded before the
+        // first panel open came back later as a REPLAY decode (~273 ms over SMB, vs
+        // ~7 ms to bake the tile we already had) at the bottom of the priority list.
+        // That is the "open the strip late and wait 30+ seconds" report.
+        //
+        // `enable_capture`, NOT `enable`: this must not unlock the strip's own
+        // scheduled work. `enabled` still gates fill planning and the T0 photo
+        // byproduct derive — the latter matters, since flipping it here would make
+        // every displayed photo in a folder containing one video pay a derive on
+        // every frame of a blaze.
+        self.thumbs.enable_capture();
         if img.color.enabled {
             self.thumbs.offer(item, img);
             return;
@@ -8027,6 +8098,15 @@ impl AppCore {
                         self.present_item(item, res.slot);
                     }
                 }
+            } else if rk != dk && sharp_diag() {
+                // #122: the ring refused a parked-tier reservation (rank beyond the
+                // window, or budget with nothing lower-priority evictable). The ring
+                // latched the refusal (`ResidentRing::denied`), so the emitter stops
+                // re-requesting it until a rebuild/nav re-ranks — without the latch this
+                // exact decode repeated every prefetch pass (the owner's 30×-item-7 log).
+                eprintln!(
+                    "[sharp-diag] ring refused parked {rk:?} item={item} ({item_bytes} B) — denied until rebuild/nav"
+                );
             }
             // reserve == None (no longer wanted): the thumb store still gets the
             // pixels we paid to decode (the blaze-past case IS the behind-strip).
@@ -16227,6 +16307,61 @@ mod tests {
             "the ready-made tile lands DIRECTLY in the cache (no droppable \
              derive-queue round trip — the poster and its thumb arrive together)"
         );
+    }
+
+    /// A poster walk cuts its thumb whether or not the strip was ever opened, and
+    /// that tile must be KEPT. Discarding it was the "open the thumbnail panel late
+    /// and wait 30+ seconds" report: every tile thrown away before the first open
+    /// came back as a replay decode (~273 ms over SMB) at the bottom of the priority
+    /// list, when we had already decoded and paid for it.
+    ///
+    /// The other half is just as load-bearing: retaining must NOT unlock the strip's
+    /// own scheduled work. `enabled` gates thumb-fill planning and the T0 photo
+    /// byproduct derive — flipping that here would make every displayed photo in a
+    /// folder containing one video pay a derive on every frame of a blaze, which is
+    /// the cost the gate exists to avoid.
+    #[test]
+    fn a_selection_tile_is_retained_before_the_strip_is_ever_opened() {
+        let mut core = test_core();
+        core.source = photos_named(&["clip.mkv"]);
+        core.playlist = Playlist::new(1, 0);
+        core.fit = Some(FitBox {
+            max_width: 800,
+            max_height: 600,
+        });
+        core.targets = vec![0];
+        core.ring = ResidentRing::new(4);
+        core.poster_sel.reset(core.content_gen);
+        core.poster_sel
+            .want(0, crate::poster_select::Demand::Display);
+        core.pending_uploads.push(Outcome::synthetic_selection(
+            0,
+            core.content_gen,
+            core.epoch,
+            core.decode_fit(),
+            Ok(poster_payload(0, (800, 450))),
+        ));
+        // The strip has NEVER been opened — the state a fresh session is in while
+        // the ring prefetches posters.
+        assert!(!core.thumbs.enabled);
+        assert!(!core.thumbs.capture);
+        assert!(!core.thumbs_visible());
+
+        core.drain_results();
+
+        assert_eq!(
+            core.thumbs.cache.tier(0),
+            Some(pb_core::ThumbTier::Full),
+            "the tile the walk already cut is retained, not discarded — opening the \
+             strip later must be a rebind, never a re-decode"
+        );
+        assert!(core.thumbs.capture, "retention is live");
+        assert!(
+            !core.thumbs.enabled,
+            "retaining a free tile must NOT unlock the strip's scheduled work — \
+             `enabled` still means 'the user opened the panel'"
+        );
+        assert!(!core.thumbs_visible(), "and the strip is still closed");
     }
 
     #[cfg(windows)]

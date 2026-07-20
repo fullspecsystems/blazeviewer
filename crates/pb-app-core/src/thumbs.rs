@@ -66,9 +66,22 @@ struct DeriveResult {
 /// The strip's orchestration state, owned by `AppCore`.
 pub struct Thumbs {
     pub cache: ThumbCache<ThumbPixels>,
-    /// Capture is enabled by the first panel open this session; before that the
-    /// strip costs zero RAM and zero pool/derive time (plan: cost gating).
+    /// The strip has been opened this session. Gates the things that cost real
+    /// work for a feature the user may never turn on: scheduling thumb-FILL walks,
+    /// and the T0 post-upload byproduct derive for every displayed photo (which
+    /// would otherwise run on every frame of a blaze).
     pub enabled: bool,
+    /// Retention is live: the derive thread exists and offered tiles are kept.
+    ///
+    /// Split from [`Self::enabled`] deliberately. A poster walk cuts its thumb
+    /// regardless of the strip (the decode layer can't see it) and already pays for
+    /// it in pool byte budget, so DISCARDING that tile is pure waste — and it is
+    /// waste we pay for twice, because refilling it later costs a replay decode
+    /// (~273 ms over SMB) versus ~7 ms to bake the tile we already had. Capture
+    /// therefore turns on as soon as a poster selection lands, while `enabled`
+    /// stays false until the panel is actually opened. A folder with no videos
+    /// never turns either on, so the zero-cost-when-unused property holds.
+    pub capture: bool,
     /// Items whose *thumb* fill decode failed — never re-planned (no retry loop).
     /// Distinct from `AppCore::failed` (display failures), which is also skipped.
     pub failed: HashSet<usize>,
@@ -100,6 +113,7 @@ impl Default for Thumbs {
         Thumbs {
             cache: ThumbCache::new(THUMB_BUDGET_BYTES),
             enabled: false,
+            capture: false,
             failed: HashSet::new(),
             follow: FollowState::default(),
             pending_scroll: None,
@@ -113,12 +127,21 @@ impl Default for Thumbs {
 }
 
 impl Thumbs {
-    /// First panel open: spawn the derive thread and start capturing. Idempotent.
+    /// First panel open: start capturing AND unlock the strip's own work (fill
+    /// scheduling, the photo byproduct derive). Idempotent.
     pub fn enable(&mut self) {
-        if self.enabled {
+        self.enabled = true;
+        self.enable_capture();
+    }
+
+    /// Start retaining offered tiles, WITHOUT unlocking the strip's scheduled work.
+    /// Called when a poster selection lands: the walk is already paid for, so the
+    /// tile it cut is worth keeping even if the panel is never opened. Idempotent.
+    pub fn enable_capture(&mut self) {
+        if self.capture {
             return;
         }
-        self.enabled = true;
+        self.capture = true;
         let (tx, job_rx) = sync_channel::<DeriveJob>(DERIVE_QUEUE);
         let (res_tx, rx): (Sender<DeriveResult>, Receiver<DeriveResult>) =
             std::sync::mpsc::channel();
@@ -169,7 +192,11 @@ impl Thumbs {
     /// small; the derive thread's resize is then a no-op and only the color
     /// bake runs). O(1) on the caller: a bounded `try_send`; full ⇒ dropped.
     pub fn offer(&mut self, item: usize, img: DecodedImage) {
-        if !self.enabled {
+        // Gated on CAPTURE, not `enabled`: a poster selection's tile is retained
+        // even before the panel is opened. The callers that would cost real work
+        // for an unopened strip (the photo byproduct hook, fill scheduling) check
+        // `enabled` themselves.
+        if !self.capture {
             return;
         }
         // A resident Full-tier thumb never regresses; skip the queue slot. A
