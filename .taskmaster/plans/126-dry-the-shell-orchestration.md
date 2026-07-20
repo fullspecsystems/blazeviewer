@@ -13,7 +13,93 @@ contract vocabulary — so move the lifecycle in and let both shells become even
 
 ---
 
-## 0. HARD CONSTRAINT: the macOS half cannot be written from the Windows box
+## Handoff
+
+**The single place cross-machine state lives** (`CLAUDE.md` → *Working across two machines*).
+Read this first; write it last. Everything below this section is durable design rationale or
+history — none of it is live state.
+
+**Last updated:** 2026-07-20, macOS session, at `8f69b709`.
+
+### Verified — what was actually run, and where
+
+| what | platform | evidence |
+|---|---|---|
+| Step 1 (dir-scan) in the core | both | 867 tests in `pb-app-core` |
+| Step 1 — macOS shell rewired, **−202/+82** | macOS | builds, runs, 36 `pb-mac-ffi` tests; owner smoke: unchanged, which **is** the pass condition for a pure-DRY move |
+| Step 1 — winit shell rewired, **−270/+102** | Windows | native `clippy -D warnings` + tests on the self-hosted runner; owner smoke: builds, pill correct |
+| Step 1 — winit pill covers the pre-bootstrap phase (UX change) | Windows | owner-confirmed |
+| Linux gate (`clippy -D warnings` on `pb-app` + tests + release build) | Linux/docker | PASS, run locally from the Mac |
+| Step 2 (archive-open) in the core | macOS | 9 tests; **not wired to either shell yet** |
+| Empty-deck cancel restores the welcome hint | both | core test + the macOS follow-up in `8f69b709` |
+
+### Not verified — what the next machine must check
+
+- **Nothing outstanding for step 1.** It is closed on both platforms.
+- **Step 2 is core-only.** Neither shell uses `AppCore::{begin,poll,cancel}_archive_open` or
+  `archive_status()` yet, so the production archive path is still the shells' own duplicated
+  copies. Nothing about step 2 has been exercised by a running app on any platform.
+
+### Cross-platform debt — landed for one shell, still owed on the other
+
+> ⚠ **The most dangerous category, because it is green.** A change can land, pass CI, and be
+> *wrong on the platform that could not compile it*. `808c99f9` fixed the empty-deck hint "in
+> the core so both shells get it" and pointed winit at it — but macOS kept its own copy and kept
+> the bug, and nothing failed. **Any commit that touches shared code it cannot fully verify must
+> add a line here.**
+
+| owed | to | raised by | status |
+|---|---|---|---|
+| `cancel_scan_command` → the core's version | macOS | `808c99f9` (Windows) | ✅ paid by `8f69b709` |
+| *(none open)* | | | |
+
+### Claimed — who is holding what right now
+
+> Prevents the other failure mode: duplicate work. Both machines fixed the `AppCore` struct
+> literal independently today, and the Mac session nearly rewrote `background.rs` from scratch
+> as `ops.rs` because it started from a stale HEAD. **Fetch, read this table, then claim.**
+
+| area | machine | since |
+|---|---|---|
+| *(nothing claimed — both idle)* | | |
+
+### Next
+
+1. **Migrate both shells onto the core's archive-open lifecycle** (~250 lines deleted per
+   shell): `struct ArchiveLoad`, `archive_gen`, `begin/poll/finish/fail/cancel_archive_open`,
+   `prompt_archive_password`. Whichever machine takes it **must claim it above** — it touches
+   both shells and is the worst possible thing to do concurrently.
+2. **Flip the shells' unconditional cross-cancel** to `begin_*`'s `superseded` return in that
+   same commit — see the trap in the session log (§12.6). The core now cancels both directions
+   itself, so leaving the shell cancels in place is a double-cancel.
+3. **Delete winit's dead Scanning dialog**, bundled with (1) since it touches the same
+   `dialog.rs`. Open question there: `contract::DialogKind::Scanning` must stay for macOS, so
+   `shell_dialog_kind`/`contract_dialog_kind` (`main.rs`) need a story once winit's variant goes.
+4. **Re-run the privacy gates after (1)**: the redaction tests, `settings.save()`
+   unreachability, the zeroizing teardown on **both** platforms, and the no-trace test (§6).
+
+### Known-red, and NOT ours — do not chase
+
+- `pb-decode`'s `plain_fixtures_have_no_dovi_summary` fails on both Windows runners with
+  `FFmpeg decoder: Decoder not found`. Pre-existing: identical failure in run `29716604750`,
+  hours before this task's first commit. It keeps the ffprobe lane red regardless of what lands.
+- The `linux-gate` runner failed on a Docker **keychain** error, not on code — fixed 2026-07-20
+  by dropping `credsStore` from `~/.docker/config.json` (the runner has no interactive session
+  to unlock the keychain, and the gate only pulls public images).
+- Two `pb-app-core` video-probe tests (`a_real_video_probes_off_thread…`,
+  `copy_details_mid_probe…`) are **flaky**, not failing — timing-dependent off-thread probes
+  that pass on an idle box.
+
+---
+
+## 0. HARD CONSTRAINT: neither machine can compile the other's shell
+
+> ⚠ **Corrected 2026-07-20 — this section was written on the Windows box and read as a global
+> truth when it is one-directional.** The asymmetry is real but it points *both* ways, and on a
+> Mac it points the other way: `pb-mac-ffi` compiles, tests **and runs**, while `pb-app`'s
+> `build.rs` hard-errors on `target_os = "macos"`. A Mac can therefore do *both* halves — the
+> mac one natively, the winit one via the `x86_64-pc-windows-msvc` cross-check — which is why
+> step 1 finished in a single session rather than waiting for a second machine. See §12.1.
 
 `crates/pb-mac-ffi/src/lib.rs:22` is `#![cfg(target_os = "macos")]` - **the entire crate is
 compiled out on every non-macOS target.** Verified empirically, not assumed: injecting a
@@ -279,7 +365,12 @@ behavioural proof:
 
 ---
 
-## 11. Findings from the first working session (2026-07-19, unattended)
+## Appendix — session log (history, not live state)
+
+Chronological. Kept for the *why* behind decisions; **status lives in `## Handoff` above**, and
+these sections are deliberately not updated as work proceeds.
+
+### Session 1 — 2026-07-19, Windows, unattended
 
 Recorded as they were verified, so the next session does not re-derive them.
 
@@ -316,7 +407,43 @@ have to take `now` as a parameter instead of calling `Instant::now()`. `Backgrou
 this. What is *not* yet solved is the injectable **worker runtime** (deterministic completion
 points for "cancel mid-walk" / "teardown in flight"), which remains open.
 
-## 12. macOS session, 2026-07-20 — step 1 landed on the Mac
+### 11.5 Why the winit shell was deliberately left unwired
+
+The core now owns the dir-scan lifecycle and the shells' copies are redundant — but neither
+shell has been migrated yet, on purpose.
+
+The interim API is a **return value** (`ScanPoll` / `ScanDialogRequest`) rather than a
+`CoreEffect`, because §0 forbids touching the shared contract from this machine. The very
+next piece of work — the phase-0 P0, on a Mac — replaces that with **identity-stamped dialog
+effects** and migrates both shells onto them together.
+
+So rewiring winit now would migrate it **twice**: once onto `ScanPoll`, then again onto the
+final effects a day later, with a throwaway shell diff in the repo's #1 churn file in
+between. Leaving it lets the Mac session move both shells once, onto the shape that lasts.
+
+**Consequence to be honest about:** no shell code has been deleted yet, so *the DRY win is
+not yet realised*. What exists is the tested, canonical implementation both shells will
+adopt. If the Mac session never happens, this commit is net-neutral-plus-tests, not a win.
+
+### 11.6 Exact starting point for the macOS session ⛔ SUPERSEDED
+
+> Historical. This was the Windows session's handoff; it has been executed and its premises
+> partly corrected (§12.1–12.4). **Live next-steps are in `## Handoff` → Next.**
+
+1. Read §0, §5a, and §11 here. Nothing needs re-deriving.
+2. Do the **P0 first**: give `CoreEffect::ShowDialog`/`CloseDialog`/`SetDialogChecking` an
+   operation id, and have shells reconcile toward a desired dialog state rather than execute
+   imperative commands. `BackgroundOps::OpId` is the identity to stamp. ~50 sites in
+   `pb-mac-ffi`, 3 of them constructing `ShowDialog`.
+3. Then migrate **both** shells' dir-scan onto `AppCore::{arm,poll,cancel}_dir_scan`,
+   deleting `struct DirScan`, `SCAN_DIALOG_DELAY` and the ~150 duplicated lines from each.
+   Keep the shell-side gate on *whether it may* reveal (it must not steal a Settings window
+   or overwrite a queued Password request) — that is genuine shell knowledge.
+4. Verify on macOS: open a folder, open a password-protected archive, cancel a slow scan,
+   quit mid-scan.
+5. Only then start step 2 (archive-open), which carries the `SecretString` path in §6.
+
+### Session 2 — 2026-07-20, macOS
 
 Picks up from §11.6. Three of its five items are done; two of its premises were wrong and are
 corrected below.
@@ -404,120 +531,9 @@ The cancel is unconditional again, commented. **Step 2 must flip it to the `supe
 return in the same commit that registers the archive open** — doing either half alone is a
 silent regression in one direction or a double-cancel in the other.
 
-### 12.7 Status
-
-| item | state |
-|---|---|
-| Phase 0 — `BackgroundOps` coordinator | ✅ on `main` |
-| Phase 0 — dialog identity | ✅ **narrow form** (§12.4): reconciliation, not id-stamping |
-| Phase 0 — injectable worker runtime | ✅ not needed — the mpsc channel already is one (§11.3) |
-| Phase 0 — wake contract | ✅ not needed — the core's 9 existing workers already share one (channel → `Option<Handle>` → `try_recv` in `tick` → a `work_pending()` arm); scan/archive already match it |
-| Step 1 — core owns spawn + pump + status query | ✅ `a78bfddd` |
-| Step 1 — **mac rewired** | ✅ `71f78e01`, **−202/+82**, 36 tests green, app runs |
-| Step 1 — **winit rewired** | ✅ `f3ca4795`, **−270/+102**, clippy-clean cross-checked |
-| Step 1 — owner interactive smoke | ✅ **both platforms, 2026-07-20** — macOS unchanged (the pass condition), Windows builds and looks correct |
-| Step 2 — archive-open | ⏸ not started; read §12.6 first |
-
-**The DRY win is real.** Both copies of the dir-scan lifecycle are deleted; the surviving
-implementation is the tested core one. Net ≈ −290 lines across the two shells.
-
-### 12.8 RESOLVED — verification ledger, closed 2026-07-20
-
-All four lanes came back green for this change. Kept as a record of what was actually checked
-rather than assumed.
-
-| lane | result |
-|---|---|
-| macOS build + run + 36 tests | ✅ here |
-| macOS interactive (owner) | ✅ "looks and works the same as always" — which **is** the pass condition: that migration was pure DRY with no intended behaviour change |
-| Windows native `clippy -D warnings` + tests | ✅ self-hosted CI run `29753422401` |
-| Windows cross-check from the Mac | ✅ clippy-clean for `x86_64-pc-windows-msvc` |
-| Windows interactive (owner) | ✅ "builds and looks correct" — this is the one CI could never answer |
-
-⚠ **CI caveat worth remembering:** that same run shows `windows`, `windows-arm64` and
-`linux-gate` red, and **none of it is this change**. `pb-decode`'s
-`plain_fixtures_have_no_dovi_summary` fails with `FFmpeg decoder: Decoder not found`
-identically in run `29716604750` from 10 hours earlier (same test, same `337 passed; 1
-failed`), and `linux-gate` was failing only because OrbStack was not running. Read the *step*
-results, not the job conclusion, on this repo right now.
-
-**Consequence:** the retained `DialogRequest::Scanning` + `dialog.rs` Scanning view were kept
-`#[allow(dead_code)]` only until this confirmation. It has arrived, so they are now deletable —
-that is the first thing the next commit does.
-
-#### The original ledger (what was open before)
-
-Honest ledger, because the §8 gate is "exercised, not assumed":
-
-- **macOS** — builds and runs here; a 3,623-file tree scans with clean stderr. **Not** checked
-  interactively: the pill's appearance, its Cancel, quit-mid-scan.
-- **winit** — `cargo check` *and* `clippy --all-targets -D warnings` clean for
-  `x86_64-pc-windows-msvc`, but **never executed**; `pb-app` cannot run on a Mac. The pill
-  change is therefore type-verified and behaviour-unverified. Three things need a Windows run:
-  1. the pill during the **pre-bootstrap** phase, where it now appears on an empty canvas — does
-     it coexist with the welcome/open panel or overlap it?
-  2. the `Searching…` zero-state actually showing (the count is 0 for that whole phase);
-  3. **cancel with an empty deck** — the old dialog's Cancel discarded the partial via
-     `ScanningCancelled`; the pill's `cancel_scan_command` keeps it. Pre-bootstrap there is
-     nothing to keep, so they converge, but confirm it restores the welcome screen rather than
-     stranding a blank canvas.
-
-The Scanning window is retained and `#[allow(dead_code)]`-marked precisely so failure of any of
-those is a one-line revert (`scan_pill_visible`), not a rebuild. Delete it once confirmed.
-
 ### 12.9 Cross-check memo correction
 
 `crates/pb-app/Cargo.toml` + `pb-app-core/Cargo.toml` need `ureq` at
 `default-features = false` **plus `features = ["json"]`** — the recorded recipe omits the
 second half, and without it `describe.rs:224` loses `send_json` and `pb-app-core` fails to
 build for the Windows target before `pb-app` is even reached.
-
-### 11.4 Status at end of session
-
-| item | state |
-|---|---|
-| Plan rev 2 (Codex round 1 folded) | ✅ on `main` |
-| Phase 0 — `BackgroundOps` coordinator + 7 tests | ✅ on `feat/126-dry-shell-orchestration` |
-| Phase 0 — identity-stamped dialogs (Codex P0) | ❌ not started |
-| Phase 0 — injectable worker runtime | ❌ not started |
-| Phase 0 — wake contract | ❌ not started |
-| Step 1 — dir-scan state machine in the core + 11 tests | ✅ on the branch |
-| Step 1 — winit rewired onto it | ⏸ **deliberately deferred, see 11.5** |
-| Step 1 — mac rewired | ⛔ **impossible from this machine** (§0) |
-
-`BackgroundOps` is additive and wired to nothing, so the branch is safe to leave or discard.
-The next session should do identity-stamped dialogs (the P0) before moving dir-scan, since
-retrofitting dialog identity after the flow moves is the painful order.
-
-### 11.5 Why the winit shell was deliberately left unwired
-
-The core now owns the dir-scan lifecycle and the shells' copies are redundant — but neither
-shell has been migrated yet, on purpose.
-
-The interim API is a **return value** (`ScanPoll` / `ScanDialogRequest`) rather than a
-`CoreEffect`, because §0 forbids touching the shared contract from this machine. The very
-next piece of work — the phase-0 P0, on a Mac — replaces that with **identity-stamped dialog
-effects** and migrates both shells onto them together.
-
-So rewiring winit now would migrate it **twice**: once onto `ScanPoll`, then again onto the
-final effects a day later, with a throwaway shell diff in the repo's #1 churn file in
-between. Leaving it lets the Mac session move both shells once, onto the shape that lasts.
-
-**Consequence to be honest about:** no shell code has been deleted yet, so *the DRY win is
-not yet realised*. What exists is the tested, canonical implementation both shells will
-adopt. If the Mac session never happens, this commit is net-neutral-plus-tests, not a win.
-
-### 11.6 Exact starting point for the macOS session
-
-1. Read §0, §5a, and §11 here. Nothing needs re-deriving.
-2. Do the **P0 first**: give `CoreEffect::ShowDialog`/`CloseDialog`/`SetDialogChecking` an
-   operation id, and have shells reconcile toward a desired dialog state rather than execute
-   imperative commands. `BackgroundOps::OpId` is the identity to stamp. ~50 sites in
-   `pb-mac-ffi`, 3 of them constructing `ShowDialog`.
-3. Then migrate **both** shells' dir-scan onto `AppCore::{arm,poll,cancel}_dir_scan`,
-   deleting `struct DirScan`, `SCAN_DIALOG_DELAY` and the ~150 duplicated lines from each.
-   Keep the shell-side gate on *whether it may* reveal (it must not steal a Settings window
-   or overwrite a queued Password request) — that is genuine shell knowledge.
-4. Verify on macOS: open a folder, open a password-protected archive, cancel a slow scan,
-   quit mid-scan.
-5. Only then start step 2 (archive-open), which carries the `SecretString` path in §6.
