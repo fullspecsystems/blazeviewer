@@ -1,6 +1,6 @@
 # Task 125 — Split `app_core_impl.rs` into concern-scoped `impl AppCore` blocks
 
-**Status:** **in progress** — rev 2, re-measured at `facd7e5c` (2026-07-20) after #126. Step 1
+**Status:** **in progress** — rev 3 (Codex round 1 folded), re-measured at `facd7e5c` (2026-07-20) after #126. Step 1
 (the `prefs` rehearsal + the verifier) has landed; see *Progress* below. **Scope gate:** this is audit finding #1 remediation
 **(a) only** — see §2, which is the most important section in this document.
 
@@ -104,7 +104,15 @@ into a behavioral refactor, and the safety property in §3 evaporates. **No fiel
 signature changes, no visibility changes, no `AppCore` struct changes, no call-site edits.**
 If a method looks wrong while moving it, note it and move it unchanged.
 
-## 3. The safety property (what makes this reviewable)
+## 3. The conservation check (what makes this reviewable)
+
+> **Renamed from "the safety property" after Codex round 1 (2026-07-20), which was right that
+> the old wording overclaimed.** The check verifies *textual conservation of function items*,
+> **not behavioural equivalence**. Identical text can behave differently in a new module. What
+> it cannot see is enumerated in `scripts/verify-pure-move.py`'s docstring and summarised in
+> §3a. Do not describe a passing run as "proven correct" — describe it as "nothing was dropped,
+> invented or edited."
+
 
 Rust permits multiple `impl AppCore` blocks across files in one crate. So every method can
 move with **zero** changes to call sites, types, or visibility.
@@ -112,17 +120,76 @@ move with **zero** changes to call sites, types, or visibility.
 That means this refactor can be **provably** behavior-preserving, not merely
 tested-and-hopefully-fine. Verify mechanically:
 
-```
-for each commit: extract every `fn` body from the crate, normalize (sort by name,
-drop file boundaries and `use` lines), hash. Before == after, or the commit is wrong.
-```
+`scripts/verify-pure-move.py` compares the multiset of `(fn name, item hash)` across every
+`.rs` in the crate, where the hash covers **attributes + signature + body**. So visibility,
+generics, `async`/`unsafe`/`const`, parameter and return types, and `#[cfg]`/`#[inline]`/
+`#[track_caller]` changes all fail the check — not just body edits.
 
-Ship that as a script in the task and run it per step. `cargo test` (830 in `pb-app-core`)
-is the backstop, not the proof — a passing suite would not catch a silently dropped method
-that nothing covers, and the normalized-body diff would.
+`cargo test` is the backstop, not the check: a passing suite would not notice a silently
+dropped method that nothing covers, and this would.
 
-**Corollary: a step with a non-empty body diff is a bug, not a judgement call.** That is what
-makes the whole thing safe to do in a hot file.
+**Corollary: a non-empty diff is a bug, not a judgement call.**
+
+### 3a. What the check does NOT cover (Codex round 1)
+
+Accepted in full. These need review by other means:
+
+- **Imports and scope.** An unchanged `foo()` or `.method()` can resolve to a *different*
+  function, trait method, const or macro in the destination module. `app_core_impl.rs` carries
+  a glob `use crate::engine::*`, so this is live, not theoretical. **Mitigation:** each moved
+  module uses `use super::*;` so it inherits the parent's scope verbatim; any *narrowing* of
+  imports is a separate, reviewed step — never bundled into a move.
+- **Module-sensitive macros** — `file!()`, `line!()`, `column!()`, `module_path!()`, relative
+  `include_str!`/`include_bytes!`. Grep each cluster for these before moving it.
+- **Same-name swaps.** Records are keyed by unqualified name, so two same-named functions in
+  different modules could in principle exchange bodies invisibly. The report prints the
+  per-name file map to make relocations human-visible; a stricter fix is the manifest in §3b.
+- **Non-function items** — structs, consts, statics, type aliases, `mod` declarations, macros,
+  trait/impl headers. Untracked.
+- **Impl target.** It cannot tell a method moved between impls for *different types*. #125
+  moves only within `impl AppCore`.
+- **Config and codegen** — nothing about per-platform `#[cfg]` resolution, inlining or
+  performance.
+
+### 3b. The verifier is itself tested
+
+The whole argument rests on the tool, so `verify-pure-move.py selftest` covers the cases that
+have actually bitten: array return types, bodyless trait declarations, braces in strings and
+raw strings, `fn ` inside comments, lifetimes vs char literals, nested fns, and sensitivity to
+an added attribute or a visibility change.
+
+⚠ **The first version had a real false negative, found by Codex, not by me.** It treated any
+`;` before the opening `{` as a bodyless declaration — so `fn effective_letterbox() -> [u8; 3]`
+was **untracked and could have been dropped or edited while the tool reported success.** Five
+functions in `app_core_impl.rs` alone were invisible (772 tracked, 777 actual). Fixed by
+matching the terminator at bracket depth 0, and pinned by a self-test.
+
+**Deferred, not rejected** (Codex's stronger gate): parse with `syn` rather than by hand, and
+keep an explicit source→destination manifest so same-name swaps are impossible. Worth doing if
+a cluster move ever looks ambiguous; not worth it up front for a check that is one input among
+`cargo test`, clippy and a run.
+
+## 3c. ⚠ Private methods break when they move (Codex round 1) — the next step hits this
+
+A private `fn` moved from `app_core_impl.rs` into `app_core_impl/<cluster>.rs` becomes private
+**to that child module**, and the parent can no longer call it. This did not bite the `prefs`
+rehearsal only because all four of its methods were `pub`. It will bite the very next cluster:
+
+- `handle` calls private `apply_scan_batch` and `apply_archive`.
+- `tick` calls private tree helpers such as `drive_fs_tree`.
+
+Two clean options, per cluster:
+
+1. **Leave cross-concern entry points in the parent.** Right when the method is genuinely
+   dispatch glue rather than part of the concern.
+2. **Change the moved method to `pub(super)`.** The spelling changes but the effective
+   visibility region does not: private-in-parent and `pub(super)`-in-child both mean "visible
+   in the parent module and its descendants".
+
+⚠ Option 2 **is** an edit, so the conservation check will flag it — correctly. Do not suppress
+it: make the visibility change its own clearly-labelled commit, separate from the move, so each
+commit is either a pure move (check passes) or a reviewed edit (check is expected to fail).
+Mixing them is how a real change hides inside a move.
 
 ## 4. Cluster inventory (measured at `HEAD`, not guessed)
 
@@ -201,13 +268,44 @@ large move will conflict with anything in flight.
 - If a conflict does occur, resolving it is unusually safe here *because* of §3: the body
   diff tells you mechanically whether the resolution preserved every method.
 
-## 9. Anti-regrowth guard (optional, recommend yes)
+## 9. Anti-regrowth: structural, NOT a line-count guard (owner call, 2026-07-20)
 
-The file grew 32% in a day *after* being named the top debt. Without a guard it will do so
-again. Cheapest effective version: a unit test asserting no file in `pb-app-core/src`
-exceeds N lines (set N at ~1.3× the largest post-split file). It fails loudly at the moment
-someone reaches for the old habit, and is a one-line edit to raise deliberately. Owner call —
-it is a nag, and nags have a cost.
+An earlier draft proposed a test failing if any file in `pb-app-core/src` exceeded ~1.3x the
+largest post-split file. **Rejected by the owner, and rightly.** A threshold lint measures the
+symptom: the number is arbitrary, it fires on a legitimately large cluster as readily as on
+sprawl, and the cheapest response when it fires is to raise the number — which trains everyone
+to route around it.
+
+**The mechanism is the structure itself: give every likely place for growth somewhere proper
+to live, and it will not pile up in one file.**
+
+The diagnosis supports this. `app_core_impl.rs` grew ~1,170 lines during #126 *even though*
+that task created three new modules (`background.rs`, `dir_scan.rs`, `archive_open.rs`). The
+**logic** had a home; the `impl AppCore` **methods** did not, so `arm_dir_scan`, `poll_dir_scan`
+and `cancel_dir_scan` landed in the big file right next to their own module. Growth was not
+carelessness — "where does an `AppCore` method go?" had exactly one answer. Once
+`app_core_impl/dir_scan.rs` exists beside `dir_scan.rs`, it has a better one.
+
+### The condition this depends on — do not skip it
+
+**The split must leave no "misc" bucket.** If `app_core_impl.rs` ends at ~6-8k as "lifecycle +
+dispatch + residency + the ~60 I never sorted", it is still the default destination, just with
+a smaller line count. The attractor survives the refactor.
+
+So the deliverable is not "the moves are done" but: **the remainder has a stated charter** —
+one sentence naming what belongs in it — so a method that does not fit that sentence visibly
+needs a home somewhere else. That is what converts "where does this go?" from a default into
+an answerable question.
+
+This raises the stakes on the §5 triage: the unassigned methods are the difference between a
+charter and a remainder, not bookkeeping.
+
+### The lightweight complement (not a test)
+
+When the split settles, record the convention where the crate's guidance already lives
+(`crates/pb-app-core/CLAUDE.md`): which concern owns which file, and that a new `AppCore`
+method goes beside its logic module rather than into `app_core_impl.rs`. Documentation of a
+structure that exists, not a nag about one that does not.
 
 ## 10. Risks
 
@@ -230,6 +328,13 @@ Worth stating plainly so the task isn't oversold. After a perfect execution:
 - The mirror-flag desync bug class (audit #1's actual hazard) is **untouched**; that is (b).
 - The two-shell duplication (#2) is untouched; that is also (b) — and per §2a that is ~16
   functions across the scan and archive-open flows, not a rewrite.
+
+**Codex round 1 put it plainly, and it belongs here:** *"this splits the source file, not the
+god object. `AppCore` retains the same state, coupling, and privilege to touch every field. It
+will materially improve navigation, reviewability, and merge conflicts, which is worthwhile.
+The later work — private fields, narrower component APIs, and extracting owned stateful
+subsystems — is what will actually dismantle the god class."* That is exactly the scope gate in
+§2, from an independent reading.
 
 This task buys tractability, and it makes (b) approachable. It is not itself the cure the
 audit is pointing at. The audit calls its item 3 *"the large, high-value program the other
@@ -285,4 +390,5 @@ already calls for. The prefs cluster was 5 by the script and 4 in reality.
 1. **Subtask 2 — triage the ~60 unassigned methods**, and re-check the auto-assignments for
    more false positives of the `rebind_same_item` kind. Output is a written assignment list.
 2. Then the small leaves (`archive`, `scan`, `view`), then the mid ones, then `video`.
-3. §9's anti-regrowth guard is still an **open owner call**.
+3. §9 is settled: anti-regrowth is structural, not a guard test (owner, 2026-07-20). The
+   thing that makes it work is that the remainder gets a CHARTER, not leftovers — see §9.
