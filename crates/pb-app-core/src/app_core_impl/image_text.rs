@@ -128,3 +128,96 @@ impl AppCore {
         ));
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app_core_impl::test_support::{clipboard_text_effects, test_core, text_result};
+
+    /// Install an in-flight scan whose result is already sitting in the channel.
+    fn feed_scan(core: &mut AppCore, item: usize, copy: bool, r: crate::image_text::ImageText) {
+        let (tx, rx) = std::sync::mpsc::channel();
+        tx.send(r).unwrap();
+        core.text_scan = Some(crate::image_text::TextScan {
+            gen: core.text_gen,
+            item,
+            copy_when_done: copy,
+            rx,
+        });
+    }
+
+    #[test]
+    fn text_scan_result_caches_by_item() {
+        let mut core = test_core();
+        core.displayed_item = Some(0);
+        feed_scan(&mut core, 0, false, text_result(&[], &["Hello"]));
+        core.poll_text_scan();
+        assert!(core.text_scan.is_none(), "job consumed");
+        assert_eq!(core.recognized_text[&0].lines, vec!["Hello"]);
+        assert!(
+            clipboard_text_effects(&core).is_empty(),
+            "no copy was requested"
+        );
+    }
+
+    #[test]
+    fn a_result_from_before_a_rebuild_is_dropped() {
+        let mut core = test_core();
+        core.displayed_item = Some(0);
+        feed_scan(&mut core, 0, false, text_result(&[], &["stale"]));
+        core.text_gen += 1; // the deck was rebuilt while the scan ran
+        core.poll_text_scan();
+        assert!(
+            core.recognized_text.is_empty(),
+            "stale-generation result must not cache under a recycled index"
+        );
+    }
+
+    #[test]
+    fn a_result_for_a_left_item_still_caches_for_the_revisit() {
+        let mut core = test_core();
+        core.displayed_item = Some(3); // user moved on mid-scan
+        feed_scan(&mut core, 0, false, text_result(&[], &["kept"]));
+        core.poll_text_scan();
+        assert_eq!(
+            core.recognized_text[&0].lines,
+            vec!["kept"],
+            "item-keyed result is still valid — revisits are instant"
+        );
+    }
+
+    #[test]
+    fn copy_requested_mid_scan_copies_when_the_result_lands() {
+        let mut core = test_core();
+        core.displayed_item = Some(0);
+        feed_scan(&mut core, 0, true, text_result(&[], &["late"]));
+        core.poll_text_scan();
+        let got = clipboard_text_effects(&core);
+        assert_eq!(got.len(), 1, "deferred copy fired on landing");
+        assert_eq!(got[0].0, "late");
+    }
+
+    #[test]
+    fn an_empty_scan_result_never_writes_the_clipboard() {
+        let mut core = test_core();
+        core.displayed_item = Some(0);
+        feed_scan(&mut core, 0, true, text_result(&[], &[]));
+        core.poll_text_scan();
+        assert!(
+            clipboard_text_effects(&core).is_empty(),
+            "nothing found → toast only, no clipboard write"
+        );
+    }
+
+    #[test]
+    fn rebuild_playlist_drops_text_results_and_bumps_the_generation() {
+        let mut core = test_core();
+        core.recognized_text.insert(0, text_result(&[], &["old"]));
+        let gen = core.text_gen;
+        let dir = std::env::temp_dir();
+        let source: Arc<dyn ItemSource> = Arc::new(FsSource::new(vec![dir.join("a.png")]));
+        core.rebuild_playlist(source, dir.clone(), Some(dir), true, 0);
+        assert!(core.recognized_text.is_empty());
+        assert!(core.text_gen > gen);
+    }
+}
