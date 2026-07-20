@@ -15,12 +15,16 @@
 mod archive_open;
 mod background;
 mod clipboard;
+mod compare;
 mod delete;
 mod describe;
 mod dir_scan;
 mod image_text;
 mod prefs;
 mod save_rotation;
+mod secret;
+mod slideshow;
+mod thumbs;
 mod undo;
 
 use std::path::{Path, PathBuf};
@@ -967,33 +971,6 @@ impl AppCore {
     /// distinct passwords this session" case; MRU-first, so the common same-folder password
     /// is attempt #1.
     pub const MAX_ARCHIVE_PASSWORDS: usize = 8;
-
-    /// Remember a password that just unlocked an encrypted archive — used for BOTH **harvest**
-    /// (a new user-entered password) and **MRU promotion** (a cached password that just
-    /// worked). Deduped (an existing equal entry moves to the front), empty ignored, truncated
-    /// to [`MAX_ARCHIVE_PASSWORDS`](Self::MAX_ARCHIVE_PASSWORDS). RAM-only, never persisted.
-    pub fn remember_archive_password(&mut self, pw: &crate::SecretString) {
-        if pw.is_empty() {
-            return;
-        }
-        self.archive_passwords.retain(|p| p != pw);
-        self.archive_passwords.insert(0, pw.clone());
-        self.archive_passwords.truncate(Self::MAX_ARCHIVE_PASSWORDS);
-    }
-
-    /// A MRU-ordered snapshot of the session passwords for the shell's archive-open worker to
-    /// auto-try before prompting. Cheap — at most [`MAX_ARCHIVE_PASSWORDS`](Self::MAX_ARCHIVE_PASSWORDS)
-    /// short strings.
-    pub fn archive_passwords_snapshot(&self) -> Vec<crate::SecretString> {
-        self.archive_passwords.clone()
-    }
-
-    /// Wipe the session password cache (teardown). The `Vec` drop zeroizes each entry; doing
-    /// it explicitly keeps the privacy guarantee auditable and covers a shell that terminates
-    /// via `exit()` without running `Drop` (macOS).
-    pub fn clear_archive_passwords(&mut self) {
-        self.archive_passwords.clear();
-    }
 
     /// cases (empty / password-required / cancelled / error) stay host-side.
     fn apply_archive(&mut self, resolved: crate::scan::Resolved) {
@@ -1960,153 +1937,6 @@ impl AppCore {
             self.hide_folder_tree();
         }
         self.emit_panels_changed();
-    }
-
-    /// Whether the Thumbnails strip is the visible left-pane content (task #83).
-    pub fn thumbs_visible(&self) -> bool {
-        self.folder_tree_open
-            && self.left_tab == crate::overlay::LeftTab::Thumbnails
-            && !self.panels.hidden
-    }
-
-    /// `Shift+T` (task #83) — the Inspector's per-tab semantics for the left
-    /// pane's Thumbnails tab: open the pane on it, switch to it if Folders is
-    /// showing, close the pane if it's already showing. While Tab-hidden:
-    /// reveal + show, never close (the reveal rule).
-    pub fn toggle_thumbnails(&mut self) {
-        use crate::overlay::LeftTab;
-        if !self.native_thumbs {
-            return; // no strip presenter on this shell yet (winit: task #83 phase 7)
-        }
-        if self.panels.reveal() {
-            self.folder_tree_open = true;
-            self.left_tab = LeftTab::Thumbnails;
-            self.on_thumbs_opened();
-            return;
-        }
-        if self.folder_tree_open && self.left_tab == LeftTab::Thumbnails {
-            self.folder_tree_open = false;
-            self.hide_folder_tree();
-            self.emit_panels_changed();
-            return;
-        }
-        self.folder_tree_open = true;
-        self.left_tab = LeftTab::Thumbnails;
-        // The HUD/native tree yields the pane; its bitmaps clear here (the strip
-        // is the pane's content now).
-        self.hide_folder_tree_visuals_for_tab_switch();
-        self.on_thumbs_opened();
-    }
-
-    /// Clear the drawn tree's visuals without closing the pane (a tab switch to
-    /// Thumbnails): the CPU tree quad / panel state drops; `folder_tree_open`
-    /// stays true because the pane is still open — on the Thumbnails tab.
-    fn hide_folder_tree_visuals_for_tab_switch(&mut self) {
-        let was_open = self.folder_tree_open;
-        self.hide_folder_tree();
-        self.folder_tree_open = was_open;
-    }
-
-    /// First-open / re-open bookkeeping for the strip (task #83): enable capture
-    /// (the T0 byproduct hook costs nothing until this), land the follow scroll
-    /// on the current item, and kick fills.
-    fn on_thumbs_opened(&mut self) {
-        self.thumbs.enable();
-        if let Some(cur) = self.playlist.current() {
-            if let Some(cmd) = self.thumbs.follow.panel_opened(cur) {
-                self.thumbs.pending_scroll = Some(cmd);
-            }
-        }
-        self.request_prefetch();
-        self.emit_panels_changed();
-    }
-
-    /// A strip click (task #83): absolute jump + the instant thumb-preview
-    /// present for cold targets — preview-first applied to jumps. The cached
-    /// thumb rides the normal synthetic-outcome upload path (the macOS
-    /// archive-poster pattern): it lands as a resident *preview*, presents, and
-    /// the real decode — queued at top priority by `request_prefetch` — upgrades
-    /// it in place. No flash of black, no wait, and the ring is never evicted
-    /// out-of-policy (the target legitimately owns a slot now).
-    pub fn thumb_jump(&mut self, item: usize) {
-        self.flush_pending_delete();
-        if item >= self.source.len() {
-            return;
-        }
-        if self.displayed_item != Some(item) {
-            self.stop_playback();
-            self.playlist.jump_to(item);
-            self.target_item = self.playlist.current();
-            if !self.try_present_target() {
-                if let Some(e) = self.thumbs.cache.get(item) {
-                    let img = pb_decode::DecodedImage {
-                        width: e.w,
-                        height: e.h,
-                        orig_width: e.payload.orig_w,
-                        orig_height: e.payload.orig_h,
-                        codec: e.payload.codec,
-                        format: pb_decode::PixelFormat::Rgba8,
-                        pixels: e.payload.rgba.clone(),
-                        is_preview: true,
-                        color: pb_decode::ColorTransform::srgb(),
-                        peak: 1.0,
-                        animated: None,
-                    };
-                    let rep_kind = self.display_kind();
-                    self.pending_uploads
-                        .push(crate::decode_pool::Outcome::synthetic(
-                            item,
-                            self.epoch,
-                            self.content_gen,
-                            rep_kind,
-                            Ok(img),
-                        ));
-                    // A click is a discrete pointer action, not the keypress
-                    // frame: a <=1 MiB upload lands now (plan §4).
-                    self.drain_results();
-                }
-            }
-            self.request_prefetch();
-        }
-        if let Some(cmd) = self.thumbs.follow.jump(item) {
-            self.thumbs.pending_scroll = Some(cmd);
-        }
-        self.emit_panels_changed();
-    }
-
-    /// T0 capture (task #83): the ring upload just finished with this outcome's
-    /// CPU buffer — hand it to the derive thread instead of dropping it. O(1)
-    /// (a bounded `try_send`); a no-op until the strip is first opened.
-    pub(super) fn thumbs_capture(&mut self, o: crate::decode_pool::Outcome) {
-        if o.key.purpose != crate::decode_pool::Purpose::Display {
-            return;
-        }
-        let item = o.key.item;
-        // A VIDEO's displayed image IS its poster — the product of a multi-second scored
-        // walk (300–1600 ms over SMB). Retain it even when the strip has never been opened,
-        // exactly like the Windows selection path does (`land_selection_tile`): the walk is
-        // already paid for, so discarding the tile is pure waste, and refilling it later
-        // costs another whole walk at the bottom of the priority list. That is the "open the
-        // strip and wait" report, and on the platforms with no #114 selection pipeline
-        // (macOS, Linux) this hook is the ONLY thing that can retain a poster tile.
-        //
-        // The asymmetry vs photos is deliberate and is the whole reason `enabled` exists:
-        // a photo thumb is a cheap local re-decode, so paying a derive for every displayed
-        // photo would put one on every frame of a blaze. A video thumb is a network walk.
-        // `enable_capture()` (not `enable()`) keeps fill planning + the photo byproduct
-        // derive gated on the panel actually being opened.
-        let is_video = matches!(
-            crate::video::item_kind(self.source.as_ref(), item),
-            crate::video::LibraryItemKind::Video(_)
-        );
-        if is_video {
-            self.thumbs.enable_capture();
-        } else if !self.thumbs.enabled {
-            return;
-        }
-        if let Some(img) = o.into_image() {
-            self.thumbs.offer(item, img);
-        }
     }
 
     /// The displayed photo's containing folder as a forward-slashed path — the
@@ -3323,111 +3153,6 @@ impl AppCore {
     // current one at full resolution — change detection at a fixed gaze point, the
     // culling tool. The pin rides the prefetch want-list at top-2 priority
     // (`request_prefetch`), so both directions of the flip are ring rebinds.
-
-    /// `⇧Y` / Image ▸ Pin for Compare — pin the current photo, or unpin when it's
-    /// already the pin. The whole pin-management surface.
-    pub fn compare_pin_cmd(&mut self) {
-        let Some(item) = self.displayed_item else {
-            return; // empty state — nothing to pin
-        };
-        if self.compare_pin == Some(item) {
-            self.clear_compare_pin();
-            self.show_toast_icon("Unpinned", ToastIcon::Unpin);
-        } else {
-            self.set_compare_pin(item);
-        }
-    }
-
-    /// `Y` / Image ▸ Compare with Pinned — flip between the pinned photo and the
-    /// current one. With nothing pinned yet, pins the current photo instead, so a
-    /// single key drives the whole feature.
-    pub fn compare_toggle_cmd(&mut self) {
-        let Some(current) = self.displayed_item else {
-            return;
-        };
-        let Some(pin) = self.compare_pin else {
-            self.set_compare_pin(current);
-            return;
-        };
-        if current == pin {
-            // Viewing the pin: flip back to the remembered position. No return point
-            // yet (pinned, never flipped) → nothing to do.
-            if let Some(ret) = self.compare_return {
-                if ret != pin && ret < self.source.len() {
-                    self.compare_jump(ret);
-                }
-            }
-        } else {
-            self.compare_return = Some(current);
-            self.compare_jump(pin);
-        }
-    }
-
-    fn set_compare_pin(&mut self, item: usize) {
-        self.compare_pin = Some(item);
-        self.compare_pin_id = Some(self.compare_identity(item));
-        self.compare_return = None;
-        self.show_toast_icon("Pinned for compare", ToastIcon::Pin);
-        // Re-issue the want-list so the pin's eviction exemption takes effect now.
-        self.request_prefetch();
-    }
-
-    /// Drop the pin and its bookkeeping (deleting the pinned photo, a new deck).
-    pub fn clear_compare_pin(&mut self) {
-        self.compare_pin = None;
-        self.compare_return = None;
-        self.compare_pin_id = None;
-    }
-
-    /// The pinned item's rebuild-stable identity: the full path where one exists,
-    /// else the archive-entry name.
-    pub(super) fn compare_identity(&self, item: usize) -> String {
-        match self.source.path(item) {
-            Some(p) => p.to_string_lossy().into_owned(),
-            None => self.source.name(item).to_string(),
-        }
-    }
-
-    /// Jump the cursor to an absolute index and present it — `advance`'s gated engine
-    /// path for the compare flip. The live zoom/pan carries across the flip when both
-    /// photos share dimensions and rotation (the 100%-crop sharpness workflow: the
-    /// same crop of the other frame lands under your gaze).
-    fn compare_jump(&mut self, item: usize) {
-        self.flush_pending_delete();
-        // Never jump while the previous target is still pending (a miss in flight) —
-        // mirroring `advance`, so a photo is never silently skipped.
-        if self.displayed_item != self.target_item {
-            return;
-        }
-        // Stage the carried zoom/pan for `view_for` to consume, so the flip's FIRST
-        // presented frame already has the view — one set_view + one draw. (The first
-        // cut presented at the reset view and re-imposed the carry afterwards: two
-        // draws, and the incoming photo flashed centered for a frame.)
-        self.compare_carry = self.compare_carry_view(item);
-        self.stop_playback();
-        self.playlist.jump_to(item);
-        self.target_item = self.playlist.current();
-        self.try_present_target();
-        // Not consumed (a ring miss / failed target): drop it rather than let some
-        // later unrelated present inherit a stale view.
-        self.compare_carry = None;
-        self.request_prefetch();
-    }
-
-    /// The live zoom/pan to carry across a flip to `to`, or `None` when the view is
-    /// the default or the two photos don't share geometry (same pixel dimensions AND
-    /// the same rotation override — otherwise the crop wouldn't map anyway).
-    pub(super) fn compare_carry_view(&self, to: usize) -> Option<(f32, [f32; 2])> {
-        if self.view.zoom == 1.0 && self.view.pan == [0.0, 0.0] {
-            return None; // default view — nothing worth carrying
-        }
-        let from = self.displayed_item?;
-        let a = self.meta_cache.get(&from)?;
-        let b = self.meta_cache.get(&to)?;
-        let rot_a = self.rotations.get(&from).copied().unwrap_or_default();
-        let rot_b = self.rotations.get(&to).copied().unwrap_or_default();
-        ((a.w, a.h) == (b.w, b.h) && rot_a == rot_b).then_some((self.view.zoom, self.view.pan))
-    }
 
     /// Reflect the pan affordance in the pointer: a pointing hand over the folder-tree,
     /// a closed hand while dragging, an open hand when the image is pannable, the default arrow
@@ -7723,34 +7448,6 @@ impl AppCore {
         let (epoch, content_gen) = (self.epoch, self.content_gen);
         self.pending_uploads
             .retain(|o| !outcome_stale(epoch, content_gen, o));
-    }
-
-    /// Start / stop the slideshow (task #23, the `S` key + View ▸ Slideshow). Starting
-    /// resets the timer (`last_present = now`) so the first slide shows for a full
-    /// interval before advancing; `about_to_wait` drives the auto-advance from there.
-    pub fn toggle_slideshow(&mut self) {
-        let on = self.slideshow.toggle();
-        if on {
-            self.last_present = Some(self.now);
-        }
-        self.show_toast(if on { "Slideshow" } else { "Slideshow Stopped" });
-    }
-
-    /// Change the slideshow interval by `steps` × 0.5s (the `[` / `]` keys: `-1`
-    /// shortens, `+1` lengthens), clamped, and flash the new value (e.g. `2.0s`). The
-    /// change applies live: the deadline is `last_present + interval`, so a running
-    /// slideshow's current slide gets more / less remaining time immediately.
-    pub fn adjust_slideshow(&mut self, steps: i32) {
-        let interval = self.slideshow.adjust(steps);
-        self.show_toast(&crate::slideshow::format_interval(interval));
-    }
-
-    /// The current slideshow interval, formatted for display (e.g. `4s`, `0.5s`) — the
-    /// same formatting the `[`/`]` adjust toast uses. The macOS toolbar shows this on its
-    /// slideshow control (task #55). Reflects live adjustments, not just the configured
-    /// default, since it reads the running `slideshow.interval`.
-    pub fn slideshow_interval_display(&self) -> String {
-        crate::slideshow::format_interval(self.slideshow.interval)
     }
 
     /// Request the native picker (`O` = file(s), `Shift+O` = folder). Computes the start
