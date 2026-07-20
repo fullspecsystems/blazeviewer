@@ -316,6 +316,111 @@ have to take `now` as a parameter instead of calling `Instant::now()`. `Backgrou
 this. What is *not* yet solved is the injectable **worker runtime** (deterministic completion
 points for "cancel mid-walk" / "teardown in flight"), which remains open.
 
+## 12. macOS session, 2026-07-20 — step 1 landed on the Mac
+
+Picks up from §11.6. Three of its five items are done; two of its premises were wrong and are
+corrected below.
+
+### 12.1 §0 is inverted on the Mac (and the position is better than §0 assumed)
+
+§0 is a *Windows-box* statement, not a global one. On the Mac the asymmetry runs the other way:
+
+| crate | on the Windows box | on the Mac |
+|---|---|---|
+| `pb-mac-ffi` | ⛔ compiled out (`#![cfg(target_os = "macos")]`) | ✅ compiles, tests, **and runs** |
+| `pb-app` | ✅ compiles, tests, lints | ⛔ `build.rs` hard-errors on `target_os = "macos"` |
+
+So **half B is the verifiable half here, and it is the only half that can actually be
+executed.** Half A remains reachable via the `x86_64-pc-windows-msvc` cross-check (the
+temporary blake3 `pure` + `ureq` `default-features = false` Cargo edits), which type-checks
+but cannot run. Net: a Mac can do *both* halves, which is why step 1 completed in one session.
+
+### 12.2 Two gaps in the handoff, found on arrival
+
+- **`AppCore::begin_dir_scan` did not exist.** `dir_scan.rs`'s module docs describe it as "the
+  thin production wrapper that makes the channel and spawns the walk" and `arm_dir_scan`'s
+  doc-comment links to it, but only `arm_dir_scan` was written. The core owned the pump and
+  none of the spawn, so **neither shell could have migrated**. Written in `a78bfddd`.
+- **The audit's cross-cancel claim (subtask 4) is false at `HEAD`,** independently confirming
+  `6bc8f7db`. macOS has cross-cancel in *both* directions with explicit `#109 item 1, winit
+  parity — 8293a662` comments. Already closed; the audit is stale.
+
+### 12.3 Correction: winit is NOT dialog-only. Both shells already have the same pill.
+
+An earlier reading in this session claimed winit shows a modal Scanning dialog where macOS
+shows an ambient pill, and called that a deliberate Mac-assed divergence. **That was wrong,
+and the owner caught it.**
+
+winit already has the same top-center pill, with a working hit-tested Cancel button
+(`pb-app/src/panels_ui.rs:1287`), documented as a deliberate parity port of the macOS SwiftUI
+`ScanPillView`. The `pb-hud` scan chip is dead code — reachable only from the dev gallery
+(`hud_gallery.rs:144`, `:367`).
+
+The **actual** divergence is much narrower, and is a gate, not a design:
+
+> winit's pill is gated **post-bootstrap** (`main.rs:3314`:
+> `displayed_item.is_some() && scan_bootstrapped && …`), so the modal `DialogKind::Scanning`
+> window covers only the *pre-bootstrap* phase. macOS's pill covers both phases and its shell
+> never reveals the sheet. The comment at `main.rs:3313` says so outright.
+
+Owner decision (2026-07-20): **unify on the ambient pill.** That is mostly *deleting* winit's
+special case — relax the gate, stop calling `open_scanning_dialog`, and port the dialog's
+`Searching…` zero-state string so the pill does not read "0 found" for the whole pre-bootstrap
+phase. That string is the one genuine UX regression risk in the change.
+
+### 12.4 The P0 was scoped down, deliberately (owner call)
+
+§11.6 step 2 called for stamping an `OpId` onto every dialog effect (~50 `pb-mac-ffi` sites
+plus the Swift host) *before* moving dir-scan. Owner chose the narrow form: **reconcile the
+two worker flows only.**
+
+The reasoning: `AppCore::scan_status()` is a *described state*, not an imperative command, so
+it removes the stale-close hazard **by construction** for this flow — there is no late `Close`
+that can arrive after a newer walk started, because the core never issues one; it only ever
+describes whatever operation is current now. The remaining dialogs (Settings, About, Confirm)
+are synchronous and never had the hazard. Revisit the wider stamp after step 2, with evidence
+from having moved both flows.
+
+### 12.5 `slow` and `bootstrapped` must stay separate facts
+
+The one non-obvious core design point. `BackgroundOps::should_reveal` **latches** (a modal
+dialog is an *event*: open one, once). An ambient pill is a *state* and must be answerable
+every frame — driven by the latch it would appear for exactly one frame and vanish. Hence
+`BackgroundOps::is_slow` alongside it, and hence `ScanStatus` reporting `slow` and
+`bootstrapped` independently rather than one "should I show something" boolean. That is
+precisely what lets one core serve blocking chrome (hides once a photo is up) and ambient
+chrome (stays for the whole walk).
+
+### 12.6 The trap waiting in step 2
+
+Wiring the mac shell's archive-open cancel to `begin_dir_scan`'s `superseded` return
+**compiles, reads correctly, and silently breaks cross-type supersession** — because the
+archive open is not registered in the core's generation space until step 2, so the core always
+returns `None`. Caught immediately by
+`beginning_a_folder_scan_supersedes_an_in_flight_archive_open`, the test that exists because
+missing this cancel *is* the "door card over a photo" corruption.
+
+The cancel is unconditional again, commented. **Step 2 must flip it to the `superseded`
+return in the same commit that registers the archive open** — doing either half alone is a
+silent regression in one direction or a double-cancel in the other.
+
+### 12.7 Status
+
+| item | state |
+|---|---|
+| Phase 0 — `BackgroundOps` coordinator | ✅ on `main` |
+| Phase 0 — dialog identity | ✅ **narrow form** (§12.4): reconciliation, not id-stamping |
+| Phase 0 — injectable worker runtime | ✅ not needed — the mpsc channel already is one (§11.3) |
+| Phase 0 — wake contract | ✅ not needed — the core's 9 existing workers already share one (channel → `Option<Handle>` → `try_recv` in `tick` → a `work_pending()` arm); scan/archive already match it |
+| Step 1 — core owns spawn + pump + status query | ✅ `a78bfddd` |
+| Step 1 — **mac rewired** | ✅ `71f78e01`, **−202/+82**, 36 tests green, app runs |
+| Step 1 — winit rewired | ⏳ next; needs the cross-check, and carries the §12.3 pill change |
+| Step 1 — owner interactive smoke on macOS | ⏳ pending (pill, its Cancel, quit mid-scan) |
+| Step 2 — archive-open | ⏸ not started; read §12.6 first |
+
+**The DRY win is now real on one shell**: one copy of the dir-scan lifecycle is deleted and
+the surviving implementation is the tested core one. It becomes a full win when winit follows.
+
 ### 11.4 Status at end of session
 
 | item | state |
