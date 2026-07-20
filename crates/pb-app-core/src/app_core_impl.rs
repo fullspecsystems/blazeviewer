@@ -7090,18 +7090,9 @@ impl AppCore {
         // An archive that opened at all — even to find nothing viewable — proves its password.
         // Promote it here, inside the core: the winning secret is never returned to a shell.
         //
-        // ⚠ A CANCELLED open deliberately promotes NOTHING, and that is a decision, not an
-        // accident of control flow (owner call 2026-07-20). This is the only caller of
-        // `remember_archive_password`, so cancelling — which never reaches here — drops the
-        // attempted secret and zeroizes it with `ArchiveOpenState`. By the "proves its
-        // password" rule above a cancelled 7z arguably *did* prove it (7z verifies before bulk
-        // extraction, so a visible progress bar means the password was accepted), which is
-        // exactly why this needs saying out loud: backing out of an operation is not a request
-        // to remember its secret, and the privacy default is to keep less.
-        //
-        // If a future refactor unifies the terminal paths and routes cancel through here, that
-        // would silently reverse this. `a_cancelled_open_never_remembers_its_password` is the
-        // tripwire.
+        // A CANCELLED open promotes too, on this same rule but from `cancel_archive_load`,
+        // gated on the open having actually produced decrypted bytes. See the reasoning there:
+        // cancelling is about the wait, not the password.
         if matches!(outcome, Ok(_) | Err(ArchiveOpenError::Empty)) {
             if let Some(pw) = attempted.as_ref().or(winner.as_ref()) {
                 self.remember_archive_password(pw);
@@ -7143,6 +7134,31 @@ impl AppCore {
     pub fn cancel_archive_load(&mut self) {
         if let Some(load) = self.archive_load.take() {
             load.request_cancel();
+            // Keep a password this open already PROVED (owner call 2026-07-20). Nobody cancels
+            // because they regret typing the correct password — they cancel because a big
+            // archive is slow, and the next thing they open is often a smaller one with the
+            // same password. Re-prompting there is the annoyance worth removing.
+            //
+            // The gate is `done() > 0`: proof, not assumption. Decompressed bytes only appear
+            // if the key was right — a wrong one fails the decrypt/CRC before producing any.
+            //
+            // It is deliberately CONSERVATIVE, and the asymmetry is the point:
+            //   * 7z / RAR are eager decodes counting decompressed bytes, so `done > 0` really
+            //     does prove the password. This is the case that matters — they are the slow
+            //     opens people actually cancel.
+            //   * The tar family counts *compressed* bytes consumed instead, which would prove
+            //     nothing — but tar has no encryption, so `attempted_password` is `None` and
+            //     this never fires for it.
+            //   * A ZIP opens lazily and may never stream bytes, so it simply will not promote.
+            // So the gate can UNDER-promote (a missed convenience) but can never OVER-promote.
+            // That direction is chosen: a wrong password in the MRU is auto-tried against every
+            // later archive, and a wrong-password ZIP attempt decrypts that archive's entire
+            // first entry — up to ~1 GiB — to discover it was wrong.
+            if load.progress.done() > 0 {
+                if let Some(pw) = load.attempted_password.as_ref() {
+                    self.remember_archive_password(pw);
+                }
+            }
         }
         if self.bg.active_is_archive() {
             self.bg.cancel();
@@ -19336,26 +19352,40 @@ mod tests {
         assert!(core.deleted.is_empty(), "fresh scan, fresh universe");
     }
 
-    /// Cancelling an open must NOT remember the password, even though the password was
-    /// accepted before the extraction the user cancelled. Owner-decided 2026-07-20: backing
-    /// out is not a request to remember. Currently this holds because `finish_archive_open` is
-    /// the only promotion site and a cancel never reaches it — this test is what stops a
-    /// future "unify the terminal paths" refactor from quietly reversing it.
+    /// Cancelling an open that HAS decrypted something keeps the password (owner call
+    /// 2026-07-20). Nobody cancels because they regret typing the correct one — they cancel a
+    /// slow archive, and often open a smaller one with the same password next.
     #[test]
-    fn a_cancelled_open_never_remembers_its_password() {
+    fn cancelling_a_progressing_open_remembers_its_proven_password() {
         let pw = crate::SecretString::new("hunter2");
         let (mut core, _tx) = armed_archive_core(Some(pw.clone()));
-        assert!(core.archive_passwords.is_empty());
+        // Decrypted output appeared: proof the key was right.
+        core.archive_load.as_ref().unwrap().progress.add_done(4096);
+
+        core.cancel_archive_load();
+
+        assert_eq!(
+            core.archive_passwords.len(),
+            1,
+            "a password that demonstrably decrypted something is worth keeping"
+        );
+        assert!(core.archive_load.is_none());
+    }
+
+    /// ...but an INSTANT cancel has proved nothing, so it remembers nothing. Not tidiness: a
+    /// wrong password in the MRU is auto-tried against every later archive, and a
+    /// wrong-password ZIP attempt decrypts that archive's whole first entry to find out.
+    #[test]
+    fn cancelling_before_anything_decrypted_remembers_nothing() {
+        let pw = crate::SecretString::new("probably-wrong");
+        let (mut core, _tx) = armed_archive_core(Some(pw.clone()));
+        assert_eq!(core.archive_load.as_ref().unwrap().progress.done(), 0);
 
         core.cancel_archive_load();
 
         assert!(
             core.archive_passwords.is_empty(),
-            "a cancelled open must not promote its password to the session MRU"
-        );
-        assert!(
-            core.archive_load.is_none(),
-            "and the secret is dropped (zeroized on Drop)"
+            "nothing decrypted yet - unproven, so it must not poison the auto-try cache"
         );
     }
 

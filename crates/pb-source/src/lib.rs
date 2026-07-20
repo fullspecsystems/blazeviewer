@@ -456,7 +456,12 @@ impl OpenProgress {
     /// openers count *compressed* bytes consumed instead, since a compressed
     /// tar's decompressed total isn't knowable up front — the fraction stays a
     /// plain ratio either way).
-    pub(crate) fn add_done(&self, n: u64) {
+    ///
+    /// `pub` rather than `pub(crate)` so `pb-app-core` can drive it in tests: the
+    /// cancel-time password promotion is gated on `done() > 0`, and that gate needs a test
+    /// that can make bytes appear without a real archive. Writing progress from outside an
+    /// opener is meaningless rather than dangerous — it moves a display counter.
+    pub fn add_done(&self, n: u64) {
         self.inner.done.fetch_add(n, Ordering::Relaxed);
     }
 }

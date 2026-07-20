@@ -69,15 +69,32 @@ archive first; on a fresh launch the same 8.5 MB zip shows nothing.
 **Items 3 and 4 — owner-run on Windows 2026-07-20, both pass.** Session MRU auto-try works on
 a second archive. Cancel mid-load on a large `.7z` closes quietly and keeps what was on screen.
 
-**Decision recorded while checking 4:** a cancelled open does **not** promote its password to
-the session MRU. The owner reasoned that backing out is not a request to remember, and that is
-now the decision — but note it was *incidental* until today: `finish_archive_open` is the only
-promotion site and a cancel never reaches it. Worth flagging because the code's own stated rule
-(*"an archive that opened at all proves its password"*) argues the other way — 7z verifies
-before bulk extraction, so a visible progress bar means the password was already accepted.
-Pinned by `a_cancelled_open_never_remembers_its_password`, with
-`a_completed_open_does_remember_its_password` as its other half, so a future "unify the terminal
-paths" refactor cannot reverse it silently.
+**Decision recorded while checking 4 — REVERSED the same day, and the reversal is the right
+one.** A cancelled open now DOES promote its password, gated on `progress.done() > 0`. The first instinct was "backing out is not a request to remember", but the
+better argument won: nobody cancels because they regret typing the *correct* password — they
+cancel a slow archive, and the next thing they open is often a smaller one with the same
+password. That also matches the code's own rule (*"an archive that opened at all proves its
+password"*).
+
+The gate is `done() > 0` — proof rather than assumption, since decompressed bytes only appear
+if the key was right. It is deliberately conservative and the asymmetry is the point: 7z/RAR
+are eager decodes counting decompressed bytes so the gate really does prove it (and they are
+the slow opens people actually cancel); the tar family counts *compressed* bytes, which would
+prove nothing, but has no encryption so the gate never fires there; a lazy ZIP may never stream
+bytes and so simply will not promote. **It can under-promote, never over-promote** — chosen
+because a wrong password in the MRU is auto-tried against every later archive, and a
+wrong-password ZIP attempt decrypts that archive's entire first entry (up to ~1 GiB) to find
+out.
+
+Note the behaviour was *incidental* before this: `finish_archive_open` was the only promotion
+site and a cancel never reached it. Pinned now by
+`cancelling_a_progressing_open_remembers_its_proven_password` (verified to fail with the gate
+removed), `cancelling_before_anything_decrypted_remembers_nothing`, and
+`a_completed_open_does_remember_its_password`.
+
+`OpenProgress::add_done` widened `pub(crate)` → `pub` so the gate is testable across the crate
+boundary; writing a display counter from outside an opener is meaningless rather than
+dangerous.
 
 **Still not run on Windows:** *Not verified* items 5–6 (session MRU auto-try on a second
 archive, Cancel mid-load on a large `.7z`, plain-`.zip` fast path from a *fresh* session, and
