@@ -38,3 +38,53 @@ impl AppCore {
         self.archive_passwords.clear();
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app_core_impl::test_support::{test_core};
+
+    /// The session password cache (session-archive-password-cache): harvest/promote via
+    /// `remember_archive_password` is MRU-ordered, deduped, empty-ignoring, capped, and
+    /// wiped by `clear_archive_passwords`.
+    #[test]
+    fn archive_password_cache_is_mru_deduped_capped_and_clearable() {
+        use crate::SecretString;
+        let mut core = test_core();
+        assert!(core.archive_passwords_snapshot().is_empty());
+
+        // Empty passwords are never remembered.
+        core.remember_archive_password(&SecretString::new(""));
+        assert!(core.archive_passwords_snapshot().is_empty());
+
+        // Newest-first (MRU).
+        core.remember_archive_password(&SecretString::new("a"));
+        core.remember_archive_password(&SecretString::new("b"));
+        let snap = core.archive_passwords_snapshot();
+        assert_eq!(snap.first().map(|s| s.expose()), Some("b"));
+
+        // Re-using an existing password moves it to the front (no duplicate).
+        core.remember_archive_password(&SecretString::new("a"));
+        let snap = core.archive_passwords_snapshot();
+        assert_eq!(
+            snap.iter()
+                .map(|s| s.expose().to_owned())
+                .collect::<Vec<_>>(),
+            vec!["a".to_owned(), "b".to_owned()],
+            "MRU promotion, no dupes"
+        );
+
+        // Capped at MAX_ARCHIVE_PASSWORDS — the oldest fall off.
+        for i in 0..AppCore::MAX_ARCHIVE_PASSWORDS + 5 {
+            core.remember_archive_password(&SecretString::new(format!("p{i}")));
+        }
+        assert_eq!(
+            core.archive_passwords_snapshot().len(),
+            AppCore::MAX_ARCHIVE_PASSWORDS
+        );
+
+        // Teardown wipes it.
+        core.clear_archive_passwords();
+        assert!(core.archive_passwords_snapshot().is_empty());
+    }
+}
