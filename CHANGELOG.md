@@ -7,15 +7,13 @@ with any pre-release suffix carried only by the tag.
 
 ## [Unreleased]
 
-### Changed
-
-- Zooming in now shows real detail instead of magnifying the screen-sized picture. Blaze
-  already keeps the full-resolution photo ready so the 1:1 key is instant; zooming with
-  `+`/`-`, a pinch, or the scroll wheel now uses it too. You see every pixel the file has,
-  up to 100%, and it costs nothing extra because the picture was already loaded.
-
 ### Fixed
 
+- Zooming in now shows real detail instead of magnifying the screen-sized picture. Blaze
+  already keeps the full-resolution photo ready, which is why the 1:1 key is instant.
+  Zooming with `=`/`-`, a pinch, or the scroll wheel now uses it too, so you see every pixel
+  the file has, up to 100%. It is instant for the same reason 1:1 is: the picture was
+  already loaded.
 - Opening a password-protected archive no longer blows the toolbar and panels up to a huge,
   stretched size. They stayed that way until you resized the window; now they don't.
 
