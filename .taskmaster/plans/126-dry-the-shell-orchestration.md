@@ -99,7 +99,32 @@ dangerous.
 **Item 5 — owner-run on Windows 2026-07-20, passes.** A plain `.zip` shows no Loading dialog
 or spinner at all.
 
-**Still not run on Windows:** *Not verified* item 6 only (session MRU auto-try on a second
+**Item 6 — owner-run on Windows 2026-07-20, PASSES.** Opening `test-images.7z` from a NAS
+share mid-scan produced exactly ONE `rebuild_playlist` (`src_len` 116 -> 32, one epoch bump)
+and `src_len` then stayed at 32. No folder batch ever came back to extend the archive deck —
+the corruption this item exists to catch did not occur. With the two core tests underneath it
+(`an_archive_open_supersedes_an_in_flight_scan`, `a_folder_scan_supersedes_an_in_flight_archive_open`),
+**all six Windows items are now verified and step 2 is done.**
+
+### Cosmetic observations, recorded not chased
+
+Two one-frame ordering gaps, both cleared of the core and both benign. Recorded so they are not
+re-investigated from scratch, and so there is a starting point if either ever gets worse.
+
+1. **Door card flashes briefly over a photo on archive entry** (owner, `comic.cbr`). Chased with
+   `PB_DOOR_DIAG` and **the core is provably innocent**: across 923 frames there is not one with
+   `door_card=Some` while `archive_kind=None` (the bug signature), zero `ring-desync` /
+   `present_slot missed` lines, and the entry transition flips card->photo in a single frame.
+   It is also *not* a fade — the door card has no fade animation; `base_alpha` is the panel
+   opacity setting. Remaining hypothesis, **untested**: the card lives in the *retained* egui
+   overlay texture, which only re-renders when dirtied (`App::door_sig`, `main.rs:535`), so a
+   stale overlay can composite over the new photo for a frame or two. At 120 Hz that is 8-16 ms,
+   which matches "a split second" and why it felt shorter on the second attempt. Owner: "not a
+   major UX issue... but I'll keep an eye on it."
+2. **`archive_scope` lags the deck by one frame** on archive entry: the first draw after
+   `rebuild_playlist` shows `src_len=32` (archive contents) with `archive_scope=false`, and the
+   next frame has it `true`. Same family as (1). Harmless as observed — the door card is already
+   `None` by then — but anything keying off `archive_scope` sees one frame of the old answer. (session MRU auto-try on a second
 archive, Cancel mid-load on a large `.7z`, plain-`.zip` fast path from a *fresh* session, and
 scan-over-archive supersession).
 
