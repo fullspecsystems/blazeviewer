@@ -27,7 +27,7 @@
 //! ([`drop_fit_slots`](ResidentRing::drop_fit_slots)) and keeps valid
 //! `Original`s; a content change purges everything ([`clear`](ResidentRing::clear)).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// Which representation of an item's pixels a ring slot holds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -130,6 +130,15 @@ pub struct ResidentRing {
     byte_budget: u64,
     /// Sum of `slot_bytes` over Pending + Resident slots.
     committed_bytes: u64,
+    /// Reservations this ring REFUSED (rank beyond the window, budget with nothing
+    /// lower-priority evictable) since the last time its answer could have changed
+    /// (task #122): a caller that re-requests a refused decode every scheduling pass
+    /// burns a full native decode per pass — the fullscreen-park livelock. Cleared by
+    /// [`clear`](Self::clear), [`compact_to`](Self::compact_to) (a rebuild resizes
+    /// budget/capacity), and a [`set_displayed`](Self::set_displayed) *change* (nav
+    /// re-ranks the keep list). Consulted via [`denied`](Self::denied); "already
+    /// tracked" refusals are NOT recorded (they're success-adjacent, not denials).
+    denied: HashSet<(usize, RepKind)>,
 }
 
 impl ResidentRing {
@@ -147,6 +156,7 @@ impl ResidentRing {
             displayed: None,
             byte_budget: byte_budget.max(1),
             committed_bytes: 0,
+            denied: HashSet::new(),
         }
     }
 
@@ -187,9 +197,14 @@ impl ResidentRing {
         self.by_key.contains_key(&(item, kind))
     }
 
-    /// Pin the on-screen slot so it is never chosen as an eviction victim.
+    /// Pin the on-screen slot so it is never chosen as an eviction victim. A *change*
+    /// of displayed slot also voids past reservation refusals (#122): nav re-ranks the
+    /// keep list, so a previously refused item may be admittable now.
     pub fn set_displayed(&mut self, slot: usize) {
         debug_assert!(slot < self.slots.len());
+        if self.displayed != Some(slot) {
+            self.denied.clear();
+        }
         self.displayed = Some(slot);
     }
 
@@ -206,6 +221,7 @@ impl ResidentRing {
         self.by_key.clear();
         self.displayed = None;
         self.committed_bytes = 0;
+        self.denied.clear();
     }
 
     /// A **geometry** change (resize / Fit↔1:1 toggle): drop every `Fit` slot (their
@@ -258,6 +274,8 @@ impl ResidentRing {
     /// are dropped. Must be called *after* [`drop_fit_slots`], on a ring whose only
     /// occupants are `Resident` Originals.
     pub fn compact_to(&mut self, new_capacity: usize, keep: &[usize]) -> Vec<SlotRemap> {
+        // A rebuild resizes capacity/budget occupancy — every past refusal is void (#122).
+        self.denied.clear();
         // Gather survivors with their priority rank.
         let rank_of = |it: usize| keep.iter().position(|&k| k == it).unwrap_or(usize::MAX);
         let mut survivors: Vec<(usize, usize, u64)> = Vec::new(); // (old_slot, item, bytes)
@@ -344,10 +362,16 @@ impl ResidentRing {
         let rank_of = |it: usize| keep.iter().position(|&k| k == it);
         // Only reserve items still wanted (present in `keep`): a decode that
         // finished after navigation moved on must not consume a slot ahead of the
-        // current targets.
-        let item_rank = rank_of(item)?;
+        // current targets. Every genuine refusal from here down is RECORDED (#122,
+        // `denied`) so a scheduler can stop re-requesting a decode this ring cannot
+        // admit until the ranks can change.
+        let Some(item_rank) = rank_of(item) else {
+            self.denied.insert(key);
+            return None;
+        };
         // A target ranked beyond the ring's capacity doesn't belong resident.
         if item_rank >= cap {
+            self.denied.insert(key);
             return None;
         }
 
@@ -378,9 +402,73 @@ impl ResidentRing {
                     });
                 }
             }
-            let slot = self.pick_victim(&rank_of, item_rank, representation.kind())?;
+            let Some(slot) = self.pick_victim(&rank_of, item_rank, representation.kind()) else {
+                // Budget full with nothing lower-priority evictable — a genuine denial.
+                self.denied.insert(key);
+                return None;
+            };
             self.free_slot(slot);
         }
+    }
+
+    /// Whether a reservation for `(item, kind)` was REFUSED since the last event that
+    /// could change the answer (a rebuild via [`compact_to`](Self::compact_to)/
+    /// [`clear`](Self::clear), or a displayed-slot change) — task #122's livelock guard:
+    /// a scheduler consulting this stops re-requesting a decode whose landing this ring
+    /// must refuse, instead of burning one full native decode per scheduling pass.
+    pub fn denied(&self, item: usize, kind: RepKind) -> bool {
+        self.denied.contains(&(item, kind))
+    }
+
+    /// Whether [`reserve_bytes`](Self::reserve_bytes) would succeed for
+    /// `(item, kind, item_bytes)` **right now**, without mutating anything — the same
+    /// rank / dedup / budget / eviction rules, evaluated as a dry run (#122: the parked
+    /// full-res emitter pre-flights wants so a decode the ring must refuse is never
+    /// requested in the first place). Feasibility mirrors the reserve loop: a slot is
+    /// obtainable (free, or at least one evictable victim), and after evicting every
+    /// evictable victim the bytes fit the budget (or nothing non-evictable remains —
+    /// the single-over-budget rule). A victim is evictable per `pick_victim`'s terminal
+    /// rules: never the displayed slot; unranked beats ranked; ranked only when
+    /// strictly lower priority, or same-rank in a *different* representation.
+    pub fn admittable(&self, item: usize, kind: RepKind, item_bytes: u64, keep: &[usize]) -> bool {
+        let cap = self.slots.len();
+        if cap == 0 || self.by_key.contains_key(&(item, kind)) {
+            return false;
+        }
+        let rank_of = |it: usize| keep.iter().position(|&k| k == it);
+        let Some(item_rank) = rank_of(item) else {
+            return false;
+        };
+        if item_rank >= cap {
+            return false;
+        }
+        let mut free = 0usize;
+        let mut evictable = 0usize;
+        let mut evictable_bytes = 0u64;
+        for (slot, state) in self.slots.iter().enumerate() {
+            let Some((occ_item, occ_kind)) = state.occupant() else {
+                free += 1;
+                continue;
+            };
+            if Some(slot) == self.displayed {
+                continue;
+            }
+            let can_evict = match rank_of(occ_item) {
+                None => true,
+                Some(r) if r > item_rank => true,
+                Some(r) if r == item_rank => occ_kind != kind,
+                Some(_) => false,
+            };
+            if can_evict {
+                evictable += 1;
+                evictable_bytes += self.slot_bytes[slot];
+            }
+        }
+        if free == 0 && evictable == 0 {
+            return false;
+        }
+        let min_committed = self.committed_bytes.saturating_sub(evictable_bytes);
+        min_committed + item_bytes <= self.byte_budget || min_committed == 0
     }
 
     /// The lowest-priority evictable occupied slot, or `None` when every candidate
@@ -597,6 +685,129 @@ mod tests {
     use crate::rng::SplitMix64;
 
     const CG: u64 = 1; // a fixed content generation for tests that don't vary it
+
+    // ── #122: the reservation-refusal latch + the dry-run pre-flight ──
+
+    /// `admittable` must agree with `reserve_bytes` on identically-built rings — it IS
+    /// the dry run of the same rules.
+    #[test]
+    fn admittable_mirrors_reserve_bytes() {
+        // Each case: (capacity, budget, residents[(item, bytes)], displayed_slot?,
+        //             candidate (item, bytes), keep)
+        type Case = (
+            usize,
+            u64,
+            &'static [(usize, u64)],
+            Option<usize>,
+            (usize, u64),
+            &'static [usize],
+        );
+        let cases: &[Case] = &[
+            // Free slot, fits: admit.
+            (4, 1000, &[(0, 100)], None, (1, 100), &[0, 1]),
+            // Not in keep: refuse.
+            (4, 1000, &[], None, (9, 100), &[0, 1]),
+            // Rank beyond capacity: refuse.
+            (1, 1000, &[(0, 10)], None, (1, 10), &[0, 1]),
+            // Budget full, the only resident is higher-priority: refuse.
+            (2, 100, &[(0, 90)], None, (1, 50), &[0, 1]),
+            // Budget full but a LOWER-priority resident is evictable: admit.
+            (2, 100, &[(1, 90)], None, (0, 50), &[0, 1]),
+            // The evictable slot is displayed → pinned: refuse.
+            (2, 100, &[(1, 90)], Some(0), (0, 50), &[0, 1]),
+            // Alone and over budget (single-over-budget rule): admit.
+            (2, 100, &[], None, (0, 500), &[0]),
+        ];
+        for (i, &(cap, budget, residents, displayed, (item, bytes), keep)) in
+            cases.iter().enumerate()
+        {
+            let build = || {
+                let mut r = ResidentRing::new_with_budget(cap, budget);
+                for &(it, b) in residents {
+                    let res = r.reserve_bytes(it, CG, fit(1), b, keep).expect("seed");
+                    r.mark_resident(it, res.slot, CG, fit(1));
+                }
+                if let Some(s) = displayed {
+                    r.set_displayed(s);
+                }
+                r
+            };
+            let predicted = build().admittable(item, RepKind::Fit, bytes, keep);
+            let actual = build()
+                .reserve_bytes(item, CG, fit(1), bytes, keep)
+                .is_some();
+            assert_eq!(
+                predicted, actual,
+                "case {i}: admittable={predicted} but reserve_bytes={actual}"
+            );
+        }
+    }
+
+    #[test]
+    fn admittable_refuses_an_already_tracked_rep_and_a_same_rank_same_rep_victim() {
+        let mut r = ResidentRing::new_with_budget(2, 100);
+        let res = r.reserve_bytes(0, CG, fit(1), 90, &[0, 1]).expect("seed");
+        r.mark_resident(0, res.slot, CG, fit(1));
+        assert!(
+            !r.admittable(0, RepKind::Fit, 10, &[0, 1]),
+            "already tracked"
+        );
+        // Same rank, same rep is never a victim; a different rep of rank-0 IS
+        // (making room for this rep of the same item is legitimate).
+        assert!(r.admittable(0, RepKind::Original, 90, &[0, 1]));
+    }
+
+    /// The #122 livelock guard: a refusal is remembered until the answer could change —
+    /// a rebuild (`compact_to`/`clear`) or a displayed-slot CHANGE — so a scheduler can
+    /// stop re-requesting a decode the ring must refuse at landing.
+    #[test]
+    fn a_refusal_is_latched_until_a_rebuild_or_a_displayed_change() {
+        let mut r = ResidentRing::new_with_budget(2, 100);
+        let res = r.reserve_bytes(0, CG, fit(1), 90, &[0, 1]).expect("seed");
+        r.mark_resident(0, res.slot, CG, fit(1));
+        r.set_displayed(res.slot);
+        assert!(!r.denied(1, RepKind::Original), "no refusal yet");
+        assert!(
+            r.reserve_bytes(1, CG, ORIG, 50, &[0, 1]).is_none(),
+            "budget full, the resident is displayed+higher-priority"
+        );
+        assert!(r.denied(1, RepKind::Original), "the refusal is latched");
+        // Re-pinning the SAME slot changes nothing…
+        r.set_displayed(res.slot);
+        assert!(r.denied(1, RepKind::Original));
+        // …but a rebuild voids every refusal.
+        r.compact_to(2, &[0, 1]);
+        assert!(!r.denied(1, RepKind::Original), "rebuild clears the latch");
+
+        // Displayed-slot CHANGE also clears (nav re-ranks the keep list).
+        assert!(
+            r.reserve_bytes(1, CG, ORIG, 500, &[0]).is_none(),
+            "not in keep"
+        );
+        assert!(r.denied(1, RepKind::Original));
+        let other = r.reserve_bytes(1, CG, fit(1), 1, &[1]).expect("a slot");
+        r.mark_resident(1, other.slot, CG, fit(1));
+        r.set_displayed(other.slot);
+        assert!(
+            !r.denied(1, RepKind::Original),
+            "landing on a different photo re-opens refused items"
+        );
+    }
+
+    #[test]
+    fn an_already_tracked_reservation_is_not_recorded_as_a_denial() {
+        let mut r = ResidentRing::new_with_budget(4, 1000);
+        let res = r.reserve_bytes(0, CG, fit(1), 10, &[0]).expect("seed");
+        r.mark_resident(0, res.slot, CG, fit(1));
+        assert!(
+            r.reserve_bytes(0, CG, fit(1), 10, &[0]).is_none(),
+            "tracked"
+        );
+        assert!(
+            !r.denied(0, RepKind::Fit),
+            "tracked is success-adjacent, not a refusal"
+        );
+    }
 
     #[test]
     fn release_pending_frees_the_slot_and_its_bytes() {

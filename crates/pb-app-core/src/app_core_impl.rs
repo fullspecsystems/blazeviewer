@@ -17431,6 +17431,237 @@ mod tests {
         );
     }
 
+    // ── #122: parked-tier livelock guard + derive-before-preview on nav ──
+
+    /// A `Renderer` double whose uploads succeed and whose `derive_fit` always works —
+    /// the shape a real GPU gives when a mipped Original is resident. `device`/`queue`
+    /// are never reached headless.
+    struct DeriveOk;
+
+    impl pb_render::Renderer for DeriveOk {
+        fn resize(&mut self, _: u32, _: u32) {}
+        fn set_image(
+            &mut self,
+            _: &[u8],
+            _: u32,
+            _: u32,
+            _: pb_render::ColorTransform,
+            _: bool,
+            _: f32,
+        ) {
+        }
+        fn clear_image(&mut self) {}
+        fn set_view(&mut self, _: pb_render::ViewTransform) {}
+        fn set_overlay(&mut self, _: Option<(&[u8], u32, u32)>, _: u32, _: u32) {}
+        fn set_info_line(&mut self, _: Option<(&[u8], u32, u32)>, _: u32, _: pb_render::HAlign) {}
+        fn reserve_ring(&mut self, _: usize, _: u32, _: u32) {}
+        #[allow(clippy::too_many_arguments)]
+        fn upload_slot(
+            &mut self,
+            _: usize,
+            _: &[u8],
+            _: u32,
+            _: u32,
+            _: pb_render::ColorTransform,
+            _: bool,
+            _: f32,
+            _: bool,
+        ) -> bool {
+            true
+        }
+        fn derive_fit(
+            &mut self,
+            _source: pb_render::DeriveSource,
+            _dst_slot: usize,
+            fit_w: u32,
+            fit_h: u32,
+            _kernel: u32,
+            _mip_bias: i32,
+        ) -> Option<pb_render::DerivedFit> {
+            Some(pb_render::DerivedFit {
+                w: fit_w,
+                h: fit_h,
+                bytes: fit_w as u64 * fit_h as u64 * 8,
+            })
+        }
+        fn present_slot(&mut self, _: usize) -> bool {
+            true
+        }
+        fn surface_size(&self) -> (u32, u32) {
+            (0, 0)
+        }
+        fn set_letterbox(&mut self, _: [u8; 3]) {}
+        fn set_toast(&mut self, _: Option<(&[u8], u32, u32)>, _: u32) {}
+        fn set_pie(&mut self, _: Option<(&[u8], u32, u32)>, _: u32) {}
+        fn set_tree(&mut self, _: Option<(&[u8], u32, u32)>, _: u32) {}
+        fn set_subtitle_overlay(&mut self, _: Option<(&[u8], u32, u32)>, _: f32, _: f32) {}
+        fn device(&self) -> &pb_render::wgpu::Device {
+            unreachable!("headless test double")
+        }
+        fn queue(&self) -> &pb_render::wgpu::Queue {
+            unreachable!("headless test double")
+        }
+        fn set_egui_overlay(&mut self, _: Option<&pb_render::wgpu::Texture>) {}
+        fn image_size(&self) -> (u32, u32) {
+            (0, 0)
+        }
+        fn set_edr_headroom(&mut self, _: f32) {}
+        fn hdr_surface_wants_edr(&self) -> Option<bool> {
+            None
+        }
+        fn poll(&self) {}
+        fn render(&mut self) -> Result<bool, pb_render::RenderError> {
+            Ok(true)
+        }
+    }
+
+    /// #122 item 2, the livelock pin: an Original the ring REFUSED at landing must not
+    /// be re-requested by the next prefetch pass — before the `denied` latch, the same
+    /// native decode repeated every pass (the owner's 30×-item-7 log).
+    #[test]
+    fn a_ring_refused_parked_original_is_not_re_requested() {
+        let mut core = test_core();
+        core.source = photos_named(&["a.jpg", "b.jpg"]);
+        core.playlist = Playlist::new(2, 0).with_cursor(0);
+        core.fit = Some(FitBox {
+            max_width: 100,
+            max_height: 100,
+        });
+        core.view.mode = ScaleMode::Fit;
+        core.settings.full_res_radius = 1; // item 1 is in the parked window
+        core.targets = vec![0, 1];
+        // A tiny byte budget: item 0's displayed Fit fills it and is pinned, so item 1's
+        // Original can never be admitted (nothing lower-priority to evict).
+        core.ring = ResidentRing::new_with_budget(2, 2_000);
+        let fit_rep = core.rep_of(pb_core::RepKind::Fit);
+        let res = core
+            .ring
+            .reserve_bytes(0, core.content_gen, fit_rep, 1_900, &[0, 1])
+            .expect("seed");
+        assert!(core
+            .ring
+            .mark_resident(0, res.slot, core.content_gen, fit_rep));
+        core.ring.set_displayed(res.slot);
+
+        // The parked-tier decode for item 1's Original lands (as if requested by an
+        // earlier pass)…
+        core.pending_uploads.push(Outcome::synthetic(
+            1,
+            core.epoch,
+            core.content_gen,
+            pb_core::RepKind::Original,
+            Ok(rgba_full(600, 400, 600, 400)),
+        ));
+        core.drain_results();
+        // …and the ring refuses + latches it.
+        assert!(
+            core.ring
+                .slot_for_rep(1, pb_core::RepKind::Original)
+                .is_none(),
+            "over budget with only the pinned display resident — refused"
+        );
+        assert!(
+            core.ring.denied(1, pb_core::RepKind::Original),
+            "the refusal is latched"
+        );
+
+        core.request_prefetch();
+        assert!(
+            !core.pool.enqueued().contains(&(
+                1,
+                crate::decode_pool::Purpose::Display,
+                pb_core::RepKind::Original
+            )),
+            "the refused Original is not re-requested — the livelock is broken"
+        );
+    }
+
+    /// #122 item 2, the pre-flight: when the item's dims are already known (meta), a
+    /// reservation the ring cannot admit is never even requested — the first wasted
+    /// decode goes away too, not just the loop.
+    #[test]
+    fn an_inadmissible_original_want_is_never_emitted() {
+        let build = |budget: u64| {
+            let mut core = test_core();
+            core.source = photos_named(&["a.jpg", "b.jpg"]);
+            core.playlist = Playlist::new(2, 0).with_cursor(0);
+            core.fit = Some(FitBox {
+                max_width: 100,
+                max_height: 100,
+            });
+            core.view.mode = ScaleMode::Fit;
+            core.settings.full_res_radius = 1;
+            core.ring = ResidentRing::new_with_budget(2, budget);
+            let fit_rep = core.rep_of(pb_core::RepKind::Fit);
+            let res = core
+                .ring
+                .reserve_bytes(0, core.content_gen, fit_rep, 1_900, &[0, 1])
+                .expect("seed");
+            assert!(core
+                .ring
+                .mark_resident(0, res.slot, core.content_gen, fit_rep));
+            core.ring.set_displayed(res.slot);
+            core.meta_cache.insert(1, meta_dims("b.jpg", 600, 400));
+            core.request_prefetch();
+            core.pool.enqueued().contains(&(
+                1,
+                crate::decode_pool::Purpose::Display,
+                pb_core::RepKind::Original,
+            ))
+        };
+        assert!(
+            !build(2_000),
+            "tiny budget: the dry-run refuses, the want is never emitted"
+        );
+        assert!(
+            build(u64::MAX),
+            "ample budget: the same want IS emitted (no over-suppression)"
+        );
+    }
+
+    /// #122 item 1: a TAP's advance GPU-sharpens with the key still down — the derive is
+    /// rebind-class cost, so only the auto-repeat (blaze) phase defers it. Before this,
+    /// the sharpen waited for key-up and every advance flashed the preview even with the
+    /// Original resident.
+    #[test]
+    fn a_tap_advance_gpu_sharpens_with_the_key_still_down() {
+        let mut core = stuck_preview_core(); // held key, initial_delay huge → NOT repeating
+        core.renderer = Some(Box::new(DeriveOk));
+        make_resident(&mut core, 0, pb_core::Representation::Original, &[0]);
+        assert!(core.held_nav().is_some(), "the key is still down");
+        assert_eq!(
+            core.sharpen_now(),
+            None,
+            "the CPU sharpen still waits for key-up (unchanged)"
+        );
+        assert!(
+            core.try_gpu_sharpen(),
+            "the GPU sharpen fires during the tap window"
+        );
+        assert!(
+            !core.preview_resident.contains(&0),
+            "the displayed photo is sharp — no preview flash on a tap"
+        );
+    }
+
+    /// #122 item 1's counterpart: once the hold is genuinely blazing (past the initial
+    /// delay), the GPU sharpen defers — those frames are replaced too fast to derive.
+    #[test]
+    fn the_blaze_repeat_phase_defers_the_gpu_sharpen() {
+        let mut core = stuck_preview_core();
+        core.initial_delay = Duration::ZERO; // held AND past the delay = repeating
+        core.renderer = Some(Box::new(DeriveOk));
+        make_resident(&mut core, 0, pb_core::Representation::Original, &[0]);
+        assert!(
+            !core.try_gpu_sharpen(),
+            "mid-blaze the derive defers to the preview ladder"
+        );
+        assert!(
+            core.preview_resident.contains(&0),
+            "the preview stays (the blaze wants throughput, not per-frame derives)"
+        );
+    }
+
     /// #109 item 4, the in-place upgrade flavor: a refused preview→full upgrade upload must
     /// leave the upgrade bookkeeping untouched — the renderer still shows the preview, so
     /// recording "sharp now" would freeze the photo blurry with no retry.
