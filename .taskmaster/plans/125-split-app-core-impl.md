@@ -1,7 +1,8 @@
 # Task 125 — Split `app_core_impl.rs` into concern-scoped `impl AppCore` blocks
 
-**Status:** **in progress** — rev 3 (Codex round 1 folded), re-measured at `facd7e5c` (2026-07-20) after #126. Step 1
-(the `prefs` rehearsal + the verifier) has landed; see *Progress* below. **Scope gate:** this is audit finding #1 remediation
+**Status:** **in progress** — rev 4 (step 2 landed), re-measured at `facd7e5c` (2026-07-20) after #126. Steps 1 and 2
+have landed: the verifier, the `prefs` rehearsal, the full triage, and four cluster moves taking the file from
+22,105 to **20,557** lines across 10 concern files. See *Progress* below. **Scope gate:** this is audit finding #1 remediation
 **(a) only** — see §2, which is the most important section in this document.
 
 ## Where this slots into the technical-debt audit
@@ -396,10 +397,124 @@ residency code from #124. So the §4 table is a **starting point, not an assignm
 per-cluster LOC figures are approximate and each cluster needs the human read that subtask 2
 already calls for. The prefs cluster was 5 by the script and 4 in reality.
 
+### Step 2 — DONE 2026-07-20: the triage, and four cluster moves
+
+**The file is ordered.** The single most useful finding of the triage, and it was not
+predicted: concerns already sit in **contiguous line ranges** in `app_core_impl.rs`. Methods
+were appended next to their relatives, so a cluster is nearly always one unbroken span. That
+makes moves mechanical rather than a scatter-gather, and it is why four clusters landed in one
+session rather than one.
+
+Consequence for the §4 table: **stop using it.** Auto-clustering by name produced both false
+positives (§ *Finding* above) and false splits. Read the file in order instead — the
+neighbourhood is the cluster.
+
+**Tooling.** `scratchpad/extract.py` cuts named methods (with their doc comments and
+attributes) out of the parent into a child module. Text surgery only, nothing rewritten; the
+verifier is what makes it trustworthy. Not committed — it is scaffolding, and the verifier is
+the part worth keeping.
+
+**Landed, 6 commits, 10 concern files, 1,686 lines out of the parent (22,105 → 20,557):**
+
+| commit | kind | files |
+|---|---|---|
+| `5f488d5c` | pure move (13 fns) | `dir_scan.rs`, `archive_open.rs` |
+| `b7e4c386` | **visibility edit** | `background.rs` (`supersede` → `pub(super)`) |
+| `08ec4c34` | **visibility edit** | `ensure_text_scan`, `ensure_describe_scan` → `pub(super)` |
+| `3b84c091` | pure move (13 fns) | `image_text.rs`, `describe.rs` |
+| `944459f5` | **visibility edit** | `reinsert_after_restore` → `pub(super)` |
+| `49350ad0` | pure move (15 fns) | `delete.rs`, `undo.rs`, `save_rotation.rs`, `clipboard.rs` |
+
+Every pure-move commit verified **2051 → 2051 function items, all byte-identical**, re-checked
+after `cargo fmt`. Every visibility commit was verified to flag *exactly* the expected names and
+hand-diffed to confirm the sole delta was the keyword. Workspace clippy `-D warnings` clean and
+all tests green at each step.
+
+Nine of the ten files pair with a logic module that already existed (`dir_scan.rs`,
+`archive_open.rs`, `background.rs`, `image_text.rs`, `describe.rs`, `delete.rs`, `undo.rs`,
+`save_rotation.rs`, `settings.rs`/`keymap.rs`). That is the two-halves rule doing exactly what
+§9 said it would.
+
+### ⚠ Two new traps, both learned this session
+
+5. **`cargo check` is not enough — use `clippy --all-targets`.** `reinsert_after_restore` moved
+   cleanly as far as the library was concerned and broke only the **test** build. `mod tests`
+   lives *inside* `app_core_impl.rs`, so it can reach a parent-private method; once that method
+   moves into `app_core_impl/undo.rs` it is a *sibling's* private and the tests lose it. So the
+   §3c private-method question must be asked of tests as well as production code, and the check
+   that answers it is `--all-targets`.
+6. **Do the visibility edit FIRST, in place, as its own commit.** §3c says separate commits but
+   not which order, and move-then-widen doesn't work: the intermediate state does not compile,
+   so there is no commit to make. Widening in the parent first gives a reviewable 2-line diff
+   against the unmoved file, and the move that follows then verifies perfectly clean. Transient
+   wart: `super` of `app_core_impl` is the crate root, so `pub(super)` reads as `pub(crate)`
+   while the method still sits in the parent. It narrows to the intended region on the next
+   commit.
+
+### The remaining assignment list (subtask 2's deliverable)
+
+Every group below pairs with the named existing module unless marked *topic*. Groups are listed
+roughly smallest-first; the last block is the charter remainder.
+
+| destination | contents | pairs with |
+|---|---|---|
+| `slideshow.rs` | `toggle_slideshow`, `adjust_slideshow`, `slideshow_interval_display` | `slideshow.rs` |
+| `secret.rs` | `remember_archive_password`, `archive_passwords_snapshot`, `clear_archive_passwords` | `secret.rs` |
+| `compare.rs` | `compare_pin_cmd`, `compare_toggle_cmd`, `set_compare_pin`, `clear_compare_pin`, `compare_identity`, `compare_jump`, `compare_carry_view` | *topic* |
+| `thumbs.rs` | `thumbs_visible`, `toggle_thumbnails`, `on_thumbs_opened`, `thumb_jump`, `thumbs_capture`, `hide_folder_tree_visuals_for_tab_switch` | `thumbs.rs` |
+| `hud.rs` | `show_toast`, `show_toast_icon`, `push_toast`, `tick_toast`, `pie_glow`, `tick_pie`, `push_pie`, `clear_pie` | `pb-hud` |
+| `meta.rs` | `exif_rows`, `ensure_exif_cached`, `poll_details_probe`, `probe_details_blocking`, `animation_rows`, `is_live_photo`, `play_hint_kind`, `item_is_video`, `door_presented`, `door_card`, `item_archive_kind` | `meta.rs`, `media_details.rs` |
+| `tree.rs` | the `fs_tree_*` / `folder_tree_*` block, `ensure_fs_tree`, `drive_fs_tree`, `show_folder_tree_mode`, `push_folder_tree`, `tree_activate`, `update_tree_hover`, … | `folder_tree.rs`, `fs_tree.rs` |
+| `panels.rs` | `help_panel`, `show_overlay`, `slot_content`, the `info_line_*` block, `text_panel`, `describe_panel`, `details_panel`, `emit_panels_changed`, `hide_overlay`, `replace_colliders`, … | `panels.rs`, `overlay.rs` |
+| `view.rs` | `set_scale_mode`, `rotate`, `view_for`, `zoom_step`, `zoom_about_cursor`, `apply_view_holds`, `pan_*`, `pannable*`, `screen_and_image`, `windowed_restore`, `push_view` | *topic* |
+| `nav.rs` | `open_dir*`, `open_disk_target`, `rescope_archive`, `open_parent_cmd`, `open_sibling_cmd`, `adjacent_folder_item`, `rebuild_playlist`, `extend_playlist`, `advance`, `nav_press`, `held_nav`, `enter_empty_state` | `follow.rs` |
+| `animation.rs` | the still-image animation/live-photo block — `toggle_play_pause`, `frame_step*`, `poll_anim_*`, `stream_*`, `install_animation`, `tick_playback`, `start_animation_decode`, `start_live_stream`, `motion_playing`, … (~30) | `animation.rs` |
+| `video.rs` + `audio_tracks.rs` + `subtitles.rs` | the ~90-method video block; split three ways rather than one 3k file | `video*.rs`, `tracks.rs`, `subtitle*.rs` |
+
+**Stays in `app_core_impl.rs` — this is the charter, and it is the deliverable §9 cares about:**
+`headless`, `new_host`, `work_pending`, `handle`, `handle_dialog_resolved`, `dispatch_action`,
+`tick`, `resize`, `scroll`, `refresh_hz`, `refresh_title`, `apply_launch_overrides`,
+`initial_image`, `menu_state_from`, `apply_scan_batch`/`finish_scan`/`filter_deleted`, and the
+whole residency & present engine (`request_prefetch`, `drain_results`, `present_item`,
+`present_failed`, `try_present_target`, the `decode_*`/`rep_of`/`present_kind`/`display_*`
+selectors, the fit-stash and GPU-derive block, `trim_caches`, `invalidate_*`, `rebuild_ring`,
+`load_current_sync`, `draw`).
+
+Nothing on that list is "leftovers" — every entry is lifecycle, dispatch, or the engine, which
+is the charter sentence exactly. **If a method resists that sentence, it needs a home above, not
+a shrug.**
+
 ### Next
 
-1. **Subtask 2 — triage the ~60 unassigned methods**, and re-check the auto-assignments for
-   more false positives of the `rebind_same_item` kind. Output is a written assignment list.
-2. Then the small leaves (`archive`, `scan`, `view`), then the mid ones, then `video`.
-3. §9 is settled: anti-regrowth is structural, not a guard test (owner, 2026-07-20). The
+1. Continue the leaves in the order above. The small four (`slideshow`, `secret`, `compare`,
+   `thumbs`) are one commit; `hud`/`meta` one more.
+2. `tree`, `panels`, `view`, `nav`, `animation` — mid-sized, one commit each.
+3. `video` last among the leaves, split three ways.
+4. **Stop and reassess** before residency, per §7 step 5. Do not pre-commit to moving it.
+5. §9 is settled: anti-regrowth is structural, not a guard test (owner, 2026-07-20). The
    thing that makes it work is that the remainder gets a CHARTER, not leftovers — see §9.
+
+## Handoff
+
+**Verified (Windows, this session):** all six commits above — workspace `cargo clippy
+--all-targets -- -D warnings` clean and `cargo test --workspace` fully green after each. The
+verifier ran on every commit with the results quoted in each message.
+
+**Not verified:** nothing platform-specific was touched, and no signature, field or call site
+changed, so there is no behavioural claim to check. The app was **not launched** this session —
+these are pure relocations within one crate, but if a Mac session wants belt-and-braces, a
+launch and an archive-open + delete + describe smoke test would cover the moved clusters.
+
+**Cross-platform debt:** none. Every change is inside `pb-app-core`, which both shells already
+compile; no `AppCore` field was added (the struct-literal trap does not apply), and no shell
+file was touched.
+
+**Claimed:** `app_core_impl.rs` is being actively split on **Windows**. It is the repo's #1
+churn file and these moves relocate large spans — a concurrent edit to it will conflict badly.
+A Mac session should take something else, or coordinate first.
+
+**Decisions/corrections:**
+- §4's cluster table is superseded by the assignment list above; the file's own ordering is a
+  better clustering signal than the method names.
+- §6's proposed `core/` subdirectory stays rejected (settled in step 1); `app_core_impl/` it is.
+- §3c gains an ordering rule (trap 6) and a scope extension to tests (trap 5).
