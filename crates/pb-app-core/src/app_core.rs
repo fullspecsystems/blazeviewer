@@ -486,6 +486,12 @@ pub struct AppCore {
     pub rebind_count: usize,
     /// The item we're trying to show (== `displayed_item` once caught up).
     pub target_item: Option<usize>,
+    /// Background-operation identity + supersession, shared by the dir-scan and archive-open
+    /// flows so they can invalidate each other through one generation space (task #126).
+    pub bg: crate::background::BackgroundOps,
+    /// The in-flight directory walk, if any (task #126 step 1). Previously duplicated as
+    /// `struct DirScan` in *both* shells, field for field.
+    pub dir_scan: Option<crate::dir_scan::DirScanState>,
     /// Flicker-compare pin (task #43): the pinned photo's playlist index. `Y` flips
     /// between it and the current photo; the pin rides the prefetch want-list at
     /// top-2 priority so the flip is always a ring rebind, never a decode. RAM-only

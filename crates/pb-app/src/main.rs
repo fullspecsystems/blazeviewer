@@ -857,6 +857,8 @@ impl App {
             displayed_item: None,
             presented_epoch: None,
             presented_kind: None,
+            bg: Default::default(),
+            dir_scan: None,
             target_item: None,
             compare_pin: None,
             compare_return: None,

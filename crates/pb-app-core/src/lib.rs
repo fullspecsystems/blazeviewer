@@ -58,6 +58,7 @@ pub mod cues;
 pub mod decode_pool;
 pub mod delete;
 pub mod describe;
+pub mod dir_scan;
 pub mod engine;
 pub mod folder_tree;
 pub mod follow;
