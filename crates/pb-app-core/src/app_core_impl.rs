@@ -5295,7 +5295,7 @@ impl AppCore {
     /// DoVi natively, so only a Session backend warns. Called from
     /// `start_video_session` (probe already cached) and `poll_details_probe` (probe
     /// landing mid-playback); `dovi_warned` makes it once per item.
-    fn maybe_warn_dovi(&mut self, item: usize) {
+    pub(super) fn maybe_warn_dovi(&mut self, item: usize) {
         let session_here = self
             .video
             .as_ref()
@@ -6034,7 +6034,7 @@ impl AppCore {
     /// frame's scene-linear `peak` — the same fp16 scRGB present path as HDR
     /// stills, so PQ/HLG video gets real headroom on an EDR/HDR surface and a
     /// correct tone-map on SDR, never an RGBA8 clip.
-    fn present_video_frame(&mut self, frame: &pb_decode::VideoFrame) {
+    pub(super) fn present_video_frame(&mut self, frame: &pb_decode::VideoFrame) {
         let item = self.video.as_ref().map(|v| v.item());
         // The metadata half of a present (owner report 2026-07-16): video frames
         // stream around `present_item`, and the first frame's `mark_resolved`
@@ -6311,7 +6311,7 @@ impl AppCore {
     /// catalog belongs to the *item* (the details probe), so it must not require a
     /// running session — gating on `video_showing()` made the flyout claim "No Video"
     /// over a film sitting at its poster.
-    fn displayed_video_item(&self) -> Option<usize> {
+    pub(super) fn displayed_video_item(&self) -> Option<usize> {
         self.displayed_item
             .filter(|&i| self.item_is_video(i) || self.video_showing())
     }
