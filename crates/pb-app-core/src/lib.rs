@@ -51,6 +51,7 @@ pub mod animation;
 pub mod app_core;
 pub mod app_core_impl;
 pub mod archive;
+pub mod background;
 pub mod config;
 pub mod contract;
 pub mod cues;
