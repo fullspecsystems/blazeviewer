@@ -1,8 +1,9 @@
 # Task 125 — Split `app_core_impl.rs` into concern-scoped `impl AppCore` blocks
 
-**Status:** **in progress** — rev 4 (step 2 landed), re-measured at `facd7e5c` (2026-07-20) after #126. Steps 1 and 2
-have landed: the verifier, the `prefs` rehearsal, the full triage, and four cluster moves taking the file from
-22,105 to **20,557** lines across 10 concern files. See *Progress* below. **Scope gate:** this is audit finding #1 remediation
+**Status:** **at the stop point** — rev 5 (step 3 landed), 2026-07-20. Every leaf is split: the file is
+**22,105 → 14,218** lines across **26 concern files**, production **12,504 → 4,730**. What remains is the
+charter — lifecycle, dispatch, and the residency & present engine — and per §7 step 5 that is a deliberate
+STOP, not the next move. Codex-reviewed clean. See *Progress* below. **Scope gate:** this is audit finding #1 remediation
 **(a) only** — see §2, which is the most important section in this document.
 
 ## Where this slots into the technical-debt audit
@@ -356,6 +357,90 @@ findings mostly reduce to"* — but per §2a that framing over-sizes what is act
 
 ## Progress
 
+### Step 3 — DONE 2026-07-20: every leaf split; the file is at the charter boundary
+
+**The leaves are done.** `app_core_impl.rs` is **22,105 → 14,218 lines** (production
+**12,504 → 4,730**, 80 methods), across **26 concern files**. The remainder is lifecycle,
+dispatch, and the residency & present engine — the charter, and nothing else. This is the §7
+step-5 stop point; residency was **not** touched.
+
+**All 26 concern files:** `animation archive_open audio_tracks background clipboard compare
+delete describe dir_scan image_text item_kind menu meta nav open panels prefs save_rotation
+secret slideshow subtitles thumbs toast tree undo video view`.
+
+Landed this session (on top of step 2's six commits):
+
+| commit kind | clusters |
+|---|---|
+| pure moves | slideshow+secret+compare+thumbs · toast+meta+item_kind · tree+panels · nav+open+view · animation · video+audio_tracks+subtitles · menu+effective_* |
+| visibility edits (each its own commit) | 3 for compare/thumbs · slideshow import fix · 9 for tree/panels · refresh_info_line_visibility · 3 for video |
+
+Every pure move verified **2051 → 2051 function items, byte-identical**, re-checked after
+`cargo fmt`. `clippy --workspace --all-targets -D warnings` clean, `cargo test --workspace`
+green, and the **ship-feature Windows build** (`libheif,dav1d,ffprobe`) succeeds.
+
+**Charter cleanup (the §9 deliverable, not bookkeeping).** After the leaves, four methods
+still contradicted the charter sentence: the `effective_*` accessors (resolved settings → went
+to `prefs.rs`) and the menu projection (chrome → `menu.rs`). Moving them is what makes the
+charter a test rather than a slogan. The remaining 74 all answer to it — lifecycle / dispatch /
+engine / deck-ingestion — and deck ingestion (`apply_scan_batch`, `apply_archive`, `finish_scan`)
+stays because it drives the ring rebuild and carries the cross-deck extend guard: it is engine,
+not scan chrome.
+
+### ⚠ Traps 7–10, all learned this session
+
+7. **Bare crate-module imports collide with a paired `mod`.** `app_core_impl.rs` imports three
+   crate modules by bare name (`settings`, `slideshow`, `timing`) and one from another crate
+   (`use pb_hud::{hud, icon}`). Declaring `mod slideshow;`/`mod hud;` beside them is E0255, and
+   even past that a bare `slideshow::` inside the child rebinds to the child. This is §3a's
+   "imports and scope" hazard firing for real — invisible to the conservation check, caught only
+   by the compiler. Fix per case: fully-qualify the parent's refs (`crate::slideshow::`), or name
+   the file for what it holds (`toast.rs`, not `hud.rs` — better name anyway). `scratchpad/namecheck.py`
+   pre-checks this now; only `settings`/`slideshow`/`timing` and `hud` were ever at risk.
+8. **`privcheck` must scan the already-split siblings, not just the parent.** `refresh_info_line_visibility`
+   passed a parent-only pre-check but broke on move: its callers had already moved to `describe.rs`,
+   and a sibling cannot see another sibling's private. The pre-check now reads the parent's code,
+   the parent's `mod tests`, AND every `app_core_impl/*.rs`. This trap worsens as the split proceeds.
+9. **The extractor severed multi-line `#[cfg(any(...))]` attributes.** A backward walk that only
+   recognised lines starting with `#[` left the continuation of a wrapped attribute behind in the
+   parent. This is the first bug in the task that could have **silently changed behaviour** (a
+   dropped cfg gate) — and it was caught twice: the parent stopped compiling, and the moved item's
+   hash would have differed (attributes are hashed). Every earlier cluster compiling AND verifying
+   byte-identical retroactively proves none of them contained a multi-line attribute. Fixed to
+   rewind by bracket depth.
+10. **Same-name items in `mod tests`.** `stream_frame` is both an `AppCore` method and a
+    `fn stream_frame() -> StreamMsg` test helper at the same indent. The extractor now bounds its
+    search to the production impl (above `#[cfg(test)]`). This is also §3a's "same-name swap" case:
+    the conservation check keys on unqualified names, so it would have counted two entries and been
+    satisfied — the extractor's refusal is the real guard.
+
+### Codex review (2026-07-20, at the stop point) — clean on all three axes
+
+Asked three targeted questions with the mechanism inlined (the only way Codex works on this repo).
+Verdicts, each independently re-checked against the tree:
+
+1. **Visibility** — `pub(super)`-in-child is *exactly* private-in-parent's region (`pub(in P)`),
+   never wider; re-exports/macros/trait-impls cannot exceed it. Confirmed.
+2. **Scope/resolution** — the silent-rebind class is real (a `use super::*` name can shadow a glob
+   import) but Codex "found no remaining instance", and an independent audit agrees: **no child
+   name matches an `engine::*` export; every executable sibling/concern reference is `crate::`-qualified;
+   no moved body contains `super::`/`module_path!`/`file!`.** The only bare sibling mention in the
+   whole split is a rustdoc intra-doc link in `panels.rs` (`[menu::…]`) — cosmetic, not executable.
+3. **Uncompiled cfg variants** — the one actionable item: `video.rs`/`animation.rs` carry
+   macOS/feature-gated methods a Windows build never type-checks. Verified concretely: the wrapped
+   `#[cfg]` attributes are intact and attached to their items, and every gated body is fully
+   `crate::`-qualified, so scope inheritance cannot rebind it on a Mac. Residual = the standard
+   cross-machine "Mac must type-check," now very low.
+
+### Next
+
+1. **STOP before residency (§7 step 5).** The remaining ~4.7k production lines are the charter:
+   lifecycle, dispatch, and the residency & present engine. Splitting the engine is a separate,
+   more debatable question — it is genuinely coupled and it is the hot path. Do **not** continue on
+   momentum. If pursued, it is its own task with its own plan.
+2. `docs/where-code-goes.md`'s two-halves rule now has 26 live examples; the anti-regrowth
+   mechanism is in place (§9).
+
 ### Step 1 — DONE 2026-07-20: the verifier, and the `prefs` rehearsal
 
 **`scripts/verify-pure-move.py`** implements §3's safety property. Snapshot the crate, move
@@ -496,22 +581,31 @@ a shrug.**
 
 ## Handoff
 
-**Verified (Windows, this session):** all six commits above — workspace `cargo clippy
---all-targets -- -D warnings` clean and `cargo test --workspace` fully green after each. The
-verifier ran on every commit with the results quoted in each message.
+**Verified (Windows, this session):** every commit — the verifier's `2051 → 2051 byte-identical`
+after each pure move (and the exact expected-flags on each visibility edit), `cargo clippy
+--workspace --all-targets -- -D warnings` clean, `cargo test --workspace` fully green, and the
+**ship-feature build** `pwsh scripts/build-windows.ps1` (`libheif,dav1d,ffprobe`) succeeds. Codex
+reviewed the split at the stop point and it came back clean on visibility, scope/resolution and
+the cfg concern (see *Codex review* under Progress).
 
-**Not verified:** nothing platform-specific was touched, and no signature, field or call site
-changed, so there is no behavioural claim to check. The app was **not launched** this session —
-these are pure relocations within one crate, but if a Mac session wants belt-and-braces, a
-launch and an archive-open + delete + describe smoke test would cover the moved clusters.
+**Not verified — the one thing a Mac must check:** `video.rs` and `animation.rs` contain
+macOS-gated methods (`macos_native_route`, `start_native_video`, `start_sample_buffer_video`,
+`start_live_stream`, and the AVFoundation live-motion path) that **no Windows build type-checks**.
+They moved byte-identically and were audited to be fully `crate::`-qualified (so `use super::*`
+cannot rebind them), but "compiles on macOS" is unproven from here. A Mac session should build
+`pb-mac-ffi` / the mac host once and confirm. The app was also **not launched** on Windows —
+these are pure relocations, but a launch + archive-open/delete/describe/video smoke test is the
+belt-and-braces pass if wanted.
 
-**Cross-platform debt:** none. Every change is inside `pb-app-core`, which both shells already
-compile; no `AppCore` field was added (the struct-literal trap does not apply), and no shell
-file was touched.
+**Cross-platform debt:** none that a Mac session can't clear with one build. Every change is
+inside `pb-app-core`, which both shells compile; no `AppCore` field was added (the struct-literal
+trap does not apply), and no shell file was touched. The macOS-cfg type-check above is the only
+item, and it is verification, not owed work.
 
-**Claimed:** `app_core_impl.rs` is being actively split on **Windows**. It is the repo's #1
-churn file and these moves relocate large spans — a concurrent edit to it will conflict badly.
-A Mac session should take something else, or coordinate first.
+**Claimed → RELEASED.** `app_core_impl.rs` was actively split on Windows this session; the leaf
+work is done and pushed, so the claim is lifted. **The residency/present engine that remains is
+the §7 step-5 STOP** — do not split it on momentum; it is a separate task with its own plan if
+ever pursued. Anyone is free to edit the parent again.
 
 **Decisions/corrections:**
 - §4's cluster table is superseded by the assignment list above; the file's own ordering is a
