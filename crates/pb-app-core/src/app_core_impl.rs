@@ -7136,6 +7136,17 @@ impl AppCore {
         }
     }
 
+    /// The in-flight open's shared progress handle, for chrome that polls it directly (the
+    /// winit Loading dialog's determinate bar owns one and reads it per frame).
+    ///
+    /// Handing out a clone is safe and carries nothing sensitive: `OpenProgress` is a shared
+    /// counter plus a cancel flag, not part of the `SecretString` path. Prefer
+    /// [`archive_status`](Self::archive_status) for a one-shot read; this exists only for
+    /// chrome that must keep polling.
+    pub fn archive_progress(&self) -> Option<pb_source::OpenProgress> {
+        self.archive_load.as_ref().map(|l| l.progress.clone())
+    }
+
     /// A live view of the open in flight, for whatever chrome a shell draws. `None` when none
     /// is running. Cheap and non-mutating, so it is safe to call every frame.
     pub fn archive_status(&self) -> Option<crate::archive_open::ArchiveStatus> {

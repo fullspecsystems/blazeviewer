@@ -2201,8 +2201,13 @@ impl AppCoreHandle {
     fn prompt_archive_password(&mut self, path: PathBuf, wrong: bool) {
         // `password_archive` is set by the core's NeedPassword transition; this only dresses
         // the sheet.
-        self.password_error = if wrong && self.shown_dialog == Some(contract::DialogKind::Password)
-        {
+        // The core says authoritatively whether this was a retry. Do NOT also require that the
+        // Password sheet is currently up, which is what this used to do: for any archive that
+        // goes through the Loading sheet (.7z, tar, an auto-try) `shown_dialog` is already
+        // `Loading` by the time the wrong password comes back, so the error was suppressed and
+        // the user just saw the field silently clear. Only the synchronous-ZIP path ever showed
+        // it. The winit shell had the identical bug (owner-found, 2026-07-20).
+        self.password_error = if wrong {
             "Incorrect password. Please try again.".to_string()
         } else {
             String::new()
@@ -5583,6 +5588,42 @@ mod tests {
         let (h, file) = handle_with_photo("proxy");
         assert_eq!(h.current_photo_path(), file.to_string_lossy());
         std::fs::remove_dir_all(file.parent().unwrap()).ok();
+    }
+
+    /// REGRESSION (owner-found 2026-07-20): a wrong password on an archive that goes through
+    /// the Loading sheet — .7z, tar, or any cached-password auto-try — showed NO error. The
+    /// retry arrives while `shown_dialog` is `Loading`, and the old code required it to be
+    /// `Password` before setting the message, so the user just saw the field clear itself with
+    /// no explanation. Only the synchronous-ZIP path (which never shows Loading) ever worked.
+    /// The winit shell had the identical bug.
+    #[test]
+    fn a_wrong_password_reports_the_error_even_after_the_loading_sheet() {
+        let mut h = test_handle(800, 600, 1.0);
+        // The state a .7z retry actually arrives in: the Loading sheet replaced the prompt.
+        h.shown_dialog = Some(contract::DialogKind::Loading);
+
+        h.apply_archive_outcome(pb_app_core::archive_open::ArchiveOutcome::NeedPassword {
+            path: PathBuf::from("/vault/locked.7z"),
+            wrong: true,
+        });
+
+        assert!(
+            !h.dialog_password_error().is_empty(),
+            "a wrong password must say so, whichever sheet happened to be up"
+        );
+        let effects = drain(&mut h);
+        assert!(has_dialog(&effects, "password"), "and re-prompt");
+    }
+
+    /// The other half: a FIRST prompt carries no error, so the message is not sticky.
+    #[test]
+    fn a_first_password_prompt_carries_no_error() {
+        let mut h = test_handle(800, 600, 1.0);
+        h.apply_archive_outcome(pb_app_core::archive_open::ArchiveOutcome::NeedPassword {
+            path: PathBuf::from("/vault/locked.7z"),
+            wrong: false,
+        });
+        assert!(h.dialog_password_error().is_empty());
     }
 
     /// NS2: the password flow — PasswordRequired prompts (message names the archive), a
