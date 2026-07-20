@@ -1,9 +1,10 @@
 # Task 128 — Migrate the `app_core_impl` tests into their concern modules
 
-**Status:** in progress — 2026-07-20. Step 0 (the `test_support` module) landed; the 144-test name/subject classification is the next work unit. Direct completion of **#125's original intent** (§4: "their tests
-travel with them, which is where the bulk of the test lines goes"; §6: "each a single `impl AppCore`
-block plus its own `mod tests`"). #125 moved the *methods* and stopped at its charter boundary; it left
-every test behind. This finishes the job.
+**Status:** **COMPLETE** — 2026-07-20. All 21 leaf concerns now hold their own tests;
+`app_core_impl.rs` is **14,231 → 9,049** lines (its `mod tests` **9,613 → 4,370**, the 132 charter
+tests that belong there). Full workspace clippy `-D warnings` clean, `cargo test --workspace` green,
+ship build passes. Direct completion of **#125's original intent** (§4/§6): #125 moved the *methods* and
+left every test behind; this moved them home.
 
 ## 1. What #125 actually left
 
@@ -359,6 +360,50 @@ None have moved yet, so nothing is owed there today.
 **Claimed:** `app_core_impl.rs`'s `mod tests` is the migration target on **Windows**. It is huge and churny;
 coordinate before editing it concurrently. #127 (error-handling) is the one other active toucher — it adds
 tests near the decode/`present_failed` path; fold, don't race.
+
+## Outcome (2026-07-20)
+
+**Done: 21 concerns, ~167 tests relocated, `app_core_impl.rs` 14,231 → 9,049.** Each concern file
+(`video.rs`, `panels.rs`, `tree.rs`, …) now ends with a `#[cfg(test)] mod tests` holding its tests;
+the parent keeps the 132 charter tests (residency/present engine, dispatch, contract, deck ingestion) —
+the test-side mirror of its production charter, exactly as intended.
+
+**`test_support.rs`** holds the shared infrastructure: the cross-concern fixtures (`test_core`,
+`photos_named`, `make_resident`, `five_photos`, `rgba_full`, `track`, `settle_at`→compare-local in the
+end, and six more found by the tier audit), plus the shared **non-fn** test items §3a warned about —
+the `FakeArchive`/`DeriveOk`/`StashOk` stub `ItemSource`/`Renderer`s and the `ARCHIVE` const, moved by
+hand as `pub(super)`.
+
+**The safety model held.** Every move: test-name **multiset identical (881→883** after #127 added two),
+`ignored` count steady at 3, `verify-pure-move` byte-identical, suite green, clippy `-D warnings` clean.
+Not one test was dropped, renamed, or `#[ignore]`d.
+
+**What actually cost time — the honest tail** (all recorded so a future migration skips them):
+- **Fixture tiers must be verified by call sites, not names.** Seven fixtures I guessed local were
+  shared; `clipboard_text_effects` tripped it first, after which one wholesale caller-cross-reference
+  pass settled every tier. `settle_at` went the other way — guessed shared (video), proved compare-local.
+- **Non-fn items (structs, consts) are invisible to the fn machinery** and to `verify-pure-move`. Four
+  surfaced (`FakeArchive`, `DeriveOk`, `StashOk`, `ARCHIVE`); each is a manual `pub(super)` move, and
+  `StashOk` also needed its `#[derive(Default)]` carried along (the multi-attribute-capture rule again).
+- **Import bookkeeping is the fiddly part, in both directions.** A moved concern can strand a now-unused
+  import in the **parent** (`mpsc`, `Viewport`, `ScanDialogRequest`, `AnimStream/StreamMsg`) — production
+  often uses these fully-qualified, so the bare `use` was test-only. And clippy's "unused" location
+  (parent vs concern) must be read before deleting: twice I removed the wrong one and broke compilation.
+  **Lesson: use `cargo fix --tests` for import cleanup, not regex pruning** — it compiles first, so it
+  never removes a still-needed import. The last two concerns (archive_open, video) used it and were clean
+  first try.
+- A driver bug (`open(cf,"w").write(open(cf).read()…)` truncates before reading) destroyed a file's impl
+  once — caught immediately by the compile, restored from git. Read-into-a-var-first.
+
+**Not done / deliberately left:** ~132 tests remain in the parent. The clear majority are charter tests
+that belong there; a handful are MED/LOW-confidence or `AMBIG` ones the conservative classifier left put
+rather than risk misfiling (safe default — the parent is where they already were). If a later pass wants
+zero non-charter tests in the parent, those are the ones to hand-triage, but there is no correctness debt
+in leaving them.
+
+**Machinery** (scratchpad, not committed): `migrate_concern.py` (per-concern mover with the verified
+tier maps + a §3b own-fixture guard), `movetests.py`, the classifier (`assign.json`), and the mvc
+verify-loop. The keeper is still `scripts/verify-pure-move.py` + the test-name multiset check.
 
 ## 11. Interaction with #127 (error-handling, in flight on another machine)
 
