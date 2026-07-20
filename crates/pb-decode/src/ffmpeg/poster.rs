@@ -530,8 +530,21 @@ mod tests {
                 &AtomicBool::new(false),
             )
             .expect("poster");
+            // Report the JUDGE's verdict on the result, not just the timing: the
+            // failure this walk exists to prevent is a *black* poster on a film that
+            // opens on a studio logo, and a fast black poster is still a bug. SDR
+            // only — the scRGB judge reads fp16 and would misread these bytes.
+            let verdict = if img.format == PixelFormat::Rgba8 {
+                let (good, score) = crate::video::poster_judge(&img.pixels, img.width, img.height);
+                format!(
+                    " | {} (score {score:.3})",
+                    if good { "SCENE" } else { "⚠ weak/dark" }
+                )
+            } else {
+                String::new()
+            };
             eprintln!(
-                "[poster] fit={}x{} → {}x{} {:?} in {:.2}s",
+                "[poster] fit={}x{} → {}x{} {:?} in {:.2}s{verdict}",
                 fit.max_width,
                 fit.max_height,
                 img.width,
