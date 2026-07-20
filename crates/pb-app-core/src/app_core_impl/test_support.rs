@@ -231,3 +231,85 @@ impl ItemSource for FakeArchive {
     }
 }
 
+/// A `Renderer` double whose uploads succeed and whose `derive_fit` always works —
+/// the shape a real GPU gives when a mipped Original is resident. `device`/`queue`
+/// are never reached headless.
+pub(super) struct DeriveOk;
+
+impl pb_render::Renderer for DeriveOk {
+    fn resize(&mut self, _: u32, _: u32) {}
+    fn set_image(
+        &mut self,
+        _: &[u8],
+        _: u32,
+        _: u32,
+        _: pb_render::ColorTransform,
+        _: bool,
+        _: f32,
+    ) {
+    }
+    fn clear_image(&mut self) {}
+    fn set_view(&mut self, _: pb_render::ViewTransform) {}
+    fn set_overlay(&mut self, _: Option<(&[u8], u32, u32)>, _: u32, _: u32) {}
+    fn set_info_line(&mut self, _: Option<(&[u8], u32, u32)>, _: u32, _: pb_render::HAlign) {}
+    fn reserve_ring(&mut self, _: usize, _: u32, _: u32) {}
+    #[allow(clippy::too_many_arguments)]
+    fn upload_slot(
+        &mut self,
+        _: usize,
+        _: &[u8],
+        _: u32,
+        _: u32,
+        _: pb_render::ColorTransform,
+        _: bool,
+        _: f32,
+        _: bool,
+    ) -> bool {
+        true
+    }
+    fn derive_fit(
+        &mut self,
+        _source: pb_render::DeriveSource,
+        _dst_slot: usize,
+        fit_w: u32,
+        fit_h: u32,
+        _kernel: u32,
+        _mip_bias: i32,
+    ) -> Option<pb_render::DerivedFit> {
+        Some(pb_render::DerivedFit {
+            w: fit_w,
+            h: fit_h,
+            bytes: fit_w as u64 * fit_h as u64 * 8,
+        })
+    }
+    fn present_slot(&mut self, _: usize) -> bool {
+        true
+    }
+    fn surface_size(&self) -> (u32, u32) {
+        (0, 0)
+    }
+    fn set_letterbox(&mut self, _: [u8; 3]) {}
+    fn set_toast(&mut self, _: Option<(&[u8], u32, u32)>, _: u32) {}
+    fn set_pie(&mut self, _: Option<(&[u8], u32, u32)>, _: u32) {}
+    fn set_tree(&mut self, _: Option<(&[u8], u32, u32)>, _: u32) {}
+    fn set_subtitle_overlay(&mut self, _: Option<(&[u8], u32, u32)>, _: f32, _: f32) {}
+    fn device(&self) -> &pb_render::wgpu::Device {
+        unreachable!("headless test double")
+    }
+    fn queue(&self) -> &pb_render::wgpu::Queue {
+        unreachable!("headless test double")
+    }
+    fn set_egui_overlay(&mut self, _: Option<&pb_render::wgpu::Texture>) {}
+    fn image_size(&self) -> (u32, u32) {
+        (0, 0)
+    }
+    fn set_edr_headroom(&mut self, _: f32) {}
+    fn hdr_surface_wants_edr(&self) -> Option<bool> {
+        None
+    }
+    fn poll(&self) {}
+    fn render(&mut self) -> Result<bool, pb_render::RenderError> {
+        Ok(true)
+    }
+}
+
