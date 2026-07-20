@@ -37,7 +37,7 @@ use crate::panels::{
 use crate::pb_key::PbKey;
 use crate::video_native::ActiveVideoBackend;
 use crate::{
-    settings, slideshow, timing, Action, AppCore, InspectorTab, NativeToast, Nav, Panels,
+    settings, slideshow, timing, Action, AppCore, FitStash, InspectorTab, NativeToast, Nav, Panels,
     SlotContent, Toast, ToastIcon, UndoAction,
 };
 
@@ -212,6 +212,7 @@ impl AppCore {
             archive_loading: false,
             redraw_pending: false,
             resize_hold: None,
+            fit_stash: [None, None],
             scan_bootstrapped: false,
             password_archive: None,
             archive_passwords: Vec::new(),
@@ -1433,6 +1434,13 @@ impl AppCore {
         }
         if Some(new_fit) == self.fit {
             return;
+        }
+        // #123 fix 2: FIRST event of a resize burst — stash the outgoing on-screen Fit
+        // before `self.fit` mutates and before the `resize_hold` Original rebind below
+        // (capture-once: later debounced events must not retag the texture with
+        // transient mid-transition geometries).
+        if self.resize_settle_at.is_none() {
+            self.capture_fit_stash(new_fit);
         }
         self.fit = Some(new_fit);
         if let Some(r) = self.renderer.as_mut() {
@@ -5536,6 +5544,15 @@ impl AppCore {
         // with zero decode. Canonical `present_item` path (title/pin/mark_resolved). Without a
         // retained hit the old frame holds via the renderer's `held` fallback — today's
         // behaviour for that one change.
+        // #123 fix 2: an exact-identity stash hit re-presents the pixels we had at this
+        // geometry — zero decode, superseding both the Original rebind and the derive.
+        // The prefetch below still runs (neighbour refill + the parked tier), but the
+        // display-Fit want is suppressed by `fit_stash_covers`.
+        if self.try_present_fit_stash() {
+            self.request_prefetch();
+            self.draw();
+            return;
+        }
         if let Some(item) = self.target_item {
             if self.displayed_item == Some(item) {
                 if let Some(slot) = self.ring.original_slot(item) {
@@ -5551,6 +5568,178 @@ impl AppCore {
         self.try_gpu_derive_fit();
         self.request_prefetch();
         self.draw();
+    }
+
+    /// #123 fix 2: whether a quarter-turn session rotation is in effect for `item`
+    /// (R90/R270 swap the effective decode axes — part of the stash identity).
+    fn stash_quarter_turned(&self, item: usize) -> bool {
+        matches!(
+            self.rotations.get(&item),
+            Some(Rotation::R90 | Rotation::R270)
+        )
+    }
+
+    /// #123 fix 2: push the mirror's total unique-stash bytes into the ring's budget
+    /// arithmetic. Called after every mirror mutation. (Brief double-count window: at
+    /// capture time the texture is still ring-committed too, until the settle's rebuild
+    /// drops the Fit slots — conservative, ~one settle long.)
+    fn sync_stash_external(&mut self) {
+        let sum = self.fit_stash.iter().flatten().map(|s| s.bytes).sum();
+        self.ring.set_external_bytes(sum);
+    }
+
+    /// #123 fix 2: drop both stash sides — mirror AND renderer texture (renderer first;
+    /// the mirror never outlives what it mirrors).
+    fn clear_fit_stash(&mut self) {
+        for i in 0..self.fit_stash.len() {
+            if self.fit_stash[i].take().is_some() {
+                if let Some(r) = self.renderer.as_mut() {
+                    r.clear_stash(i);
+                }
+            }
+        }
+        self.sync_stash_external();
+    }
+
+    /// #123 fix 2: whether an exact-identity stash covers `item` at the CURRENT effective
+    /// geometry — the want-suppression predicate (re-evaluated every pass, never cached):
+    /// a covered current photo needs no display-Fit decode, the stash IS its definitive Fit.
+    fn fit_stash_covers(&self, item: usize) -> bool {
+        let Some(fit) = self.decode_fit() else {
+            return false;
+        };
+        let q = self.stash_quarter_turned(item);
+        self.fit_stash.iter().flatten().any(|s| {
+            s.item == item
+                && s.content_gen == self.content_gen
+                && s.fit == fit
+                && s.top_inset == self.content_top_inset
+                && s.quarter_turned == q
+        })
+    }
+
+    /// #123 fix 2, the CAPTURE side: called on the FIRST event of a resize burst, BEFORE
+    /// `self.fit` mutates and before the `resize_hold` Original rebind (Codex r1 f1 — a
+    /// later capture would stash the Original mislabeled as the old Fit). Aliases the
+    /// on-screen definitive Fit into a renderer stash slot so toggling back to this exact
+    /// geometry is a rebind. Fulls only (Codex Q3); renderer-verified (#109.4).
+    fn capture_fit_stash(&mut self, incoming: FitBox) {
+        if self.view.mode != ScaleMode::Fit {
+            return; // Fill/Original display the Original rep — nothing fit-sized on screen
+        }
+        let Some(outgoing) = self.fit else {
+            return;
+        };
+        let Some(item) = self.displayed_item else {
+            return;
+        };
+        if self.target_item != Some(item) || self.preview_resident.contains(&item) {
+            return; // mid-nav, or a preview on screen — only definitive fulls stash
+        }
+        let Some(ring_slot) = self.ring.slot_for_rep(item, pb_core::RepKind::Fit) else {
+            return; // displayed via the held/single-image path — nothing to alias
+        };
+        let q = self.stash_quarter_turned(item);
+        let entry = FitStash {
+            item,
+            content_gen: self.content_gen,
+            fit: outgoing,
+            top_inset: self.content_top_inset,
+            quarter_turned: q,
+            bytes: self
+                .ring
+                .slot_bytes_of(item, pb_core::RepKind::Fit)
+                .unwrap_or(0),
+        };
+        // Slot rotation (Codex Q1): overwrite a slot already holding this OUTGOING
+        // geometry (dedup), else any slot NOT holding the INCOMING geometry (that one is
+        // about to become presentable and must survive) — A→B→A→B keeps both sides live.
+        let same = |s: &FitStash, fit: FitBox| {
+            s.item == item && s.content_gen == self.content_gen && s.fit == fit
+        };
+        let idx = (0..self.fit_stash.len())
+            .find(|&i| {
+                self.fit_stash[i]
+                    .as_ref()
+                    .is_some_and(|s| same(s, outgoing))
+            })
+            .or_else(|| {
+                (0..self.fit_stash.len()).find(|&i| {
+                    !self.fit_stash[i]
+                        .as_ref()
+                        .is_some_and(|s| same(s, incoming))
+                })
+            })
+            .unwrap_or(0);
+        let ok = self
+            .renderer
+            .as_mut()
+            .is_some_and(|r| r.stash_fit(idx, ring_slot));
+        if ok {
+            self.fit_stash[idx] = Some(entry);
+            self.sync_stash_external();
+            if sharp_diag() {
+                eprintln!(
+                    "[sharp-diag] fit-stash captured item={item} {}x{} (slot {idx})",
+                    outgoing.max_width, outgoing.max_height
+                );
+            }
+        }
+        // A renderer refusal is already loud (`[pb-render] stash_fit refused`); the mirror
+        // simply records nothing — never a stash the renderer lacks (#109.4).
+    }
+
+    /// #123 fix 2, the PRESENT side: on the geometry settle, an exact-identity stash hit
+    /// re-presents the pixels we had at this geometry — zero decode, superseding both the
+    /// Original rebind and the GPU derive. Transactional around the un-landed #109.5 hole:
+    /// `mark_resolved` is gated on the renderer's own confirmation.
+    fn try_present_fit_stash(&mut self) -> bool {
+        let Some(item) = self.target_item else {
+            return false;
+        };
+        if !self.fit_stash_covers(item) {
+            return false;
+        }
+        let Some(fit) = self.decode_fit() else {
+            return false;
+        };
+        let q = self.stash_quarter_turned(item);
+        let Some(idx) = (0..self.fit_stash.len()).find(|&i| {
+            self.fit_stash[i].as_ref().is_some_and(|s| {
+                s.item == item
+                    && s.content_gen == self.content_gen
+                    && s.fit == fit
+                    && s.top_inset == self.content_top_inset
+                    && s.quarter_turned == q
+            })
+        }) else {
+            return false;
+        };
+        let ok = self.renderer.as_mut().is_some_and(|r| r.present_stash(idx));
+        if !ok {
+            // A mirror entry the renderer can't honour — drop it loudly and fall through
+            // to the decode ladder (#109.4: never trust, never silently proceed).
+            eprintln!(
+                "[ring-desync] fit-stash mirror without a renderer texture (slot {idx}) — dropped"
+            );
+            self.fit_stash[idx] = None;
+            self.sync_stash_external();
+            return false;
+        }
+        // Renderer-confirmed: the exact definitive Fit is on screen. Clear the hold +
+        // sharpen bookkeeping, then resolve.
+        self.resize_hold = None;
+        self.preview_resident.remove(&item);
+        self.upgrade_done.remove(&item);
+        self.full_requested_at.remove(&item);
+        self.mark_resolved(item);
+        if sharp_diag() {
+            eprintln!(
+                "[sharp-diag] fit-stash re-present item={item} {}x{} — zero decode",
+                fit.max_width, fit.max_height
+            );
+        }
+        true
     }
 
     /// #110 Phase 110b + item-6 6b: satisfy the TARGET photo's Fit display by GPU-deriving the
@@ -6087,6 +6276,12 @@ impl AppCore {
                 if pending_display {
                     continue;
                 }
+                // #123 fix 2: a stash-covered photo needs no display decode — the stashed
+                // texture IS its definitive Fit at this exact geometry (checked fresh
+                // every pass; any identity drift re-opens the want).
+                if self.fit_stash_covers(t) {
+                    continue;
+                }
                 // Preview-first (`allow_preview`) is a FIT-scale concept: an embedded ~256px
                 // thumbnail is a fine instant stand-in for a fit-to-window view, but it is NEVER a
                 // valid `Original` (1:1 / Fill decodes at native res). Gating on `fit.is_some()`
@@ -6180,7 +6375,7 @@ impl AppCore {
                 }
                 continue;
             }
-            if !pending_display {
+            if !pending_display && !self.fit_stash_covers(t) {
                 fulls.push(Job::display(t, fit, false));
             }
         }
@@ -7382,6 +7577,12 @@ impl AppCore {
                 self.item_archive_kind(item),
             );
         }
+        // #123 fix 2: the stash is current-photo-scoped — a DIFFERENT photo successfully
+        // on screen retires it. Present-success, not mere target churn (a failed present
+        // must not orphan pixels we may still return to).
+        if presented && self.fit_stash.iter().flatten().any(|s| s.item != item) {
+            self.clear_fit_stash();
+        }
         self.effects.push(contract::CoreEffect::SetTitle(title));
         self.ring.set_displayed(slot);
         // A fresh landing on a *different* photo re-arms the play hint. `anim_hint_shown_for`
@@ -8270,6 +8471,9 @@ impl AppCore {
         // pre-change pixels is rejected on landing; the strip re-derives. View/follow
         // state survives — a save-rotation must not yank the strip.
         self.thumbs.invalidate_content();
+        // #123 fix 2: stash identities are content-scoped — index N may name different
+        // pixels now, so both stash sides die with the deck.
+        self.clear_fit_stash();
     }
 
     /// The shared geometry-rebuild tail: bump the epoch, size the new ring, then either RETAIN
@@ -17709,6 +17913,246 @@ mod tests {
                 "…while NEIGHBOUR Originals stay in the low-priority tail; log: {log:?}"
             );
         }
+    }
+
+    // ── #123 fix 2: the geometry-pair Fit stash ──
+
+    /// A `Renderer` double with working stash semantics: tracks the presented ring slot
+    /// (so `stash_fit`'s verify-the-presented-slot rule is real) and two stash slots.
+    #[derive(Default)]
+    struct StashOk {
+        presented: Option<usize>,
+        stashed: [bool; 2],
+    }
+
+    impl pb_render::Renderer for StashOk {
+        fn resize(&mut self, _: u32, _: u32) {}
+        fn set_image(
+            &mut self,
+            _: &[u8],
+            _: u32,
+            _: u32,
+            _: pb_render::ColorTransform,
+            _: bool,
+            _: f32,
+        ) {
+        }
+        fn clear_image(&mut self) {}
+        fn set_view(&mut self, _: pb_render::ViewTransform) {}
+        fn set_overlay(&mut self, _: Option<(&[u8], u32, u32)>, _: u32, _: u32) {}
+        fn set_info_line(&mut self, _: Option<(&[u8], u32, u32)>, _: u32, _: pb_render::HAlign) {}
+        fn reserve_ring(&mut self, _: usize, _: u32, _: u32) {}
+        #[allow(clippy::too_many_arguments)]
+        fn upload_slot(
+            &mut self,
+            _: usize,
+            _: &[u8],
+            _: u32,
+            _: u32,
+            _: pb_render::ColorTransform,
+            _: bool,
+            _: f32,
+            _: bool,
+        ) -> bool {
+            true
+        }
+        fn present_slot(&mut self, slot: usize) -> bool {
+            self.presented = Some(slot);
+            true
+        }
+        fn stash_fit(&mut self, stash_idx: usize, ring_slot: usize) -> bool {
+            if stash_idx < 2 && self.presented == Some(ring_slot) {
+                self.stashed[stash_idx] = true;
+                true
+            } else {
+                false
+            }
+        }
+        fn present_stash(&mut self, stash_idx: usize) -> bool {
+            if stash_idx < 2 && self.stashed[stash_idx] {
+                self.presented = None;
+                true
+            } else {
+                false
+            }
+        }
+        fn clear_stash(&mut self, stash_idx: usize) {
+            if stash_idx < 2 {
+                self.stashed[stash_idx] = false;
+            }
+        }
+        fn surface_size(&self) -> (u32, u32) {
+            (0, 0)
+        }
+        fn set_letterbox(&mut self, _: [u8; 3]) {}
+        fn set_toast(&mut self, _: Option<(&[u8], u32, u32)>, _: u32) {}
+        fn set_pie(&mut self, _: Option<(&[u8], u32, u32)>, _: u32) {}
+        fn set_tree(&mut self, _: Option<(&[u8], u32, u32)>, _: u32) {}
+        fn set_subtitle_overlay(&mut self, _: Option<(&[u8], u32, u32)>, _: f32, _: f32) {}
+        fn device(&self) -> &pb_render::wgpu::Device {
+            unreachable!("headless test double")
+        }
+        fn queue(&self) -> &pb_render::wgpu::Queue {
+            unreachable!("headless test double")
+        }
+        fn set_egui_overlay(&mut self, _: Option<&pb_render::wgpu::Texture>) {}
+        fn image_size(&self) -> (u32, u32) {
+            (0, 0)
+        }
+        fn set_edr_headroom(&mut self, _: f32) {}
+        fn hdr_surface_wants_edr(&self) -> Option<bool> {
+            None
+        }
+        fn poll(&self) {}
+        fn render(&mut self) -> Result<bool, pb_render::RenderError> {
+            Ok(true)
+        }
+    }
+
+    /// A parked core with item 0's definitive Fit resident and presented via `StashOk`.
+    fn stash_test_core(fit: FitBox) -> AppCore {
+        let mut core = test_core();
+        core.source = photos_named(&["a.jpg", "b.jpg"]);
+        core.playlist = Playlist::new(2, 0).with_cursor(0);
+        core.ring = ResidentRing::new(4);
+        core.fit = Some(fit);
+        core.view.mode = ScaleMode::Fit;
+        core.targets = vec![0];
+        core.target_item = Some(0);
+        core.renderer = Some(Box::new(StashOk::default()));
+        let fit_rep = core.rep_of(pb_core::RepKind::Fit);
+        make_resident(&mut core, 0, fit_rep, &[0]);
+        let slot = core.ring.slot_for(0).expect("resident");
+        core.present_item(0, slot); // displayed + the mock records the presented slot
+        core
+    }
+
+    /// The owner's "I literally just had these pixels" pin: capture at A, move to B,
+    /// return to A — the stash re-presents with ZERO decode, and the want stays
+    /// suppressed while covered.
+    #[test]
+    fn toggle_back_re_presents_the_stashed_fit_with_zero_decode() {
+        let a = FitBox {
+            max_width: 100,
+            max_height: 100,
+        };
+        let b = FitBox {
+            max_width: 200,
+            max_height: 150,
+        };
+        let mut core = stash_test_core(a);
+        core.capture_fit_stash(b); // the resize hook, first event of the A→B burst
+        assert!(
+            core.fit_stash
+                .iter()
+                .flatten()
+                .any(|s| s.item == 0 && s.fit == a),
+            "the outgoing A-side texture is stashed with its exact identity"
+        );
+
+        core.fit = Some(b);
+        core.invalidate_geometry(); // the settle at B (epoch bump, Fit slots dropped)
+        assert!(
+            !core.try_present_fit_stash(),
+            "at B the A-stash does not match — no false hit"
+        );
+
+        core.fit = Some(a); // toggle back
+        core.invalidate_geometry();
+        assert!(
+            core.try_present_fit_stash(),
+            "back at A: the exact pixels re-present — a rebind, not a decode"
+        );
+        assert_eq!(core.displayed_item, Some(0));
+        assert!(core.target_caught_up(), "resolved via the stash present");
+
+        core.request_prefetch();
+        assert!(
+            !core.pool.enqueued().contains(&(
+                0,
+                crate::decode_pool::Purpose::Display,
+                pb_core::RepKind::Fit
+            )),
+            "a covered photo emits no display-Fit want"
+        );
+    }
+
+    /// Only definitive fulls stash (Codex Q3): a preview on screen records nothing.
+    #[test]
+    fn a_preview_is_never_stashed() {
+        let a = FitBox {
+            max_width: 100,
+            max_height: 100,
+        };
+        let b = FitBox {
+            max_width: 200,
+            max_height: 150,
+        };
+        let mut core = stash_test_core(a);
+        core.preview_resident.insert(0);
+        core.capture_fit_stash(b);
+        assert!(
+            core.fit_stash.iter().all(Option::is_none),
+            "a preview must not be re-presentable as a definitive Fit"
+        );
+    }
+
+    /// #109.4 discipline: a mirror entry the renderer can't honour is dropped loudly and
+    /// the settle falls through to the decode ladder.
+    #[test]
+    fn a_stash_mirror_without_a_texture_is_dropped() {
+        let a = FitBox {
+            max_width: 100,
+            max_height: 100,
+        };
+        let mut core = stash_test_core(a);
+        core.renderer = None; // headless: present_stash refuses via the default
+        core.fit_stash[0] = Some(FitStash {
+            item: 0,
+            content_gen: core.content_gen,
+            fit: a,
+            top_inset: core.content_top_inset,
+            quarter_turned: false,
+            bytes: 64,
+        });
+        assert!(!core.try_present_fit_stash());
+        assert!(
+            core.fit_stash.iter().all(Option::is_none),
+            "the orphan mirror entry is dropped, not retried forever"
+        );
+    }
+
+    /// The stash is current-photo-scoped: a DIFFERENT photo successfully presented
+    /// retires it; content changes kill it outright.
+    #[test]
+    fn nav_and_content_changes_retire_the_stash() {
+        let a = FitBox {
+            max_width: 100,
+            max_height: 100,
+        };
+        let b = FitBox {
+            max_width: 200,
+            max_height: 150,
+        };
+        let mut core = stash_test_core(a);
+        core.capture_fit_stash(b);
+        assert!(core.fit_stash.iter().flatten().count() == 1);
+
+        // Present a DIFFERENT photo (its own resident Fit) → the stash retires.
+        let fit_rep = core.rep_of(pb_core::RepKind::Fit);
+        make_resident(&mut core, 1, fit_rep, &[0, 1]);
+        let slot1 = core.ring.slot_for(1).expect("resident");
+        core.present_item(1, slot1);
+        assert!(
+            core.fit_stash.iter().all(Option::is_none),
+            "landing on another photo retires the pair"
+        );
+
+        // And a content change clears whatever exists at the time.
+        let mut core = stash_test_core(a);
+        core.capture_fit_stash(b);
+        core.invalidate_content();
+        assert!(core.fit_stash.iter().all(Option::is_none));
     }
 
     /// #122 item 1: a TAP's advance GPU-sharpens with the key still down — the derive is

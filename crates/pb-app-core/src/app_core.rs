@@ -209,6 +209,24 @@ pub struct PreviewWatchdog {
     pub retries: u8,
 }
 
+/// #123 fix 2: the core-side identity of one renderer-stashed Fit texture (the
+/// geometry-pair stash). Presentable iff EVERY field matches the live state — the #119
+/// exactness rule: the fit box alone is not the effective decode geometry (the top inset
+/// and the quarter-turn rotation parity fold in, `derive_fit_box`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FitStash {
+    pub item: usize,
+    pub content_gen: u64,
+    /// The exact fit box the texture was decoded for (physical px).
+    pub fit: FitBox,
+    /// The content-top inset in effect when it was produced.
+    pub top_inset: u32,
+    /// Whether a quarter-turn session rotation (R90/R270) was in effect.
+    pub quarter_turned: bool,
+    /// The texture's VRAM charge (drives `ResidentRing::set_external_bytes`).
+    pub bytes: u64,
+}
+
 pub struct AppCore {
     /// The injected wall-clock "now" for this event/tick — **the core never calls
     /// `Instant::now()`** (NS0 5.5 / Phase 0.3). The shell stamps it at each event-loop entry
@@ -514,6 +532,16 @@ pub struct AppCore {
     /// preview of itself — Codex 2026-07-18). Cleared when the fresh full Fit lands, on nav to a
     /// different item, or on a deck rebuild. `None` = no resize hold in effect.
     pub resize_hold: Option<usize>,
+    /// #123 fix 2 — the geometry-pair Fit stash mirror: identity for up to two renderer-side
+    /// stashed textures (the A and B sides of a fullscreen/windowed oscillation), so
+    /// toggling BACK to a geometry re-presents the exact pixels we had there (a rebind)
+    /// instead of re-decoding. Exact identity per #119 (item, content generation, and the
+    /// full effective decode geometry: fit box + top inset + rotation parity); every
+    /// renderer interaction is checked (#109.4 — a mirror entry the renderer can't honour
+    /// is dropped loudly). Current-photo-scoped: cleared when a DIFFERENT photo presents
+    /// successfully, and on any content change. VRAM accounted via
+    /// `ResidentRing::set_external_bytes`. RAM/VRAM-only, dies with the process.
+    pub fit_stash: [Option<FitStash>; 2],
     /// Whether the in-flight directory scan has applied its first non-empty batch (the first photo
     /// is shown). The `ScanBatch` handler bootstraps the playlist while this is false, then extends
     /// it; the host reads it to gate the Scanning-dialog reveal / the scan-count chip. Reset to

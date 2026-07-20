@@ -1,8 +1,15 @@
 # 123 fix 2 — The geometry-pair Fit stash: toggle-back is a rebind, never a re-decode
 
-_Status: **rev 2 — Codex round 1 folded, IMPLEMENTATION-READY** (2026-07-19). Task #123
-fix 2, owner-approved in direction ("keep the fullscreen texture for whatever mode they are
-in handy"). Fix 1 (current-Original priority) shipped `c1b4d707`._
+_Status: **rev 2 — IMPLEMENTED** (2026-07-19; owner smoke pending — park, F, F: the
+second F and every later toggle-back should be instant with `[sharp-diag] fit-stash
+re-present` firing). Task #123 fix 2, owner-approved in direction. Fix 1
+(current-Original priority) shipped `c1b4d707`. Implementation matches this rev's design:
+`Arc<RingSlot>` aliasing, burst-start capture, exact identity (fit + inset + rotation
+parity), settle-hook before Original-rebind/derive, want suppression, external-bytes
+budget accounting, all renderer interactions checked. Deferred with rationale: a
+tick-driven full resize→settle integration test (the hook placements are 3 reviewed
+lines; the mechanism is pinned by `toggle_back_re_presents_the_stashed_fit_with_zero_decode`
+and 3 sibling tests)._
 
 ## The ask (owner, 2026-07-19)
 

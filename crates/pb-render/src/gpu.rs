@@ -5,6 +5,7 @@
 //! window surface; `render_offscreen` renders to a buffer for tests.
 
 use std::borrow::Cow;
+use std::sync::Arc;
 
 use bytemuck::{Pod, Zeroable};
 use wgpu::util::DeviceExt;
@@ -2599,7 +2600,10 @@ pub struct WgpuRenderer {
     upload: Box<dyn UploadStrategy>,
     /// Resident texture ring (Phase 3). Empty until `reserve_ring`; each `Some`
     /// slot holds a pre-uploaded photo. `present_slot` selects which one draws.
-    ring: Vec<Option<RingSlot>>,
+    /// `Arc` (#123 fix 2): the ring, the `held` fallback, and the geometry-pair
+    /// `stash` can alias ONE texture allocation — wgpu handles aren't `Clone`, and
+    /// duplicating VRAM would defeat the stash's whole point.
+    ring: Vec<Option<Arc<RingSlot>>>,
     /// When `Some(i)`, `render` draws ring slot `i` instead of `bind_group`.
     present_idx: Option<usize>,
     /// The frame that was on screen when the ring was last rebuilt (`reserve_ring` on a
@@ -2608,7 +2612,15 @@ pub struct WgpuRenderer {
     /// the stale single-image `bind_group`, so a resize / scale-mode switch / deck rebuild
     /// never flashes blank or a wrong frame (task #18 finding #5). One image's worth of
     /// texture, outside the ring budget; released the moment a real frame is presented.
-    held: Option<RingSlot>,
+    held: Option<Arc<RingSlot>>,
+    /// #123 fix 2 — the geometry-pair Fit stash: up to two aliased textures (the A and B
+    /// sides of a fullscreen/windowed oscillation) the core can re-present exactly
+    /// (`present_stash`) instead of re-decoding. Identity lives in the CORE's mirror
+    /// (`FitStash`); this side only verifies the presented slot at stash time and answers
+    /// honestly (#109.4 fail-loud). Presenting a stash installs it as `held` — the stashed
+    /// texture was decoded for exactly the current viewport, so the held draw's GPU refit
+    /// is identity.
+    stash: [Option<Arc<RingSlot>>; 2],
     /// Background (letterbox) fill, sRGB, shown around a non-covering photo.
     /// Defaults to [`LETTERBOX`]; the app overrides it from user settings.
     letterbox: [u8; 3],
@@ -2911,6 +2923,7 @@ impl WgpuRenderer {
             subtitle: None,
             upload,
             ring: Vec::new(),
+            stash: [None, None],
             present_idx: None,
             held: None,
             letterbox: [LETTERBOX[0], LETTERBOX[1], LETTERBOX[2]],
@@ -3701,7 +3714,7 @@ impl Renderer for WgpuRenderer {
             scale,
             mipgen,
         );
-        self.ring[slot] = Some(RingSlot {
+        self.ring[slot] = Some(Arc::new(RingSlot {
             bind_group: uploaded.bind_group,
             w,
             h,
@@ -3710,13 +3723,13 @@ impl Renderer for WgpuRenderer {
             was_clamped: uploaded.was_clamped,
             mode: uploaded.mode,
             content_hdr: hdr,
-        });
+        }));
         true
     }
 
     fn remap_ring(&mut self, new_capacity: usize, remaps: &[pb_core::SlotRemap]) -> Vec<usize> {
         let mut old = std::mem::take(&mut self.ring);
-        let mut next: Vec<Option<RingSlot>> = (0..new_capacity).map(|_| None).collect();
+        let mut next: Vec<Option<Arc<RingSlot>>> = (0..new_capacity).map(|_| None).collect();
         let mut moved = Vec::new();
         for r in remaps {
             // Release-validated (not just debug-asserted): an out-of-range or duplicate `to`
@@ -3815,7 +3828,7 @@ impl Renderer for WgpuRenderer {
             scale,
         );
         let bytes = dw as u64 * dh as u64 * if srgb_in { 4 } else { 8 };
-        self.ring[dst_slot] = Some(RingSlot {
+        self.ring[dst_slot] = Some(Arc::new(RingSlot {
             bind_group,
             w: dw,
             h: dh,
@@ -3824,7 +3837,7 @@ impl Renderer for WgpuRenderer {
             was_clamped: false,
             mode,
             content_hdr,
-        });
+        }));
         Some(DerivedFit {
             w: dw,
             h: dh,
@@ -3861,6 +3874,64 @@ impl Renderer for WgpuRenderer {
             )),
         );
         true
+    }
+
+    fn stash_fit(&mut self, stash_idx: usize, ring_slot: usize) -> bool {
+        if stash_idx >= self.stash.len() {
+            return false;
+        }
+        // The core names the ring slot it believes is on screen; verify, never trust
+        // (#109.4) — stashing the wrong occupant would later re-present another photo's
+        // pixels under this one's identity.
+        if self.present_idx != Some(ring_slot) {
+            eprintln!(
+                "[pb-render] stash_fit refused: ring slot {ring_slot} is not presented (present_idx={:?})",
+                self.present_idx
+            );
+            return false;
+        }
+        let Some(slot) = self.ring.get(ring_slot).and_then(|s| s.clone()) else {
+            eprintln!("[pb-render] stash_fit refused: ring slot {ring_slot} is empty");
+            return false;
+        };
+        self.stash[stash_idx] = Some(slot);
+        true
+    }
+
+    fn present_stash(&mut self, stash_idx: usize) -> bool {
+        let Some(slot) = self.stash.get(stash_idx).and_then(|s| s.clone()) else {
+            return false;
+        };
+        let (w, h, peak) = (slot.w, slot.h, slot.peak);
+        // Install via the held path: the stash was decoded for EXACTLY this viewport
+        // geometry (caller-verified), so the held draw's GPU refit is identity. The
+        // stash slot keeps its own alias — a later toggle can re-present it again.
+        self.blank = false;
+        self.message = None;
+        self.held = Some(slot);
+        self.present_idx = None;
+        self.set_present_peak(peak);
+        self.img_w = w;
+        self.img_h = h;
+        self.queue.write_buffer(
+            &self.vbuf,
+            0,
+            bytemuck::cast_slice(&quad_vertices(
+                &self.view,
+                w,
+                h,
+                self.config.width,
+                self.config.height,
+                self.content_top_inset,
+            )),
+        );
+        true
+    }
+
+    fn clear_stash(&mut self, stash_idx: usize) {
+        if let Some(s) = self.stash.get_mut(stash_idx) {
+            *s = None;
+        }
     }
 
     fn render(&mut self) -> Result<bool, RenderError> {

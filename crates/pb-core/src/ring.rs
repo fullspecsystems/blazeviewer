@@ -128,6 +128,11 @@ pub struct ResidentRing {
     displayed: Option<usize>,
     /// Hard VRAM cap: reserving evicts until `committed_bytes + new ≤ this`.
     byte_budget: u64,
+    /// VRAM held OUTSIDE the slot vector but inside this budget (#123: the renderer's
+    /// geometry-pair Fit stash — unique allocations only; an Arc alias of a live ring
+    /// slot counts once, in `committed_bytes`). Subtracted from the budget every
+    /// admission decision makes. Set via [`set_external_bytes`](Self::set_external_bytes).
+    external_bytes: u64,
     /// Sum of `slot_bytes` over Pending + Resident slots.
     committed_bytes: u64,
     /// Reservations this ring REFUSED (rank beyond the window, budget with nothing
@@ -155,9 +160,28 @@ impl ResidentRing {
             by_key: HashMap::new(),
             displayed: None,
             byte_budget: byte_budget.max(1),
+            external_bytes: 0,
             committed_bytes: 0,
             denied: HashSet::new(),
         }
+    }
+
+    /// Report VRAM held outside the slot vector but inside this budget (#123: the
+    /// geometry-pair Fit stash). Every admission decision (`reserve_bytes`,
+    /// [`admittable`](Self::admittable), [`make_room_for_upgrade`](Self::make_room_for_upgrade))
+    /// works against `byte_budget - external_bytes`. Changing it also voids the refusal
+    /// latch (the budget answer changed) — a shrink re-opens denied items, a growth may
+    /// deny new ones honestly on their next attempt.
+    pub fn set_external_bytes(&mut self, bytes: u64) {
+        if bytes != self.external_bytes {
+            self.denied.clear();
+        }
+        self.external_bytes = bytes;
+    }
+
+    /// The budget available to slot admissions after external holdings (#123).
+    fn effective_budget(&self) -> u64 {
+        self.byte_budget.saturating_sub(self.external_bytes).max(1)
     }
 
     pub fn capacity(&self) -> usize {
@@ -195,6 +219,14 @@ impl ResidentRing {
     /// Whether `item` is tracked in the given representation kind (resident or Pending).
     pub fn is_tracked_rep(&self, item: usize, kind: RepKind) -> bool {
         self.by_key.contains_key(&(item, kind))
+    }
+
+    /// The recorded VRAM bytes of `item`'s slot in `kind` (#123: the stash captures the
+    /// outgoing Fit's true charge so `set_external_bytes` stays honest).
+    pub fn slot_bytes_of(&self, item: usize, kind: RepKind) -> Option<u64> {
+        self.by_key
+            .get(&(item, kind))
+            .map(|&slot| self.slot_bytes[slot])
     }
 
     /// Pin the on-screen slot so it is never chosen as an eviction victim. A *change*
@@ -304,7 +336,7 @@ impl ResidentRing {
             if rank_of(item) >= new_capacity {
                 continue; // no longer belongs resident
             }
-            if self.committed_bytes + bytes > self.byte_budget && self.committed_bytes != 0 {
+            if self.committed_bytes + bytes > self.effective_budget() && self.committed_bytes != 0 {
                 continue; // over budget; drop the lower-priority survivor
             }
             let to = next;
@@ -383,7 +415,7 @@ impl ResidentRing {
             if let Some(slot) = free {
                 // Reserve once it fits the budget, or once nothing else is resident
                 // (a single over-budget image must still be showable).
-                if self.committed_bytes + item_bytes <= self.byte_budget
+                if self.committed_bytes + item_bytes <= self.effective_budget()
                     || self.committed_bytes == 0
                 {
                     self.slots[slot] = SlotState::Pending {
@@ -468,7 +500,7 @@ impl ResidentRing {
             return false;
         }
         let min_committed = self.committed_bytes.saturating_sub(evictable_bytes);
-        min_committed + item_bytes <= self.byte_budget || min_committed == 0
+        min_committed + item_bytes <= self.effective_budget() || min_committed == 0
     }
 
     /// The lowest-priority evictable occupied slot, or `None` when every candidate
@@ -562,7 +594,7 @@ impl ResidentRing {
         loop {
             // Post-upgrade committed = committed - current + need. Evicting reduces
             // committed (never touching the item's own slot), so this converges.
-            if self.committed_bytes.saturating_sub(current) + need <= self.byte_budget {
+            if self.committed_bytes.saturating_sub(current) + need <= self.effective_budget() {
                 return true;
             }
             // Find the lowest-priority evictable slot that is neither displayed nor a
@@ -792,6 +824,28 @@ mod tests {
             !r.denied(1, RepKind::Original),
             "landing on a different photo re-opens refused items"
         );
+    }
+
+    /// #123: stash textures live outside the slot vector but inside the VRAM budget —
+    /// every admission decision must see the debit, and changing it voids the refusal
+    /// latch (the budget answer changed).
+    #[test]
+    fn external_stash_bytes_debit_every_admission_decision() {
+        let mut r = ResidentRing::new_with_budget(4, 1000);
+        let res = r.reserve_bytes(0, CG, fit(1), 500, &[0, 1]).expect("seed");
+        r.mark_resident(0, res.slot, CG, fit(1));
+        r.set_displayed(res.slot); // pinned — never evictable for item 1
+        assert!(r.admittable(1, RepKind::Fit, 400, &[0, 1]));
+        r.set_external_bytes(200); // a stash texture holds 200 of the 1000
+        assert!(
+            !r.admittable(1, RepKind::Fit, 400, &[0, 1]),
+            "500 committed + 400 wanted > the 800 left after the stash"
+        );
+        assert!(r.reserve_bytes(1, CG, fit(1), 400, &[0, 1]).is_none());
+        assert!(r.denied(1, RepKind::Fit), "refusal latched as usual");
+        r.set_external_bytes(0); // stash cleared: the budget answer changed
+        assert!(!r.denied(1, RepKind::Fit), "…which voids the latch");
+        assert!(r.reserve_bytes(1, CG, fit(1), 400, &[0, 1]).is_some());
     }
 
     #[test]

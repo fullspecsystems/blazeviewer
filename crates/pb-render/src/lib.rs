@@ -319,6 +319,34 @@ pub trait Renderer {
     /// renderer still shows the prior photo (the "card over a photo" defect).
     fn present_slot(&mut self, slot: usize) -> bool;
 
+    /// #123 fix 2 (the geometry-pair Fit stash): alias ring slot `ring_slot`'s texture
+    /// into stash slot `stash_idx` (0|1), so a later [`present_stash`](Self::present_stash)
+    /// can rebind it after a geometry oscillation instead of re-decoding. The caller names
+    /// the ring slot it BELIEVES is presented; the renderer verifies `present_idx ==
+    /// ring_slot` and refuses otherwise (#109.4: the core must never record a stash the
+    /// renderer lacks — or stash the wrong occupant). Identity (item / content generation /
+    /// exact fit geometry) lives in the caller's mirror. Default (headless/tests): refuse.
+    fn stash_fit(&mut self, stash_idx: usize, ring_slot: usize) -> bool {
+        let _ = (stash_idx, ring_slot);
+        false
+    }
+
+    /// Present stash slot `stash_idx` as the displayed image — a rebind, zero decode. The
+    /// stashed texture was produced for EXACTLY the current viewport geometry (the caller
+    /// verified identity), so it is installed via the held-frame path whose GPU refit is
+    /// identity here. `false` = the slot is empty: the caller drops its mirror entry
+    /// (loudly) and falls through to the decode ladder. Default: refuse.
+    fn present_stash(&mut self, stash_idx: usize) -> bool {
+        let _ = stash_idx;
+        false
+    }
+
+    /// Drop stash slot `stash_idx`'s texture (content invalidation / eviction). Aliases
+    /// still held by the ring or the held fallback keep their allocation. Idempotent.
+    fn clear_stash(&mut self, stash_idx: usize) {
+        let _ = stash_idx;
+    }
+
     /// The surface's currently-configured swapchain size (physical px). The shell compares
     /// it to the live window size to detect a stale swapchain — a size drift the renderer
     /// can't self-heal (it holds no window handle), which otherwise leaves the surface
