@@ -19202,6 +19202,50 @@ mod tests {
         assert!(!core.scanning);
     }
 
+    /// The REVERSE of `an_archive_open_supersedes_an_in_flight_scan`, and the direction that
+    /// actually caused the historical corruption: a folder scan started over an in-flight
+    /// archive open must abandon that open, so a late `ArchiveResolved` cannot rebuild the deck
+    /// back onto the archive on top of the folder now being scanned.
+    ///
+    /// Both directions run through one `supersede` helper in the core; this pins the half the
+    /// shells used to own by hand (and which the winit shell did with an unconditional
+    /// `cancel_dir_scan()` at the right call site, macOS with its own copy).
+    #[test]
+    fn a_folder_scan_supersedes_an_in_flight_archive_open() {
+        let (mut core, tx) = armed_archive_core(Some(crate::SecretString::new("pw")));
+        let open_id = core.archive_load.as_ref().map(|l| l.id).unwrap();
+        assert!(core.bg.is_current(open_id));
+
+        // Opening a folder now: the scan claims the shared generation space.
+        let (_tx2, rx2) = std::sync::mpsc::channel();
+        core.arm_dir_scan(1, rx2, crate::scan::ScanProgress::new(), "Photos".into());
+
+        assert!(
+            !core.bg.is_current(open_id),
+            "the archive open is stale the instant the scan begins"
+        );
+        assert!(
+            core.archive_load.is_none(),
+            "and its worker handle is dropped, not left to land later"
+        );
+
+        // The abandoned worker can no longer deliver ANYTHING: dropping the state dropped the
+        // receiver, so its send fails outright. That is a stronger guarantee than "the result
+        // is ignored" — there is no channel left for a stale result to arrive on.
+        assert!(
+            tx.send((1, (Err(crate::archive::ArchiveOpenError::Empty), None)))
+                .is_err(),
+            "the superseded worker's channel must be gone, not merely ignored"
+        );
+        assert!(
+            matches!(
+                core.poll_archive_load(),
+                crate::archive_open::ArchiveOutcome::Pending
+            ),
+            "and polling finds nothing to apply"
+        );
+    }
+
     /// Arming a second walk supersedes the first through the same one gate.
     #[test]
     fn a_second_scan_supersedes_the_first() {
