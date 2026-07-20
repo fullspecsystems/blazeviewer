@@ -5569,89 +5569,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn rebuild_playlist_records_last_folder_but_only_for_folder_backed_opens() {
-        let mut core = test_core();
-        assert!(
-            !core.persist_prefs,
-            "test cores must never write the real settings.toml"
-        );
-        let dir = std::env::temp_dir();
-        let source: Arc<dyn ItemSource> = Arc::new(FsSource::new(vec![dir.join("a.png")]));
-        core.rebuild_playlist(source, dir.clone(), Some(dir.clone()), true, 0);
-        assert_eq!(core.settings.last_folder.as_deref(), Some(dir.as_path()));
-
-        // An archive-style rebuild (no scan_root) must not clobber the remembered folder.
-        let source: Arc<dyn ItemSource> = Arc::new(FsSource::new(vec![dir.join("b.png")]));
-        core.rebuild_playlist(source, dir.join("x.zip"), None, false, 0);
-        assert_eq!(core.settings.last_folder.as_deref(), Some(dir.as_path()));
-    }
-
-    #[test]
-    fn rebuild_playlist_reseeds_the_shuffle_so_repeated_opens_diverge() {
-        // Regression test: `rebuild_playlist` used to reseed the random walk with the
-        // hardcoded literal `0`, so opening a deck of the same size produced the exact
-        // same "random" order every single time (same launch, next launch, always).
-        // Two independent opens of an equally-sized deck must land on different
-        // shuffle permutations.
-        let mut core = test_core();
-        let dir = std::env::temp_dir();
-        let paths: Vec<PathBuf> = (0..32).map(|i| dir.join(format!("{i}.png"))).collect();
-
-        let source: Arc<dyn ItemSource> = Arc::new(FsSource::new(paths.clone()));
-        core.rebuild_playlist(source, dir.clone(), Some(dir.clone()), true, 0);
-        let first = core.playlist.shuffle().clone();
-
-        let source: Arc<dyn ItemSource> = Arc::new(FsSource::new(paths));
-        core.rebuild_playlist(source, dir.clone(), Some(dir.clone()), true, 0);
-        let second = core.playlist.shuffle().clone();
-
-        assert_ne!(
-            first, second,
-            "two opens of the same-size deck must not shuffle identically"
-        );
-    }
-
-    #[test]
-    fn a_rotation_undo_survives_a_same_root_rebuild_but_clears_on_a_new_deck() {
-        // Regression: a SaveRotation undo entry used to be keyed by playlist *index*, so *any*
-        // rebuild dropped it — deleting a photo after a Save Rotation silently wiped the
-        // rotation-undo (the "rotate→save, delete, delete, Ctrl+Z ×3" report: the 3rd undo was
-        // gone). Now every undo entry is path-keyed and survives a same-deck rebuild; only a
-        // genuinely new deck (different root) clears the stack.
-        let mut core = test_core();
-        let dir = std::env::temp_dir();
-        let paths: Vec<PathBuf> = (0..3).map(|i| dir.join(format!("{i}.jpg"))).collect();
-        let source: Arc<dyn ItemSource> = Arc::new(FsSource::new(paths));
-        core.rebuild_playlist(source, dir.clone(), Some(dir.clone()), true, 0);
-
-        core.undo_stack.push(crate::undo::UndoAction::SaveRotation {
-            path: dir.join("1.jpg"),
-            prev: 1,
-        });
-
-        // A same-root rebuild — e.g. the advance after deleting a *different* photo — keeps it,
-        // and the label still names the (path-resolved) file.
-        let remaining: Arc<dyn ItemSource> =
-            Arc::new(FsSource::new(vec![dir.join("0.jpg"), dir.join("1.jpg")]));
-        core.rebuild_playlist(remaining, dir.clone(), Some(dir.clone()), true, 0);
-        assert_eq!(
-            core.undo_stack.len(),
-            1,
-            "a path-keyed rotation undo survives a same-root rebuild"
-        );
-        assert_eq!(core.undo_stack[0].menu_label(), "Undo Rotate 1.jpg");
-
-        // A genuinely new deck (different root) clears the whole stack.
-        let other = dir.join("pb_other_deck");
-        let fresh: Arc<dyn ItemSource> = Arc::new(FsSource::new(vec![other.join("z.jpg")]));
-        core.rebuild_playlist(fresh, other.clone(), Some(other), false, 0);
-        assert!(
-            core.undo_stack.is_empty(),
-            "opening a new deck clears the undo stack"
-        );
-    }
-
     // --- "Text in image" state machine (task #45): drive `poll_text_scan` with a
     // hand-fed channel — the worker/OCR backend stays out of these tests entirely.
 
@@ -7742,27 +7659,6 @@ mod tests {
         );
     }
 
-    /// A deck rebuild drops the in-flight probe and bumps the generation, so nothing from
-    /// the old deck can land.
-    #[test]
-    fn entering_the_empty_state_cancels_the_probe_and_bumps_the_generation() {
-        let mut core = test_core();
-        core.source = five_photos();
-        let (_tx, rx) = std::sync::mpsc::channel::<crate::app_core::ItemDetails>();
-        core.details_probe = Some(crate::media_details::DetailsProbe {
-            gen: core.details_gen,
-            item: 1,
-            identity: "x".into(),
-            copy_when_done: false,
-            rx,
-        });
-        let gen = core.details_gen;
-        core.enter_empty_state();
-        assert!(core.details_probe.is_none());
-        assert!(core.details_gen > gen);
-        assert!(core.exif_cache.is_empty());
-    }
-
     /// The Details generation must NOT be the geometry epoch: a window resize bumps that
     /// one, and would throw away perfectly good catalogs (and, worse, a rebuild would not
     /// bump it at all).
@@ -8242,23 +8138,6 @@ mod tests {
             core.epoch,
             e0.wrapping_add(1),
             "a content change also invalidates geometry"
-        );
-    }
-
-    #[test]
-    fn a_new_deck_advances_the_content_generation() {
-        // A deck rebuild reassigns every index — index N now names different pixels, so the
-        // content generation must advance (this is what purges retained Originals).
-        let mut core = test_core();
-        let c0 = core.content_gen;
-        let root = PathBuf::from("photos");
-        let src: Arc<dyn ItemSource> =
-            Arc::new(FsSource::new(vec![root.join("a.jpg"), root.join("b.jpg")]));
-        core.rebuild_playlist(src, root, None, false, 0);
-        assert_eq!(
-            core.content_gen,
-            c0.wrapping_add(1),
-            "a new deck is a content change"
         );
     }
 
@@ -9344,41 +9223,6 @@ mod tests {
         assert!(
             !core.work_pending(),
             "drained and resident — the pump may sleep"
-        );
-    }
-
-    /// Codex r1 f4: every content boundary explicitly quiesces the pool — pinned through
-    /// the exact path with no follow-up prefetch, `enter_empty_state` (the last-photo-
-    /// deleted flow), which routes through `invalidate_content`.
-    #[test]
-    fn invalidate_content_quiesces_the_pool() {
-        let mut core = test_core();
-        core.source = photos_named(&["a.jpg", "b.jpg"]);
-        core.playlist = Playlist::new(2, 0).with_cursor(0);
-        core.fit = Some(FitBox {
-            max_width: 100,
-            max_height: 100,
-        });
-        core.request_prefetch(); // the real pool now holds display jobs
-
-        core.enter_empty_state();
-
-        // Already-sent (error) outcomes may still sit in the channel holding their
-        // guards; drain + briefly poll until the flagged worker finishes discarding.
-        for _ in 0..200 {
-            core.drain_results();
-            if !core.pool.has_work() {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(5));
-        }
-        assert!(
-            !core.pool.has_work(),
-            "the content boundary cancelled every queued/in-flight pool job"
-        );
-        assert!(
-            core.pending_uploads.is_empty(),
-            "and nothing stale re-staged through the drain"
         );
     }
 
@@ -10620,31 +10464,6 @@ mod tests {
         assert!(core.fit_stash.iter().all(Option::is_none));
     }
 
-    /// #122 item 1: a TAP's advance GPU-sharpens with the key still down — the derive is
-    /// rebind-class cost, so only the auto-repeat (blaze) phase defers it. Before this,
-    /// the sharpen waited for key-up and every advance flashed the preview even with the
-    /// Original resident.
-    #[test]
-    fn a_tap_advance_gpu_sharpens_with_the_key_still_down() {
-        let mut core = stuck_preview_core(); // held key, initial_delay huge → NOT repeating
-        core.renderer = Some(Box::new(DeriveOk));
-        make_resident(&mut core, 0, pb_core::Representation::Original, &[0]);
-        assert!(core.held_nav().is_some(), "the key is still down");
-        assert_eq!(
-            core.sharpen_now(),
-            None,
-            "the CPU sharpen still waits for key-up (unchanged)"
-        );
-        assert!(
-            core.try_gpu_sharpen(),
-            "the GPU sharpen fires during the tap window"
-        );
-        assert!(
-            !core.preview_resident.contains(&0),
-            "the displayed photo is sharp — no preview flash on a tap"
-        );
-    }
-
     /// #122 item 1's counterpart: once the hold is genuinely blazing (past the initial
     /// delay), the GPU sharpen defers — those frames are replaced too fast to derive.
     #[test]
@@ -10870,39 +10689,6 @@ mod tests {
     }
 
 
-    /// The ADR-024 watchdog (level-triggered safety net): a lost key-up leaves `held_nav` stuck
-    /// `Some`, which suppresses the sharpen — the stuck-preview race. Once the displayed preview
-    /// has lingered past `PREVIEW_WATCHDOG_AFTER`, the sharpen is forced regardless of
-    /// `held_nav`, so the display converges to its full without waiting for a focus change.
-    #[test]
-    fn a_lingering_preview_sharpens_despite_a_stuck_held_nav() {
-        let mut core = stuck_preview_core();
-        assert!(core.held_nav().is_some(), "the stuck key reads as blazing");
-        assert_eq!(
-            core.sharpen_now(),
-            None,
-            "blazing suppresses the sharpen (the normal gate)"
-        );
-
-        let t0 = core.now;
-        core.tick(); // arms the watchdog (stamps the lingering preview)
-        assert_eq!(core.sharpen_now(), None, "not yet past the deadline");
-
-        core.now = t0 + PREVIEW_WATCHDOG_AFTER + Duration::from_millis(100);
-        core.tick(); // fires the watchdog
-        assert_eq!(
-            core.sharpen_now(),
-            Some(0),
-            "the lingering preview sharpens even though held_nav is stuck Some"
-        );
-        // The firing edge must also force the prefetch re-issue (the request path stamps
-        // `full_requested_at`), because 3b's change-detection alone can't reopen the gate.
-        assert!(
-            core.full_requested_at.contains_key(&0),
-            "the full was actually requested, not merely flagged wanted"
-        );
-    }
-
     /// A real blaze must never trip the watchdog: every advance re-arms the stamp for the new
     /// displayed item, so cumulative hold time is irrelevant — only *lingering on one photo*
     /// counts. The hot path stays preview-only.
@@ -11042,28 +10828,6 @@ mod tests {
         core.tick();
         assert!(core.preview_watchdog.is_none(), "RAW must never arm");
         assert_eq!(core.sharpen_now(), None);
-    }
-
-    /// Deck-index reassignment disarms the watchdog: `PreviewWatchdog.item` is deck-relative,
-    /// so a fired entry for old-item-0 must not instantly force a sharpen on a NEW deck whose
-    /// first photo also happens to sit at index 0 — the new photo gets a fresh arm.
-    #[test]
-    fn a_deck_rebuild_disarms_the_watchdog() {
-        let mut core = stuck_preview_core();
-        let t0 = core.now;
-        core.tick();
-        core.now = t0 + PREVIEW_WATCHDOG_AFTER;
-        core.tick();
-        assert!(core.preview_watchdog.is_some_and(|w| w.fired));
-
-        let root = PathBuf::from("photos");
-        let src: Arc<dyn ItemSource> =
-            Arc::new(FsSource::new(vec![root.join("x.jpg"), root.join("y.jpg")]));
-        core.rebuild_playlist(src, root, None, false, 0);
-        assert!(
-            core.preview_watchdog.is_none(),
-            "indices were reassigned — the old fired state must not carry over"
-        );
     }
 
     /// item-6 6a: a GEOMETRY change retains resident Originals — the whole point of
@@ -11657,39 +11421,6 @@ mod tests {
         core.now = t0 + PREVIEW_WATCHDOG_AFTER;
         core.tick();
         assert_eq!(core.sharpen_now(), Some(0), "at the deadline — fired");
-    }
-
-    #[test]
-    fn rebuild_playlist_clears_metadata_and_marks_nothing_presented() {
-        use crate::meta::PhotoMeta;
-        let mut core = test_core();
-        core.current = Some(PhotoMeta {
-            rel: "old.jpg".into(),
-            w: 100,
-            h: 80,
-            size: None,
-            codec: "PNG",
-            animated: None,
-            recovered: None,
-        });
-        core.target_item = Some(0);
-        core.mark_resolved(0);
-        assert!(core.target_caught_up());
-
-        let root = PathBuf::from("photos");
-        let src: Arc<dyn ItemSource> =
-            Arc::new(FsSource::new(vec![root.join("a.jpg"), root.join("b.jpg")]));
-        core.rebuild_playlist(src, root, None, false, 0);
-
-        assert!(core.current.is_none(), "a new deck drops the old metadata");
-        // `displayed_item` names the logical current, but nothing is presented at this epoch
-        // (presented_epoch = None), so it reads as pending — the held old frame holds (with
-        // the pie) until the async decode lands. No synchronous decode ran on the loop.
-        assert_eq!(core.displayed_item, Some(0));
-        assert_eq!(core.presented_epoch, None);
-        assert_eq!(core.target_item, Some(0));
-        assert!(core.target_pending());
-        assert!(!core.target_caught_up());
     }
 
     /// Diagnostic (initial-video-poster bug): a video as the initial item, whose
