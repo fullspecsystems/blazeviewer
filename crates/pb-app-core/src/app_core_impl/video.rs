@@ -1638,3 +1638,1006 @@ impl AppCore {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app_core_impl::test_support::{core_with_a_native_video, seed_details, test_core, track};
+    
+
+    /// **Regression.** Subtitles gated on `video_session_active()`, which is false for the
+    /// Native backend. When the macOS sample-buffer route became the default for MKV/WebM,
+    /// that silently turned subtitles off for exactly the files they were built for — no
+    /// error, no failing test, just nothing on screen.
+    ///
+    /// "Is a video on screen" must not depend on which backend is drawing it.
+    #[test]
+    fn a_native_backed_video_counts_as_showing() {
+        let core = core_with_a_native_video();
+        assert!(
+            core.video_showing(),
+            "the sample-buffer / AVPlayer route is still a video playing"
+        );
+        assert!(
+            !core.video_session_active(),
+            "and it is NOT session-backed — which is exactly why the old check failed"
+        );
+    }
+
+    /// The playhead has to come from whichever backend is live. On Native the shell owns
+    /// the clock and reports it ~20 Hz; before the first report there is simply no answer,
+    /// and inventing one would put cues out of step with the picture.
+    #[test]
+    fn the_native_playhead_comes_from_the_shells_reports() {
+        let mut core = core_with_a_native_video();
+        assert_eq!(core.video_position(), None, "no report yet — no answer");
+
+        core.native_video_progress(7, 12.5, 100.0);
+        assert_eq!(core.video_position(), Some(Duration::from_secs_f64(12.5)));
+
+        core.native_video_progress(7, 13.0, 100.0);
+        assert_eq!(core.video_position(), Some(Duration::from_secs_f64(13.0)));
+    }
+
+    /// A report from a torn-down player must never move the live one's clock — the same
+    /// session-identity rule every other native callback follows.
+    #[test]
+    fn a_stale_sessions_progress_does_not_move_the_playhead() {
+        let mut core = core_with_a_native_video();
+        core.native_video_progress(7, 12.5, 100.0);
+        core.native_video_progress(999, 88.0, 100.0); // a straggler from a dead session
+        assert_eq!(
+            core.video_position(),
+            Some(Duration::from_secs_f64(12.5)),
+            "a straggler must not be believed"
+        );
+    }
+
+    /// A core with a live `VideoSession` on item 0 — the state `tick_subtitles` only
+    /// does real work in, and the state the switched-off bug needed to appear.
+    fn core_with_a_playing_video() -> AppCore {
+        let mut core = test_core();
+        let (session, _io) =
+            crate::video_session::VideoSession::new(pb_decode::VideoSessionId(1), 1 << 20);
+        core.video = Some(crate::video_native::ActiveVideoBackend::Session(
+            crate::video_session::ActiveVideo::new(session, 0),
+        ));
+        core.displayed_item = Some(0);
+        // Leak the producer end: dropping it would fail the session, and this core never
+        // decodes anything — it exists to make `video_session_active()` true.
+        std::mem::forget(_io);
+        assert!(
+            core.video_session_active(),
+            "the fixture must actually be active"
+        );
+        core
+    }
+
+    /// **Regression.** Pressing `C` with a cue on screen left it frozen there forever.
+    ///
+    /// `update()` hides correctly when the mode is Off — and a unit test proved it. But
+    /// the tick had its own `if Off { return }` fast path that never called `update()`, so
+    /// the bitmap and its generation just sat there and the shell kept drawing the last
+    /// cue. The test passed; the feature was broken. This one drives `tick_subtitles`,
+    /// which is where the bug actually lived.
+    #[test]
+    fn switching_subtitles_off_clears_a_cue_that_is_on_screen() {
+        use crate::subtitle::SubtitleSelection;
+        let mut core = core_with_a_playing_video();
+        core.subtitles.selection = SubtitleSelection::automatic();
+        core.subtitles.force_showing_for_test();
+        let before = core.subtitles.gen();
+
+        core.subtitles.selection = SubtitleSelection::off();
+        core.tick_subtitles();
+
+        assert!(
+            core.subtitles.bitmap().is_none(),
+            "the last cue must not survive being switched off"
+        );
+        assert!(
+            core.subtitles.gen() > before,
+            "the shell only stops drawing when the generation moves"
+        );
+    }
+
+    /// The Windows (WASAPI) currency accessors (task #99): each row resolves in
+    /// whichever currency its locator carries, a stream resolves back to its row, and a
+    /// row without a locator in the asked currency answers `-1` — the shell's cue to try
+    /// the other currency or refuse. Both currencies coexist because the engine takes
+    /// either (FFmpeg's own catalog carries `FfStream`; MF's fallback catalog `MfStream`).
+    #[test]
+    fn audio_stream_accessors_round_trip_in_both_currencies() {
+        let mut core = core_with_a_native_video();
+        let mut a0 = track("AAC", "eng");
+        a0.id.local_id = 1;
+        let mut a1 = track("AC-3", "fra");
+        a1.id.local_id = 2;
+        let mut catalog = pb_decode::MediaTrackCatalog::new(
+            1,
+            pb_decode::MediaBackend::FFmpeg,
+            pb_decode::TrackSet::complete(vec![a0, a1]),
+            pb_decode::TrackSet::complete(vec![]),
+        );
+        // Row 0 is MF-located (the fallback-catalog shape), row 1 FFmpeg-located.
+        catalog.set_locator(1, pb_decode::tracks::TrackLocator::MfStream(3));
+        catalog.set_locator(2, pb_decode::tracks::TrackLocator::FfStream(2));
+        seed_details(&mut core, 0, Some(catalog), Some(true));
+
+        assert_eq!(core.audio_row_mf_stream(0), 3);
+        assert_eq!(core.audio_row_mf_stream(1), -1, "no MF twin → refuse");
+        assert_eq!(core.audio_row_mf_stream(9), -1, "out of range → refuse");
+
+        assert_eq!(core.audio_row_for_mf_stream(3), 0);
+        assert_eq!(core.audio_row_for_mf_stream(9), -1);
+        assert_eq!(core.audio_row_for_ff_stream(2), 1);
+        assert_eq!(core.audio_row_for_ff_stream(0), -1);
+    }
+
+    /// R4 (overhaul plan 1D): a held-seek run pauses audio ONCE and commits ONE
+    /// audio seek + resume (in that order) at the settled final landing — never
+    /// stopping/seeking/refilling the audio decoder per intermediate target.
+    #[test]
+    fn held_seek_run_coalesces_to_one_audio_commit() {
+        use crate::video::{
+            SeekGeneration, VideoProducerEvent, VideoProducerMsg, VideoSessionId, VideoSessionState,
+        };
+        use crate::video_session::{ActiveVideo, VideoSession, VideoSessionIo};
+        use pb_decode::video::VideoColorInfo;
+
+        let mut core = test_core();
+        let sid = VideoSessionId(9);
+        let (session, io) = VideoSession::new(sid, 4);
+        core.video = Some(ActiveVideoBackend::Session(ActiveVideo::new(session, 0)));
+        let frame = |pts_ms: u64, generation: SeekGeneration| pb_decode::VideoFrame {
+            session_id: sid,
+            seek_generation: generation,
+            pts: Duration::from_millis(pts_ms),
+            width: 1,
+            height: 1,
+            format: pb_decode::PixelFormat::Rgba8,
+            pixels: vec![0; 4],
+            color: VideoColorInfo::srgb(),
+        };
+        io.events
+            .send(VideoProducerEvent::Opened {
+                session_id: sid,
+                duration: Some(Duration::from_secs(60)),
+                width: 1,
+                height: 1,
+                has_audio: false,
+                frame_bytes: 4,
+            })
+            .unwrap();
+        io.events
+            .send(VideoProducerEvent::Frame(frame(0, SeekGeneration::FIRST)))
+            .unwrap();
+        io.events
+            .send(VideoProducerEvent::Frame(frame(33, SeekGeneration::FIRST)))
+            .unwrap();
+        core.poll_video();
+        assert_eq!(
+            core.video.as_ref().unwrap().state(),
+            VideoSessionState::Playing
+        );
+
+        // The generation of the last SeekTo the producer saw (drains the inbox).
+        let last_seek_gen = |io: &VideoSessionIo| {
+            let mut generation = None;
+            while let Ok(msg) = io.msgs.try_recv() {
+                if let VideoProducerMsg::SeekTo { generation: g, .. } = msg {
+                    generation = Some(g);
+                }
+            }
+            generation.expect("a SeekTo reached the producer")
+        };
+
+        core.effects.clear();
+        // Model the seek key being HELD for the whole run — the real held-key path
+        // sets `video_seek_last` each repeat (`apply_view_holds`), and the adaptive
+        // audio commit keys off it: while the key is down, only the full settle window
+        // applies, so intermediate targets never commit (below). A bare `video_seek`
+        // wouldn't set it, so set it explicitly to model the hold.
+        core.video_seek_last = Some(core.now);
+        // Held repeat: two forward seeks 200 ms apart, each landing quickly.
+        core.video_seek(false);
+        let gen1 = last_seek_gen(&io);
+        io.events
+            .send(VideoProducerEvent::Frame(frame(2000, gen1)))
+            .unwrap();
+        io.events
+            .send(VideoProducerEvent::Frame(frame(2033, gen1)))
+            .unwrap();
+        core.now += Duration::from_millis(200);
+        core.poll_video(); // gen1 lands mid-run
+        core.video_seek(false);
+        let gen2 = last_seek_gen(&io);
+        io.events
+            .send(VideoProducerEvent::Frame(frame(4000, gen2)))
+            .unwrap();
+        io.events
+            .send(VideoProducerEvent::Frame(frame(4033, gen2)))
+            .unwrap();
+        core.now += Duration::from_millis(100);
+        core.poll_video(); // gen2 lands; run not settled yet (100 < 250 ms)
+
+        let pauses = |core: &AppCore| {
+            core.effects
+                .iter()
+                .filter(|e| matches!(e, contract::CoreEffect::PauseVideoAudio))
+                .count()
+        };
+        let seeks = |core: &AppCore| {
+            core.effects
+                .iter()
+                .filter(|e| matches!(e, contract::CoreEffect::SeekVideoAudio { .. }))
+                .count()
+        };
+        let resumes = |core: &AppCore| {
+            core.effects
+                .iter()
+                .filter(|e| matches!(e, contract::CoreEffect::ResumeVideoAudio))
+                .count()
+        };
+        assert_eq!(pauses(&core), 1, "audio pauses once at run begin");
+        assert_eq!(seeks(&core), 0, "no audio seek for intermediate targets");
+        assert_eq!(resumes(&core), 0, "audio stays paused mid-run");
+
+        // The run settles → exactly one commit: seek to the LANDED position,
+        // then resume, in that order.
+        core.now += VIDEO_SEEK_AUDIO_SETTLE;
+        core.poll_video();
+        assert_eq!(pauses(&core), 1);
+        assert_eq!(seeks(&core), 1, "one audio seek per run");
+        assert_eq!(resumes(&core), 1, "one resume per run");
+        let seek_at = core.effects.iter().position(
+            |e| matches!(e, contract::CoreEffect::SeekVideoAudio { position } if *position == Duration::from_millis(4000)),
+        );
+        let resume_at = core
+            .effects
+            .iter()
+            .position(|e| matches!(e, contract::CoreEffect::ResumeVideoAudio));
+        assert!(
+            seek_at.expect("seek to the landed pts") < resume_at.expect("resume"),
+            "audio seeks before it resumes"
+        );
+
+        // A later poll adds nothing — the commit is one-shot.
+        core.now += Duration::from_millis(100);
+        core.poll_video();
+        assert_eq!((seeks(&core), resumes(&core)), (1, 1));
+    }
+
+    /// Task #4 follow-up: a DISCRETE tap — the seek key already released — commits its
+    /// audio seek after the short [`VIDEO_SEEK_AUDIO_QUIET`], NOT the full settle
+    /// window, so audio lands with the picture instead of ~172 ms behind it (measured).
+    /// The held run above proves the slow path still coalesces; this proves a tap is
+    /// fast, and the two differ only by whether the key is down.
+    #[test]
+    fn a_released_tap_commits_audio_after_the_short_quiet() {
+        use crate::video::{
+            SeekGeneration, VideoProducerEvent, VideoProducerMsg, VideoSessionId, VideoSessionState,
+        };
+        use crate::video_session::{ActiveVideo, VideoSession};
+        use pb_decode::video::VideoColorInfo;
+
+        let mut core = test_core();
+        let sid = VideoSessionId(9);
+        let (session, io) = VideoSession::new(sid, 4);
+        core.video = Some(ActiveVideoBackend::Session(ActiveVideo::new(session, 0)));
+        let frame = |pts_ms: u64, generation: SeekGeneration| pb_decode::VideoFrame {
+            session_id: sid,
+            seek_generation: generation,
+            pts: Duration::from_millis(pts_ms),
+            width: 1,
+            height: 1,
+            format: pb_decode::PixelFormat::Rgba8,
+            pixels: vec![0; 4],
+            color: VideoColorInfo::srgb(),
+        };
+        io.events
+            .send(VideoProducerEvent::Opened {
+                session_id: sid,
+                duration: Some(Duration::from_secs(60)),
+                width: 1,
+                height: 1,
+                has_audio: false,
+                frame_bytes: 4,
+            })
+            .unwrap();
+        io.events
+            .send(VideoProducerEvent::Frame(frame(0, SeekGeneration::FIRST)))
+            .unwrap();
+        io.events
+            .send(VideoProducerEvent::Frame(frame(33, SeekGeneration::FIRST)))
+            .unwrap();
+        core.poll_video();
+        assert_eq!(
+            core.video.as_ref().unwrap().state(),
+            VideoSessionState::Playing
+        );
+
+        core.effects.clear();
+        // The key is UP (a single tap already released) — the release signal.
+        core.video_seek_last = None;
+        core.video_seek(false);
+        let generation = {
+            let mut g = None;
+            while let Ok(msg) = io.msgs.try_recv() {
+                if let VideoProducerMsg::SeekTo { generation, .. } = msg {
+                    g = Some(generation);
+                }
+            }
+            g.expect("a SeekTo reached the producer")
+        };
+        // Two frames satisfy preroll (PREROLL_FRAMES) so the seek lands, as the held
+        // test does; the landing anchors at the first frame's pts (2000).
+        io.events
+            .send(VideoProducerEvent::Frame(frame(2000, generation)))
+            .unwrap();
+        io.events
+            .send(VideoProducerEvent::Frame(frame(2033, generation)))
+            .unwrap();
+
+        // Just past the short quiet — and well below the full settle window.
+        assert!(VIDEO_SEEK_AUDIO_QUIET < VIDEO_SEEK_AUDIO_SETTLE);
+        core.now += VIDEO_SEEK_AUDIO_QUIET + Duration::from_millis(1);
+        core.poll_video();
+        let seeks = core
+            .effects
+            .iter()
+            .filter(|e| matches!(e, contract::CoreEffect::SeekVideoAudio { position } if *position == Duration::from_millis(2000)))
+            .count();
+        assert_eq!(
+            seeks, 1,
+            "a released tap commits after the short quiet, not the full window"
+        );
+    }
+
+    /// Task #94.2: leaving a video far enough into a long-enough clip remembers a
+    /// (rewound) resume position keyed by item; a near-start leave remembers nothing.
+    #[test]
+    fn stop_video_remembers_a_mid_clip_position() {
+        use crate::video::{VideoProducerEvent, VideoSessionId};
+        use crate::video_session::{ActiveVideo, VideoSession};
+
+        let mut core = test_core();
+        let sid = VideoSessionId(20);
+        let (session, io) = VideoSession::new(sid, 4);
+        core.video = Some(ActiveVideoBackend::Session(ActiveVideo::new(session, 3)));
+        io.events
+            .send(VideoProducerEvent::Opened {
+                session_id: sid,
+                duration: Some(Duration::from_secs(60)),
+                width: 1,
+                height: 1,
+                has_audio: false,
+                frame_bytes: 4,
+            })
+            .unwrap();
+        core.poll_video();
+        // Playhead at ~10 s (a seek sets desired_position without needing frames).
+        if let Some(v) = core
+            .video
+            .as_mut()
+            .and_then(ActiveVideoBackend::as_session_mut)
+        {
+            v.session.seek_to(Duration::from_secs(10), core.now, None);
+        }
+        core.stop_video();
+        assert_eq!(
+            core.video_resume.get(&3).copied(),
+            Some(Duration::from_secs(8)), // 10 s − RESUME_REWIND
+            "leaving mid-clip remembers the rewound position"
+        );
+
+        // A near-start leave remembers nothing (item 3's entry stays as-is; a new
+        // item 4 left at 2 s is not recorded).
+        let (session2, io2) = VideoSession::new(VideoSessionId(21), 4);
+        core.video = Some(ActiveVideoBackend::Session(ActiveVideo::new(session2, 4)));
+        io2.events
+            .send(VideoProducerEvent::Opened {
+                session_id: VideoSessionId(21),
+                duration: Some(Duration::from_secs(60)),
+                width: 1,
+                height: 1,
+                has_audio: false,
+                frame_bytes: 4,
+            })
+            .unwrap();
+        core.poll_video();
+        if let Some(v) = core
+            .video
+            .as_mut()
+            .and_then(ActiveVideoBackend::as_session_mut)
+        {
+            v.session.seek_to(Duration::from_secs(2), core.now, None);
+        }
+        core.stop_video();
+        assert_eq!(
+            core.video_resume.get(&4),
+            None,
+            "near-start is not remembered"
+        );
+    }
+
+    /// Task #94.2: a session started for an item with a remembered position seeks
+    /// there once it can (leaving Opening), holds the poster until then, and pauses
+    /// audio for the resume run.
+    #[test]
+    fn returning_to_a_video_resumes_at_the_remembered_position() {
+        use crate::video::{VideoProducerEvent, VideoProducerMsg, VideoSessionId};
+        use crate::video_session::{ActiveVideo, VideoSession};
+
+        let mut core = test_core();
+        let sid = VideoSessionId(22);
+        let (session, io) = VideoSession::new(sid, 4);
+        let mut av = ActiveVideo::new(session, 5);
+        av.resume_to = Some(Duration::from_secs(30)); // as start_video_session would set it
+        core.video = Some(ActiveVideoBackend::Session(av));
+        io.events
+            .send(VideoProducerEvent::Opened {
+                session_id: sid,
+                duration: Some(Duration::from_secs(120)),
+                width: 1,
+                height: 1,
+                has_audio: false,
+                frame_bytes: 4,
+            })
+            .unwrap();
+        core.poll_video();
+
+        // The resume seek fired to 30 s, and the one-shot target was consumed.
+        let v = core
+            .video
+            .as_ref()
+            .and_then(ActiveVideoBackend::as_session)
+            .expect("session");
+        assert_eq!(
+            v.resume_to, None,
+            "the resume target is consumed once applied"
+        );
+        assert_eq!(
+            v.session.desired_position(core.now),
+            Duration::from_secs(30),
+            "the session sought to the remembered position"
+        );
+        // The producer was told to seek to ~30 s (video Cues path).
+        let sought = std::iter::from_fn(|| io.msgs.try_recv().ok())
+            .any(|m| matches!(m, VideoProducerMsg::SeekTo { target, .. } if target == Duration::from_secs(30)));
+        assert!(sought, "a SeekTo(30s) reached the producer");
+    }
+
+    /// Task #94.2 (native path): the shell's periodic position report folds into
+    /// the resume map — mid-clip remembered (rewound), watched-to-end forgotten,
+    /// a stale session ignored.
+    #[test]
+    fn native_video_progress_records_and_forgets_resume() {
+        use crate::video::VideoSessionId;
+        use crate::video_native::NativeVideoProxy;
+
+        let mut core = test_core();
+        core.video = Some(ActiveVideoBackend::Native(NativeVideoProxy::new(
+            7,
+            VideoSessionId(30),
+            false,
+        )));
+        // Mid-clip → remembered, rewound by RESUME_REWIND.
+        core.native_video_progress(30, 40.0, 100.0);
+        assert_eq!(
+            core.video_resume.get(&7).copied(),
+            Some(Duration::from_secs(38))
+        );
+        // Near the end → forgotten, so returning restarts.
+        core.native_video_progress(30, 99.0, 100.0);
+        assert_eq!(core.video_resume.get(&7), None);
+        // Re-record mid-clip, then a wrong-session report must NOT touch it.
+        core.native_video_progress(30, 50.0, 100.0);
+        core.native_video_progress(999, 10.0, 100.0);
+        assert_eq!(
+            core.video_resume.get(&7).copied(),
+            Some(Duration::from_secs(48))
+        );
+    }
+
+    /// A paused seek commits the audio position on settle but never resumes —
+    /// paused stays paused (plan 1D).
+    #[test]
+    fn paused_seek_commits_audio_position_without_resume() {
+        use crate::video::{
+            SeekGeneration, VideoProducerEvent, VideoProducerMsg, VideoSessionId, VideoSessionState,
+        };
+        use crate::video_session::{ActiveVideo, VideoSession};
+        use pb_decode::video::VideoColorInfo;
+
+        let mut core = test_core();
+        let sid = VideoSessionId(10);
+        let (session, io) = VideoSession::new(sid, 4);
+        core.video = Some(ActiveVideoBackend::Session(ActiveVideo::new(session, 0)));
+        let frame = |pts_ms: u64, generation: SeekGeneration| pb_decode::VideoFrame {
+            session_id: sid,
+            seek_generation: generation,
+            pts: Duration::from_millis(pts_ms),
+            width: 1,
+            height: 1,
+            format: pb_decode::PixelFormat::Rgba8,
+            pixels: vec![0; 4],
+            color: VideoColorInfo::srgb(),
+        };
+        io.events
+            .send(VideoProducerEvent::Opened {
+                session_id: sid,
+                duration: Some(Duration::from_secs(60)),
+                width: 1,
+                height: 1,
+                has_audio: false,
+                frame_bytes: 4,
+            })
+            .unwrap();
+        io.events
+            .send(VideoProducerEvent::Frame(frame(0, SeekGeneration::FIRST)))
+            .unwrap();
+        io.events
+            .send(VideoProducerEvent::Frame(frame(33, SeekGeneration::FIRST)))
+            .unwrap();
+        core.poll_video();
+
+        // Pause, then seek: the landing presents once and stays paused.
+        if let Some(v) = core
+            .video
+            .as_mut()
+            .and_then(ActiveVideoBackend::as_session_mut)
+        {
+            v.session.pause(core.now);
+        }
+        core.effects.clear();
+        core.video_seek(false);
+        let generation = {
+            let mut generation = None;
+            while let Ok(msg) = io.msgs.try_recv() {
+                if let VideoProducerMsg::SeekTo { generation: g, .. } = msg {
+                    generation = Some(g);
+                }
+            }
+            generation.expect("a SeekTo reached the producer")
+        };
+        io.events
+            .send(VideoProducerEvent::Frame(frame(2000, generation)))
+            .unwrap();
+        core.now += VIDEO_SEEK_AUDIO_SETTLE;
+        core.poll_video();
+        assert_eq!(
+            core.video.as_ref().unwrap().state(),
+            VideoSessionState::Paused
+        );
+        assert!(
+            core.effects.iter().any(|e| matches!(
+                e,
+                contract::CoreEffect::SeekVideoAudio { position } if *position == Duration::from_millis(2000)
+            )),
+            "the paused audio player follows the landed position"
+        );
+        assert!(
+            !core
+                .effects
+                .iter()
+                .any(|e| matches!(e, contract::CoreEffect::ResumeVideoAudio)),
+            "paused stays paused"
+        );
+    }
+
+    /// Archive video playback: when the producer reports an audio track, the
+    /// `StartVideoAudio` effect carries the SAME `Arc`-shared in-RAM container the
+    /// producer reads (the `ActiveVideo::media` slot) — an archive entry has no
+    /// path, and the one-copy contract is the point of the slot.
+    #[test]
+    fn archive_video_audio_starts_from_the_shared_bytes() {
+        use crate::video::{VideoInput, VideoProducerEvent, VideoSessionId};
+        use crate::video_session::{ActiveVideo, VideoSession};
+
+        struct FakeArchive;
+        impl pb_source::ItemSource for FakeArchive {
+            fn len(&self) -> usize {
+                1
+            }
+            fn name(&self, _i: usize) -> &str {
+                "folder/clip.mp4"
+            }
+            fn bytes(&self, _i: usize) -> std::io::Result<Vec<u8>> {
+                Ok(b"fake".to_vec())
+            }
+        }
+
+        let mut core = test_core();
+        core.source = Arc::new(FakeArchive);
+        core.displayed_item = Some(0);
+
+        let sid = VideoSessionId(1);
+        let (session, io) = VideoSession::new(sid, 4);
+        let av = ActiveVideo::new(session, 0);
+        let data = std::sync::Arc::new(b"fake mp4 container".to_vec());
+        av.media
+            .set(VideoInput::Bytes {
+                data: data.clone(),
+                name: "folder/clip.mp4".into(),
+            })
+            .expect("fresh slot");
+        core.video = Some(ActiveVideoBackend::Session(av));
+        io.events
+            .send(VideoProducerEvent::Opened {
+                session_id: sid,
+                duration: Some(Duration::from_secs(2)),
+                width: 1,
+                height: 1,
+                has_audio: true,
+                frame_bytes: 4,
+            })
+            .unwrap();
+        core.effects.clear();
+        core.poll_video();
+
+        let started = core.effects.iter().find_map(|e| match e {
+            contract::CoreEffect::StartVideoAudio {
+                input, session_id, ..
+            } => Some((input.clone(), *session_id)),
+            _ => None,
+        });
+        let (input, got_sid) =
+            started.expect("Opened(has_audio) must start the shell audio player");
+        assert_eq!(got_sid, sid);
+        match input {
+            VideoInput::Bytes { data: d, name } => {
+                assert!(
+                    std::sync::Arc::ptr_eq(&d, &data),
+                    "the audio player must read the SAME buffer (one resident copy)"
+                );
+                assert_eq!(name, "folder/clip.mp4");
+            }
+            VideoInput::Path(_) => {
+                panic!("an archive entry must start audio from bytes, not a path")
+            }
+        }
+    }
+
+    /// Arrow-seek on the macOS **native** backend emits a relative, generation-bumped
+    /// `SeekVideoBy` intent (±2 s, Shift ±10 s; the shell resolves it against AVPlayer).
+    #[test]
+    fn native_arrow_seek_emits_relative_seek_intent() {
+        use crate::video::VideoSessionId;
+        use crate::video_native::{ActiveVideoBackend, NativeVideoProxy};
+
+        fn seek_of(core: &AppCore) -> Option<(u64, u64, i64)> {
+            core.effects.iter().find_map(|e| match e {
+                contract::CoreEffect::SeekVideoBy {
+                    session_id,
+                    generation,
+                    delta_ms,
+                } => Some((session_id.0, generation.0, *delta_ms)),
+                _ => None,
+            })
+        }
+
+        let mut core = test_core();
+        core.displayed_item = Some(0);
+        core.video = Some(ActiveVideoBackend::Native(NativeVideoProxy::new(
+            0,
+            VideoSessionId(7),
+            false,
+        )));
+
+        // Forward ±2 s; generation bumps off FIRST(0) → 1.
+        core.effects.clear();
+        core.video_seek(false);
+        assert_eq!(seek_of(&core), Some((7, 1, 2000)));
+
+        // Backward is a negative delta; generation keeps climbing.
+        core.effects.clear();
+        core.video_seek(true);
+        assert_eq!(seek_of(&core), Some((7, 2, -2000)));
+
+        // Shift widens the step to ±10 s.
+        core.mods.shift = true;
+        core.effects.clear();
+        core.video_seek(false);
+        assert_eq!(seek_of(&core), Some((7, 3, 10_000)));
+    }
+
+    /// The macOS archive-video byte stash is pulled exactly once — a second pull (a stale
+    /// or superseded session) gets nothing, never another session's container.
+    #[test]
+    fn pending_video_bytes_is_taken_once() {
+        let mut core = test_core();
+        assert!(
+            core.take_pending_video_bytes().is_empty(),
+            "none by default"
+        );
+        core.pending_video_bytes = Some(vec![1, 2, 3, 4]);
+        assert_eq!(core.take_pending_video_bytes(), vec![1, 2, 3, 4]);
+        assert!(core.take_pending_video_bytes().is_empty(), "consumed once");
+    }
+
+    /// A shell-generated archive-video poster becomes a synthetic full-decode `Outcome`
+    /// queued for the ring; a wrong-sized frame is dropped, but the in-flight guard always
+    /// clears so a later revisit can re-request.
+    #[test]
+    fn video_poster_ready_queues_a_synthetic_outcome() {
+        let mut core = test_core();
+
+        // Wrong pixel count (claims 4x4 but sends 10 bytes) → dropped, guard still cleared.
+        core.poster_inflight.insert(3, 1);
+        core.video_poster_ready(1, 3, 4, 4, vec![0u8; 10]);
+        assert!(
+            !core.poster_inflight.contains_key(&3),
+            "in-flight cleared even on a bad frame"
+        );
+        assert!(
+            core.pending_uploads.is_empty(),
+            "bad pixel count is dropped"
+        );
+
+        // A STALE request id (the marker now belongs to a newer request, #119 diff
+        // review): dropped whole — the replacement's marker survives.
+        core.poster_inflight.insert(4, 9);
+        core.video_poster_ready(2, 4, 2, 2, vec![255u8; 16]);
+        assert!(
+            core.poster_inflight.contains_key(&4),
+            "a straggler with a stale id must not consume the replacement's marker"
+        );
+        assert!(core.pending_uploads.is_empty(), "and installs nothing");
+        core.poster_inflight.remove(&4);
+
+        // Correct 2x2 RGBA8 (16 bytes) → queued as a full (non-preview) outcome for item 5.
+        core.poster_inflight.insert(5, 2);
+        core.video_poster_ready(2, 5, 2, 2, vec![255u8; 16]);
+        assert!(!core.poster_inflight.contains_key(&5));
+        assert_eq!(core.pending_uploads.len(), 1);
+        let o = &core.pending_uploads[0];
+        assert_eq!(o.key.item, 5);
+        assert_eq!(o.key.epoch, core.epoch);
+        assert!(o
+            .result
+            .as_ref()
+            .is_ok_and(|img| img.width == 2 && img.height == 2 && !img.is_preview));
+    }
+
+    /// The thin Swift round-trip races the Rust worker by construction, so it must never
+    /// overwrite a richer catalog-bearing entry just by landing second.
+    #[test]
+    fn the_shell_archive_round_trip_never_clobbers_a_richer_catalog() {
+        let mut core = test_core();
+        let cat = pb_decode::MediaTrackCatalog::new(
+            1,
+            pb_decode::MediaBackend::FFmpeg,
+            pb_decode::TrackSet::complete(vec![track("AAC", "eng")]),
+            pb_decode::TrackSet::complete(vec![]),
+        );
+        seed_details(&mut core, 2, Some(cat), Some(true));
+
+        core.archive_video_meta_ready(2, "HEVC".to_string(), 30_000, 5_000, true);
+
+        let d = core.exif_cache.get(&2).expect("still cached");
+        assert!(d.media.is_some(), "the catalog must survive");
+        assert!(
+            !d.fields.iter().any(|(k, _)| k == "Audio"),
+            "the placeholder Audio row must not come back"
+        );
+        // ...but it still populates an entry that has no catalog.
+        core.exif_cache.remove(&2);
+        core.archive_video_meta_ready(2, "HEVC".to_string(), 30_000, 5_000, true);
+        assert!(core
+            .exif_cache
+            .get(&2)
+            .expect("cached")
+            .fields
+            .iter()
+            .any(|(k, v)| k == "Video codec" && v == "HEVC"));
+    }
+
+    /// A shell-probed archive-video's facts become the inspector's rows (codec/fps/duration/
+    /// audio) and re-signal the panel; unknown duration is omitted.
+    #[test]
+    fn archive_video_meta_ready_builds_inspector_rows() {
+        let mut core = test_core();
+        core.archive_video_meta_ready(2, "HEVC".to_string(), 30_000, 5_000, true);
+        let rows = &core
+            .exif_cache
+            .get(&2)
+            .expect("rows cached for item 2")
+            .fields;
+        assert!(rows.iter().any(|(k, v)| k == "Video codec" && v == "HEVC"));
+        assert!(rows
+            .iter()
+            .any(|(k, v)| k == "Frame rate" && v == "30.00 fps"));
+        assert!(rows.iter().any(|(k, _)| k == "Duration"));
+        assert!(rows.iter().any(|(k, v)| k == "Audio" && v == "Yes"));
+        assert!(core
+            .effects
+            .iter()
+            .any(|e| matches!(e, contract::CoreEffect::PanelsChanged)));
+
+        // Unknown duration (-1) is omitted; no audio reads "No".
+        core.archive_video_meta_ready(3, "H.264".to_string(), 0, -1, false);
+        let rows = &core.exif_cache.get(&3).unwrap().fields;
+        assert!(
+            !rows.iter().any(|(k, _)| k == "Duration"),
+            "unknown duration omitted"
+        );
+        assert!(
+            !rows.iter().any(|(k, _)| k == "Frame rate"),
+            "unknown fps omitted"
+        );
+        assert!(rows.iter().any(|(k, v)| k == "Audio" && v == "No"));
+    }
+
+    /// Poster byte stashes are keyed by request id and consumed once.
+    #[test]
+    fn pending_poster_bytes_keyed_and_taken_once() {
+        let mut core = test_core();
+        core.pending_poster_bytes.insert(7, vec![9, 8, 7]);
+        assert!(
+            core.take_pending_poster_bytes(99).is_empty(),
+            "wrong id → nothing"
+        );
+        assert_eq!(core.take_pending_poster_bytes(7), vec![9, 8, 7]);
+        assert!(
+            core.take_pending_poster_bytes(7).is_empty(),
+            "consumed once"
+        );
+    }
+
+    /// Frame-step on the native backend emits a `StepVideo` intent for the displayed item,
+    /// and no-ops for a stale/mismatched item.
+    #[test]
+    fn native_frame_step_emits_step_intent() {
+        use crate::video::VideoSessionId;
+        use crate::video_native::{ActiveVideoBackend, NativeVideoProxy};
+
+        let mut core = test_core();
+        core.displayed_item = Some(0);
+        core.video = Some(ActiveVideoBackend::Native(NativeVideoProxy::new(
+            0,
+            VideoSessionId(9),
+            false,
+        )));
+
+        core.effects.clear();
+        assert!(core.video_frame_step(1));
+        assert!(core.effects.iter().any(|e| matches!(e,
+            contract::CoreEffect::StepVideo { session_id, forward: true } if session_id.0 == 9)));
+
+        // Displayed item moved on: the step is dropped (a stale key press).
+        core.displayed_item = Some(5);
+        core.effects.clear();
+        assert!(!core.video_frame_step(-1));
+        assert!(!core
+            .effects
+            .iter()
+            .any(|e| matches!(e, contract::CoreEffect::StepVideo { .. })));
+    }
+
+    /// Owner-reported (79.10 smoke): a resize drag stalls the presenter (the OS
+    /// modal loop) while audio plays on — playback must freeze *together* and
+    /// resume together at settle, exactly where it froze. (The clock-catch-up
+    /// alternative raced or seek-churned — tried, regressed, reverted.)
+    #[test]
+    fn resize_pauses_playback_and_settle_resumes_it() {
+        use crate::video::{VideoProducerEvent, VideoSessionId, VideoSessionState};
+        use crate::video_native::ActiveVideoBackend;
+        use crate::video_session::{ActiveVideo, VideoSession};
+
+        let mut core = test_core();
+        core.source = Arc::new(pb_source::FsSource::new(vec![std::path::PathBuf::from(
+            r"C:\nope\clip.mp4",
+        )]));
+        core.playlist = Playlist::new(1, 0);
+        core.displayed_item = Some(0);
+        let (session, io) = VideoSession::new(VideoSessionId(1), 16);
+        core.video = Some(ActiveVideoBackend::Session(ActiveVideo::new(session, 0)));
+        io.events
+            .send(VideoProducerEvent::Opened {
+                session_id: VideoSessionId(1),
+                duration: Some(Duration::from_secs(10)),
+                width: 2,
+                height: 2,
+                has_audio: false,
+                frame_bytes: 16,
+            })
+            .unwrap();
+        let frame = |pts_ms: u64| pb_decode::VideoFrame {
+            session_id: VideoSessionId(1),
+            seek_generation: crate::video::SeekGeneration::FIRST,
+            pts: Duration::from_millis(pts_ms),
+            width: 2,
+            height: 2,
+            format: pb_decode::PixelFormat::Rgba8,
+            pixels: vec![0; 16],
+            color: pb_decode::video::VideoColorInfo::srgb(),
+        };
+        io.events.send(VideoProducerEvent::Frame(frame(0))).unwrap();
+        io.events
+            .send(VideoProducerEvent::Frame(frame(33)))
+            .unwrap();
+        core.poll_video();
+        assert_eq!(
+            core.video.as_ref().unwrap().state(),
+            VideoSessionState::Playing
+        );
+
+        // A resize lands mid-playback: freeze together.
+        core.effects.clear();
+        core.resize(320, 200, 1.0);
+        assert_eq!(
+            core.video.as_ref().unwrap().state(),
+            VideoSessionState::Paused,
+            "resize pauses the session"
+        );
+        assert!(
+            core.effects
+                .iter()
+                .any(|e| matches!(e, contract::CoreEffect::PauseVideoAudio)),
+            "…and the audio with it"
+        );
+        assert!(core.video_paused_by_resize);
+
+        // The settle deadline passes: resume together, exactly where frozen.
+        core.effects.clear();
+        core.resize_settle_at = Some(core.now - Duration::from_millis(1));
+        core.handle(contract::CoreEvent::Tick(Instant::now()));
+        assert_eq!(
+            core.video.as_ref().unwrap().state(),
+            VideoSessionState::Playing,
+            "settle resumes the session"
+        );
+        assert!(
+            core.effects
+                .iter()
+                .any(|e| matches!(e, contract::CoreEffect::ResumeVideoAudio)),
+            "…and the audio with it"
+        );
+        assert!(!core.video_paused_by_resize, "one-shot");
+        drop(io);
+    }
+
+    /// Owner-reported (79.10 smoke): toggling fullscreen while a video played went
+    /// jerky — the resize-settle re-decode ran a synchronous poster decode over the
+    /// live frame and refilled the whole ring (neighbor poster storms) mid-playback.
+    /// A live video must defer the refresh; stopping the video re-issues it.
+    #[test]
+    fn geometry_change_during_video_defers_the_ring_refill() {
+        use crate::video::{VideoProducerEvent, VideoSessionId};
+        use crate::video_session::{ActiveVideo, VideoSession};
+
+        let mut core = test_core();
+        core.source = Arc::new(pb_source::FsSource::new(vec![std::path::PathBuf::from(
+            r"C:\nope\clip.mp4",
+        )]));
+        core.playlist = Playlist::new(1, 0);
+        core.displayed_item = Some(0);
+        let (session, io) = VideoSession::new(VideoSessionId(1), 1024);
+        core.video = Some(ActiveVideoBackend::Session(ActiveVideo::new(session, 0)));
+        io.events
+            .send(VideoProducerEvent::Opened {
+                session_id: VideoSessionId(1),
+                duration: Some(Duration::from_secs(10)),
+                width: 64,
+                height: 64,
+                has_audio: false,
+                frame_bytes: 64 * 64 * 4,
+            })
+            .unwrap();
+        core.poll_video();
+
+        // The settled geometry change defers instead of re-decoding.
+        core.refresh_after_geometry_change();
+        assert!(core.video_geometry_stale, "refresh deferred while playing");
+
+        // Stopping the video re-issues the prefetch (targets recomputed).
+        core.targets.clear();
+        core.stop_video();
+        assert!(!core.video_geometry_stale, "flag consumed");
+        assert!(
+            !core.targets.is_empty(),
+            "ring refill re-issued once playback ended"
+        );
+    }
+}
