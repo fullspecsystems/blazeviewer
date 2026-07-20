@@ -196,6 +196,9 @@ impl AppCore {
             last_nav: Nav::Forward,
             displayed_item: None,
             presented_epoch: None,
+            presented_kind: None,
+            #[cfg(test)]
+            rebind_count: 0,
             target_item: None,
             compare_pin: None,
             compare_return: None,
@@ -2179,6 +2182,9 @@ impl AppCore {
     /// range, and re-frames. `factor` > 1 zooms in, < 1 zooms out.
     pub fn zoom_step(&mut self, factor: f32) {
         self.view.zoom = (self.view.zoom * factor).clamp(MIN_ZOOM, MAX_ZOOM);
+        // #124: past 1:1 the fit-sized texture no longer has the pixels; bind the resident
+        // full-res Original. After the zoom math, never before (see `reconcile_zoom_rep`).
+        self.reconcile_zoom_rep();
         self.push_view();
         self.draw();
     }
@@ -3830,6 +3836,9 @@ impl AppCore {
             .last_cursor
             .unwrap_or([sw as f32 / 2.0, sh as f32 / 2.0]);
         self.view.zoom_about(factor, anchor, iw, ih, sw, sh);
+        // #124: AFTER `zoom_about` -- it reads the currently bound texture's dims to keep the
+        // cursor anchor pinned, so a rebind first would anchor against the wrong dims.
+        self.reconcile_zoom_rep();
         self.push_view();
         self.draw();
         // Zooming changes whether the image overflows — update the grab affordance
@@ -5827,6 +5836,17 @@ impl AppCore {
                 d.w, d.h, d.bytes
             );
         }
+        // #124: the user may be zoomed past 1:1 and deliberately bound to the full-res
+        // `Original`. Presenting the derived Fit here would revert the picture to the softer
+        // texture AND -- via `present_item` -> `view_for` -- reset the zoom to 1.0 mid-gesture.
+        // Keep the derive (it is exactly what a zoom back out wants); just don't bind it.
+        // House rule: background work may change residency or quality, never the presented
+        // representation.
+        if self.presented_kind == Some(pb_core::RepKind::Original)
+            && self.displayed_item == Some(item)
+        {
+            return true;
+        }
         // Present the derived Fit explicitly (canonical `present_item` path). Not
         // `try_present_target`: item-6's Part D re-present may have already resolved the target
         // with the ORIGINAL slot, and the caught-up shortcut would then leave the exact-size
@@ -5939,10 +5959,15 @@ impl AppCore {
         // and RESET the user's zoom/pan (and re-stamp `last_present`, skewing slideshow
         // dwell) — an in-place quality upgrade of the already-presented photo must not
         // touch the view (Codex).
-        if self.displayed_item == Some(item) {
+        // #124: same guard as `try_gpu_derive_fit` -- a zoom-selected `Original` outranks a
+        // freshly-sharpened `Fit`. The sharpen still happened and is banked for zoom-out.
+        if self.displayed_item == Some(item)
+            && self.presented_kind != Some(pb_core::RepKind::Original)
+        {
             if let Some(a) = self.renderer.as_mut() {
                 a.present_slot(dst);
             }
+            self.presented_kind = Some(pb_core::RepKind::Fit);
             self.draw();
         }
         true
@@ -6089,6 +6114,7 @@ impl AppCore {
                 // actually present (the round-3 recovery contract).
                 if self.displayed_item == Some(it) || self.target_item == Some(it) {
                     self.presented_epoch = None;
+                    self.presented_kind = None; // #124: see `invalidate_geometry`
                 }
             }
             let thumb_candidates: Vec<usize> = self.thumbs.failed.iter().copied().collect();
@@ -6689,6 +6715,137 @@ impl AppCore {
             },
             pb_core::RepKind::Original => pb_core::Representation::Original,
         }
+    }
+
+    /// Zoom deadband around 1.0 for the representation choice (task #124). Without it a zoom
+    /// that lands on 1.0000001 and back would flap the bound texture every tick.
+    const ZOOM_REP_EPS: f32 = 1e-3;
+
+    /// **Which representation `item` should be PRESENTED from, accounting for zoom** (task #124).
+    ///
+    /// This is deliberately separate from [`display_kind`](Self::display_kind): that one is
+    /// mode-derived and drives the *decode* path (`request_prefetch`, the sharpen loop, thumbs,
+    /// `slot_bytes_estimate`), where zoom must change nothing. This one is a *display-time*
+    /// choice over what is **already resident** — it never causes a decode.
+    ///
+    /// Why it exists: in Fit mode the resident texture is viewport-sized, so zooming past 1.0
+    /// magnified it and showed roughly `k`× less detail than the file holds (`k` = the
+    /// decode-to-fit scale). The full-res `Original` is already retained for the parked window
+    /// by the #106.7 tier — precisely so a Fit↔1:1 toggle is a rebind — and smooth zoom simply
+    /// had no path to it. Binding it is a pure rebind: no decode, no upload, no epoch bump.
+    ///
+    /// The swap is geometrically invisible because [`ViewTransform::base_scale`] is computed
+    /// from the *bound texture's own* dims, so the Fit rep's `1/k` exactly cancels the decode
+    /// scale `k` and both reps display at the same size (pinned by
+    /// `fit_and_original_reps_display_at_the_same_size` in `pb-render`).
+    pub fn present_kind(&self, item: usize) -> pb_core::RepKind {
+        // 1. Fill/Original already display the Original; only Fit mode has anything to switch.
+        if self.view.mode != ScaleMode::Fit {
+            return self.display_kind();
+        }
+        // 2. At or below 1:1 the fit texture is exactly right — and it is the cheaper binding.
+        if self.view.zoom <= 1.0 + Self::ZOOM_REP_EPS {
+            return pb_core::RepKind::Fit;
+        }
+        // 3. Nothing to switch to. Graceful: this is today's behaviour, just soft.
+        let Some(orig) = self.ring.original_slot(item) else {
+            return pb_core::RepKind::Fit;
+        };
+        // 4. A same-slot Original is the same pixels — switching buys nothing.
+        if self.ring.slot_for_rep(item, pb_core::RepKind::Fit) == Some(orig) {
+            return pb_core::RepKind::Fit;
+        }
+        // 5. A photo the fit box never downscaled (`k == 1.0`, so `downscale_to_fit` clamped)
+        //    has an Original identical to its Fit. Rebinding would churn for no pixels. Meta is
+        //    the cheap way to know the true size; when it's unknown, allow the swap (worst case
+        //    the two reps match and the rebind is a visual no-op).
+        if let (Some(m), Some(fit)) = (self.meta_cache.get(&item), self.fit) {
+            if m.w <= fit.max_width && m.h <= fit.max_height {
+                return pb_core::RepKind::Fit;
+            }
+        }
+        pb_core::RepKind::Original
+    }
+
+    /// The resident slot for [`present_kind`], falling back to the display slot.
+    fn present_slot_for(&self, item: usize) -> Option<usize> {
+        match self.present_kind(item) {
+            pb_core::RepKind::Original => self
+                .ring
+                .original_slot(item)
+                .or_else(|| self.display_slot(item)),
+            pb_core::RepKind::Fit => self.display_slot(item),
+        }
+    }
+
+    /// **Rebind the SAME item to a different resident representation, preserving the view**
+    /// (task #124). Returns whether the renderer took it.
+    ///
+    /// Deliberately NOT [`present_item`]: that is the *fresh landing* path and runs
+    /// [`view_for`](Self::view_for), which resets zoom/pan to the mode's natural framing —
+    /// it would cancel the very zoom that asked for this rebind. It also re-stamps
+    /// `last_present` (skewing slideshow dwell), re-emits the title, and records the `present`
+    /// metric, none of which apply to an in-place representation swap of the photo already on
+    /// screen. `try_gpu_sharpen` established this discipline for quality upgrades; this is the
+    /// same shape for representation swaps.
+    ///
+    /// State is committed only on a successful bind: `present_slot` returns `false` on a
+    /// core↔renderer ring desync, and recording a `presented_kind` we did not actually bind
+    /// would make the §3.6 guards lie about what is on screen.
+    fn rebind_same_item(&mut self, item: usize, slot: usize, kind: pb_core::RepKind) -> bool {
+        let view = self.view; // the CURRENT view — never `view_for`
+        let bound = match self.renderer.as_mut() {
+            Some(r) => {
+                r.set_view(view);
+                r.present_slot(slot)
+            }
+            // Headless (unit tests) counts as bound, matching `present_item`.
+            None => true,
+        };
+        if !bound {
+            eprintln!("[ring-desync] rebind_same_item({slot}) missed for item {item}");
+            return false;
+        }
+        self.ring.set_displayed(slot);
+        self.presented_kind = Some(kind);
+        #[cfg(test)]
+        {
+            self.rebind_count += 1;
+        }
+        self.draw();
+        true
+    }
+
+    /// Re-select the presented representation after a **zoom** change (task #124) — the one
+    /// place the three zoom mutators (`zoom_step`, `zoom_about_cursor`, the `apply_view_holds`
+    /// ramp) share.
+    ///
+    /// ⚠ Must run **after** the caller's zoom/pan math: [`ViewTransform::zoom_about`] reads the
+    /// *currently bound* texture dims via `placement()` to keep the cursor anchor pinned, so
+    /// rebinding first would do that math against the wrong dims.
+    ///
+    /// A no-op unless the decision actually flips, so a hold-to-zoom ramp rebinds once on the
+    /// way past 1:1 rather than every tick.
+    pub fn reconcile_zoom_rep(&mut self) {
+        let Some(item) = self.displayed_item else {
+            return;
+        };
+        // Don't fight an in-flight nav: the target's own present will pick the right rep.
+        if self.target_item != Some(item) {
+            return;
+        }
+        // A live video/animation draws via `set_image`, not the ring — never rebind under it.
+        if self.playback.is_some() {
+            return;
+        }
+        let want = self.present_kind(item);
+        if self.presented_kind == Some(want) {
+            return;
+        }
+        let Some(slot) = self.present_slot_for(item) else {
+            return;
+        };
+        self.rebind_same_item(item, slot, want);
     }
 
     /// The resident ring slot to display `item` from in the current scale mode: its slot in
@@ -7629,6 +7786,11 @@ impl AppCore {
         }
         self.effects.push(contract::CoreEffect::SetTitle(title));
         self.ring.set_displayed(slot);
+        // #124: record WHICH representation is now on screen. `present_item` is the fresh
+        // landing path and `view_for` above reset zoom to 1.0, so the mode-derived answer is
+        // the correct one here. The background quality paths read this to avoid rebinding
+        // their derived `Fit` over a zoom-selected `Original`.
+        self.presented_kind = Some(self.display_kind());
         // A fresh landing on a *different* photo re-arms the play hint. `anim_hint_shown_for`
         // is keyed to the item and only updated when landing on an animated one — so without
         // this, visiting a non-animated photo in between would leave it latched, and returning
@@ -8267,10 +8429,17 @@ impl AppCore {
                 // (it kept the preview's dims otherwise — visible in Original mode),
                 // then redraw it now-sharp. `present_slot` keeps the current view, so
                 // any zoom/pan is preserved.
-                if self.displayed_item == Some(item) {
+                // #124: don't bind the landed Fit over a zoom-selected `Original` (the third
+                // of the three background rebind paths). The comment above is right that
+                // `present_slot` preserves zoom/pan -- but it says nothing about the
+                // REPRESENTATION, which is exactly what a zoom chose.
+                if self.displayed_item == Some(item)
+                    && self.presented_kind != Some(pb_core::RepKind::Original)
+                {
                     if let Some(a) = self.renderer.as_mut() {
                         a.present_slot(slot);
                     }
+                    self.presented_kind = Some(pb_core::RepKind::Fit);
                     self.draw();
                 }
                 self.thumbs_capture(outcome);
@@ -8526,6 +8695,11 @@ impl AppCore {
     /// (current → compare-pin → neighbours) — the same priority order that decoded them.
     fn rebuild_ring(&mut self, retain: bool) {
         self.epoch = self.epoch.wrapping_add(1);
+        // #124: the representation we were bound to may not survive the rebuild (a retaining
+        // pass drops every Fit slot; a content pass resets outright). A stale `presented_kind`
+        // would make the background-rebind guards lie about what is actually on screen, so
+        // clear it here — the next present re-establishes it.
+        self.presented_kind = None;
         let fit = self.fit.unwrap_or(FitBox {
             max_width: 1,
             max_height: 1,
@@ -11406,6 +11580,10 @@ impl AppCore {
                 // Exponential (multiplicative) zoom about the screen center.
                 self.view.zoom =
                     (self.view.zoom * (rate * dir * dt).exp()).clamp(MIN_ZOOM, MAX_ZOOM);
+                // #124: cheap -- `reconcile_zoom_rep` returns immediately unless the
+                // representation decision actually flips, so a held ramp rebinds once on the
+                // way past 1:1 rather than every tick.
+                self.reconcile_zoom_rep();
                 changed = true;
             }
             None => {
@@ -18148,6 +18326,214 @@ mod tests {
         let slot = core.ring.slot_for(0).expect("resident");
         core.present_item(0, slot); // displayed + the mock records the presented slot
         core
+    }
+
+    // -- #124: smooth zoom binds the resident Original ----------------------------------
+
+    /// A core parked on item 0 with BOTH representations resident and a fit box that really
+    /// downscales, so `Fit` and `Original` are genuinely different pixels.
+    fn zoom_test_core() -> AppCore {
+        let mut core = test_core();
+        core.source = photos_named(&["a.jpg", "b.jpg"]);
+        core.playlist = Playlist::new(2, 0).with_cursor(0);
+        core.ring = ResidentRing::new(4);
+        core.fit = Some(FitBox {
+            max_width: 100,
+            max_height: 100,
+        });
+        core.view.mode = ScaleMode::Fit;
+        core.targets = vec![0];
+        core.target_item = Some(0);
+        core.renderer = Some(Box::new(StashOk::default()));
+        let fit_rep = core.rep_of(pb_core::RepKind::Fit);
+        make_resident(&mut core, 0, fit_rep, &[0]);
+        let slot = core.ring.slot_for(0).expect("resident");
+        core.present_item(0, slot);
+        make_resident(&mut core, 0, pb_core::Representation::Original, &[0]);
+        core
+    }
+
+    /// The core selector: only Fit mode + a real zoom + a resident, genuinely-larger
+    /// Original picks `Original`. Every other combination stays on `Fit`.
+    #[test]
+    fn present_kind_picks_the_original_only_when_zoom_needs_it_and_it_is_resident() {
+        let mut core = zoom_test_core();
+
+        // Rule 2: at or below 1:1 the fit texture is exactly right.
+        core.view.zoom = 1.0;
+        assert_eq!(core.present_kind(0), pb_core::RepKind::Fit, "1.0 stays Fit");
+        core.view.zoom = 0.5;
+        assert_eq!(
+            core.present_kind(0),
+            pb_core::RepKind::Fit,
+            "zoom out stays Fit"
+        );
+
+        // The win case.
+        core.view.zoom = 3.0;
+        assert_eq!(
+            core.present_kind(0),
+            pb_core::RepKind::Original,
+            "past 1:1 with a resident Original, bind it"
+        );
+
+        // Rule 1: Fill/Original modes already display the Original; nothing to switch.
+        core.view.mode = ScaleMode::Original;
+        assert_eq!(
+            core.present_kind(0),
+            core.display_kind(),
+            "mode wins in 1:1"
+        );
+        core.view.mode = ScaleMode::Fit;
+
+        // Rule 3: nothing resident to switch to; graceful, today's behaviour.
+        let mut bare = test_core();
+        bare.source = photos_named(&["a.jpg"]);
+        bare.playlist = Playlist::new(1, 0).with_cursor(0);
+        bare.ring = ResidentRing::new(4);
+        bare.fit = Some(FitBox {
+            max_width: 100,
+            max_height: 100,
+        });
+        bare.view.mode = ScaleMode::Fit;
+        let fit_rep = bare.rep_of(pb_core::RepKind::Fit);
+        make_resident(&mut bare, 0, fit_rep, &[0]);
+        bare.view.zoom = 3.0;
+        assert_eq!(
+            bare.present_kind(0),
+            pb_core::RepKind::Fit,
+            "no resident Original, stay on Fit rather than fail"
+        );
+    }
+
+    /// The whole point: zooming past 1:1 rebinds to the Original **without disturbing the
+    /// zoom**. `present_item` would have reset it to 1.0 via `view_for` - the trap this
+    /// feature would have died on.
+    #[test]
+    fn zooming_past_one_to_one_rebinds_to_the_original_and_keeps_the_zoom() {
+        let mut core = zoom_test_core();
+        assert_eq!(core.presented_kind, Some(pb_core::RepKind::Fit));
+
+        core.zoom_step(3.0);
+
+        assert_eq!(
+            core.presented_kind,
+            Some(pb_core::RepKind::Original),
+            "the zoom bound the full-res Original"
+        );
+        assert!(
+            (core.view.zoom - 3.0).abs() < 1e-6,
+            "the rebind must not reset the zoom (got {})",
+            core.view.zoom
+        );
+
+        // And zooming back out returns to the cheaper fit texture.
+        core.zoom_step(1.0 / 3.0);
+        assert_eq!(core.presented_kind, Some(pb_core::RepKind::Fit));
+        assert!((core.view.zoom - 1.0).abs() < 1e-6);
+    }
+
+    /// A hold-to-zoom ramp calls `reconcile_zoom_rep` every tick; it must rebind ONCE on the
+    /// way past 1:1, not on every tick.
+    #[test]
+    fn a_zoom_ramp_rebinds_once_not_every_tick() {
+        let mut core = zoom_test_core();
+        let before = core.rebind_count;
+        for _ in 0..20 {
+            core.view.zoom *= 1.1; // the ramp's own mutation
+            core.reconcile_zoom_rep();
+        }
+        assert_eq!(core.presented_kind, Some(pb_core::RepKind::Original));
+        assert_eq!(
+            core.rebind_count - before,
+            1,
+            "20 ramp ticks past the threshold must produce exactly one rebind"
+        );
+    }
+
+    /// #124 clobber path 2, the worst one: a GPU derive landing while the user is zoomed
+    /// must not run `present_item` (which resets zoom to 1.0 via `view_for`) nor bind its
+    /// Fit over the zoom-selected Original. Asserts the guard's own predicate, which is what
+    /// both derive sites branch on.
+    #[test]
+    fn a_gpu_derive_declines_to_bind_over_a_zoomed_original() {
+        let mut core = zoom_test_core();
+        core.zoom_step(3.0);
+        let bound = core.ring.original_slot(0);
+
+        let declines = core.presented_kind == Some(pb_core::RepKind::Original)
+            && core.displayed_item == Some(0);
+
+        assert!(declines, "the derive must decline to bind while zoomed");
+        assert!((core.view.zoom - 3.0).abs() < 1e-6, "zoom survives");
+        assert_eq!(core.ring.original_slot(0), bound, "still the Original");
+    }
+
+    /// #124 clobber paths 1 and 3: `try_gpu_sharpen` and the `drain_results` CPU sharpen
+    /// landing both rebind the Fit slot for the displayed item. Neither may fire while a
+    /// zoom has selected the Original - but both are wanted again once it zooms back out.
+    #[test]
+    fn a_landing_sharpen_declines_over_a_zoomed_original_but_returns_on_zoom_out() {
+        let mut core = zoom_test_core();
+        core.zoom_step(3.0);
+        let calls = core.rebind_count;
+
+        // Both sites share this guard shape.
+        let would_bind = core.displayed_item == Some(0)
+            && core.presented_kind != Some(pb_core::RepKind::Original);
+        assert!(
+            !would_bind,
+            "a landed Fit must not bind over the zoomed Original"
+        );
+
+        core.zoom_step(1.0 / 3.0);
+        assert_eq!(core.presented_kind, Some(pb_core::RepKind::Fit));
+        assert!(core.rebind_count > calls, "zoom-out rebinds the banked Fit");
+    }
+
+    /// The decode path must not notice the zoom at all: `decode_fit` / `display_rep` /
+    /// `display_kind` stay mode-derived, so the ring, the sharpen loop and the thumbnail
+    /// strip keep decoding exactly what they did before.
+    #[test]
+    fn a_zoom_rebind_does_not_disturb_the_decode_targets() {
+        let mut core = zoom_test_core();
+        let (fit, rep, kind) = (core.decode_fit(), core.display_rep(), core.display_kind());
+
+        core.zoom_step(8.0);
+
+        assert_eq!(core.presented_kind, Some(pb_core::RepKind::Original));
+        assert_eq!(core.decode_fit(), fit, "decode target changed");
+        assert_eq!(core.display_rep(), rep, "display rep changed");
+        assert_eq!(core.display_kind(), kind, "display kind changed");
+    }
+
+    /// A zoom must not rebind while a nav to another item is in flight - the target's own
+    /// present picks the right representation when it lands.
+    #[test]
+    fn zoom_does_not_rebind_mid_nav() {
+        let mut core = zoom_test_core();
+        core.target_item = Some(1); // nav in flight
+        core.view.zoom = 3.0;
+        core.reconcile_zoom_rep();
+        assert_eq!(
+            core.presented_kind,
+            Some(pb_core::RepKind::Fit),
+            "mid-nav zoom must not fight the pending present"
+        );
+    }
+
+    /// A geometry change rebuilds the ring, so the representation we were bound to may not
+    /// survive it. A stale `presented_kind` would make the background-rebind guards lie.
+    #[test]
+    fn invalidating_geometry_clears_the_presented_kind() {
+        let mut core = zoom_test_core();
+        core.zoom_step(3.0);
+        assert_eq!(core.presented_kind, Some(pb_core::RepKind::Original));
+        core.invalidate_geometry();
+        assert_eq!(
+            core.presented_kind, None,
+            "stale rep must not survive a rebuild"
+        );
     }
 
     /// The owner's "I literally just had these pixels" pin: capture at A, move to B,

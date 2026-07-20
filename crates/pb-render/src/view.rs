@@ -436,4 +436,55 @@ mod tests {
             "a real zoom is horizontally pannable"
         );
     }
+
+    /// The **no-jump invariant** behind task #124: swapping the bound texture between the
+    /// fit-sized `Fit` rep and the full-res `Original` rep must be geometrically invisible.
+    ///
+    /// It holds because `base_scale` is computed from *the bound texture's own dims*, so the
+    /// Fit rep's `1/k` exactly cancels the decode-to-fit scale `k`:
+    ///   Fit:      dims (ow*k, oh*k), base = min(sw/(ow*k), sh/(oh*k)) = 1/k  -> displayed = ow*k*zoom
+    ///   Original: dims (ow, oh),     base = min(sw/ow, sh/oh)         = k    -> displayed = ow*k*zoom
+    ///
+    /// This is the claim the whole #124 rebind rests on: if it were false, zooming would visibly
+    /// snap the moment the representation changed, and a geometry stash (#123) would be needed.
+    #[test]
+    fn fit_and_original_reps_display_at_the_same_size() {
+        // (orig_w, orig_h, screen_w, screen_h) — landscape, portrait, square, extreme aspect,
+        // and a source SMALLER than the screen (k clamps to 1, both reps identical).
+        let cases = [
+            (6000u32, 4000u32, 3840u32, 2160u32),
+            (4000, 6000, 3840, 2160),
+            (5000, 5000, 2560, 1440),
+            (12000, 2000, 3840, 2160),
+            (8256, 5504, 7680, 2160),
+            (800, 600, 3840, 2160), // k == 1.0: no downscale
+        ];
+        for (ow, oh, sw, sh) in cases {
+            // The decoder's scale, and the integer dims it rounds to (pb-decode `downscale_to_fit`).
+            let k = (sw as f64 / ow as f64).min(sh as f64 / oh as f64).min(1.0);
+            let fw = ((ow as f64 * k).round() as u32).max(1);
+            let fh = ((oh as f64 * k).round() as u32).max(1);
+            for rotation in [Rotation::R0, Rotation::R90, Rotation::R180, Rotation::R270] {
+                for zoom in [0.5f32, 1.0, 1.5, 3.0, 8.0, MAX_ZOOM] {
+                    let v = ViewTransform {
+                        mode: ScaleMode::Fit,
+                        rotation,
+                        zoom,
+                        pan: [0.0, 0.0],
+                    };
+                    let (fit_w, fit_h) = v.displayed_size(fw, fh, sw, sh);
+                    let (org_w, org_h) = v.displayed_size(ow, oh, sw, sh);
+                    // Sub-pixel rounding on the non-constraining axis is the only permitted
+                    // difference, and it must stay under the pan deadzone so it can never flip
+                    // a pan affordance. Scale the tolerance with zoom: a rounding error in the
+                    // texture is magnified by the zoom factor, which is expected and harmless.
+                    let tol = ViewTransform::PAN_DEADZONE_PX * zoom.max(1.0);
+                    assert!(
+                        (fit_w - org_w).abs() <= tol && (fit_h - org_h).abs() <= tol,
+                        "rep swap moved the image: {ow}x{oh} @ {sw}x{sh} {rotation:?} zoom {zoom}                          -> fit {fit_w}x{fit_h} vs original {org_w}x{org_h} (tol {tol})"
+                    );
+                }
+            }
+        }
+    }
 }

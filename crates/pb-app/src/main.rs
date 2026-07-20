@@ -856,6 +856,7 @@ impl App {
             last_nav: Nav::Forward,
             displayed_item: None,
             presented_epoch: None,
+            presented_kind: None,
             target_item: None,
             compare_pin: None,
             compare_return: None,
