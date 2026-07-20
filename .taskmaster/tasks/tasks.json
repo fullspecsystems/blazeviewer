@@ -1412,19 +1412,19 @@
             "id": 1,
             "title": "poster_walk.rs + rational_to_hns + FakeBackend tests",
             "description": "The driver, Best<F>, ScanOutcome, SeekError, and the one rational->hns conversion helper in video.rs. Nothing wired: pure addition, zero behavior change. Tests cover head-good-no-seeks, offset ordering/collapse, Refused from seek AND Stop from scan, cancel/deadline during the last failed seek, deadline inside a scan, Best first-max-wins + lazy consider_with.",
-            "status": "pending"
+            "status": "done"
           },
           {
             "id": 2,
             "title": "MF onto the driver (behavior-neutral)",
-            "description": "Delete mf_poster's deep_scan + Best; implement the trait. Keep scan's per-sample deadline check (:648) and the deadline creation point (:523); map both invalid-position sites; make reader retirement an explicit Drop-based contract (:730/:783/:892). Cannot be run on the Mac dev box - Windows cross-check + owner smoke.",
+            "description": "Delete mf_poster's deep_scan + Best; implement the trait. Keep scan's per-sample deadline check (:648) and the deadline creation point (:523); map both invalid-position sites; make reader retirement an explicit Drop-based contract (:730/:783/:892). Cannot be run on the Mac dev box - Windows cross-check + owner smoke. OWNER-OWNED: to be done on the Windows machine (2026-07-19 owner decision) \u2014 this Mac cannot compile or run MF.",
             "status": "pending"
           },
           {
             "id": 3,
             "title": "FFmpeg 3a: mechanical port + scRGB judge hoist (behavior-neutral)",
-            "description": "PosterWalk becomes the trait impl; Best<ff::frame::Video> gains ts_hns; hoist scrgb_frame_score/bright_enough into video.rs unchanged, with a no-resize judge path so FFmpeg's already-judge-sized pixels don't pay an extra clone.",
-            "status": "pending"
+            "description": "PosterWalk becomes the trait impl; Best<ff::frame::Video> gains ts_hns; hoist scrgb_frame_score/bright_enough into video.rs unchanged, with a no-resize judge path so FFmpeg's already-judge-sized pixels don't pay an extra clone. DONE 2026-07-19. One honest deviation from the plan's 'behavior-neutral' label: the driver's BETWEEN-BURST deadline check is structurally inherent to using walk_poster, so it arrives with 3a rather than 3b. It can only stop a walk the AVIO interrupt deadline would have killed anyway, returning best-so-far instead of an error. 3b keeps the genuinely subtle half: classifying an interrupt-triggered read error as cancellation vs elapsed-deadline vs real decode error.",
+            "status": "done"
           },
           {
             "id": 4,

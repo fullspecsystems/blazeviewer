@@ -610,6 +610,72 @@ pub fn poster_judge(rgba: &[u8], w: u32, h: u32) -> (bool, f32) {
     )
 }
 
+/// [`poster_judge`] for a candidate that is **already at judge scale**, skipping
+/// the reduction entirely (task #121). [`poster_judge_frame`] copies its input
+/// even when no reduction is needed (`w <= POSTER_JUDGE_WIDTH` → `to_vec()`), so
+/// a backend whose walk converter already outputs judge-sized pixels — FFmpeg's
+/// does — would otherwise pay one full buffer clone per candidate purely to
+/// satisfy the shared entry point.
+pub fn poster_judge_at_scale(rgba: &[u8], w: u32) -> (bool, f32) {
+    (poster_frame_is_good(rgba, w), poster_frame_score(rgba, w))
+}
+
+/// The poster walk's accept rule for an **fp16 scene-linear** frame — the linear
+/// equivalent of [`poster_frame_bright_enough`]'s ~10% sRGB floor (sRGB 0.10
+/// linearizes to ≈0.01). Subsampled like the RGBA8 walk.
+///
+/// Lives here beside the RGBA8 judge (task #121) so that **every** poster
+/// threshold in the tree has one home: this rule was private to the FFmpeg
+/// backend, which is exactly how the RGBA8 gate drifted between backends before
+/// [`POSTER_JUDGE_WIDTH`] was hoisted.
+pub fn poster_frame_bright_enough_scrgb(f16_bytes: &[u8]) -> bool {
+    let mut sum = 0.0f32;
+    let mut n = 0u32;
+    for px in f16_bytes.chunks_exact(8).step_by(8) {
+        let ch = |i: usize| half::f16::from_le_bytes([px[i], px[i + 1]]).to_f32();
+        // Rec.709 linear luma.
+        sum += 0.2126 * ch(0) + 0.7152 * ch(2) + 0.0722 * ch(4);
+        n += 1;
+    }
+    n > 0 && sum / n as f32 > 0.01
+}
+
+/// Poster score for an fp16 scene-linear frame, on the same scale as the RGBA8
+/// [`poster_frame_score`]. HDR tone-mapping detail is hard to judge in
+/// scene-linear, so this keeps the simple bright/not-bright split: a visible
+/// frame is "good" (stops the walk), a dark one isn't (seek deeper). Ordered by
+/// brightness so the fallback still prefers the least-black frame.
+///
+/// ⚠ KNOWN LIMIT (task #114 §2, unchanged by the #121 move): the white-title-card
+/// **detail** gate does not cover HDR films — this is brightness-only, so an HDR
+/// clip opening on a bright title card can still stop the walk there.
+pub fn poster_frame_score_scrgb(f16_bytes: &[u8]) -> f32 {
+    if poster_frame_bright_enough_scrgb(f16_bytes) {
+        1.0
+    } else {
+        let mut sum = 0.0f32;
+        let mut n = 0u32;
+        for px in f16_bytes.chunks_exact(8).step_by(8) {
+            let ch = |i: usize| half::f16::from_le_bytes([px[i], px[i + 1]]).to_f32();
+            sum += 0.2126 * ch(0) + 0.7152 * ch(2) + 0.0722 * ch(4);
+            n += 1;
+        }
+        if n == 0 {
+            0.0
+        } else {
+            (sum / n as f32).min(0.01) * 0.01 // below the good bar, ranked by brightness
+        }
+    }
+}
+
+/// [`poster_judge`] for an fp16 scene-linear candidate: `(is_good, score)`.
+pub fn poster_judge_scrgb(f16_bytes: &[u8]) -> (bool, f32) {
+    (
+        poster_frame_bright_enough_scrgb(f16_bytes),
+        poster_frame_score_scrgb(f16_bytes),
+    )
+}
+
 /// The native-capped edge for poster Originals (task #114 phase 3, owner
 /// decision: 4096 — exactly native for a 4K film, which displays 1:1 at
 /// 3840×2160 on a 7680-wide screen; only >4K sources are reduced). The
@@ -684,6 +750,61 @@ pub fn poster_deep_cap(duration: Duration) -> Duration {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The at-scale judge is a SHORTCUT, not a different rule: for any input at or
+    /// below the judge width it must agree with the resizing entry exactly. That
+    /// equivalence is what lets the FFmpeg backend skip `poster_judge_frame`'s
+    /// unconditional buffer clone — if it ever diverged, that backend would silently
+    /// go back to judging at a different scale than MF, which is precisely the
+    /// resolution-dependence #114 removed.
+    #[test]
+    fn the_at_scale_judge_agrees_with_the_resizing_judge_below_the_judge_width() {
+        for (w, h) in [(64u32, 64u32), (POSTER_JUDGE_WIDTH, 100), (200, 120)] {
+            // A textured frame (clears the detail gate) and a flat bright one (must not).
+            let textured: Vec<u8> = (0..w * h)
+                .flat_map(|i| {
+                    let v = if (i / 3) % 2 == 0 { 40u8 } else { 210 };
+                    [v, v, v, 255]
+                })
+                .collect();
+            let flat: Vec<u8> = (0..w * h).flat_map(|_| [235u8, 235, 235, 255]).collect();
+            for px in [&textured, &flat] {
+                let (g1, s1) = poster_judge(px, w, h);
+                let (g2, s2) = poster_judge_at_scale(px, w);
+                assert_eq!(g1, g2, "goodness diverged at {w}x{h}");
+                assert!(
+                    (s1 - s2).abs() < f32::EPSILON,
+                    "score diverged at {w}x{h}: {s1} vs {s2}"
+                );
+            }
+        }
+    }
+
+    /// The scRGB judge moved out of the FFmpeg backend (task #121) and is now shared
+    /// API with no backend test behind it — pin its two rules here. It is
+    /// brightness-only by design (HDR detail is hard to judge pre-tone-map), which is
+    /// also its known limit for white title cards.
+    #[test]
+    fn the_scrgb_judge_splits_bright_from_dark_and_ranks_the_least_black() {
+        let frame = |v: f32| -> Vec<u8> {
+            let h = half::f16::from_f32(v).to_le_bytes();
+            // RGBA fp16 = 8 bytes/px; the judge subsamples with step_by(8).
+            std::iter::repeat_n([h[0], h[1], h[0], h[1], h[0], h[1], 0, 0], 64)
+                .flatten()
+                .collect()
+        };
+        let (good, bright_score) = poster_judge_scrgb(&frame(0.5));
+        assert!(good, "a visibly bright scene-linear frame is a good poster");
+        assert_eq!(bright_score, 1.0);
+
+        let (good_dark, dark_score) = poster_judge_scrgb(&frame(0.001));
+        assert!(!good_dark, "a near-black frame must not stop the walk");
+        assert!(dark_score < 1.0);
+
+        // …and the fallback still prefers the least-black of two bad frames.
+        let (_, darker) = poster_judge_scrgb(&frame(0.0001));
+        assert!(darker < dark_score, "ranking must order by brightness");
+    }
 
     /// The locator conversion (task #121). Exactness matters: a replay claims the
     /// stored locator only if a decoded frame's timestamp matches it, so drift

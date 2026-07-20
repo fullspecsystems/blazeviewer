@@ -1,10 +1,9 @@
 # Blaze Viewer — Current Status (session handoff)
 
-_Last updated: 2026-07-19 (rev 20). Two major arcs MERGED to `main` + pushed this session:
-the **#114 one-run poster pipeline** (this thread) and **79.10 NVDEC hardware decode** (the
-parallel wt1 agent). The macOS ports (#113, #109) and the #112 profiles design are the open
-threads._
-
+_Last updated: 2026-07-19 (rev 21). This session ran on the **macOS** side: #109 item 1 and
+the #113 on-device verify are DONE, and the **#121 poster-walk DRY refactor** (owner-asked)
+is underway — phases 1 and 3a merged to `main`. The parallel Windows agent landed #109.4 in
+the same window; the two were merged (see the ID-collision note below)._
 ---
 
 # ▶️ START HERE — #114 is DONE and on main (`a987d0d6` tip)
@@ -55,14 +54,67 @@ rebase integration exposed + fixed a broken `run_video_producer` test call site
 (`6b08e44a`).
 
 ## Next actions
-1. **Owner continues smoking main** (rebuild!). Known-accepted: SMB-bound first walks.
-2. **#112 performance profiles** — design rev 4 IMPLEMENTATION-READY per its review log, but
-   paused at owner sign-off (3 Codex rounds folded); do not implement without the go.
-3. **#113 macOS on-device verify** (+ #109 item-1 parity edits) — the rendering arc rides the
-   shared `WgpuRenderer`, unverified on Metal. #114 phase 5 (optional: `DecodeError::Cancelled`
-   variant, mac poster parity via the shared walk constants) belongs to this trip.
-4. **#102 fuzz/bench subtask, #92 macOS poster half, door gating #105.2/#107** — the smaller
-   owed items (rev-19 audit stands).
+1. **#121 phase 2 — the MF port — is OWNER-OWNED, on Windows.** It is the one phase this Mac
+   cannot compile or run (`pb-app`/MF are Windows-only). The plan spells the contract:
+   keep `scan`'s per-sample deadline check, map BOTH invalid-position sites, and make reader
+   retirement `Drop`-based. Everything it needs already exists on `main`.
+2. **#121 phases 3b / 4a / 4b** (FFmpeg deadline+interrupt classification; AVFoundation PTS
+   plumbing; `av_poster` onto the driver = **#92.2**) — all doable on the Mac.
+3. **Owner smoke of the FFmpeg poster path** (macOS MKV/WebM) after 3a — it is meant to be
+   behavior-neutral; the one accepted delta is the driver's between-burst deadline check.
+4. **#112 performance profiles** — design rev 4 IMPLEMENTATION-READY, paused at owner
+   sign-off; do not implement without the go.
+5. **#119 / #120** (new, from the Windows side): the toggle-storm root cause and the
+   diagnostics panel. #119 is adjacent to the #113 derive work verified this session.
+6. **#102 fuzz/bench subtask, door gating #105.2/#107** — the smaller owed items.
+
+## ⚠️ Task-ID collision (2026-07-19) — read before filing a task
+Both sides filed a **#115** concurrently: the Windows agent's "compcol RAR dependency" (which
+kept the number) and this session's poster-walk refactor (**renumbered #121**). The phase-1
+commit `7089c548` still says "#115 phase 1" — same work. **Re-fetch before picking an id.**
+
+# ▶️ THIS SESSION (macOS) — what landed
+
+- **#109 item 1 (`5089f36a`)** — the macOS shell now cross-cancels its two deck-installing
+  workers (archive open ⇄ folder scan), closing mode B. Also fixed a stale `pb-mac-ffi`
+  fixture that had been RED on `main` since `cd07a388` (`handle_on_a_door` never stamped
+  `presented_epoch`, so the `door_presented()` gate hid the card).
+- **#113 VERIFIED on Metal** — the #110/ADR-024 arc rides free on macOS, no porting:
+  `[sharp-diag] GPU-derived Fit` fires on every fullscreen toggle, and `PB_SCALE_POLICY=cpu`
+  is a clean A/B (zero derive lines, CPU re-decode at each new fit dim). All 69 `pb-render`
+  tests pass headless on Metal, including the real GPU derive suite (they `.expect("no GPU
+  adapter")` and diff GPU vs a CPU reference — so WGSL→MSL is genuinely correct, not merely
+  compiling). ⚠ **Two traps for whoever re-runs this:** test #110 on a **JPEG** — a RAW is
+  excluded from the parked tier, so a folder whose first item is a `.NEF` shows zero derive
+  lines and looks broken; and `110-manual-test-script.md:74` was **stale** (it claimed macOS
+  uses the `remap_ring` trait default — it does not: shared `rebuild_ring`
+  (`app_core_impl.rs:8046`) calls `WgpuRenderer`'s override at `gpu.rs:3709`).
+  NOT exercised: the watchdog (needs real hold-to-blaze pressure) and any crispness/feel
+  judgment — those need the owner's eyes.
+- **#121 phases 1 + 3a** — see below.
+
+# 🧱 #121 — one poster walk (the DRY refactor the owner asked for)
+
+Plan: `.taskmaster/plans/121-one-poster-walk-driver.md` (rev 2, Codex round 1 folded:
+no P0, 5×P1 + 3×P2). **Why:** `deep_scan` and `Best` existed near-verbatim TWICE
+(`mf_poster.rs:695`/`477` and `ffmpeg/poster.rs:352`/`122` — same comments word-for-word) and
+not at all in `av_poster.rs`, and they drifted: two-scale scoring landed in FFmpeg only
+(`cfd55ffe`), origin capture + judge-size scoring + the BDMV degrade in MF only (#114).
+Addresses tech-debt-audit finding **#5**.
+
+- **Phase 1 (`7089c548`)** — `pb-decode/src/poster_walk.rs`: the policy once, behind
+  `PosterBackend` (duration/cancelled/seek/scan) + `Best<F>` + `SeekError` + `ScanOutcome`.
+  24 tests where the policy had none, driven by a `FakeBackend` with no video in it.
+- **Phase 3a** — the FFmpeg backend ported onto the driver; the scRGB judge hoisted into
+  `video.rs`, so **every** poster threshold now lives there.
+- **LOAD-BEARING:** `ScanOutcome{Good,Exhausted,Stop}` is not a bool because MF's typed
+  `MF_E_INVALID_POSITION` degrade fires from **two** sites — the `SetCurrentPosition` seek
+  (`mf_poster.rs:763`) *and* the post-seek `ReadSample` inside the burst (`:658`, caught at
+  `deep_scan:752`). Collapsing the second into "found nothing" silently turns "stop, keep the
+  head best" into "try the next offset". Codex caught this; the rev-1 design had it wrong.
+- `video::rational_to_hns` is the one locator conversion (signed i128, saturating, `None` on a
+  bad denominator — **never** a silent 0, and never `pts_to_duration`, which clamps and
+  round-trips through f64).
 
 ## Diag levers (debug console only)
 `PB_SHARP_DIAG`, `PB_DOOR_DIAG`, `PB_PERF`, `PB_SCALE_POLICY=cpu`, `PB_DERIVE_KERNEL`,

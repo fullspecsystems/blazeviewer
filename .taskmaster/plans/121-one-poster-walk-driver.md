@@ -342,8 +342,14 @@ Backend-level:
 2. **MF onto the driver** — delete `deep_scan` + `Best`; implement the trait incl. the
    retirement contract. Windows cross-check + full `pb-decode` suite. **Behavior-neutral.**
 3. **FFmpeg, split** (Codex P2-3, for clean bisection):
-   - **3a** mechanical port + scRGB judge hoist + `ts_hns`. **Behavior-neutral.**
-   - **3b** driver deadline check + interrupt classification. **Intended change.**
+   - **3a** mechanical port + scRGB judge hoist + `ts_hns`. **DONE 2026-07-19.**
+     ⚠ **Deviation from the rev-2 split, recorded honestly:** the driver's *between-burst*
+     deadline check is structurally inherent to calling `walk_poster`, so it landed with 3a,
+     not 3b. It can only stop a walk the AVIO interrupt deadline would have killed anyway
+     (returning best-so-far instead of an error), so the risk is nil — but "3a is
+     behavior-neutral" is now "3a is behavior-neutral **except** the between-burst deadline".
+   - **3b** interrupt **classification** (`ffmpeg/poster.rs:224` → cancellation vs elapsed
+     deadline vs real decode error) — the genuinely subtle half. **Intended change.**
 4. **AVFoundation, split** (#92.2):
    - **4a** the internal `_at` helper + timed-frame callback + PTS plumbing, with zero-offset
      Live-Photo regression tests. **Behavior-neutral.**
@@ -410,3 +416,22 @@ mechanical-vs-semantic.
   moved unchanged, the #114 surface genuinely untouched, `poster_select_supported` staying
   Windows-only being coherent, AVFoundation `timeRange` + `CMSampleBufferGetPresentationTimeStamp`
   being technically feasible, and the out-of-scope boundary being sound.
+- **Round 2 (2026-07-19, phase 3a implementation): no P0, 2×P1 + 4×P2 — all folded.**
+  **P1-a:** `stamp_hns` read raw `Frame::pts()` while the playback producer stamps
+  `Frame::timestamp()` (best-effort, `video_producer.rs:526`) — so whenever FFmpeg *derived* a
+  timestamp the poster would have synthesized one instead, and its locator could disagree with
+  playback's clock for the same frame. Now reads `timestamp()`. **P1-b:** `scan` took the
+  driver's `deadline` and ignored it, never returning `ScanOutcome::Stop` — a violation of the
+  contract this plan itself documents (the backend owns the per-sample check; the driver only
+  checks between bursts), letting one burst's decode+transfer+convert overrun the watchdog.
+  The check is in. **P2:** an unconvertible time base fell back to `0`, aliasing the
+  legitimate first-frame timestamp → now a `NO_LOCATOR_HNS` (`i64::MIN`) sentinel the
+  #114-parity work must refuse; a cancel landing *inside* `avformat_seek_file` was classed
+  `Failed` rather than `Cancelled`; and two intentional behavior deltas were noted (the
+  cancellation message gained a prefix — still suffix-matched by `is_cancelled` — and a cancel
+  on the final failed seek now aborts instead of returning a poster for a retired job).
+  **Verified correct by the review:** RGBA judging identical, the scRGB math moved verbatim,
+  the `(score, good)` → `(good, score)` swap correct, first-max tie-breaking preserved,
+  ordinary seek failures still `Failed`/continue and never `Refused`, EOF/EAGAIN unchanged,
+  the time base passed in the correct orientation, timestamps absolute, capture before
+  `walk_conv.convert`, and `Best::consider_with` genuinely lazy.
