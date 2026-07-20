@@ -2392,10 +2392,32 @@ impl AppCore {
     /// CPU buffer — hand it to the derive thread instead of dropping it. O(1)
     /// (a bounded `try_send`); a no-op until the strip is first opened.
     fn thumbs_capture(&mut self, o: crate::decode_pool::Outcome) {
-        if !self.thumbs.enabled || o.key.purpose != crate::decode_pool::Purpose::Display {
+        if o.key.purpose != crate::decode_pool::Purpose::Display {
             return;
         }
         let item = o.key.item;
+        // A VIDEO's displayed image IS its poster — the product of a multi-second scored
+        // walk (300–1600 ms over SMB). Retain it even when the strip has never been opened,
+        // exactly like the Windows selection path does (`land_selection_tile`): the walk is
+        // already paid for, so discarding the tile is pure waste, and refilling it later
+        // costs another whole walk at the bottom of the priority list. That is the "open the
+        // strip and wait" report, and on the platforms with no #114 selection pipeline
+        // (macOS, Linux) this hook is the ONLY thing that can retain a poster tile.
+        //
+        // The asymmetry vs photos is deliberate and is the whole reason `enabled` exists:
+        // a photo thumb is a cheap local re-decode, so paying a derive for every displayed
+        // photo would put one on every frame of a blaze. A video thumb is a network walk.
+        // `enable_capture()` (not `enable()`) keeps fill planning + the photo byproduct
+        // derive gated on the panel actually being opened.
+        let is_video = matches!(
+            crate::video::item_kind(self.source.as_ref(), item),
+            crate::video::LibraryItemKind::Video(_)
+        );
+        if is_video {
+            self.thumbs.enable_capture();
+        } else if !self.thumbs.enabled {
+            return;
+        }
         if let Some(img) = o.into_image() {
             self.thumbs.offer(item, img);
         }
@@ -19284,6 +19306,92 @@ mod tests {
         let e = core.thumbs.cache.get(2).expect("captured");
         assert_eq!((e.w, e.h), (128, 64));
         assert_eq!(e.tier, pb_core::ThumbTier::Full);
+    }
+
+    /// A displayed image, for the capture hook.
+    fn captured_img(w: u32, h: u32) -> pb_decode::DecodedImage {
+        pb_decode::DecodedImage {
+            width: w,
+            height: h,
+            orig_width: w,
+            orig_height: h,
+            codec: "H.264",
+            format: pb_decode::PixelFormat::Rgba8,
+            pixels: vec![7; (w * h * 4) as usize],
+            is_preview: false,
+            color: pb_decode::ColorTransform::srgb(),
+            peak: 1.0,
+            animated: None,
+        }
+    }
+
+    /// A video's poster is retained even though the strip was NEVER opened.
+    ///
+    /// On macOS/Linux there is no #114 selection pipeline, so this hook is the only thing
+    /// that can keep a poster tile at all. Before this, browsing a movie folder with the
+    /// strip closed threw away every poster it walked for, and opening the strip re-walked
+    /// all of them from scratch at the bottom of the priority list.
+    #[test]
+    fn a_videos_poster_is_captured_even_with_the_strip_never_opened() {
+        let mut core = thumb_test_core();
+        core.source = photos_named(&["a.jpg", "film.mkv", "c.jpg"]);
+        core.playlist = Playlist::new(3, 0);
+        assert!(!core.thumbs.enabled, "the strip was never opened");
+        assert!(!core.thumbs.capture);
+
+        core.thumbs_capture(Outcome::synthetic(
+            1, // the .mkv
+            core.epoch,
+            core.content_gen,
+            pb_core::RepKind::Fit,
+            Ok(captured_img(128, 64)),
+        ));
+
+        assert!(
+            core.thumbs.capture,
+            "a poster walk we already paid for must turn retention on"
+        );
+        assert!(
+            !core.thumbs.enabled,
+            "but the strip's own scheduled work stays gated on an actual panel open"
+        );
+        for _ in 0..200 {
+            if core.thumbs.poll(0) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(
+            core.thumbs.cache.get(1).is_some(),
+            "the poster tile is kept"
+        );
+    }
+
+    /// …and the asymmetry holds: a PHOTO is not captured while the strip is closed.
+    ///
+    /// This is the guard that makes the video case affordable. A photo thumb is a cheap
+    /// local re-decode, so capturing every displayed photo would put a derive on every
+    /// frame of a blaze — which is precisely what `thumbs.enabled` exists to prevent.
+    /// Deleting this test's guarantee is how a blaze regression gets in.
+    #[test]
+    fn a_photo_is_not_captured_while_the_strip_is_closed() {
+        let mut core = thumb_test_core();
+        core.source = photos_named(&["a.jpg", "film.mkv", "c.jpg"]);
+        core.playlist = Playlist::new(3, 0);
+
+        core.thumbs_capture(Outcome::synthetic(
+            0, // a photo
+            core.epoch,
+            core.content_gen,
+            pb_core::RepKind::Fit,
+            Ok(captured_img(128, 64)),
+        ));
+
+        assert!(
+            !core.thumbs.capture,
+            "a displayed photo must not switch retention on — that is a blaze cost"
+        );
+        assert!(core.thumbs.cache.get(0).is_none());
     }
 
     #[test]

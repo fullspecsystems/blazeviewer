@@ -8,6 +8,8 @@ with any pre-release suffix carried only by the tag.
 ## [Unreleased]
 
 ### Fixed
+
+- Video thumbnails: a movie's poster is now kept as its thumbnail as soon as you view it, even if the thumbnail strip is closed — opening the strip later no longer re-scans films you have already browsed past (macOS and Linux; Windows already did this).
 - **Repeated fullscreen toggles no longer blur over and over.** Toggling fullscreen (or
   resizing) used to cancel the full-resolution copy the app was quietly preparing for the
   photo you're parked on — so each toggle re-blurred and re-sharpened, sometimes four or
