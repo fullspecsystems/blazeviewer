@@ -197,6 +197,8 @@ impl AppCore {
             displayed_item: None,
             presented_epoch: None,
             presented_kind: None,
+            bg: crate::background::BackgroundOps::new(),
+            dir_scan: None,
             #[cfg(test)]
             rebind_count: 0,
             target_item: None,
@@ -6646,6 +6648,143 @@ impl AppCore {
         self.poster_sel.end_pass();
         self.pool
             .set_targets(self.epoch, self.content_gen, &self.source, &jobs);
+    }
+
+    // ── Directory-scan worker lifecycle (task #126 step 1) ────────────────────────────────
+    //
+    // Moved off the two shells, which each carried a byte-similar copy. The shells keep only
+    // dialog realisation; everything below is shell-neutral and unit-tested.
+
+    /// Install an already-spawned walk. Returns the operation it **superseded**, if any, so
+    /// the caller can stop that worker.
+    ///
+    /// The supersession *policy* lives in [`BackgroundOps`](crate::background::BackgroundOps)
+    /// — one generation space across both operation kinds — while the *mechanism* for an
+    /// archive open stays with the shell until step 2 moves that worker too. That split is
+    /// deliberate: the invariant has a single owner even though the two workers do not yet.
+    ///
+    /// Separated from [`begin_dir_scan`](Self::begin_dir_scan) so tests can arm a scan with
+    /// their own channel and drive it deterministically, with no thread and no sleeps.
+    pub fn arm_dir_scan(
+        &mut self,
+        wire_gen: u64,
+        rx: std::sync::mpsc::Receiver<(u64, crate::scan::ScanUpdate)>,
+        progress: crate::scan::ScanProgress,
+        name: String,
+    ) -> Option<(crate::background::OpId, crate::background::OpKind)> {
+        // A fresh scan is a fresh universe: no stale tombstones from the previous deck.
+        self.deleted.clear();
+        let (id, superseded) = self.bg.begin(crate::background::OpKind::DirScan, self.now);
+        // Stop the previous walk *here*, inside the transition, rather than trusting each
+        // call site to remember. The winit shell's `cancel_dir_scan` relies on callers
+        // clearing the handle afterwards and its own comment overstates that they all do
+        // (two of five do not); the macOS copy clears it internally. This adopts the macOS
+        // shape, which is correct by construction (task #126 §11.2).
+        if let Some(prev) = self.dir_scan.take() {
+            prev.request_cancel();
+        }
+        self.scanning = true; // sequential-only prefetch while streaming
+        self.scan_bootstrapped = false; // the first non-empty batch bootstraps the view
+        self.dir_scan = Some(crate::dir_scan::DirScanState::armed(
+            id, wire_gen, rx, progress, name,
+        ));
+        superseded
+    }
+
+    /// Cancel any in-flight walk. Idempotent, and — unlike the winit shell's version — it
+    /// clears the handle itself, so no call site has to remember (task #126 §11.2).
+    pub fn cancel_dir_scan(&mut self) {
+        if let Some(scan) = self.dir_scan.take() {
+            scan.request_cancel();
+        }
+        self.bg.cancel();
+        self.scanning = false;
+    }
+
+    /// Pump the walk's channel, applying every snapshot queued this tick. Returns what the
+    /// shell should do with its Scanning dialog.
+    ///
+    /// Mirrors the shipped shell logic: the first non-empty batch bootstraps the view and the
+    /// rest extend it; a `Done` for the current generation ends the walk (toasting when it
+    /// found nothing); a slow walk with nothing on screen asks for the progress dialog; a
+    /// dead worker never strands its dialog.
+    pub fn poll_dir_scan(&mut self) -> crate::dir_scan::ScanPoll {
+        use crate::dir_scan::{ScanDialogRequest, ScanPoll};
+        use crate::scan::ScanUpdate;
+        use std::sync::mpsc::TryRecvError;
+        loop {
+            let (wire_gen, id, recv) = match self.dir_scan.as_ref() {
+                Some(s) => (s.wire_gen, s.id, s.rx.try_recv()),
+                None => return ScanPoll::idle(),
+            };
+            // One staleness gate for both flows: a walk superseded by a newer scan *or* by an
+            // archive open fails this, so its late batches can never touch the deck.
+            if !self.bg.is_current(id) {
+                self.dir_scan = None;
+                self.scanning = false;
+                return ScanPoll::dialog(ScanDialogRequest::Close);
+            }
+            match recv {
+                Ok((g, ScanUpdate::Batch(resolved))) => {
+                    if g != wire_gen {
+                        continue; // superseded (defensive; the channel is per-scan)
+                    }
+                    self.handle(contract::CoreEvent::ScanBatch(resolved));
+                    // A photo is on screen, so a revealed dialog has served its purpose —
+                    // browsing should start at the first image, not the end of the walk.
+                    if self.scan_bootstrapped {
+                        return ScanPoll::dialog(ScanDialogRequest::Close);
+                    }
+                }
+                Ok((g, ScanUpdate::Done)) => {
+                    if g != wire_gen {
+                        continue;
+                    }
+                    let scanned = self
+                        .dir_scan
+                        .as_ref()
+                        .map(|s| s.name.clone())
+                        .unwrap_or_default();
+                    self.dir_scan = None;
+                    self.bg.finish(id);
+                    let never_bootstrapped = !self.scan_bootstrapped;
+                    self.handle(contract::CoreEvent::ScanDone);
+                    return ScanPoll {
+                        dialog: ScanDialogRequest::Close,
+                        found_no_photos: never_bootstrapped.then_some(scanned),
+                    };
+                }
+                Err(TryRecvError::Empty) => {
+                    // Reveal only once the walk is slow enough to notice, and never over a
+                    // photo that is already up. `should_reveal` latches, so this fires once.
+                    if self.scan_bootstrapped {
+                        return ScanPoll::idle();
+                    }
+                    let due = self
+                        .bg
+                        .should_reveal(self.now, crate::dir_scan::SCAN_DIALOG_DELAY)
+                        .is_some();
+                    if !due {
+                        return ScanPoll::idle();
+                    }
+                    return match self.dir_scan.as_ref() {
+                        Some(s) => ScanPoll::dialog(ScanDialogRequest::Reveal {
+                            name: s.name.clone(),
+                            progress: s.progress.clone(),
+                        }),
+                        None => ScanPoll::idle(),
+                    };
+                }
+                Err(TryRecvError::Disconnected) => {
+                    // The worker died (panic, or dropped its sender without a terminal Done).
+                    // Never strand its dialog.
+                    self.dir_scan = None;
+                    self.bg.finish(id);
+                    self.scanning = false;
+                    return ScanPoll::dialog(ScanDialogRequest::Close);
+                }
+            }
+        }
     }
 
     /// The decode-to-fit target for the current mode: the display size in Fit mode
@@ -18326,6 +18465,197 @@ mod tests {
         let slot = core.ring.slot_for(0).expect("resident");
         core.present_item(0, slot); // displayed + the mock records the presented slot
         core
+    }
+
+    // -- #126 step 1: the directory-scan lifecycle, now core-owned --------------------------
+
+    use crate::dir_scan::ScanDialogRequest;
+
+    /// Arm a scan on a core with a channel the TEST drives - no thread, no sleeps. This is
+    /// the deterministic completion point Codex asked an injectable runtime for; the mpsc
+    /// channel already was one.
+    fn armed_scan_core() -> (
+        AppCore,
+        std::sync::mpsc::Sender<(u64, crate::scan::ScanUpdate)>,
+    ) {
+        let mut core = test_core();
+        let (tx, rx) = std::sync::mpsc::channel();
+        core.arm_dir_scan(1, rx, crate::scan::ScanProgress::new(), "Photos".into());
+        (core, tx)
+    }
+
+    /// The invariant phase 0 exists for, now end-to-end: an archive open supersedes an
+    /// in-flight walk, so the walk's late batches can never reach the deck. In the shells
+    /// this needed a hand-written `cancel_dir_scan()` at the right call site, and missing it
+    /// was the "door card over a photo" corruption.
+    #[test]
+    fn an_archive_open_supersedes_an_in_flight_scan() {
+        let (mut core, tx) = armed_scan_core();
+        // The archive open claims the shared generation space.
+        let (_open, superseded) = core
+            .bg
+            .begin(crate::background::OpKind::ArchiveOpen, core.now);
+        assert!(
+            matches!(superseded, Some((_, crate::background::OpKind::DirScan))),
+            "the displaced scan must be handed back so its worker is stopped"
+        );
+
+        // A batch the walk already sent now arrives. It must be dropped, not applied.
+        tx.send((1, crate::scan::ScanUpdate::Done)).unwrap();
+        let poll = core.poll_dir_scan();
+        assert_eq!(poll.dialog, crate::dir_scan::ScanDialogRequest::Close);
+        assert!(core.dir_scan.is_none(), "the stale walk is dropped");
+        assert!(!core.scanning);
+    }
+
+    /// Arming a second walk supersedes the first through the same one gate.
+    #[test]
+    fn a_second_scan_supersedes_the_first() {
+        let (mut core, _tx) = armed_scan_core();
+        let first = core.dir_scan.as_ref().map(|s| s.id).unwrap();
+        let (_tx2, rx2) = std::sync::mpsc::channel();
+        core.arm_dir_scan(2, rx2, crate::scan::ScanProgress::new(), "Other".into());
+        assert!(
+            !core.bg.is_current(first),
+            "the first walk is stale at once"
+        );
+        assert!(core.bg.is_current(core.dir_scan.as_ref().unwrap().id));
+    }
+
+    /// Cancel clears the handle ITSELF - the macOS shape (task #126 section 11.2). The winit
+    /// copy relied on every call site clearing afterwards, and its comment overstated that
+    /// they all do.
+    #[test]
+    fn cancel_clears_the_handle_without_help_from_the_call_site() {
+        let (mut core, _tx) = armed_scan_core();
+        core.cancel_dir_scan();
+        assert!(core.dir_scan.is_none(), "no call-site convention required");
+        assert!(!core.scanning);
+        assert_eq!(core.bg.active(), None);
+        core.cancel_dir_scan(); // idempotent
+        assert!(core.dir_scan.is_none());
+    }
+
+    /// A slow walk with nothing on screen asks for the dialog - but only after the delay, and
+    /// only once. Deterministic: `now` is moved by hand, never slept on.
+    #[test]
+    fn a_slow_walk_asks_for_the_dialog_once_and_only_after_the_delay() {
+        let (mut core, _tx) = armed_scan_core();
+        let start = core.now;
+
+        assert_eq!(
+            core.poll_dir_scan().dialog,
+            ScanDialogRequest::None,
+            "too soon"
+        );
+
+        core.now = start + crate::dir_scan::SCAN_DIALOG_DELAY - Duration::from_millis(1);
+        assert_eq!(
+            core.poll_dir_scan().dialog,
+            ScanDialogRequest::None,
+            "still under"
+        );
+
+        core.now = start + crate::dir_scan::SCAN_DIALOG_DELAY;
+        assert_eq!(
+            core.poll_dir_scan().dialog,
+            ScanDialogRequest::Reveal {
+                name: "Photos".into(),
+                progress: crate::scan::ScanProgress::new(),
+            },
+            "reveals at the deadline"
+        );
+
+        core.now = start + Duration::from_secs(30);
+        assert_eq!(
+            core.poll_dir_scan().dialog,
+            ScanDialogRequest::None,
+            "and never again - the latch is what stops a per-tick re-reveal"
+        );
+    }
+
+    /// The dialog must never pop over a photo that is already up: once a batch has
+    /// bootstrapped the view, the walk goes quiet however slow it is.
+    #[test]
+    fn the_dialog_never_pops_over_an_already_bootstrapped_photo() {
+        let (mut core, _tx) = armed_scan_core();
+        core.scan_bootstrapped = true;
+        core.now += Duration::from_secs(30);
+        assert_eq!(
+            core.poll_dir_scan().dialog,
+            ScanDialogRequest::None,
+            "a photo is on screen; a progress dialog would be an interruption"
+        );
+    }
+
+    /// A finished walk that found nothing hands the folder name back so the shell can toast
+    /// it, and closes the dialog. A walk that DID find photos toasts nothing.
+    #[test]
+    fn an_empty_walk_reports_its_folder_name_and_a_productive_one_does_not() {
+        let (mut core, tx) = armed_scan_core();
+        tx.send((1, crate::scan::ScanUpdate::Done)).unwrap();
+        let poll = core.poll_dir_scan();
+        assert_eq!(poll.dialog, ScanDialogRequest::Close);
+        assert_eq!(
+            poll.found_no_photos.as_deref(),
+            Some("Photos"),
+            "an empty folder is reported by name"
+        );
+        assert!(core.dir_scan.is_none(), "a terminal path clears the walk");
+        assert_eq!(core.bg.active(), None, "and retires the operation");
+
+        let (mut core, tx) = armed_scan_core();
+        core.scan_bootstrapped = true; // photos were found
+        tx.send((1, crate::scan::ScanUpdate::Done)).unwrap();
+        let poll = core.poll_dir_scan();
+        assert_eq!(poll.found_no_photos, None, "nothing to apologise for");
+    }
+
+    /// A worker that dies without sending `Done` (panic, or a dropped sender) must not strand
+    /// its dialog on screen forever.
+    #[test]
+    fn a_dead_worker_never_strands_its_dialog() {
+        let (mut core, tx) = armed_scan_core();
+        drop(tx); // the worker vanished
+        let poll = core.poll_dir_scan();
+        assert_eq!(poll.dialog, ScanDialogRequest::Close);
+        assert!(core.dir_scan.is_none());
+        assert!(!core.scanning);
+        assert_eq!(core.bg.active(), None);
+    }
+
+    /// Polling with no walk in flight is a no-op, not a panic - the tick calls it every frame.
+    #[test]
+    fn polling_with_no_walk_is_inert() {
+        let mut core = test_core();
+        assert_eq!(core.poll_dir_scan(), crate::dir_scan::ScanPoll::idle());
+    }
+
+    /// A batch tagged with a stale WIRE generation is skipped even while the operation id is
+    /// current (belt-and-braces: the channel is per-scan, so this is defensive).
+    #[test]
+    fn a_batch_from_a_stale_wire_generation_is_skipped() {
+        let (mut core, tx) = armed_scan_core();
+        tx.send((99, crate::scan::ScanUpdate::Done)).unwrap(); // wrong generation
+        drop(tx);
+        let poll = core.poll_dir_scan();
+        // The stale Done was skipped; the loop then saw the disconnect.
+        assert_eq!(
+            poll.found_no_photos, None,
+            "a stale Done must not report a result"
+        );
+        assert!(core.dir_scan.is_none());
+    }
+
+    /// A fresh scan is a fresh universe: stale delete tombstones from the previous deck must
+    /// not survive into it.
+    #[test]
+    fn arming_a_scan_clears_stale_delete_tombstones() {
+        let mut core = test_core();
+        core.deleted.insert(std::path::PathBuf::from("gone.jpg"));
+        let (_tx, rx) = std::sync::mpsc::channel();
+        core.arm_dir_scan(1, rx, crate::scan::ScanProgress::new(), "Photos".into());
+        assert!(core.deleted.is_empty(), "fresh scan, fresh universe");
     }
 
     // -- #124: smooth zoom binds the resident Original ----------------------------------

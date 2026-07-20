@@ -276,3 +276,92 @@ behavioural proof:
   the core before #125 removes them. Expect the file to get slightly worse before it gets
   better; that is the correct order anyway, because moving these flows in first means #125
   sorts them into the right cluster once instead of twice.
+
+---
+
+## 11. Findings from the first working session (2026-07-19, unattended)
+
+Recorded as they were verified, so the next session does not re-derive them.
+
+### 11.1 The audit's cross-cancel claim is FALSE — correct it at the source
+
+Audit finding #3 / task #109 item 1 claims *"the mac shell still lacks the cross-cancel that
+Windows got in `8293a662`"*, and §4 of this plan carried it forward as unverified. **It is
+wrong.** `pb-mac-ffi`'s `begin_archive_open` contains the cross-cancel with an explicit
+citation:
+
+> Cross-type supersession (#109 item 1, winit parity — `8293a662`) … supersedes the scan too.
+
+So macOS is at parity here. This removes the one concrete benefit §4 hoped to claim for
+#126, and the task must not be justified on it. **Fix `technical-debt-audit.md` finding #3
+and task #109 item 1.**
+
+### 11.2 A real (harmless today) asymmetry in `cancel_dir_scan`
+
+- **macOS** clears the handle *inside* `cancel_dir_scan` (`self.dir_scan = None;`).
+- **winit** does not; its comment claims *"Every cancel path clears `dir_scan` immediately
+  after"* — and **two of its five call sites do not** (`begin_dir_scan`, which replaces the
+  handle anyway, and `clear_session_state`, which is teardown).
+
+So the behaviour is equivalent today and there is **no live bug** — but winit's version is
+correct only by a call-site convention its own comment overstates, while macOS's is correct
+by construction. **When unifying, adopt the macOS shape** (clear inside the function). This
+is a good example of the drift hazard being real without a bug being present.
+
+### 11.3 Codex's "injectable clock" requirement was already half-met
+
+`AppCore::now` already exists and is stamped by the shells once per event (NS0 5.5), and 18
+existing test sites already drive it. So no `Clock` trait is needed — the state machines just
+have to take `now` as a parameter instead of calling `Instant::now()`. `BackgroundOps` does
+this. What is *not* yet solved is the injectable **worker runtime** (deterministic completion
+points for "cancel mid-walk" / "teardown in flight"), which remains open.
+
+### 11.4 Status at end of session
+
+| item | state |
+|---|---|
+| Plan rev 2 (Codex round 1 folded) | ✅ on `main` |
+| Phase 0 — `BackgroundOps` coordinator + 7 tests | ✅ on `feat/126-dry-shell-orchestration` |
+| Phase 0 — identity-stamped dialogs (Codex P0) | ❌ not started |
+| Phase 0 — injectable worker runtime | ❌ not started |
+| Phase 0 — wake contract | ❌ not started |
+| Step 1 — dir-scan state machine in the core + 11 tests | ✅ on the branch |
+| Step 1 — winit rewired onto it | ⏸ **deliberately deferred, see 11.5** |
+| Step 1 — mac rewired | ⛔ **impossible from this machine** (§0) |
+
+`BackgroundOps` is additive and wired to nothing, so the branch is safe to leave or discard.
+The next session should do identity-stamped dialogs (the P0) before moving dir-scan, since
+retrofitting dialog identity after the flow moves is the painful order.
+
+### 11.5 Why the winit shell was deliberately left unwired
+
+The core now owns the dir-scan lifecycle and the shells' copies are redundant — but neither
+shell has been migrated yet, on purpose.
+
+The interim API is a **return value** (`ScanPoll` / `ScanDialogRequest`) rather than a
+`CoreEffect`, because §0 forbids touching the shared contract from this machine. The very
+next piece of work — the phase-0 P0, on a Mac — replaces that with **identity-stamped dialog
+effects** and migrates both shells onto them together.
+
+So rewiring winit now would migrate it **twice**: once onto `ScanPoll`, then again onto the
+final effects a day later, with a throwaway shell diff in the repo's #1 churn file in
+between. Leaving it lets the Mac session move both shells once, onto the shape that lasts.
+
+**Consequence to be honest about:** no shell code has been deleted yet, so *the DRY win is
+not yet realised*. What exists is the tested, canonical implementation both shells will
+adopt. If the Mac session never happens, this commit is net-neutral-plus-tests, not a win.
+
+### 11.6 Exact starting point for the macOS session
+
+1. Read §0, §5a, and §11 here. Nothing needs re-deriving.
+2. Do the **P0 first**: give `CoreEffect::ShowDialog`/`CloseDialog`/`SetDialogChecking` an
+   operation id, and have shells reconcile toward a desired dialog state rather than execute
+   imperative commands. `BackgroundOps::OpId` is the identity to stamp. ~50 sites in
+   `pb-mac-ffi`, 3 of them constructing `ShowDialog`.
+3. Then migrate **both** shells' dir-scan onto `AppCore::{arm,poll,cancel}_dir_scan`,
+   deleting `struct DirScan`, `SCAN_DIALOG_DELAY` and the ~150 duplicated lines from each.
+   Keep the shell-side gate on *whether it may* reveal (it must not steal a Settings window
+   or overwrite a queued Password request) — that is genuine shell knowledge.
+4. Verify on macOS: open a folder, open a password-protected archive, cancel a slow scan,
+   quit mid-scan.
+5. Only then start step 2 (archive-open), which carries the `SecretString` path in §6.
