@@ -7156,7 +7156,7 @@ impl AppCore {
             fraction: load.progress.fraction(),
             slow: self
                 .bg
-                .is_slow(self.now, crate::dir_scan::SCAN_DIALOG_DELAY),
+                .is_slow(self.now, crate::archive_open::LOADING_DIALOG_DELAY),
         })
     }
 

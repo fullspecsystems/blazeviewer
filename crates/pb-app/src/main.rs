@@ -1109,27 +1109,13 @@ impl App {
     /// workers and cancels the displaced one itself. Doing it here as well would be a
     /// double-cancel (task #126 §12.6).
     fn begin_archive_open(&mut self, path: PathBuf, password: Option<pb_app_core::SecretString>) {
-        let name = pb_app_core::archive_open::archive_display_name(&path);
         match self.core.begin_archive_open(path, password) {
-            pb_app_core::archive_open::ArchiveOutcome::Pending => {
-                // The determinate progress + Cancel dialog. If the password prompt is still up
-                // (a just-verified entry), promote it in place — same window, no flicker;
-                // otherwise (drag-drop / picker / launch) open a fresh loading dialog.
-                let msg = format!("Opening \u{201c}{name}\u{201d}\u{2026}");
-                let Some(progress) = self.core.archive_progress() else {
-                    return;
-                };
-                if self.dialog.as_ref().map(|d| d.kind()) == Some(dialog::DialogKind::Password) {
-                    if let Some(d) = self.dialog.as_mut() {
-                        d.become_loading(&msg, progress);
-                    }
-                } else {
-                    self.pending_dialog = Some(DialogRequest::Loading {
-                        message: msg,
-                        progress,
-                    });
-                }
-            }
+            // Still in flight. The progress dialog is NOT opened here — `poll_archive_load`
+            // reveals it only once the open outlasts `LOADING_DIALOG_DELAY`. Opening it
+            // immediately flashed a spinner for a couple of milliseconds on anything that opens
+            // quickly, which reads as a glitch (owner-reported 2026-07-20). Same policy the
+            // folder scan has always had.
+            pb_app_core::archive_open::ArchiveOutcome::Pending => {}
             // The synchronous ZIP path already finished — never open a dialog at all.
             done => self.apply_archive_outcome(done),
         }
@@ -1139,6 +1125,38 @@ impl App {
     fn poll_archive_load(&mut self) {
         let outcome = self.core.poll_archive_load();
         self.apply_archive_outcome(outcome);
+        self.reveal_slow_archive_open();
+    }
+
+    /// Reveal the determinate progress + Cancel dialog once the open has been slow enough to be
+    /// worth telling the user about — never for a fast one, which would only flash.
+    ///
+    /// If the password prompt is still up (a just-verified entry), promote it in place — same
+    /// window, no flicker; otherwise open a fresh loading dialog.
+    fn reveal_slow_archive_open(&mut self) {
+        let Some(status) = self.core.archive_status() else {
+            return;
+        };
+        let already_up = self.dialog.as_ref().map(|d| d.kind())
+            == Some(dialog::DialogKind::Loading)
+            || matches!(self.pending_dialog, Some(DialogRequest::Loading { .. }));
+        if !status.slow || already_up {
+            return;
+        }
+        let Some(progress) = self.core.archive_progress() else {
+            return;
+        };
+        let msg = format!("Opening \u{201c}{}\u{201d}\u{2026}", status.name);
+        if self.dialog.as_ref().map(|d| d.kind()) == Some(dialog::DialogKind::Password) {
+            if let Some(d) = self.dialog.as_mut() {
+                d.become_loading(&msg, progress);
+            }
+        } else {
+            self.pending_dialog = Some(DialogRequest::Loading {
+                message: msg,
+                progress,
+            });
+        }
     }
 
     /// Reconcile this shell's chrome to an archive-open outcome. The core decided *what*

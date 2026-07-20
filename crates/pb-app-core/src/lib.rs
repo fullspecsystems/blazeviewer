@@ -23,7 +23,7 @@
 /// `--help` header (`pb-cli`), the About dialog, and the Windows file-association
 /// description — so the three can never drift apart again. Keep it short: it stands
 /// alone atop `--help` and sits under the [`APP_NAME`] in the About box.
-pub const TAGLINE: &str = "An ultra-fast, capable image viewer";
+pub const TAGLINE: &str = "An ultra-fast image and video viewer";
 
 /// The product's **display name** — the form a user reads. The About box, the Windows
 /// `ApplicationName` capability, Explorer's ProgId labels, the folder verb.

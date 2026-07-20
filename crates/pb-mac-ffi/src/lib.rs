@@ -2756,17 +2756,13 @@ impl AppCoreHandle {
     /// workers and cancels the displaced one itself. Doing it here as well would be a
     /// double-cancel (task #126 §12.6).
     fn begin_archive_open(&mut self, path: PathBuf, password: Option<SecretString>) {
-        let name = pb_app_core::archive_open::archive_display_name(&path);
         match self.core.begin_archive_open(path, password) {
-            // Still in flight: the determinate "Opening…" progress + Cancel sheet. If the
-            // password prompt is still up, the same ShowDialog replaces its content in place —
-            // SwiftUI's state-driven sheet makes winit's `become_loading` implicit.
-            pb_app_core::archive_open::ArchiveOutcome::Pending => {
-                self.dialog_message = format!("Opening \u{201c}{name}\u{201d}\u{2026}");
-                self.core.effects.push(contract::CoreEffect::ShowDialog(
-                    contract::DialogKind::Loading,
-                ));
-            }
+            // Still in flight. The "Opening…" sheet is NOT revealed here — `poll_archive_load`
+            // reveals it only once the open outlasts `LOADING_DIALOG_DELAY`. Showing it
+            // immediately flashed a spinner for a couple of milliseconds on anything that opens
+            // quickly, which reads as a glitch (owner-reported 2026-07-20). Same policy the
+            // folder scan has always had.
+            pb_app_core::archive_open::ArchiveOutcome::Pending => {}
             // The synchronous ZIP path already finished — never show a sheet at all.
             done => self.apply_archive_outcome(done),
         }
@@ -2776,6 +2772,26 @@ impl AppCoreHandle {
     fn poll_archive_load(&mut self) {
         let outcome = self.core.poll_archive_load();
         self.apply_archive_outcome(outcome);
+        self.reveal_slow_archive_open();
+    }
+
+    /// Reveal the determinate "Opening…" + Cancel sheet once the open has been slow enough to
+    /// be worth telling the user about — never for a fast one, which would only flash.
+    ///
+    /// Deliberately not gated on which sheet is up: if the password prompt is still showing, the
+    /// same `ShowDialog` replaces its content in place (SwiftUI's state-driven sheet makes
+    /// winit's `become_loading` implicit).
+    fn reveal_slow_archive_open(&mut self) {
+        let Some(status) = self.core.archive_status() else {
+            return;
+        };
+        if !status.slow || self.shown_dialog == Some(contract::DialogKind::Loading) {
+            return;
+        }
+        self.dialog_message = format!("Opening \u{201c}{}\u{201d}\u{2026}", status.name);
+        self.core.effects.push(contract::CoreEffect::ShowDialog(
+            contract::DialogKind::Loading,
+        ));
     }
 
     /// Reconcile this shell's chrome to an archive-open outcome. The core decided *what*

@@ -1279,7 +1279,7 @@ final class CoreModel {
         let center = NSMutableParagraphStyle()
         center.alignment = .center
         let credits = NSMutableAttributedString(
-            string: "An ultra-fast image viewer\n\n",
+            string: "An ultra-fast image and video viewer\n\n",
             attributes: [
                 .font: NSFont.systemFont(ofSize: NSFont.smallSystemFontSize),
                 .foregroundColor: NSColor.labelColor,
@@ -1299,7 +1299,8 @@ final class CoreModel {
         credits.append(
             NSAttributedString(
                 string: """
-                    \n\nFFmpeg \u{a9} the FFmpeg developers (GNU LGPL v2.1)
+                    \n\nFFmpeg \u{a9} the FFmpeg developers
+                    (GNU LGPL v2.1)
                     Full license texts are inside the app bundle, in \
                     Contents/Resources/licenses.
                     """,

@@ -34,6 +34,7 @@
 
 use std::path::PathBuf;
 use std::sync::mpsc::Receiver;
+use std::time::Duration;
 
 use crate::archive::ArchiveOpenError;
 use crate::scan::Resolved;
@@ -110,6 +111,18 @@ pub struct ArchiveStatus {
     /// The open has outlasted the reveal delay — slow enough to be worth chrome.
     pub slow: bool,
 }
+
+/// How long an archive open must run before its progress chrome is worth showing.
+///
+/// The archive twin of [`SCAN_DIALOG_DELAY`](crate::dir_scan::SCAN_DIALOG_DELAY), and it exists
+/// for the same reason: a plain `.zip` opens in single-digit milliseconds, so revealing the
+/// "Opening…" sheet immediately produced a **nonsensical flash** of a spinner nobody could read
+/// (owner-reported 2026-07-20). Chrome that appears and vanishes faster than the eye resolves is
+/// worse than no chrome — it reads as a glitch.
+///
+/// Same 250 ms as the scan delay, deliberately: they are the same judgement about the same
+/// human, and two different numbers would only invite drift.
+pub const LOADING_DIALOG_DELAY: Duration = Duration::from_millis(250);
 
 /// The archive's display name for a headline: its file name, else a stable word.
 ///
