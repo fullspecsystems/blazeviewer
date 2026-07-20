@@ -7089,6 +7089,19 @@ impl AppCore {
         let (outcome, winner) = result;
         // An archive that opened at all — even to find nothing viewable — proves its password.
         // Promote it here, inside the core: the winning secret is never returned to a shell.
+        //
+        // ⚠ A CANCELLED open deliberately promotes NOTHING, and that is a decision, not an
+        // accident of control flow (owner call 2026-07-20). This is the only caller of
+        // `remember_archive_password`, so cancelling — which never reaches here — drops the
+        // attempted secret and zeroizes it with `ArchiveOpenState`. By the "proves its
+        // password" rule above a cancelled 7z arguably *did* prove it (7z verifies before bulk
+        // extraction, so a visible progress bar means the password was accepted), which is
+        // exactly why this needs saying out loud: backing out of an operation is not a request
+        // to remember its secret, and the privacy default is to keep less.
+        //
+        // If a future refactor unifies the terminal paths and routes cancel through here, that
+        // would silently reverse this. `a_cancelled_open_never_remembers_its_password` is the
+        // tripwire.
         if matches!(outcome, Ok(_) | Err(ArchiveOpenError::Empty)) {
             if let Some(pw) = attempted.as_ref().or(winner.as_ref()) {
                 self.remember_archive_password(pw);
@@ -19321,6 +19334,46 @@ mod tests {
         let (_tx, rx) = std::sync::mpsc::channel();
         core.arm_dir_scan(1, rx, crate::scan::ScanProgress::new(), "Photos".into());
         assert!(core.deleted.is_empty(), "fresh scan, fresh universe");
+    }
+
+    /// Cancelling an open must NOT remember the password, even though the password was
+    /// accepted before the extraction the user cancelled. Owner-decided 2026-07-20: backing
+    /// out is not a request to remember. Currently this holds because `finish_archive_open` is
+    /// the only promotion site and a cancel never reaches it — this test is what stops a
+    /// future "unify the terminal paths" refactor from quietly reversing it.
+    #[test]
+    fn a_cancelled_open_never_remembers_its_password() {
+        let pw = crate::SecretString::new("hunter2");
+        let (mut core, _tx) = armed_archive_core(Some(pw.clone()));
+        assert!(core.archive_passwords.is_empty());
+
+        core.cancel_archive_load();
+
+        assert!(
+            core.archive_passwords.is_empty(),
+            "a cancelled open must not promote its password to the session MRU"
+        );
+        assert!(
+            core.archive_load.is_none(),
+            "and the secret is dropped (zeroized on Drop)"
+        );
+    }
+
+    /// The other half of the same decision: an open that COMPLETES does remember it, so the
+    /// same-password folder asks once. Without this, the test above could be satisfied by
+    /// never remembering anything.
+    #[test]
+    fn a_completed_open_does_remember_its_password() {
+        let pw = crate::SecretString::new("hunter2");
+        let (mut core, tx) = armed_archive_core(Some(pw.clone()));
+        tx.send((1, (Err(crate::archive::ArchiveOpenError::Empty), None)))
+            .unwrap();
+        core.poll_archive_load();
+        assert_eq!(
+            core.archive_passwords.len(),
+            1,
+            "an archive that opened at all proves its password"
+        );
     }
 
     /// #126 ledger item 3, and the bug it turned out to be hiding. A scan that ends NATURALLY

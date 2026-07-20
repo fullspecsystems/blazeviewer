@@ -66,7 +66,20 @@ dialog is possible at all. It only goes async when `will_autotry` is true — i.
 password cache is non-empty**. So the flash was partly an artifact of testing an encrypted
 archive first; on a fresh launch the same 8.5 MB zip shows nothing.
 
-**Still not run on Windows:** *Not verified* items 3–6 (session MRU auto-try on a second
+**Items 3 and 4 — owner-run on Windows 2026-07-20, both pass.** Session MRU auto-try works on
+a second archive. Cancel mid-load on a large `.7z` closes quietly and keeps what was on screen.
+
+**Decision recorded while checking 4:** a cancelled open does **not** promote its password to
+the session MRU. The owner reasoned that backing out is not a request to remember, and that is
+now the decision — but note it was *incidental* until today: `finish_archive_open` is the only
+promotion site and a cancel never reaches it. Worth flagging because the code's own stated rule
+(*"an archive that opened at all proves its password"*) argues the other way — 7z verifies
+before bulk extraction, so a visible progress bar means the password was already accepted.
+Pinned by `a_cancelled_open_never_remembers_its_password`, with
+`a_completed_open_does_remember_its_password` as its other half, so a future "unify the terminal
+paths" refactor cannot reverse it silently.
+
+**Still not run on Windows:** *Not verified* items 5–6 (session MRU auto-try on a second
 archive, Cancel mid-load on a large `.7z`, plain-`.zip` fast path from a *fresh* session, and
 scan-over-archive supersession).
 
