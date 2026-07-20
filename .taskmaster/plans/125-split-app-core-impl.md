@@ -1,0 +1,231 @@
+# Task 125 — Split `app_core_impl.rs` into concern-scoped `impl AppCore` blocks
+
+**Status:** plan, rev 1 (pre-Codex). **Scope gate:** this is audit finding #1 remediation
+**(a) only** — see §2, which is the most important section in this document.
+
+## Where this slots into the technical-debt audit
+
+It is not a new idea; it is the audit's **top-ranked finding and its #1 recommended
+action**, never filed as a task:
+
+- Finding #1, *"the god-objects + the half-finished NS0 inversion (the hub)"* — **note the
+  audit's label is wrong, see §2a** — remediation (a): *"split the one impl into concern-scoped `impl AppCore` blocks across files
+  (video / tree / overlay / prefetch) — Rust allows this for free; mechanical, low-risk,
+  immediately shrinks the blast radius and conflict surface."*
+- Recommended sequencing #1: *"Mechanical, low-risk, immediate relief to blast radius and
+  merge conflicts. No behavior change."* Marked safe to do now, independent of everything
+  else.
+
+The audit references exactly one task (finding #5 → #121). Finding #1's remediation (a) was
+never given an id, which is the likeliest reason it is the one recommendation that didn't
+happen while #109/#119/#121 all did.
+
+## 1. Why now: it is compounding faster than anything else in the repo
+
+| commit | date | `app_core_impl.rs` |
+|---|---:|---:|
+| `8b5dc30b` (the audit's own baseline) | 2026-07-18 | 15,898 |
+| `939c0bce` | 2026-07-19 | 20,546 |
+| `HEAD` (`5f3b4429`) | 2026-07-19 | 20,932 |
+
+**+5,034 lines (+32%) in about a day.** The audit flagged this file as its #1 debt and
+warned its numbers would drift; they drifted by a third within 24 hours. Its stated figures
+(16,013 LOC, 323 methods, `mod tests` at 10011) are all now wrong in the same direction.
+
+Current, re-measured at `HEAD`:
+
+- **20,932 lines** — 11,963 production, 8,970 tests
+- **349 production methods**, essentially one flat `impl AppCore`
+- next-largest file in the repo is `gpu.rs` at 7,127, so this is ~2.9× the runner-up
+
+Three concrete costs paid during task #124 alone, all attributable to file size:
+
+1. Two full Codex review runs produced **nothing** — both exhausted their budget exploring
+   the file. A review was only obtained by manually extracting excerpts into the prompt.
+2. A patch landed in the **wrong function** first (`rebuild_playlist` instead of
+   `rebuild_ring`) — plausible-looking neighbours in a 349-entry method list.
+3. "What else touches this?" is not answerable by reading a file, so every change needs a
+   repo-wide grep to be safe.
+
+## 2a. ⚠ Correction to the audit: NS0 is **not** half-finished (owner, 2026-07-19)
+
+The audit calls finding #1 *"the half-finished NS0 inversion."* That label is wrong and
+should be fixed at the source. Re-measured at `HEAD`:
+
+- `pb-app-core` is **50,337 LOC** — the core owns the overwhelming bulk of behavior.
+- In `pb-mac-ffi/src/lib.rs` (6,393 lines) the genuine FFI surface starts at **line 4,390**.
+- The contract carries **102 `CoreEffect` variants**.
+- macOS ships a native SwiftUI/AppKit host over that core, which is the inversion's whole
+  point and could not exist if it hadn't happened.
+
+**NS0 shipped.** What remains is a single bounded residue: **16 orchestration functions
+duplicated across the two shells**, plus `struct DirScan` and `struct ArchiveLoad` defined
+in both —
+
+```
+begin_dir_scan  poll_dir_scan  cancel_dir_scan  cancel_scan_command  scan_pill_visible
+begin_archive_open  poll_archive_load  finish_archive_open  fail_archive_open
+cancel_archive_load  prompt_archive_password  is_archive
+apply_menu_state  confirm_delete_permanent  toggle_recursive  toggle_show_archives
+```
+
+Every one is **async worker orchestration for directory scan and archive open** — the two
+flows that straddle the boundary because they own *shell-side* resources (worker threads,
+channels, modal dialogs) while their state belongs to the core. That is a reason they were
+left, not an oversight.
+
+This matters beyond pedantry: "half-finished inversion" reads as *the big refactor was
+abandoned midway* and makes (b) sound like a large program, when it is a nameable de-dup of
+~16 functions and 2 structs. Audit findings #1 (title) and #2 (which calls this *"the single
+worst cross-platform liability"* and sizes it at ~2,870 lines) should be re-scoped
+accordingly — the 41 "mirror" comments in `pb-mac-ffi` remain accurate, but they cluster on
+these two flows rather than spreading across the shell.
+
+---
+
+## 2. ⚠ Scope gate — (a) not (b)
+
+The audit deliberately splits finding #1 into two remediations. **They must stay separate
+tasks**, and this plan is strictly the first:
+
+| | what | risk | this task? |
+|---|---|---|---|
+| **(a)** | move methods into concern-scoped `impl AppCore` blocks in new files | **none if done as a pure move** (§3) | ✅ **yes** |
+| (b) | de-duplicate the remaining shell-worker orchestration (scan + archive open); give the mirror flags one owner | design change, cross-crate, dissolves findings #1/#2/#6 | ❌ separate task |
+| (c) | end the ~165-`pub`-field sprawl via accessors / `#[non_exhaustive]` | needs (b) first (shells build it as a literal) | ❌ later |
+
+Bundling (a) with (b) is the main way this goes wrong: it converts a provably-safe file move
+into a behavioral refactor, and the safety property in §3 evaporates. **No field moves, no
+signature changes, no visibility changes, no `AppCore` struct changes, no call-site edits.**
+If a method looks wrong while moving it, note it and move it unchanged.
+
+## 3. The safety property (what makes this reviewable)
+
+Rust permits multiple `impl AppCore` blocks across files in one crate. So every method can
+move with **zero** changes to call sites, types, or visibility.
+
+That means this refactor can be **provably** behavior-preserving, not merely
+tested-and-hopefully-fine. Verify mechanically:
+
+```
+for each commit: extract every `fn` body from the crate, normalize (sort by name,
+drop file boundaries and `use` lines), hash. Before == after, or the commit is wrong.
+```
+
+Ship that as a script in the task and run it per step. `cargo test` (830 in `pb-app-core`)
+is the backstop, not the proof — a passing suite would not catch a silently dropped method
+that nothing covers, and the normalized-body diff would.
+
+**Corollary: a step with a non-empty body diff is a bug, not a judgement call.** That is what
+makes the whole thing safe to do in a hot file.
+
+## 4. Cluster inventory (measured at `HEAD`, not guessed)
+
+349 production methods, auto-clustered by name, with the LOC each would take along:
+
+| cluster | fns | ~LOC | note |
+|---|---:|---:|---|
+| video / audio / playback / poster / subtitle | 96 | 2,882 | biggest; already has siblings (`video_session.rs`, `video_native.rs`, `subtitle.rs`) |
+| **residency / decode / present / ring** | 44 | 2,388 | **the hot engine — genuinely coupled, moves LAST or not at all** |
+| *(unassigned — needs manual triage)* | 59 | 1,878 | §5 |
+| lifecycle / dispatch (`tick`, `dispatch_action`, `handle`) | 10 | 1,101 | `tick` is 487 lines by itself |
+| panels / overlay / hud / toast | 40 | 891 | |
+| tree / fs / nav / playlist | 38 | 856 | |
+| file ops / undo / delete / copy | 15 | 581 | |
+| view / geometry / zoom / compare | 22 | 568 | touched by #124 |
+| scan / describe / text | 13 | 395 | |
+| settings / keymap | 5 | 185 | |
+| archive / door | 7 | 129 | |
+
+The eight leaf clusters (everything except residency, dispatch and unassigned) are
+**~6,487 LOC ≈ 54% of production** — and their tests travel with them, which is where the
+bulk of the 8,970 test lines goes. Extracting only the leaves takes the file from 20,932 to
+roughly 6–8k without touching the hot path once.
+
+## 5. The unassigned 59
+
+Auto-clustering leaves 59 methods (1,878 LOC) unmatched — e.g. `open_plan`, `advance`,
+`trim_caches`, `work_pending`, `enter_empty_state`, `refresh_after_geometry_change`,
+`apply_stream_msg`, `menu_state_from`, `windowed_restore`, `index_of_path`. These need a
+human read, and they are the interesting ones: a method that resists naming into a concern
+is either genuinely cross-cutting (keep central) or badly named (note it, move it unchanged,
+file a rename separately). **Do not rename anything during the move** — a rename breaks the
+§3 body-diff proof.
+
+## 6. Proposed file map
+
+New files in `crates/pb-app-core/src/core/`, each a single `impl AppCore` block plus its own
+`mod tests`:
+
+```
+core/video.rs      core/panels.rs     core/tree.rs      core/view.rs
+core/files.rs      core/scan.rs       core/archive.rs   core/prefs.rs
+```
+
+`app_core_impl.rs` keeps lifecycle/dispatch, the residency engine, and the triaged
+cross-cutting remainder. Naming note: `pb-app-core` already has top-level `scan.rs`,
+`video.rs`, `subtitle.rs` etc. as *logic* modules — hence the `core/` subdirectory for the
+*orchestration* halves, so `core/video.rs` (AppCore's video methods) is visibly distinct from
+`video.rs` (the video logic). Confirm that reads right before committing to it.
+
+## 7. Sequencing
+
+Leaf-first, smallest-blast-radius-first, one cluster per commit:
+
+1. `prefs` (5 fns / 185 LOC) — the smallest possible end-to-end rehearsal of the whole
+   process, including the §3 verifier. If anything about the mechanism is wrong, learn it here.
+2. `archive` (7 / 129), `scan` (13 / 395), `view` (22 / 568) — still small, still leafy.
+3. `files` (15 / 581), `tree` (38 / 856), `panels` (40 / 891).
+4. `video` (96 / 2,882) — the big win, deliberately after the process is proven six times.
+5. **Stop and reassess.** At this point the file is ~6–8k and the remaining content is
+   dispatch + residency + the triaged remainder. Splitting the residency engine is a
+   different (and more debatable) question; it is genuinely coupled and it is the hot path.
+   Do not pre-commit to it here.
+
+`tick` (487 lines) and `dispatch_action` are **not** decomposed by this task. Cutting them up
+is a behavior-risk change to per-frame ordering; file it separately if wanted.
+
+## 8. Merge-conflict strategy (this is the real risk, not correctness)
+
+The owner edits this tree concurrently, and this file is the repo's #1 churn file. A
+large move will conflict with anything in flight.
+
+- **Land each step in its own commit, same day it is written.** Do not batch.
+- **Check with the owner that nothing is mid-flight in a cluster before moving it.**
+- **Never `git add -A`** (standing rule) — stage the explicit paths.
+- If a conflict does occur, resolving it is unusually safe here *because* of §3: the body
+  diff tells you mechanically whether the resolution preserved every method.
+
+## 9. Anti-regrowth guard (optional, recommend yes)
+
+The file grew 32% in a day *after* being named the top debt. Without a guard it will do so
+again. Cheapest effective version: a unit test asserting no file in `pb-app-core/src`
+exceeds N lines (set N at ~1.3× the largest post-split file). It fails loudly at the moment
+someone reaches for the old habit, and is a one-line edit to raise deliberately. Owner call —
+it is a nag, and nags have a cost.
+
+## 10. Risks
+
+| risk | severity | mitigation |
+|---|---|---|
+| Merge conflicts with concurrent owner edits | **the top risk** | §8: one cluster per commit, check before moving, land same-day |
+| Scope creep into NS0 (b) or renames | high — destroys the §3 proof | §2 scope gate; move unchanged, file follow-ups separately |
+| A method silently dropped in a move | high | §3 normalized body diff; `cargo test` as backstop |
+| Splitting the residency engine on momentum | high — hot path | §7 step 5 is an explicit stop-and-reassess, not a plan to continue |
+| Anchor churn in plans/memory (`app_core_impl.rs:NNNN` everywhere) | medium, unavoidable | accept; the audit's own anchors are already stale, and line anchors were never stable in a file growing 5k/day |
+| `core/` naming collides confusingly with existing logic modules | low | §6; confirm before step 1 |
+
+## 11. What this does NOT fix
+
+Worth stating plainly so the task isn't oversold. After a perfect execution:
+
+- `AppCore` still has ~165 `pub` fields, and any method in any new file can still touch any
+  of them. **The blast radius is unchanged in principle** — only navigability, review size,
+  and merge-conflict surface improve.
+- The mirror-flag desync bug class (audit #1's actual hazard) is **untouched**; that is (b).
+- The two-shell duplication (#2) is untouched; that is also (b) — and per §2a that is ~16
+  functions across the scan and archive-open flows, not a rewrite.
+
+This task buys tractability, and it makes (b) approachable. It is not itself the cure the
+audit is pointing at. The audit calls its item 3 *"the large, high-value program the other
+findings mostly reduce to"* — but per §2a that framing over-sizes what is actually left.

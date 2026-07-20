@@ -1478,6 +1478,54 @@
             "status": "pending"
           }
         ]
+      },
+      {
+        "id": 125,
+        "title": "Split app_core_impl.rs into concern-scoped impl AppCore blocks (audit finding #1a)",
+        "description": "Audit finding #1 remediation (a), and the audit's #1 recommended action - never filed as a task, which is likely why it is the one recommendation that did not happen while #109/#119/#121 all did. Plan: .taskmaster/plans/125-split-app-core-impl.md.\n\nWHY NOW. app_core_impl.rs went 15,898 -> 20,546 lines between 2026-07-18 (8b5dc30b, the audit's own baseline) and 2026-07-19, and 20,932 at 5f3b4429: +5,034 lines / +32% in about a day, in the very file the audit had just named its top debt. Re-measured at HEAD: 20,932 lines (11,963 production + 8,970 tests), 349 production methods in essentially one flat impl AppCore. Next-largest file in the repo is gpu.rs at 7,127, so this is ~2.9x the runner-up. The audit's stated figures (16,013 / 323 methods / mod tests at 10011) are all now stale in the same direction - its freshness caveat predicted exactly this.\n\nCOST, OBSERVED (not theoretical) during task #124: two full Codex review runs returned NOTHING because both exhausted their budget exploring the file - a review was only obtained by hand-extracting excerpts into the prompt; a patch landed in the WRONG function first (rebuild_playlist vs rebuild_ring, plausible-looking neighbours in a 349-entry list); and 'what else touches this?' needs a repo-wide grep because it cannot be answered by reading a file.\n\nSCOPE GATE - THE MOST IMPORTANT PART. This is remediation (a) ONLY: move methods into concern-scoped `impl AppCore` blocks in new files. NOT (b) finishing the NS0 inversion (AppCore owns orchestration, mirror flags get one owner), and NOT (c) ending the ~165-pub-field sprawl. No field moves, no signature changes, no visibility changes, no AppCore struct changes, no call-site edits, NO RENAMES. If a method looks wrong while being moved, note it and move it unchanged. Bundling (a) with (b) is the main way this goes wrong: it converts a provably-safe file move into a behavioral refactor and destroys the safety property below.\n\nTHE SAFETY PROPERTY. Rust allows multiple `impl AppCore` blocks across files in one crate, so every method moves with zero call-site/type/visibility change. That makes the refactor PROVABLY behavior-preserving rather than merely tested: extract every fn body from the crate, normalize (sort by name, drop file boundaries and use-lines), hash, and require before == after for every commit. A non-empty body diff is a bug, not a judgement call. cargo test (830 in pb-app-core) is the backstop, not the proof - a passing suite would not catch a silently dropped method that nothing covers.\n\nCLUSTERS (measured at HEAD, auto-clustered by method name, LOC each would take along): video/audio/playback/poster/subtitle 96 fns/2,882 LOC; residency/decode/present/ring 44/2,388 (THE HOT ENGINE - moves last or not at all); unassigned-needs-triage 59/1,878; lifecycle/dispatch 10/1,101 (tick alone is 487); panels/overlay/hud 40/891; tree/fs/nav 38/856; file ops/undo 15/581; view/geometry 22/568; scan/describe/text 13/395; settings/keymap 5/185; archive/door 7/129. The eight LEAF clusters are ~6,487 LOC ~= 54% of production and their tests travel with them, so extracting only the leaves takes the file to roughly 6-8k WITHOUT touching the hot path once.\n\nSEQUENCING: leaf-first, one cluster per commit - prefs (smallest, a full rehearsal of the process incl. the verifier) -> archive/scan/view -> files/tree/panels -> video (the big win, after the process is proven six times) -> STOP AND REASSESS. Splitting the residency engine is a separate and more debatable question (genuinely coupled, and the hot path); do not pre-commit to it. tick (487 lines) and dispatch_action are NOT decomposed here - cutting them up is a behavior risk to per-frame ordering, file separately if wanted.\n\nTOP RISK IS MERGE CONFLICTS, NOT CORRECTNESS: the owner edits this tree concurrently and this is the repo's #1 churn file. Land each step in its own commit the same day, confirm nothing is mid-flight in a cluster before moving it, stage explicit paths (never add -A). A conflict is unusually safe to resolve here precisely because the body diff mechanically proves the resolution preserved every method.\n\nWHAT THIS DOES NOT FIX (so the task is not oversold): AppCore still has ~165 pub fields and any method in any new file can still touch any of them, so the blast radius is unchanged IN PRINCIPLE - only navigability, review size and merge-conflict surface improve. The mirror-flag desync bug class (finding #1's actual hazard) and the two-shell duplication (#2) are untouched; both are (b). This task buys tractability and makes (b) approachable; the audit itself calls the NS0 inversion 'the large, high-value program the other findings mostly reduce to.'",
+        "status": "pending",
+        "priority": "high",
+        "dependencies": [],
+        "details": "Measured at 5f3b4429 (2026-07-19). Growth: 8b5dc30b 15,898 -> 939c0bce 20,546 -> HEAD 20,932. Test module starts at line 11,963. Audit source: .taskmaster/plans/technical-debt-audit.md finding #1 (remediation a) + Recommended sequencing item 1. Proposed layout: crates/pb-app-core/src/core/{video,panels,tree,view,files,scan,archive,prefs}.rs, each one impl AppCore block plus its own mod tests; app_core_impl.rs retains lifecycle/dispatch + the residency engine + the triaged remainder. NOTE the naming check in plan section 6: pb-app-core already has top-level scan.rs / video.rs / subtitle.rs as LOGIC modules, hence core/ for the ORCHESTRATION halves - confirm that reads right before committing to it. The 59 unassigned methods (open_plan, advance, trim_caches, work_pending, enter_empty_state, refresh_after_geometry_change, apply_stream_msg, menu_state_from, windowed_restore, index_of_path, ...) need a human read: one that resists naming into a concern is either genuinely cross-cutting (keep central) or badly named (note it, move unchanged, file the rename separately - a rename breaks the body-diff proof).",
+        "testStrategy": "The primary check is NOT the test suite - it is the normalized-body diff described in the scope/safety sections: per commit, extract every fn body in pb-app-core, normalize (sort by name, drop file boundaries and use-lines) and require the hash to be identical before and after. Ship that verifier as a script alongside step 1 and run it on every step. cargo test --workspace (830 in pb-app-core) and cargo clippy --all-targets -D warnings are the backstop. Additionally assert the method COUNT is conserved (349 production) so a dropped method is caught even if its body hash never appears. Optional anti-regrowth guard (owner call, plan section 9): a unit test failing if any file in pb-app-core/src exceeds ~1.3x the largest post-split file - the file grew 32% in a day AFTER being named the top debt, so without a guard it will do so again; the cost is that it is a nag.",
+        "subtasks": [
+          {
+            "id": 1,
+            "title": "Write the body-diff verifier and rehearse on `prefs` (5 fns / 185 LOC)",
+            "description": "The verifier first, then the smallest possible cluster end-to-end: new core/prefs.rs, one impl AppCore block, its tests moved with it, verifier green, workspace green. If anything about the mechanism is wrong (module naming, test visibility, cfg-gated methods, doc-link breakage) it surfaces here at 185 LOC instead of at 2,882.",
+            "status": "pending"
+          },
+          {
+            "id": 2,
+            "title": "Triage the 59 unassigned methods into keep-central vs a cluster",
+            "description": "A human read, before the bigger moves depend on the answer. Output is a written assignment list, not code. Methods that resist naming are the signal: genuinely cross-cutting stays in app_core_impl.rs; badly named gets moved unchanged with a rename filed separately.",
+            "status": "pending"
+          },
+          {
+            "id": 3,
+            "title": "Extract the small leaves: archive, scan, view",
+            "description": "7/129, 13/395, 22/568. One cluster per commit, verifier per commit. view/ was touched by #124 so re-confirm nothing is mid-flight there first.",
+            "status": "pending"
+          },
+          {
+            "id": 4,
+            "title": "Extract the mid leaves: files, tree, panels",
+            "description": "15/581, 38/856, 40/891. Same discipline. By the end of this step the process has been proven six times.",
+            "status": "pending"
+          },
+          {
+            "id": 5,
+            "title": "Extract video/audio/playback (96 fns / 2,882 LOC) - the big win",
+            "description": "Deliberately last among the leaves. Largest cluster and the one with the most existing sibling modules (video_session.rs, video_native.rs, subtitle.rs), so also the one where the core/ vs top-level naming distinction matters most.",
+            "status": "pending"
+          },
+          {
+            "id": 6,
+            "title": "Stop, re-measure, and decide whether the residency engine moves at all",
+            "description": "Explicitly a decision point, not a plan to continue. The file should be ~6-8k by here. The residency/decode cluster (44 fns / 2,388 LOC) is genuinely coupled and is the hot path; splitting it is a different argument that deserves its own evidence. Also decide the anti-regrowth guard here, with real post-split numbers to set the threshold from.",
+            "status": "pending"
+          }
+        ]
       }
     ],
     "metadata": {
