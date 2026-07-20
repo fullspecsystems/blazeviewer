@@ -71,4 +71,12 @@ after a toggle.
 - Mode-1 (ICC) photos keep the CPU re-decode path (their pyramid conversion is #110's 110d).
 - The Phase-1b display-capped pyramid budget is a reviewed design draft, not implemented
   (zero effect on the 7680 display; see `.taskmaster/plans/110c-phase1b-display-capped-pyramid.md`).
-- macOS uses the old drop-all ring rebuild (remap_ring trait default) until its shell is ported.
+- ~~macOS uses the old drop-all ring rebuild (remap_ring trait default)~~ — **STALE, corrected
+  2026-07-19 (#113).** macOS calls the REAL `remap_ring`: shared `rebuild_ring`
+  (`app_core_impl.rs:8046`) invokes it on `WgpuRenderer`, which overrides the trait default at
+  `gpu.rs:3709`, and the mac shell constructs exactly that renderer. The whole arc was verified
+  on-device on Metal — `GPU-derived Fit` fires per toggle, `PB_SCALE_POLICY=cpu` is a clean A/B,
+  and all 69 pb-render tests (incl. the real GPU derive suite) pass headless on Metal.
+- ⚠ **Test #110 on a JPEG, not whatever sorts first.** RAW is excluded from the parked tier, so a
+  folder whose first item is a `.NEF` shows ZERO derive lines and looks broken. (Cost the #113
+  verifier four confusing toggles.)

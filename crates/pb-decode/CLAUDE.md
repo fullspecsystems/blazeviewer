@@ -101,15 +101,25 @@ Filesystem videos (one cross-platform container recognition list; per-file playa
 a runtime property of the OS codecs) are **typed items** — `LibraryItemKind`, dispatched
 in `decode_item` *before* any `bytes()` read; path-only, never indexed inside archives;
 Live-Photo companion `.mov`s are hidden by same-stem-per-directory dedup at scan.
-Poster = the clip's first non-black frame via an MF reader configured identically to
-playback (rotation/color parity by construction); panel facts come from a ~20 ms
-header-only probe. Playback = a forward-only `VideoSession` (pb-app-core, injected-time,
+Poster = a **scored walk** (tasks #92/#114/#121), not "the first non-black frame": a cheap
+head pass, then — only if that finds nothing genuinely good (bright AND textured) — seeks past
+the intro shallow→deep, since a feature film opens on black/logo/fade. Candidates are judged on
+a fixed 256 px reduction (`POSTER_JUDGE_WIDTH`) so the gate is resolution-independent and a
+thumb-fit walk and a display-fit walk agree. **The policy lives once, in `poster_walk.rs`**
+(task #121): a `PosterBackend` supplies only the mechanics (seek, decode, judge), and MF +
+FFmpeg are on it. ⚠ **`av_poster.rs` (macOS MP4/MOV) is NOT yet** — it remains the original
+first-bright-frame walk with no deep seek, so a clip that opens dark gets a black poster
+(pinned by an `#[ignore]`d test in that file; #121 phase 4b closes it). Rotation/color parity
+with playback is by construction; panel facts come from a ~20 ms header-only probe.
+
+Playback = a forward-only `VideoSession` (pb-app-core, injected-time,
 fully unit-tested on fake producers) fed by a demand-driven MF reader thread (pb-decode):
 one credit = one frame over a **single merged command channel** (Stop/SeekTo can never be
 deafened by backpressure), byte/frame-budgeted queue (constant memory at any clip
-length), rebuffer-don't-drift, audio = a shell WinRT `MediaPlayer` (video tracks
-deselected — audio only) whose position is the master clock via ~4 Hz
-`AudioClockSample`s. Seek recreates the reader positioned at the target (repositioning a
+length), rebuffer-don't-drift, audio = a **WASAPI** backend (`ae6f412e`; the shell WinRT
+`MediaPlayer` it replaced could not play legacy MJPEG-AVI, and MF cannot decode
+AC-3/E-AC-3/DTS at all — hence the FFmpeg-first audio path) whose clock is the master via
+~4 Hz `AudioClockSample`s. Seek recreates the reader positioned at the target (repositioning a
 warm HEVC reader blocks ~1 s — spike-measured); the producer parks after EOS so `P`
 replays via seek-to-0. 4K30 software decode is comfortable; 4K60 is borderline — NV12 +
 in-shader YUV or hardware decode is the reserved escalation (ADR-012).

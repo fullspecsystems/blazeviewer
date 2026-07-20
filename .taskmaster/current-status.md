@@ -1,9 +1,10 @@
 # Blaze Viewer — Current Status (session handoff)
 
-_Last updated: 2026-07-19 (rev 22). This session ran on the **macOS** side: #109 item 1 and
-the #113 on-device verify are DONE, and the **#121 poster-walk DRY refactor** (owner-asked)
-is underway — phases 1 and 3a merged to `main`. The parallel Windows agent landed #109.4 in
-the same window; the two were merged (see the ID-collision note below)._
+_Last updated: 2026-07-19 (rev 23). This session ran on the **macOS** side. Landed: #109
+item 1, the #113 on-device verify (DONE), the **#121 poster-walk DRY refactor** (phases 1 +
+3a; phase 2/MF came from the Windows side), and the **macOS thumbnail-strip fix** — first
+tile 199 ms, down from ~60 s, owner-measured. The parallel Windows agent landed #109.4,
+#119/#122/#123-fix-1 in the same window; all merged (see the ID-collision note below)._
 ---
 
 # ▶️ START HERE — #114 is DONE and on main (`a987d0d6` tip)
@@ -54,19 +55,22 @@ rebase integration exposed + fixed a broken `run_video_producer` test call site
 (`6b08e44a`).
 
 ## Next actions
-1. **#121 phase 2 — the MF port — is OWNER-OWNED, on Windows.** It is the one phase this Mac
-   cannot compile or run (`pb-app`/MF are Windows-only). The plan spells the contract:
-   keep `scan`'s per-sample deadline check, map BOTH invalid-position sites, and make reader
-   retirement `Drop`-based. Everything it needs already exists on `main`.
-2. **#121 phases 3b / 4a / 4b** (FFmpeg deadline+interrupt classification; AVFoundation PTS
-   plumbing; `av_poster` onto the driver = **#92.2**) — all doable on the Mac.
-3. **Owner smoke of the FFmpeg poster path** (macOS MKV/WebM) after 3a — it is meant to be
-   behavior-neutral; the one accepted delta is the driver's between-burst deadline check.
-4. **#112 performance profiles** — design rev 4 IMPLEMENTATION-READY, paused at owner
-   sign-off; do not implement without the go.
-5. **#119 / #120** (new, from the Windows side): the toggle-storm root cause and the
-   diagnostics panel. #119 is adjacent to the #113 derive work verified this session.
-6. **#102 fuzz/bench subtask, door gating #105.2/#107** — the smaller owed items.
+1. **Re-measure the strip** (`PB_THUMB_DIAG=1`) on the Videos share. Two fixes landed since
+   the 199 ms reading: the poster-tile retention that produced it, AND the double-walk
+   removal (`d71c3f92`) — every film in the display window was being walked TWICE
+   concurrently. The ~700 ms/tile plateau should be smaller; that number decides whether
+   the #114 selection parity is ever worth its risk.
+2. **#121 subtask 4 (FFmpeg 3b)** — interrupt classification (cancel vs elapsed deadline vs
+   real decode error, `ffmpeg/poster.rs:224`). Small, doable on the Mac, closes a known gap.
+3. **#123** — owner-owned (fix 1 landed `c1b4d707`, plan rev 2 implementation-ready).
+4. **#109 items 2/3/5** — shared open generation, decode identity, present_item propagation.
+   Items 1 and 4 are done.
+5. **#112 profiles** — design rev 4 implementation-ready, paused at owner sign-off.
+6. **#106.1 byte cache / #106.3 read throttling** — the COLD-read side. #106.4 measured warm
+   reads at ~37 ms vs 300–500 ms decode, so this only pays cold; that is the 7 s first photo.
+7. **Low value now:** #121 subtasks 5/6 + #92.2 (AVFoundation). MOV/MP4 on this library are
+   smartphone clips that open on content, so they never deep-walk — the gap is pinned by an
+   `#[ignore]`d test and costs nothing sitting there.
 
 ## ⚠️ Task-ID collision (2026-07-19) — read before filing a task
 Both sides filed a **#115** concurrently: the Windows agent's "compcol RAR dependency" (which
@@ -151,6 +155,16 @@ off Windows: `enable_capture()`'s only call site is `land_selection_tile`, which
 10 tiles <1 s, 70 tiles in 17 s. Two regimes: a fast head/tail (~44–100 ms/tile — tiles from
 posters already walked) around a **~700 ms/tile plateau from ~1 s to ~15 s**, which is
 independent fill walks contending with the still-draining display window.
+
+**Second fix, same session (`d71c3f92`):** the display window's films were also being walked
+TWICE concurrently — a Display poster walk AND a Thumb fill walk — because the only guard
+(`pending_items`) is built from `pending_uploads`, i.e. decodes that have already RETURNED, so
+an in-flight walk was invisible to it. Since the poster now becomes the tile, that second walk
+was pure duplicated network work competing for the workers the first one needed. Scoped to
+`!poster_select_supported()` so the Windows selection branch keeps its `Demand::Thumb` union
+(which is what routes a FAILED walk into `thumbs.failed` — Codex P2). Proven by the failing
+test's enqueue log, mutation-verified, and its sibling test pins that films OUTSIDE the display
+window still fill themselves.
 
 **What the plateau would cost to remove:** ONLY the #114 selection parity (workstream C)
 collapses the display walk and the thumb fill into one job, so there is no contention —
