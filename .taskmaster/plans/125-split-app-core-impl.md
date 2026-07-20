@@ -588,19 +588,35 @@ after each pure move (and the exact expected-flags on each visibility edit), `ca
 reviewed the split at the stop point and it came back clean on visibility, scope/resolution and
 the cfg concern (see *Codex review* under Progress).
 
-**Not verified — the one thing a Mac must check:** `video.rs` and `animation.rs` contain
-macOS-gated methods (`macos_native_route`, `start_native_video`, `start_sample_buffer_video`,
-`start_live_stream`, and the AVFoundation live-motion path) that **no Windows build type-checks**.
-They moved byte-identically and were audited to be fully `crate::`-qualified (so `use super::*`
-cannot rebind them), but "compiles on macOS" is unproven from here. A Mac session should build
-`pb-mac-ffi` / the mac host once and confirm. The app was also **not launched** on Windows —
-these are pure relocations, but a launch + archive-open/delete/describe/video smoke test is the
-belt-and-braces pass if wanted.
+**VERIFIED on macOS (2026-07-20):** the macOS-gated methods in `video.rs`/`animation.rs`
+(`macos_native_route`, `macos_sample_buffer_route`, `start_native_video`,
+`start_sample_buffer_video`, `start_live_stream`, and the AVFoundation live-motion path)
+**type-check, compile, and link clean on macOS.** Ran, on `aarch64-apple-darwin`:
+`cargo build -p pb-mac-ffi --features ffvideo` (clean), `cargo clippy -p pb-mac-ffi
+--features ffvideo -- -D warnings` (clean — matches the repo bar for the code Windows can't
+lint), and the full `scripts/build-swift-host.sh --debug --ffvideo` (built + linked +
+assembled the `.app`). Only pre-existing noise: a `block v0.1.6` future-incompat note and
+Swift `mediaSelectionGroup` deprecation warnings, neither related to #125. The audit
+("fully `crate::`-qualified, `use super::*` can't rebind") is confirmed by construction — a
+rebind would have been a compile error. The app also **launched cleanly** (no startup crash),
+so the moved lifecycle/init paths execute.
 
-**Cross-platform debt:** none that a Mac session can't clear with one build. Every change is
-inside `pb-app-core`, which both shells compile; no `AppCore` field was added (the struct-literal
-trap does not apply), and no shell file was touched. The macOS-cfg type-check above is the only
-item, and it is verification, not owed work.
+_Note: the `livephoto` feature is the **Linux** live-photo path
+(`all(unix, not(target_os="macos"), feature="livephoto")`); the macOS live path is
+`target_os="macos"`-gated and compiles regardless of that feature. `pb-mac-ffi` forwards only
+`ffvideo`, so `--features ffvideo` is the correct and sufficient macOS type-check._
+
+**Owner-driven interactive smoke test (optional, belt-and-braces):** these are pure
+relocations that now compile+link+launch, so behaviour is not expected to change. If a hands-on
+pass is wanted, exercise the moved clusters in the running app: play a video (audio + seek +
+frame-step), a Live Photo, open an archive (`P`) and climb out (`Alt+Up`), delete a photo and
+undo it, toggle the folder tree / inspector panels, and the describe/OCR panels. Nothing should
+behave differently from before.
+
+**Cross-platform debt:** NONE — cleared 2026-07-20. Every change is inside `pb-app-core`, which
+both shells compile; no `AppCore` field was added (the struct-literal trap does not apply), and
+no shell file was touched. The one owed item — the macOS-cfg type-check — is done (see VERIFIED
+above). #125 is fully verified on both platforms.
 
 **Claimed → RELEASED.** `app_core_impl.rs` was actively split on Windows this session; the leaf
 work is done and pushed, so the claim is lifted. **The residency/present engine that remains is

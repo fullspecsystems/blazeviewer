@@ -11,8 +11,8 @@ the same tasks in parallel through the day. Everything below is on `main`, pushe
 `app_core_impl.rs`) has reached its STOP POINT — every leaf is split, 22,105 → 14,218 lines,
 26 concern files.** What remains in the parent is the charter (lifecycle, dispatch, residency &
 present engine); splitting the engine is a deliberate STOP (§7 step 5), a separate task if ever.
-**There is no live #125 work to continue** — the next thing a fresh session picks is from the
-backlog below, or the one Mac-only verification item in the plan's `## Handoff`.
+**There is no live #125 work to continue** — the Mac-only verification item is now DONE (see
+below); the next thing a fresh session picks is from the backlog below.
 
 New this session and worth reading before writing any code:
 **`docs/where-code-goes.md`** — an ordered decision procedure for where a new function
@@ -49,11 +49,13 @@ plan if ever** — do not continue on momentum. The charter is now a test, not a
 `effective_*` accessors and menu projection were moved out precisely because they contradicted
 it.
 
-**One Mac-only verification owed** (plan `## Handoff`): `video.rs`/`animation.rs` hold
-macOS-gated methods no Windows build type-checks. They moved byte-identically and were audited
-fully `crate::`-qualified, so scope can't rebind them — but a Mac should build `pb-mac-ffi` once
-to confirm "compiles on macOS". Verification, not owed work. **The parent is released** — no
-longer claimed; anyone may edit it.
+**Mac verification DONE (2026-07-20).** The macOS-gated methods in `video.rs`/`animation.rs`
+type-check, clippy-`-D warnings` clean, and link: `cargo build`/`cargo clippy -p pb-mac-ffi
+--features ffvideo` + full `build-swift-host.sh --debug --ffvideo` (built the `.app`), and the
+app launched clean. **#125 is now fully verified on both platforms — no owed work remains.** The
+parent (`app_core_impl.rs`) is released; anyone may edit it. (An optional owner-driven interactive
+smoke test of the moved clusters is noted in the plan `## Handoff`, but it's belt-and-braces —
+pure relocations that compile+link+launch.)
 
 ### Reusable machinery left behind (in `scratchpad/`, not committed — the verifier is the keeper)
 
