@@ -597,16 +597,40 @@ same three conventions:
 
 1. **Read the plan's ledger first; write it last.** Each task plan carries one section
    titled **`## Handoff`** — the *only* place cross-machine state lives, so nobody has to
-   guess whether it's §11 this time or §12.8 the next. It holds exactly three things:
+   guess whether it's §11 this time or §12.8 the next. It holds five things:
    *verified* (what was actually run, on which platform), *not verified* (what the next
-   machine must check, specifically enough to act on), and *decisions/corrections* (including
-   corrections to earlier sessions — those are welcome, and have caught real errors).
+   machine must check, specifically enough to act on), *decisions/corrections* (including
+   corrections to earlier sessions — those are welcome, and have caught real errors), plus
+   the two below, which exist because each cures one of the two ways sessions collide:
+   - **Cross-platform debt** — *landed for one shell, still owed on the other.* **The
+     dangerous category, because it is green.** A commit can fix something "in the core so
+     both shells get it", pass CI, and leave the other platform still broken — because the
+     machine that wrote it could not compile that shell. It happened on 2026-07-20: the
+     empty-deck welcome-hint fix landed with winit pointed at the core and macOS still
+     running its own copy of `cancel_scan_command`, and *nothing failed*. **Any commit
+     touching shared code it cannot fully verify adds a line here**; only the other machine
+     strikes it.
+   - **Claimed** — *who is holding what, right now.* The cure for duplicate work. On
+     2026-07-20 both machines independently fixed the same `AppCore` struct literal, and the
+     Mac session nearly rewrote `background.rs` from scratch because it began from a stale
+     HEAD. **Fetch, read this table, then claim** — especially for anything touching both
+     shells at once, which is the worst thing to do concurrently.
 2. **Never mark something verified that you could not run.** "Compiles" is not "works", and
    `cargo check --target x86_64-pc-windows-msvc` from a Mac is not a Windows run. Say which
    it was. A shell UX change is *behaviour-unverified* until someone launches the app.
 3. **Leave a revert lever for anything unverified.** If you ship a UX change the other
    machine must confirm, keep the old path alive behind `#[allow(dead_code)]` and a one-line
    gate, and say in the Handoff what flipping it restores and when it may be deleted.
+4. **Fetch before you start, and again before you push.** Both machines commit to `main`. A
+   session that plans against a stale HEAD re-derives work that already exists — and the
+   cost is not just wasted effort, it is two divergent implementations of the same thing.
+
+**A worked example of why this pays.** The 2026-07-20 Mac session wrote its *not verified*
+list honestly, including "cancel with an empty deck — confirm it restores the welcome screen
+rather than stranding a blank canvas." The Windows session treated that as a lead rather than
+a formality and found it was a **real bug in both shells**, needing a folder slow enough to
+cancel pre-bootstrap — something neither owner nor agent would plausibly hit by hand. It is a
+regression test now. An honest "I could not check this" is worth more than a confident green.
 
 **⚠ The trap that has actually bitten (2026-07-20):** `pb-app` builds `AppCore` as a **struct
 literal** while `pb-mac-ffi` goes through `AppCore::new_host`. So **adding a field to
