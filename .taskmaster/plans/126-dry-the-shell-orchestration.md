@@ -96,7 +96,10 @@ removed), `cancelling_before_anything_decrypted_remembers_nothing`, and
 boundary; writing a display counter from outside an opener is meaningless rather than
 dangerous.
 
-**Still not run on Windows:** *Not verified* items 5–6 (session MRU auto-try on a second
+**Item 5 — owner-run on Windows 2026-07-20, passes.** A plain `.zip` shows no Loading dialog
+or spinner at all.
+
+**Still not run on Windows:** *Not verified* item 6 only (session MRU auto-try on a second
 archive, Cancel mid-load on a large `.7z`, plain-`.zip` fast path from a *fresh* session, and
 scan-over-archive supersession).
 
