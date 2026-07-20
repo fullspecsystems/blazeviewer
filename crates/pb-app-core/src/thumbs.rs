@@ -12,6 +12,7 @@
 
 use std::collections::HashSet;
 use std::sync::mpsc::{sync_channel, Receiver, Sender, SyncSender};
+use std::time::Instant;
 
 use pb_core::{InsertOutcome, ThumbCache, ThumbDemand, ThumbTier};
 use pb_decode::{DecodedImage, FitBox, PixelFormat};
@@ -106,6 +107,11 @@ pub struct Thumbs {
     /// derive's marker before the generation check rejected it, re-triggering the
     /// very walk the marker guards against.
     pub pending: HashSet<(u64, usize)>,
+    /// `PB_THUMB_DIAG` stopwatch: when the strip was opened, and how many tiles have
+    /// landed since. Measures the metric the user actually feels — *time until you see
+    /// thumbnails* — which no existing counter reports. RAM-only, durations and counts
+    /// only (never a path or a pixel), and `None` unless the env var is set.
+    diag: Option<(Instant, usize)>,
 }
 
 impl Default for Thumbs {
@@ -114,6 +120,7 @@ impl Default for Thumbs {
             cache: ThumbCache::new(THUMB_BUDGET_BYTES),
             enabled: false,
             capture: false,
+            diag: None,
             failed: HashSet::new(),
             follow: FollowState::default(),
             pending_scroll: None,
@@ -126,11 +133,22 @@ impl Default for Thumbs {
     }
 }
 
+/// `PB_THUMB_DIAG=1` — report how long the strip takes to show tiles, and which
+/// source produced each one. Off by default; read once.
+fn thumb_diag() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("PB_THUMB_DIAG").is_ok_and(|v| v != "0"))
+}
+
 impl Thumbs {
     /// First panel open: start capturing AND unlock the strip's own work (fill
     /// scheduling, the photo byproduct derive). Idempotent.
     pub fn enable(&mut self) {
         self.enabled = true;
+        if thumb_diag() && self.diag.is_none() {
+            self.diag = Some((Instant::now(), 0));
+            eprintln!("[thumb-diag] strip opened — t0");
+        }
         self.enable_capture();
     }
 
@@ -272,6 +290,15 @@ impl Thumbs {
             ) == InsertOutcome::Stored
             {
                 changed = true;
+                if let Some((t0, n)) = self.diag.as_mut() {
+                    *n += 1;
+                    let (count, ms) = (*n, t0.elapsed().as_millis());
+                    // The first tile is the headline number: everything before it is a
+                    // blank strip. Then every 10th, so a 64-tile fill is ~7 lines.
+                    if count == 1 || count % 10 == 0 {
+                        eprintln!("[thumb-diag] tile #{count} at {ms} ms");
+                    }
+                }
             }
         }
         changed
