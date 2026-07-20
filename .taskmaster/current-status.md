@@ -1,6 +1,6 @@
 # Blaze Viewer — Current Status (session handoff)
 
-_Last updated: 2026-07-19 (rev 21). This session ran on the **macOS** side: #109 item 1 and
+_Last updated: 2026-07-19 (rev 22). This session ran on the **macOS** side: #109 item 1 and
 the #113 on-device verify are DONE, and the **#121 poster-walk DRY refactor** (owner-asked)
 is underway — phases 1 and 3a merged to `main`. The parallel Windows agent landed #109.4 in
 the same window; the two were merged (see the ID-collision note below)._
@@ -122,6 +122,40 @@ Addresses tech-debt-audit finding **#5**.
 `PB_AV_SYNC`. Probes: `probe_one_file` / `ab_poster_walk` (ignored tests, pb-decode;
 `PB_PROBE_FILE` / `PB_POSTER_AB_DIR`). Corpus: `\\beenas\Media\Movies`,
 `D:\Media\Pictures\…\Wedding`.
+
+# 🎬 macOS thumbnail strip — FIXED (2026-07-19), with the measurement
+
+**Symptom (owner, on `\\beenas.local\Media\Videos`):** opening the strip on a movie folder
+showed blank placeholders for **nearly a minute**.
+
+**Root cause — starvation, NOT throughput.** The pool's documented order is "every
+display/poster want ahead of every thumb want" (decode_pool.rs:22), so thumb fills cannot
+begin until the whole display prefetch window drains — and on a movie folder every one of
+those is a multi-second network walk. Two wrong diagnoses were tried first and are recorded
+so nobody re-derives them: (1) "raise the thumb concurrency cap" — wrong layer, a
+concurrency limit would trickle tiles from second one, not withhold them for a minute;
+(2) "the #114 selection dedup is the cure" — it halves work per VISITED movie but does not
+reduce N distinct movies × one walk each.
+
+**The fix (`6b701b3b`, workstream A):** `thumbs_capture` now retains a VIDEO's displayed
+image as its tile even when the strip has never been opened — a video's displayed image IS
+its poster, already paid for by a 300–1600 ms walk. It fires on EVERY Display-purpose
+outcome, prefetch-window items included, so the whole window's posters become tiles as they
+land. Photos keep the `enabled` gate (a photo thumb is a cheap local re-decode; capturing
+every displayed photo would put a derive on every frame of a blaze).
+⚠ **The trap:** gating on `capture` instead of `enabled` — the obvious reading — is a NO-OP
+off Windows: `enable_capture()`'s only call site is `land_selection_tile`, which is
+`cfg!(windows)`. The hook must TURN capture on, not test it.
+
+**Measured after (owner, `PB_THUMB_DIAG=1`, same share):** first tile **199 ms** (from ~60 s),
+10 tiles <1 s, 70 tiles in 17 s. Two regimes: a fast head/tail (~44–100 ms/tile — tiles from
+posters already walked) around a **~700 ms/tile plateau from ~1 s to ~15 s**, which is
+independent fill walks contending with the still-draining display window.
+
+**What the plateau would cost to remove:** ONLY the #114 selection parity (workstream C)
+collapses the display walk and the thumb fill into one job, so there is no contention —
+worth ~10–14 s on that folder. Deliberately NOT scheduled: large, contract-heavy, and
+second-order now. Revisit only if it grates in real use.
 
 # 📓 Load-bearing knowledge (don't re-derive)
 

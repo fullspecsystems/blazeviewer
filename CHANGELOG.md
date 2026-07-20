@@ -9,7 +9,7 @@ with any pre-release suffix carried only by the tag.
 
 ### Fixed
 
-- Video thumbnails: a movie's poster is now kept as its thumbnail as soon as you view it, even if the thumbnail strip is closed — opening the strip later no longer re-scans films you have already browsed past (macOS and Linux; Windows already did this).
+- **Movie thumbnails appear almost immediately instead of after a minute of blank placeholders.** A film's poster is now kept as its thumbnail the moment it's generated, even with the thumbnail strip closed, so opening the strip shows the films you've already browsed past straight away rather than re-scanning every one of them (macOS and Linux; Windows already worked this way). Measured over a network share: first thumbnail 0.2 s, down from roughly a minute.
 - **Parking on a photo arms its instant fullscreen toggle much sooner.** The full-quality
   copy that makes toggles instant used to queue behind every neighbouring photo's refill
   work, so on large photos the "toggle is now instant" moment could lag many seconds behind
