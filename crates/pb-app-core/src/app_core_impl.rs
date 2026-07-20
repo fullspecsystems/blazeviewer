@@ -4680,7 +4680,7 @@ fn run_platform_video_producer(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use test_support::{five_photos, make_resident, photos_named, rgba_full, test_core};
+    use test_support::{clipboard_text_effects, core_with_a_native_video, five_photos, make_resident, photos_named, poster_payload, rgba_full, seed_details, stuck_preview_core, test_core, text_result, track};
     use crate::contract::{CoreEvent, Modifiers};
     use crate::{PbKey, Viewport};
 
@@ -4714,17 +4714,6 @@ mod tests {
         );
     }
 
-    /// A core with a live **Native** backend on item 0 — the macOS sample-buffer /
-    /// AVPlayer shape, which is what MKV and WebM actually take since Phase 3F.
-    fn core_with_a_native_video() -> AppCore {
-        let mut core = test_core();
-        let sid = pb_decode::VideoSessionId(7);
-        let mut proxy = crate::video_native::NativeVideoProxy::new(0, sid, false);
-        proxy.on_state_changed(sid, crate::video::VideoSessionState::Playing);
-        core.video = Some(crate::video_native::ActiveVideoBackend::Native(proxy));
-        core.displayed_item = Some(0);
-        core
-    }
 
     /// **Regression.** Subtitles gated on `video_session_active()`, which is false for the
     /// Native backend. When the macOS sample-buffer route became the default for MKV/WebM,
@@ -5795,33 +5784,6 @@ mod tests {
     }
 
     #[test]
-    fn native_tree_visibility_and_safe_activate() {
-        let mut core = test_core();
-        assert!(!core.tree_panel_visible(), "off by default");
-        core.native_tree = true;
-        assert!(!core.tree_panel_visible(), "closed → not visible");
-        core.folder_tree_open = true;
-        assert!(core.tree_panel_visible(), "open + native → visible");
-        core.panels.hidden = true;
-        assert!(!core.tree_panel_visible(), "Tab-hidden → not visible");
-        core.panels.hidden = false;
-        // A tick signals the host on the visibility transition (no hud needed for the diff).
-        core.effects.clear();
-        core.handle(CoreEvent::Tick(std::time::Instant::now()));
-        assert!(
-            core.effects
-                .iter()
-                .any(|e| matches!(e, contract::CoreEffect::PanelsChanged)),
-            "the tree's visibility change signals the host"
-        );
-        // Activate with nothing derived is a safe no-op (no target).
-        core.tree_activate(0);
-        // Winit (native_tree off) is never native-visible.
-        core.native_tree = false;
-        assert!(!core.tree_panel_visible());
-    }
-
-    #[test]
     fn native_open_suppresses_the_hud_and_signals() {
         let mut core = test_core(); // headless → empty source
         core.native_open = true;
@@ -6016,13 +5978,6 @@ mod tests {
     // --- "Text in image" state machine (task #45): drive `poll_text_scan` with a
     // hand-fed channel — the worker/OCR backend stays out of these tests entirely.
 
-    fn text_result(qr: &[&str], lines: &[&str]) -> crate::image_text::ImageText {
-        crate::image_text::ImageText {
-            qr: qr.iter().map(|s| s.to_string()).collect(),
-            lines: lines.iter().map(|s| s.to_string()).collect(),
-            ocr_error: None,
-        }
-    }
 
     /// Install an in-flight scan whose result is already sitting in the channel.
     fn feed_scan(core: &mut AppCore, item: usize, copy: bool, r: crate::image_text::ImageText) {
@@ -6036,18 +5991,6 @@ mod tests {
         });
     }
 
-    fn clipboard_text_effects(core: &AppCore) -> Vec<(String, Option<String>)> {
-        core.effects
-            .iter()
-            .filter_map(|e| match e {
-                contract::CoreEffect::WriteClipboard(contract::ClipboardPayload::Text {
-                    text,
-                    toast,
-                }) => Some((text.clone(), toast.clone())),
-                _ => None,
-            })
-            .collect()
-    }
 
     #[test]
     fn show_image_text_toggles_the_panel_mode() {
@@ -6363,18 +6306,6 @@ mod tests {
             msg.contains("backend is set up"),
             "the stale error was cleared and the describe re-ran (got: {msg})"
         );
-    }
-
-    #[test]
-    fn copy_description_uses_the_cache_and_carries_a_toast() {
-        let mut core = test_core();
-        core.displayed_item = Some(0);
-        core.descriptions.insert(0, Ok("A calico cat.".to_string()));
-        core.dispatch_action(Action::CopyDescription);
-        let got = clipboard_text_effects(&core);
-        assert_eq!(got.len(), 1);
-        assert_eq!(got[0].0, "A calico cat.");
-        assert_eq!(got[0].1.as_deref(), Some("Copied description"));
     }
 
     #[test]
@@ -6701,58 +6632,6 @@ mod tests {
         assert!(core.tree_io.is_none());
     }
 
-    #[test]
-    fn sibling_results_are_stale_guarded_and_only_matches_navigate() {
-        let opened_dir = |core: &AppCore| {
-            core.effects
-                .iter()
-                .any(|e| matches!(e, contract::CoreEffect::BeginDirScan { .. }))
-        };
-        let feed = |core: &mut AppCore,
-                    from_root: PathBuf,
-                    target: Option<crate::folder_tree::DiskTarget>| {
-            let (tx, rx) = std::sync::mpsc::channel();
-            tx.send(crate::folder_tree::TreeIoResult::Sibling { from_root, target })
-                .unwrap();
-            core.tree_io = Some(crate::folder_tree::tree_io_for_tests(rx));
-            core.effects.clear();
-            let t = core.now;
-            core.handle(CoreEvent::Tick(t));
-        };
-
-        let mut core = compare_core(2);
-        // A result computed for a deck the user already left: dropped — it must
-        // not yank navigation somewhere the user moved away from.
-        feed(
-            &mut core,
-            PathBuf::from("/somewhere/else"),
-            Some(crate::folder_tree::DiskTarget::Directory(PathBuf::from(
-                "/somewhere/else/next",
-            ))),
-        );
-        assert!(!opened_dir(&core), "stale sibling results are dropped");
-        assert!(core.tree_io.is_none(), "the finished job is released");
-
-        // Nothing with photos in that direction: no navigation (the host shows
-        // the toast — HUD-gated, so asserted in the live smoke, not here).
-        let root = core.root.clone();
-        feed(&mut core, root, None);
-        assert!(
-            !opened_dir(&core),
-            "an exhausted search must not open anything"
-        );
-
-        // A live match opens exactly like Open Folder — the shared plan.
-        let root = core.root.clone();
-        let target = root.join("next-door");
-        feed(
-            &mut core,
-            root,
-            Some(crate::folder_tree::DiskTarget::Directory(target)),
-        );
-        assert!(opened_dir(&core), "a found sibling opens as a dir scan");
-    }
-
     /// Open Parent out of an archive lands the deck cursor on that archive's **door** when Show
     /// Archives is on (so `space` continues past it), and on the folder's first item when it's
     /// off (task #108 — the off case avoids the streaming-scan stall on a filtered-out target).
@@ -6784,42 +6663,6 @@ mod tests {
             begin_cursor(&hidden),
             Some(pb_core::open::Cursor::First),
             "archives hidden → first item (no stall on a filtered-out door)"
-        );
-    }
-
-    /// `open_disk_target` (task #108): a `Directory` re-roots as a folder scan; an `Archive`
-    /// opens as its own deck (the door / File-open path), never a folder scan.
-    #[test]
-    fn open_disk_target_routes_folders_and_archives_apart() {
-        let mut core = test_core();
-        core.effects.clear();
-        core.open_disk_target(crate::folder_tree::DiskTarget::Archive(PathBuf::from(
-            "/p/a.zip",
-        )));
-        assert!(
-            core.effects.iter().any(|e| matches!(
-                e,
-                contract::CoreEffect::BeginArchiveOpen { path, .. } if path.as_path() == Path::new("/p/a.zip")
-            )),
-            "an archive target opens the archive"
-        );
-        assert!(
-            !core
-                .effects
-                .iter()
-                .any(|e| matches!(e, contract::CoreEffect::BeginDirScan { .. })),
-            "an archive target is never a folder scan"
-        );
-
-        core.effects.clear();
-        core.open_disk_target(crate::folder_tree::DiskTarget::Directory(PathBuf::from(
-            "/p/dir",
-        )));
-        assert!(
-            core.effects
-                .iter()
-                .any(|e| matches!(e, contract::CoreEffect::BeginDirScan { .. })),
-            "a directory target re-roots as a folder scan"
         );
     }
 
@@ -6974,35 +6817,6 @@ mod tests {
     }
 
     #[test]
-    fn os_theme_resolves_through_the_appearance_preference() {
-        let mut core = test_core();
-        // Default: System, dark until the shell reports (the pre-#46 look).
-        assert!(core.effective_dark());
-        assert_eq!(core.effective_letterbox(), core.settings.letterbox);
-
-        // The OS flips to light → System follows, and refresh_theme tracks the flip.
-        core.handle(CoreEvent::OsThemeChanged { dark: false });
-        assert!(!core.effective_dark());
-        assert!(!core.hud_dark, "refresh_theme applied the resolved theme");
-        assert_eq!(core.effective_letterbox(), core.settings.letterbox_light);
-
-        // Forced Light / Dark ignore the OS theme entirely.
-        core.settings.appearance_mode = settings::AppearanceMode::Dark;
-        assert!(core.effective_dark());
-        assert_eq!(core.effective_letterbox(), core.settings.letterbox);
-        core.settings.appearance_mode = settings::AppearanceMode::Light;
-        core.os_dark = true;
-        assert!(!core.effective_dark());
-
-        // A redundant report is change-free (hud_dark only moves on a real flip).
-        core.settings.appearance_mode = settings::AppearanceMode::System;
-        core.refresh_theme();
-        assert!(core.hud_dark);
-        core.handle(CoreEvent::OsThemeChanged { dark: true });
-        assert!(core.hud_dark);
-    }
-
-    #[test]
     fn tick_flushes_a_due_pending_delete() {
         // NS1 contract: a host that only drives `handle(Tick)` still gets the deferred
         // delete-advance — it must not depend on a shell-side flush (the winit shell's
@@ -7020,215 +6834,6 @@ mod tests {
             core.pending_delete.is_none(),
             "a Tick at/past the deadline must flush the pending delete"
         );
-    }
-
-    /// A headless core over an n-item deck of (nonexistent) temp paths — decode
-    /// failures are tolerated everywhere off the hot path, and the compare tests
-    /// assert on cursor/target/pin state, not on presentation.
-    fn compare_core(n: usize) -> AppCore {
-        let mut core = test_core();
-        let dir = std::env::temp_dir();
-        let paths: Vec<PathBuf> = (0..n).map(|i| dir.join(format!("cmp_{i}.png"))).collect();
-        let source: Arc<dyn ItemSource> = Arc::new(FsSource::new(paths));
-        core.rebuild_playlist(source, dir.clone(), Some(dir), true, 0);
-        core
-    }
-
-    /// Move the cursor to `i` and mark it settled (headless: no decode ever lands,
-    /// so the `displayed == target` gate is satisfied by hand).
-    fn settle_at(core: &mut AppCore, i: usize) {
-        core.playlist.jump_to(i);
-        core.target_item = Some(i);
-        core.displayed_item = Some(i);
-    }
-
-    #[test]
-    fn compare_toggle_pins_first_then_flips_and_returns() {
-        let mut core = compare_core(5);
-        // First Y with nothing pinned: pins the current photo, no navigation.
-        core.dispatch_action(Action::CompareToggle);
-        assert_eq!(core.compare_pin, Some(0));
-        assert_eq!(core.target_item, Some(0), "pinning must not navigate");
-        // Browse to 3, then Y: flips to the pin, remembering where we were.
-        settle_at(&mut core, 3);
-        core.dispatch_action(Action::CompareToggle);
-        assert_eq!(core.target_item, Some(0), "Y flips to the pin");
-        assert_eq!(core.compare_return, Some(3));
-        // Y again from the pin: returns to the remembered position.
-        core.displayed_item = core.target_item;
-        core.dispatch_action(Action::CompareToggle);
-        assert_eq!(core.target_item, Some(3), "Y on the pin returns");
-        assert_eq!(core.compare_pin, Some(0), "the pin itself stays fixed");
-    }
-
-    #[test]
-    fn compare_pin_moves_and_unpins() {
-        let mut core = compare_core(4);
-        core.dispatch_action(Action::ComparePin);
-        assert_eq!(core.compare_pin, Some(0));
-        // ⇧Y elsewhere moves the pin (and resets the return point).
-        settle_at(&mut core, 2);
-        core.compare_return = Some(1);
-        core.dispatch_action(Action::ComparePin);
-        assert_eq!(core.compare_pin, Some(2));
-        assert_eq!(core.compare_return, None, "re-pin resets the return point");
-        // ⇧Y on the pinned photo unpins.
-        core.dispatch_action(Action::ComparePin);
-        assert_eq!(core.compare_pin, None);
-        assert_eq!(core.compare_pin_id, None);
-    }
-
-    #[test]
-    fn compare_flip_never_interrupts_a_pending_target() {
-        let mut core = compare_core(5);
-        core.dispatch_action(Action::CompareToggle); // pin = 0
-                                                     // The launch decode of (nonexistent) cmp_0 failed, and a failed target
-                                                     // auto-settles via `present_failed` — clear it so the flip is a genuine
-                                                     // ring MISS that stays pending, which is what this test is about.
-        core.failed.clear();
-        settle_at(&mut core, 3);
-        core.dispatch_action(Action::CompareToggle); // flip to the pin...
-        assert_eq!(core.target_item, Some(0));
-        // ...but the present hasn't landed (displayed still 3). A second Y must not
-        // clobber the in-flight target (mirrors `advance`'s never-skip gate).
-        core.dispatch_action(Action::CompareToggle);
-        assert_eq!(core.target_item, Some(0));
-        assert_eq!(core.displayed_item, Some(3));
-    }
-
-    #[test]
-    fn compare_pin_survives_a_same_deck_rebuild_and_clears_on_a_new_deck() {
-        let dir = std::env::temp_dir();
-        let mut core = compare_core(4);
-        settle_at(&mut core, 2);
-        core.dispatch_action(Action::ComparePin); // pin = cmp_2 at index 2
-                                                  // The delete-advance shape: same paths minus cmp_1 → cmp_2 shifts to index 1.
-        let remaining: Vec<PathBuf> = [0usize, 2, 3]
-            .iter()
-            .map(|i| dir.join(format!("cmp_{i}.png")))
-            .collect();
-        let src: Arc<dyn ItemSource> = Arc::new(FsSource::new(remaining));
-        core.rebuild_playlist(src, dir.clone(), Some(dir.clone()), true, 0);
-        assert_eq!(
-            core.compare_pin,
-            Some(1),
-            "the pin re-resolves by path across a same-deck rebuild"
-        );
-        assert_eq!(core.compare_return, None, "the return point never survives");
-        // A genuinely new deck has no matching identity — the pin clears.
-        let other: Vec<PathBuf> = (0..3).map(|i| dir.join(format!("other_{i}.png"))).collect();
-        let src: Arc<dyn ItemSource> = Arc::new(FsSource::new(other));
-        core.rebuild_playlist(src, dir.clone(), Some(dir), true, 0);
-        assert_eq!(core.compare_pin, None);
-        assert_eq!(core.compare_pin_id, None);
-    }
-
-    #[test]
-    fn compare_pin_rides_the_prefetch_want_list_at_top_two() {
-        let mut core = compare_core(50);
-        core.dispatch_action(Action::ComparePin); // pin = 0
-        settle_at(&mut core, 40);
-        core.request_prefetch();
-        assert_eq!(
-            core.targets.first(),
-            Some(&40),
-            "current target stays first"
-        );
-        assert_eq!(
-            core.targets.get(1),
-            Some(&0),
-            "the pin rides at top-2 priority so eviction can never drop it"
-        );
-        assert_eq!(
-            core.targets.iter().filter(|&&t| t == 0).count(),
-            1,
-            "the pin appears exactly once"
-        );
-    }
-
-    #[test]
-    fn deleting_down_to_the_empty_state_clears_the_pin() {
-        let mut core = compare_core(1);
-        core.dispatch_action(Action::ComparePin);
-        assert!(core.compare_pin.is_some());
-        core.enter_empty_state();
-        assert_eq!(core.compare_pin, None);
-        assert_eq!(core.compare_pin_id, None);
-    }
-
-    #[test]
-    fn compare_carry_applies_only_to_matching_geometry() {
-        use crate::meta::PhotoMeta;
-        let meta = |w: u32, h: u32| PhotoMeta {
-            rel: String::new(),
-            w,
-            h,
-            size: None,
-            codec: "PNG",
-            animated: None,
-            recovered: None,
-        };
-        let mut core = compare_core(3);
-        core.meta_cache.insert(0, meta(100, 80));
-        core.meta_cache.insert(2, meta(100, 80));
-        settle_at(&mut core, 2);
-        core.view.zoom = 3.0;
-        core.view.pan = [10.0, -4.0];
-        assert_eq!(
-            core.compare_carry_view(0),
-            Some((3.0, [10.0, -4.0])),
-            "same dims + same rotation → the crop carries"
-        );
-        // A rotation override on one side breaks the mapping.
-        core.rotations.insert(0, Rotation::default().cw());
-        assert_eq!(core.compare_carry_view(0), None);
-        core.rotations.clear();
-        // Dimension mismatch → no carry.
-        core.meta_cache.insert(0, meta(99, 80));
-        assert_eq!(core.compare_carry_view(0), None);
-        // Default view → nothing worth carrying.
-        core.meta_cache.insert(0, meta(100, 80));
-        core.view.zoom = 1.0;
-        core.view.pan = [0.0, 0.0];
-        assert_eq!(core.compare_carry_view(0), None);
-    }
-
-    #[test]
-    fn compare_carry_is_staged_for_the_flips_first_frame_and_is_one_shot() {
-        // The owner-reported flicker: presenting at the reset view and re-imposing the
-        // carry afterwards flashed the incoming photo centered for one frame. The carry
-        // is now staged for `view_for` to consume, so the FIRST present lands
-        // positioned — and it must be one-shot, never leaking into a later present.
-        use crate::meta::PhotoMeta;
-        let meta = |w: u32, h: u32| PhotoMeta {
-            rel: String::new(),
-            w,
-            h,
-            size: None,
-            codec: "PNG",
-            animated: None,
-            recovered: None,
-        };
-        let mut core = compare_core(3);
-        core.meta_cache.insert(0, meta(100, 80));
-        core.meta_cache.insert(2, meta(100, 80));
-        core.dispatch_action(Action::CompareToggle); // pin = 0
-        core.failed.clear(); // cmp_0's launch decode failed; make the flip a clean MISS
-        settle_at(&mut core, 2);
-        core.view.zoom = 2.0;
-        core.view.pan = [5.0, 6.0];
-        core.dispatch_action(Action::CompareToggle); // flip stages the carry...
-                                                     // ...but headless the present missed (no ring): the stash must be dropped so a
-                                                     // later unrelated present resets instead of inheriting a stale view.
-        assert_eq!(core.compare_carry, None);
-        let v = core.view_for(2);
-        assert_eq!((v.zoom, v.pan), (1.0, [0.0, 0.0]));
-        // A staged carry is consumed by exactly ONE view_for (the flip's present).
-        core.compare_carry = Some((2.0, [5.0, 6.0]));
-        let v = core.view_for(0);
-        assert_eq!((v.zoom, v.pan), (2.0, [5.0, 6.0]), "first frame carries");
-        let v = core.view_for(0);
-        assert_eq!((v.zoom, v.pan), (1.0, [0.0, 0.0]), "the carry is one-shot");
     }
 
     #[test]
@@ -8755,25 +8360,6 @@ mod tests {
 
     // -- media-track Details rows (task #98) --------------------------------
 
-    /// Seed the Details cache for `item` with a catalog, as a probe would.
-    fn seed_details(
-        core: &mut AppCore,
-        item: usize,
-        media: Option<pb_decode::MediaTrackCatalog>,
-        has_audio: Option<bool>,
-    ) {
-        core.exif_cache.insert(
-            item,
-            crate::app_core::ItemDetails {
-                size: 1234,
-                fields: vec![("Video codec".into(), "HEVC".into())],
-                media,
-                has_audio,
-                probe_state: crate::media_details::ProbeState::Ready,
-                dovi_incompatible: false,
-            },
-        );
-    }
 
     fn seeded_rows(core: &AppCore, item: usize) -> Vec<String> {
         let d = core.exif_cache.get(&item).expect("seeded");
@@ -8789,27 +8375,6 @@ mod tests {
             .collect()
     }
 
-    fn track(codec: &str, lang: &str) -> pb_decode::MediaTrack {
-        pb_decode::MediaTrack {
-            id: pb_decode::TrackId {
-                catalog_generation: 1,
-                local_id: 0,
-            },
-            kind: pb_decode::TrackKind::Audio,
-            language: Some(lang.into()),
-            title: None,
-            codec_raw: codec.to_ascii_lowercase(),
-            codec: codec.into(),
-            capability: pb_decode::TrackCapability::Playable,
-            flags: pb_decode::TrackFlags::none(),
-            audio: Some(pb_decode::AudioFormat {
-                channels: 2,
-                layout: Some("stereo".into()),
-                sample_rate: 48000,
-            }),
-            external: false,
-        }
-    }
 
     /// A described catalog reaches the Details table as real per-track rows — the
     /// user-visible point of task #98 (this is what retires the `Audio: Yes` placeholder).
@@ -9569,34 +9134,6 @@ mod tests {
 
     // --- Poster selection (task #114, phase 1) ------------------------------
 
-    fn poster_payload(item: usize, fitted: (u32, u32)) -> pb_decode::PosterSelection {
-        let img = |w: u32, h: u32| pb_decode::DecodedImage {
-            width: w,
-            height: h,
-            orig_width: 3840,
-            orig_height: 2160,
-            codec: "HEVC",
-            format: pb_decode::PixelFormat::Rgba8,
-            pixels: vec![128; (w * h * 4) as usize],
-            is_preview: false,
-            color: pb_decode::ColorTransform::srgb(),
-            peak: 1.0,
-            animated: None,
-            recovered: None,
-        };
-        pb_decode::PosterSelection {
-            choice: pb_decode::PosterChoice {
-                origin_hns: 0,
-                relative_hns: item as i64 * 10_000_000,
-                native_w: 3840,
-                native_h: 2160,
-                content_hdr: false,
-            },
-            fit_img: Some(img(fitted.0, fitted.1)),
-            thumb_img: Some(img(64, 36)),
-            native: None,
-        }
-    }
 
     #[cfg(windows)]
     #[test]
@@ -12404,32 +11941,6 @@ mod tests {
         assert_eq!(core.sharpen_now(), None, "sharp now — the pie stops");
     }
 
-    /// Sets up a core parked on item 0 displayed as a resident PREVIEW, with a nav key stuck
-    /// held (the lost-key-up race): `held` claims Space is down, but no release will ever come.
-    /// `hold_start`/`initial_delay` are pinned so the tick's step-3 advance machinery stays out
-    /// of the way — the subject under test is the 3b sharpen gate, not hold-to-blaze.
-    fn stuck_preview_core() -> AppCore {
-        let mut core = test_core();
-        core.source = photos_named(&["a.jpg"]);
-        core.playlist = Playlist::new(1, 0).with_cursor(0);
-        core.ring = ResidentRing::new(4);
-        core.fit = Some(FitBox {
-            max_width: 100,
-            max_height: 100,
-        });
-        core.view.mode = ScaleMode::Fit;
-        let fit_rep = core.rep_of(pb_core::RepKind::Fit);
-        make_resident(&mut core, 0, fit_rep, &[0]);
-        core.preview_resident.insert(0);
-        core.targets = vec![0];
-        core.displayed_item = Some(0);
-        core.target_item = Some(0);
-        core.mark_resolved(0);
-        core.held.insert(PbKey::Space, Action::Next);
-        core.hold_start = Some(core.now);
-        core.initial_delay = Duration::from_secs(3600);
-        core
-    }
 
     /// The ADR-024 watchdog (level-triggered safety net): a lost key-up leaves `held_nav` stuck
     /// `Some`, which suppresses the sharpen — the stuck-preview race. Once the displayed preview
@@ -14099,50 +13610,6 @@ mod tests {
         core.presented_epoch = Some(core.epoch);
         assert!(core.door_presented());
         assert!(core.door_card().is_some());
-    }
-
-    /// The session password cache (session-archive-password-cache): harvest/promote via
-    /// `remember_archive_password` is MRU-ordered, deduped, empty-ignoring, capped, and
-    /// wiped by `clear_archive_passwords`.
-    #[test]
-    fn archive_password_cache_is_mru_deduped_capped_and_clearable() {
-        use crate::SecretString;
-        let mut core = test_core();
-        assert!(core.archive_passwords_snapshot().is_empty());
-
-        // Empty passwords are never remembered.
-        core.remember_archive_password(&SecretString::new(""));
-        assert!(core.archive_passwords_snapshot().is_empty());
-
-        // Newest-first (MRU).
-        core.remember_archive_password(&SecretString::new("a"));
-        core.remember_archive_password(&SecretString::new("b"));
-        let snap = core.archive_passwords_snapshot();
-        assert_eq!(snap.first().map(|s| s.expose()), Some("b"));
-
-        // Re-using an existing password moves it to the front (no duplicate).
-        core.remember_archive_password(&SecretString::new("a"));
-        let snap = core.archive_passwords_snapshot();
-        assert_eq!(
-            snap.iter()
-                .map(|s| s.expose().to_owned())
-                .collect::<Vec<_>>(),
-            vec!["a".to_owned(), "b".to_owned()],
-            "MRU promotion, no dupes"
-        );
-
-        // Capped at MAX_ARCHIVE_PASSWORDS — the oldest fall off.
-        for i in 0..AppCore::MAX_ARCHIVE_PASSWORDS + 5 {
-            core.remember_archive_password(&SecretString::new(format!("p{i}")));
-        }
-        assert_eq!(
-            core.archive_passwords_snapshot().len(),
-            AppCore::MAX_ARCHIVE_PASSWORDS
-        );
-
-        // Teardown wipes it.
-        core.clear_archive_passwords();
-        assert!(core.archive_passwords_snapshot().is_empty());
     }
 
     /// Redaction is end-to-end: a password riding the `#[derive(Debug)]` contract types never

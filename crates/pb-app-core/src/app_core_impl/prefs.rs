@@ -189,3 +189,39 @@ impl AppCore {
         self.settings.letterbox_for(self.effective_dark())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app_core_impl::test_support::{test_core};
+    use crate::contract::{CoreEvent};
+
+    #[test]
+    fn os_theme_resolves_through_the_appearance_preference() {
+        let mut core = test_core();
+        // Default: System, dark until the shell reports (the pre-#46 look).
+        assert!(core.effective_dark());
+        assert_eq!(core.effective_letterbox(), core.settings.letterbox);
+
+        // The OS flips to light → System follows, and refresh_theme tracks the flip.
+        core.handle(CoreEvent::OsThemeChanged { dark: false });
+        assert!(!core.effective_dark());
+        assert!(!core.hud_dark, "refresh_theme applied the resolved theme");
+        assert_eq!(core.effective_letterbox(), core.settings.letterbox_light);
+
+        // Forced Light / Dark ignore the OS theme entirely.
+        core.settings.appearance_mode = settings::AppearanceMode::Dark;
+        assert!(core.effective_dark());
+        assert_eq!(core.effective_letterbox(), core.settings.letterbox);
+        core.settings.appearance_mode = settings::AppearanceMode::Light;
+        core.os_dark = true;
+        assert!(!core.effective_dark());
+
+        // A redundant report is change-free (hud_dark only moves on a real flip).
+        core.settings.appearance_mode = settings::AppearanceMode::System;
+        core.refresh_theme();
+        assert!(core.hud_dark);
+        core.handle(CoreEvent::OsThemeChanged { dark: true });
+        assert!(core.hud_dark);
+    }
+}
