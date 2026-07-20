@@ -1868,7 +1868,7 @@ impl AppCore {
     /// the info line's drawn state alongside it — both can flip on any action that
     /// touches `panels.hidden`, and this is the one choke point nearly all of them
     /// already call.
-    fn refresh_slot(&mut self) {
+    pub(super) fn refresh_slot(&mut self) {
         if self.slot_content().is_some() {
             self.show_overlay();
         } else {
@@ -1894,7 +1894,7 @@ impl AppCore {
     /// Apply the tree's visibility after a hide/reveal: clear the bitmap when hidden,
     /// force a rebuild against fresh state when revealed (the signature gate re-runs
     /// the derivation next tick).
-    fn refresh_tree_visibility(&mut self) {
+    pub(super) fn refresh_tree_visibility(&mut self) {
         if self.panels.tree_visible(self.folder_tree_open) {
             self.folder_tree_sig = None; // rebuild + re-upload next tick
         } else {
@@ -1958,7 +1958,7 @@ impl AppCore {
     /// an empty deck, which browses from the root itself). Compared per tick while
     /// the overlay is open (string ops only — the `read_dir`s in
     /// [`show_folder_tree`](Self::show_folder_tree) run only when this changes).
-    fn folder_sig(&self) -> String {
+    pub(super) fn folder_sig(&self) -> String {
         match self.displayed_item {
             Some(item) => format!("{}|{}", self.root.display(), self.current_folder_rel(item)),
             None => format!("{}|@root", self.root.display()),
@@ -2001,7 +2001,7 @@ impl AppCore {
     /// view, hand the `read_dir` derivation to an off-thread worker that `tick`
     /// installs when it lands. The disk I/O never runs on this thread: a
     /// spun-down drive or a dead network share must not stall the event loop.
-    fn show_folder_tree_mode(&mut self, lite: bool) {
+    pub(super) fn show_folder_tree_mode(&mut self, lite: bool) {
         // Check the cheap gates before deriving rows, so a font-less host doesn't
         // pay the derivation on every retry tick. A Tab-hidden tree derives nothing
         // either — reveal forces the rebuild via the cleared signature. A disk deck on
@@ -2088,7 +2088,7 @@ impl AppCore {
     /// Rasterize + upload the tree from prepared rows — the shared path for fresh
     /// derivations, hover transitions, and paging (the latter two reuse the cached
     /// rows, so they never re-derive and never touch the disk).
-    fn push_folder_tree(
+    pub(super) fn push_folder_tree(
         &mut self,
         rows: Vec<hud::TreeRow>,
         targets: Vec<Option<crate::folder_tree::TreeTarget>>,
@@ -2258,7 +2258,7 @@ impl AppCore {
     /// Drive the resident tree each tick while it's shown: install finished off-thread
     /// `read_dir` results, reveal + mark the current folder, kick reads for any expanded-
     /// but-unread folder, and refresh count badges — signalling the host on change.
-    fn drive_fs_tree(&mut self) {
+    pub(super) fn drive_fs_tree(&mut self) {
         self.ensure_fs_tree();
         if self.fs_tree.is_none() {
             return;
@@ -4155,7 +4155,7 @@ impl AppCore {
 
     /// Push the [`CoreEffect::PanelsChanged`] marker so the host re-pulls the native
     /// panel model — deduped (the drain can pull once for several mutations in a tick).
-    fn emit_panels_changed(&mut self) {
+    pub(super) fn emit_panels_changed(&mut self) {
         if !self
             .effects
             .iter()
@@ -4347,7 +4347,7 @@ impl AppCore {
     /// on the opposite side reserves nothing, but a wide centered line that spans the
     /// whole width pushes both corner panels *and* the toast. `0` when there's no
     /// overlap or the line is hidden.
-    fn info_line_reserve_for(&self, px0: f32, px1: f32) -> u32 {
+    pub(super) fn info_line_reserve_for(&self, px0: f32, px1: f32) -> u32 {
         let Some((lx0, lx1)) = self.info_line_span() else {
             return 0;
         };
@@ -4392,7 +4392,7 @@ impl AppCore {
     /// (shared by the full HUD string and the native main text). Folder is prepended to the
     /// filename with a `/` — the relative dir when the scan is recursive, else the containing
     /// folder's name.
-    fn info_line_parts(&self, meta: &crate::meta::PhotoMeta) -> Vec<String> {
+    pub(super) fn info_line_parts(&self, meta: &crate::meta::PhotoMeta) -> Vec<String> {
         let mut parts = Vec::new();
         // `rel` is the path relative to the scan root, so split its directory (nested scans)
         // from the file name.
