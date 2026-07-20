@@ -40,3 +40,12 @@ Thumbs.db
 
 # Local scratch/smoke-test image sets (generated, not the pinned benchmark corpus)
 scratch-corpus/
+
+# Per-machine Claude Code settings (tool permissions), written by the tool as you work.
+# Ignored HERE rather than relying on a user's global excludesfile, because the clean-tree
+# gate runs inside the AppImage build container (scripts/release-linux-docker.sh), where
+# $HOME is not mounted and global git config is invisible — so a file ignored on the host
+# still shows as `?? ` in the container and aborts the release. Repo-local rules travel
+# with the repo; personal ones do not. (Hit on 0.3.0, 2026-07-19: macOS built clean and
+# Linux refused, same tree, minutes apart.)
+.claude/settings.local.json
