@@ -246,3 +246,101 @@ impl AppCore {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app_core_impl::test_support::{clipboard_text_effects, test_core};
+
+    fn feed_describe(
+        core: &mut AppCore,
+        item: usize,
+        r: Result<String, crate::describe::DescribeError>,
+    ) {
+        let (tx, rx) = std::sync::mpsc::channel();
+        tx.send(r).unwrap();
+        core.describe_scan = Some(crate::describe::DescribeScan {
+            gen: core.describe_gen,
+            item,
+            copy_when_done: false,
+            rx,
+        });
+    }
+
+    #[test]
+    fn describe_result_caches_by_item() {
+        let mut core = test_core();
+        core.displayed_item = Some(0);
+        feed_describe(&mut core, 0, Ok("A red bicycle.".to_string()));
+        core.poll_describe_scan();
+        assert!(core.describe_scan.is_none(), "job consumed");
+        assert_eq!(core.descriptions[&0].as_deref(), Ok("A red bicycle."));
+    }
+
+    #[test]
+    fn describe_result_from_before_a_rebuild_is_dropped() {
+        let mut core = test_core();
+        core.displayed_item = Some(0);
+        feed_describe(&mut core, 0, Ok("stale".to_string()));
+        core.describe_gen += 1; // deck rebuilt while describing
+        core.poll_describe_scan();
+        assert!(
+            core.descriptions.is_empty(),
+            "stale-generation result must not cache under a recycled index"
+        );
+    }
+
+    #[test]
+    fn describe_backend_error_caches_a_one_line_user_message() {
+        let mut core = test_core();
+        core.displayed_item = Some(0);
+        feed_describe(
+            &mut core,
+            0,
+            Err(crate::describe::DescribeError::Unreachable),
+        );
+        core.poll_describe_scan();
+        let msg = core.descriptions[&0].as_ref().unwrap_err();
+        assert!(msg.contains("model server"), "actionable message: {msg}");
+    }
+
+    #[test]
+    fn copy_description_defers_the_copy_until_the_describe_lands() {
+        let mut core = test_core();
+        core.displayed_item = Some(0);
+        core.settings.describe_endpoint = "http://localhost:1234/v1".to_string();
+        // Nothing cached → the copy arms `copy_when_done` on the in-flight scan.
+        core.dispatch_action(Action::CopyDescription);
+        assert!(
+            core.describe_scan
+                .as_ref()
+                .is_some_and(|s| s.copy_when_done),
+            "copy is deferred to the scan result"
+        );
+        // Simulate the result landing.
+        feed_describe(&mut core, 0, Ok("A late description.".to_string()));
+        core.describe_scan.as_mut().unwrap().copy_when_done = true;
+        core.poll_describe_scan();
+        let got = clipboard_text_effects(&core);
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].0, "A late description.");
+        assert_eq!(got[0].1.as_deref(), Some("Copied description"));
+    }
+
+    #[test]
+    fn ask_describe_bypasses_the_general_description_cache() {
+        let mut core = test_core();
+        core.displayed_item = Some(0);
+        core.settings.describe_endpoint = String::new(); // keep it thread-free
+        core.descriptions
+            .insert(0, Ok("old general description".to_string()));
+        core.ask_describe("What year is this?".to_string());
+        // The cached general description was dropped and a fresh run attempted (which,
+        // with no endpoint, resolves to the setup hint rather than the stale text).
+        assert!(
+            core.descriptions[&0].is_err(),
+            "the question re-ran instead of returning the cached description"
+        );
+        assert_eq!(core.panels.inspector, Some(InspectorTab::Describe));
+    }
+}
