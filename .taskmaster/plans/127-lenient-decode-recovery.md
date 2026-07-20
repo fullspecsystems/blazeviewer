@@ -76,14 +76,18 @@ ladder; #3 (kill the pie / placeholder) is the failure floor.
   `meta_cache` first; `drain_results` now merges the later full decode's flag). Owner confirmed
   the image displays; details notice verified live (the Original decode arrives recovered=Some
   and merges). Tests: accessor, details row, merge regression. Clippy clean incl. `pb-mac-ffi`.
-- **Step 3 (graceful failure):** the stuck-pie root cause found + fixed — a PARKED failed
-  target wasn't re-resolved after a geometry-epoch bump (`try_present_target` runs only under a
-  held nav key), so `presented_epoch` stayed stale and `tick_pie` spun forever. `resolve_parked_
-  failure()` re-stamps it each tick (regression test). Added a `failed_reason` map, a
-  `current_decode_error()` accessor, a Details "Error" row, and a native `DecodeErrorView`
-  placeholder ("Can't display this image" + reason) shown like the door card. Core + `pb-mac-ffi`
-  + swift host all build; 876 pb-app-core tests green. **Owner visual confirmation of the
-  placeholder + pie-gone: PENDING at time of writing.**
+- **Step 3 (graceful failure):** committed `9bdd3556` (then merged with #128). The stuck-pie
+  root cause found + fixed — a PARKED failed target wasn't re-resolved after a geometry-epoch
+  bump (`try_present_target` runs only under a held nav key), so `presented_epoch` stayed stale
+  and `tick_pie` spun forever. `resolve_parked_failure()` re-stamps it each tick (regression
+  test). Added a `failed_reason` map, `current_decode_error()` + `current_file_name()` accessors,
+  a Details "Error" row, canvas-blanking in `present_failed` (`clear_image`), and a native
+  `DecodeErrorView` placeholder in the **door-card panel language** (header "Error Displaying
+  Image" + divider + broken-image glyph + filename over reason). **Owner-confirmed the look
+  ("right vibe").** Two owner iterations landed: (a) restyle from a bare glyph to the door-card
+  card; (b) the `held_nav`-gated clear left the previous photo up when navigating *to* a corrupt
+  file — removed the gate so `present_failed` always blanks; added the filename; renamed the
+  header. 876 pb-app-core tests green, clippy clean on the post-merge tree.
 
 **Not verified — Windows must check (cross-platform debt):**
 1. **Two `AppCore`/`DecodedImage` struct-literal fields added blind from the Mac — the

@@ -1575,19 +1575,19 @@
             "id": 1,
             "title": "pb-decode: recovery ladder + recovered flag",
             "description": "zune strict-first then lenient; on error fall back to OS codec (ImageIO/WIC) then image crate; flag DecodedImage.recovered with the reason. Tests with crafted malformed JPEGs.",
-            "status": "pending"
+            "status": "done"
           },
           {
             "id": 2,
             "title": "pb-app-core: recovered map + details-panel notice + reliable present_failed",
             "description": "Carry recovered reason per-item (RAM-only), show a notice line in the details/info panel, ensure a truly-failed decode resolves the pie.",
-            "status": "pending"
+            "status": "done"
           },
           {
             "id": 3,
             "title": "macOS shell: kill the pie + placeholder + notice display",
             "description": "Swift host must react to the failed/resolved state (stop spinner, show placeholder) and render the recovery notice.",
-            "status": "pending"
+            "status": "done"
           },
           {
             "id": 4,

@@ -15,6 +15,10 @@ with any pre-release suffix carried only by the tag.
   and other viewers; Blaze Viewer was refusing them outright. It now salvages them the way
   those other viewers do, and the file's details panel notes that it was recovered from a
   damaged file, and why.
+- A genuinely undecodable image no longer leaves a spinner turning forever over a blank (or,
+  worse, the previous) photo. The canvas clears and a clear "Error Displaying Image" card names
+  the file and the reason, and the details panel carries the same. (macOS; the Windows/Linux
+  card is still to come.)
 - Opening an archive no longer flashes a progress spinner for a split second. The "Opening…"
   window now appears only if the archive actually takes a moment to open, the way folder
   scanning has always worked. It also waits a little longer than the folder pill does before
