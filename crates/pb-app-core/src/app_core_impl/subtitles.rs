@@ -242,3 +242,198 @@ impl AppCore {
             .update(t, vp, video, 0.0, self.viewport.scale_factor);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app_core_impl::test_support::{core_with_a_native_video, seed_details, test_core, track};
+
+    /// The same rule for the other way out: a video that stops must not leave its last cue
+    /// hanging over whatever is on screen next.
+    #[test]
+    fn a_stale_overlay_is_cleared_when_nothing_is_playing() {
+        let mut core = test_core(); // no session
+        core.subtitles.selection = crate::subtitle::SubtitleSelection::automatic();
+        core.subtitles.force_showing_for_test();
+        core.tick_subtitles();
+        assert!(core.subtitles.bitmap().is_none());
+    }
+
+    /// A subtitle track on the catalog the picker reads.
+    fn sub(local_id: u64, lang: &str) -> pb_decode::MediaTrack {
+        pb_decode::MediaTrack {
+            id: pb_decode::TrackId {
+                catalog_generation: 1,
+                local_id,
+            },
+            kind: pb_decode::TrackKind::Subtitle,
+            language: Some(lang.into()),
+            title: None,
+            codec_raw: "subrip".into(),
+            codec: "SubRip".into(),
+            capability: pb_decode::TrackCapability::SupportedText,
+            flags: pb_decode::TrackFlags::none(),
+            audio: None,
+            external: false,
+        }
+    }
+
+    /// A playing MKV whose catalog carries `subs`.
+    fn core_with_subtitle_tracks(subs: Vec<pb_decode::MediaTrack>) -> AppCore {
+        let mut core = core_with_a_native_video();
+        core.native_toast = true;
+        let catalog = pb_decode::MediaTrackCatalog::new(
+            1,
+            pb_decode::MediaBackend::FFmpeg,
+            pb_decode::TrackSet::complete(vec![track("AAC", "eng")]),
+            pb_decode::TrackSet::complete(subs),
+        );
+        seed_details(&mut core, 0, Some(catalog), Some(true));
+        core
+    }
+
+    fn labels(core: &mut AppCore) -> Vec<String> {
+        core.subtitle_picker_rows()
+            .iter()
+            .map(|r| format!("{}{}", if r.active { "✓ " } else { "" }, r.label))
+            .collect()
+    }
+
+    /// The picker lists Off, Automatic, then the file's tracks; selecting a row applies it.
+    #[test]
+    fn selecting_a_picker_row_applies_that_track() {
+        use crate::subtitle::SubtitleWant;
+        let mut core = core_with_subtitle_tracks(vec![sub(0, "eng"), sub(1, "fra")]);
+        assert_eq!(
+            labels(&mut core),
+            vec!["✓ Off", "Automatic", "English · SubRip", "French · SubRip"]
+        );
+
+        core.select_subtitle_row(3); // French
+        assert!(core.subtitles.selection.enabled);
+        assert_eq!(
+            core.subtitles.selection.want,
+            SubtitleWant::Track(pb_decode::TrackId {
+                catalog_generation: 1,
+                local_id: 1
+            }),
+        );
+        assert!(core.settings.subtitles, "the preference follows the choice");
+        // The tick moves with it, and the toast names what was picked.
+        assert_eq!(
+            labels(&mut core),
+            vec!["Off", "Automatic", "English · SubRip", "✓ French · SubRip"]
+        );
+        let t = core.toast_native.as_ref().expect("the user is told");
+        assert_eq!(
+            (t.message.as_str(), t.icon),
+            ("French · SubRip", ToastIcon::Captions)
+        );
+
+        // ...and row 0 is a real way back to off.
+        core.select_subtitle_row(0);
+        assert!(!core.subtitles.selection.enabled);
+        assert!(!core.settings.subtitles);
+        assert_eq!(labels(&mut core)[0], "✓ Off");
+    }
+
+    /// **The owner's bug, pinned** (2026-07-15, on Ad Astra): pick Chinese, press `C` twice,
+    /// and English came back. `C` set the mode to `Automatic` on the way back on, because
+    /// one enum held both "are subtitles on" and "which one" — so turning them off *had* to
+    /// destroy the choice.
+    ///
+    /// `C` must flip exactly one of those and leave the other alone.
+    #[test]
+    fn c_toggles_without_forgetting_the_picked_track() {
+        use crate::subtitle::SubtitleWant;
+        let mut core = core_with_subtitle_tracks(vec![sub(0, "eng"), sub(1, "zho")]);
+        core.select_subtitle_row(3); // Chinese — not what Automatic would choose
+        let picked = core.subtitles.selection.want;
+        assert!(matches!(picked, SubtitleWant::Track(_)));
+
+        core.dispatch_action(Action::ToggleSubtitles); // off
+        assert!(!core.subtitles.selection.enabled);
+        assert_eq!(
+            core.subtitles.selection.want, picked,
+            "off must not destroy the choice"
+        );
+
+        core.dispatch_action(Action::ToggleSubtitles); // on again
+        assert!(core.subtitles.selection.enabled);
+        assert_eq!(
+            core.subtitles.selection.want, picked,
+            "and on must bring back what was picked, not Automatic"
+        );
+        assert_eq!(
+            labels(&mut core),
+            vec!["Off", "Automatic", "English · SubRip", "✓ Chinese · SubRip"],
+            "Chinese is back on screen — this is the bug the owner reported"
+        );
+    }
+
+    /// **The point of the shared list.** `Shift+C` steps through *tracks* — the very rows the
+    /// picker draws, in its order. Off is `C`'s job and Automatic is not a step (it resolves
+    /// to one of these tracks, so it would show the same subtitles twice under two names).
+    #[test]
+    fn shift_c_walks_the_pickers_track_rows() {
+        let mut core = core_with_subtitle_tracks(vec![sub(0, "eng"), sub(1, "fra")]);
+        let rows: Vec<String> = core
+            .subtitle_picker_rows()
+            .iter()
+            .map(|r| r.label.clone())
+            .collect();
+
+        // From off, three presses: first track, second track, wrap to the first.
+        let mut visited = Vec::new();
+        for _ in 0..3 {
+            core.dispatch_action(Action::SubtitleCycle);
+            let ticked = core
+                .subtitle_picker_rows()
+                .into_iter()
+                .find(|r| r.active)
+                .expect("something is always ticked");
+            visited.push(ticked.label);
+        }
+        assert_eq!(
+            visited,
+            vec![rows[2].clone(), rows[3].clone(), rows[2].clone()],
+            "the track rows, in the picker's order, wrapping"
+        );
+        assert!(
+            core.subtitles.selection.enabled,
+            "asking for the next track when they're off can only mean you want to see one"
+        );
+    }
+
+    /// An index that no longer exists (the list changed under an open popover) must be
+    /// ignored — never clamped onto a neighbouring track the user did not click.
+    #[test]
+    fn an_out_of_range_row_selects_nothing() {
+        let mut core = core_with_subtitle_tracks(vec![sub(0, "eng")]);
+        core.select_subtitle_row(99);
+        assert!(!core.subtitles.selection.enabled, "unchanged");
+        assert!(core.toast_native.is_none(), "and says nothing");
+    }
+
+    /// "Still reading the tracks" and "this file has none" are different answers, and an
+    /// empty list must not be drawn as the second one.
+    #[test]
+    fn an_unprobed_video_is_not_the_same_as_a_video_with_no_tracks() {
+        let mut core = core_with_a_native_video();
+        assert!(core.subtitle_picker_rows().is_empty());
+        assert!(!core.subtitle_tracks_known(), "the probe has not landed");
+
+        let mut probed = core_with_subtitle_tracks(vec![]);
+        assert!(probed.subtitle_tracks_known(), "it landed, and said none");
+        assert_eq!(labels(&mut probed), vec!["✓ Off"], "just the Off row");
+    }
+
+    /// A still is not a video: the picker offers nothing rather than the last film's tracks.
+    #[test]
+    fn a_still_offers_no_picker_rows() {
+        let mut core = test_core();
+        core.displayed_item = Some(0);
+        assert!(core.subtitle_picker_rows().is_empty());
+        assert!(!core.subtitle_tracks_known());
+    }
+}
