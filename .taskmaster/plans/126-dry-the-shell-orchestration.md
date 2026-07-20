@@ -1,9 +1,12 @@
 # Task 126 — DRY the two shells: move dir-scan + archive-open orchestration into the core
 
-**Status:** plan, **rev 2 - Codex round 1 folded**. Codex verdict: *"approve the direction,
-but revise the plan before implementation. Add a phase zero."* Its architectural requirements
-are now section 5a; a hard tooling constraint found while starting work is section 0.
-**Relationship to #125:** do **this first**. See §1.
+**Status:** ✅ **COMPLETE — 2026-07-20.** Both shells' dir-scan and archive-open copies are
+gone; the surviving implementation is the tested core one. All six Windows verification items
+and the macOS run passed. Kept as the design record and for the follow-ups in *Outcome* below.
+
+Plan history: rev 1, then rev 2 folding Codex round 1 (verdict: *"approve the direction, but
+revise the plan before implementation. Add a phase zero"* — its requirements became §5a).
+Sections 0–10 are the plan as executed; the appendix is the session log.
 
 ## The one-sentence version
 
@@ -13,242 +16,84 @@ contract vocabulary — so move the lifecycle in and let both shells become even
 
 ---
 
-## Handoff
+## Outcome
 
-**The single place cross-machine state lives** (`CLAUDE.md` → *Working across two machines*).
-Read this first; write it last. Everything below this section is durable design rationale or
-history — none of it is live state.
+> This section replaced the live `## Handoff` block when the task closed. There is no live
+> cross-machine state left; what remains below is the design record.
 
-**Last updated:** 2026-07-20, **Windows session**, after the encrypted-archive smoke test.
+### What shipped
 
-### Windows smoke test — DONE, with two defects found and fixed
-
-The step-2 winit shell had never been executed. It has now been, by the owner, against
-`D:\Media\2002-password-is-test.7z` and `D:\Media\Pictures.zip`.
-
-| *Not verified* item | result |
+| | |
 |---|---|
-| 1 · wrong-password inline error | ✅ shows correctly |
-| 2 · layout must not shift | ✅ stable |
-| 7 · focus returns to the field | ✅ |
-| 8 · no spinner flash on a fast open | ⚠️ see *boundary flash* below |
+| Phase 0 — `BackgroundOps`, one generation space across both operation kinds | `pb-app-core/src/background.rs` |
+| Step 1 — dir-scan lifecycle in the core, **both** shells migrated | `dir_scan.rs`; −270/+102 winit, −202/+82 macOS |
+| Step 2 — archive-open lifecycle in the core, **both** shells migrated | `archive_open.rs`; −216/+72 macOS, winit likewise |
+| Cleanup — winit's dead Scanning dialog deleted | −208/+23 |
+| Verification | all 6 Windows items owner-run; macOS built, run and owner-smoked |
 
-**Defect 1 — the "Checking…" spinner rendered under the button bar. FIXED.**
-`set_password_error` clears `checking`, but `set_checking(true)` does **not** clear
-`password_error` — so the ordinary retry path (wrong password → error shown → retype →
-submit) had *both* live at once. Since `428b160c` made the error row always laid out, that
-became two stacked rows in a fixed 500x250 window with a bottom button bar, and the spinner
-overflowed underneath it. Collapsed into **one reserved status row** (checking wins, else the
-error, else a transparent placeholder), height pinned to one text line via `allocate_ui` so
-the row cannot resize as it changes state. Owner-confirmed: *"a much nicer design."*
+Roughly **−800 lines across the two shells**, replaced by one tested core implementation.
+Acceptance criterion met (§5a): **neither shell owns operation generation, cancellation,
+retry, timeout or stale-result policy** any more.
 
-⚠ **This is NOT the macOS untraced bottom-left spinner.** That one appears during a *quick
-open* with no password dialog involved; this one only while a password is being verified.
-Same description, different trigger — **the macOS one is still open and still untraced.**
+### Defects found and fixed along the way (none were the point of the task)
 
-**Defect 2 — boundary flash. FIXED by raising the gate, not by a minimum display time.**
-`LOADING_DIALOG_DELAY` 250 → **500 ms**. An open landing at ~252 ms cleared the gate, painted,
-and closed ~2 ms later.
+- **Empty-deck cancel stranded a blank canvas.** `finish_scan` restored the "Press O to open"
+  hint; no cancel path did. Both shells had it; fixed in the core. Proven by removing the fix
+  and watching `cancelling_a_scan_with_an_empty_deck_restores_the_welcome_hint` fail.
+- **The "Checking…" spinner rendered under the button bar** on the retry path, because
+  `set_password_error` clears `checking` but `set_checking(true)` does not clear
+  `password_error` — two stacked rows in a fixed 500x250 window. Collapsed to one reserved
+  status row.
+- **Boundary flash** on the Opening dialog: `LOADING_DIALOG_DELAY` 250 → 500 ms. ⚠ Fixed by
+  raising the gate, **not** by a minimum display time — that was considered and rejected, and
+  the reasoning lives in the constant's doc comment. Read it before changing the value.
+- **Wrong-password message never showed** for anything routing through the Loading dialog
+  (found on macOS, present identically on Windows).
+- **A cancelled archive open now keeps a password it already proved**, gated on
+  `progress.done() > 0`. Deliberately conservative: it can under-promote, never over-promote,
+  because a wrong password in the MRU is auto-tried against every later archive.
 
-- ⚠️ **Do not "fix" the residual flash with a minimum display duration.** Considered and
-  rejected: it trades a few ms of blip for a real, deliberate delay on every slow-ish open,
-  which is the wrong direction for this codebase. The rationale is in the constant's doc
-  comment — read it before changing the value.
-- The old comment argued this constant must stay equal to `SCAN_DIALOG_DELAY` (*"the same
-  judgement about the same human"*). That is answered, not ignored: the pill is **ambient**,
-  this is a **modal window**, and a higher bar for interrupting than for informing is
-  principled. Both numbers now carry the reasoning.
-- `archive_status_tracks_the_open` was advancing by `SCAN_DIALOG_DELAY` in an *archive* test
-  and only passed because the constants were equal. Now pins its own delay, both sides of it.
+### Corrections to earlier claims — do not re-derive these
 
-**Worth knowing:** a plain `.zip` normally opens on the *synchronous* fast path where no
-dialog is possible at all. It only goes async when `will_autotry` is true — i.e. **the session
-password cache is non-empty**. So the flash was partly an artifact of testing an encrypted
-archive first; on a fresh launch the same 8.5 MB zip shows nothing.
+- **The audit's cross-cancel claim is FALSE.** `technical-debt-audit.md` finding #3 / task
+  #109 item 1 say macOS lacks the cross-cancel Windows got in `8293a662`. It has it, with an
+  explicit "winit parity" citation. Confirmed independently by two sessions. The audit was
+  corrected 2026-07-20.
+- **The audit's "half-finished NS0 inversion" framing is wrong**, and its ~2,870-line sizing
+  measured all of `impl AppCoreHandle` (mostly legitimate FFI shimming). The real duplication
+  was ~390 lines per shell. See `125-split-app-core-impl.md` §2a.
+- **§0's compile asymmetry is one-directional and reads as global.** See §12.1: on a Mac it
+  points the other way, which is why this task finished on one machine.
+- **Codex's "injectable clock" requirement was already satisfied** by `AppCore::now`, and its
+  "injectable worker runtime" turned out unnecessary — the `mpsc` channel already is the
+  deterministic seam (tests install the receiver and drive the sender). No new abstraction.
 
-**Items 3 and 4 — owner-run on Windows 2026-07-20, both pass.** Session MRU auto-try works on
-a second archive. Cancel mid-load on a large `.7z` closes quietly and keeps what was on screen.
+### Open follow-ups (not part of this task)
 
-**Decision recorded while checking 4 — REVERSED the same day, and the reversal is the right
-one.** A cancelled open now DOES promote its password, gated on `progress.done() > 0`. The first instinct was "backing out is not a request to remember", but the
-better argument won: nobody cancels because they regret typing the *correct* password — they
-cancel a slow archive, and the next thing they open is often a smaller one with the same
-password. That also matches the code's own rule (*"an archive that opened at all proves its
-password"*).
-
-The gate is `done() > 0` — proof rather than assumption, since decompressed bytes only appear
-if the key was right. It is deliberately conservative and the asymmetry is the point: 7z/RAR
-are eager decodes counting decompressed bytes so the gate really does prove it (and they are
-the slow opens people actually cancel); the tar family counts *compressed* bytes, which would
-prove nothing, but has no encryption so the gate never fires there; a lazy ZIP may never stream
-bytes and so simply will not promote. **It can under-promote, never over-promote** — chosen
-because a wrong password in the MRU is auto-tried against every later archive, and a
-wrong-password ZIP attempt decrypts that archive's entire first entry (up to ~1 GiB) to find
-out.
-
-Note the behaviour was *incidental* before this: `finish_archive_open` was the only promotion
-site and a cancel never reached it. Pinned now by
-`cancelling_a_progressing_open_remembers_its_proven_password` (verified to fail with the gate
-removed), `cancelling_before_anything_decrypted_remembers_nothing`, and
-`a_completed_open_does_remember_its_password`.
-
-`OpenProgress::add_done` widened `pub(crate)` → `pub` so the gate is testable across the crate
-boundary; writing a display counter from outside an opener is meaningless rather than
-dangerous.
-
-**Item 5 — owner-run on Windows 2026-07-20, passes.** A plain `.zip` shows no Loading dialog
-or spinner at all.
-
-**Item 6 — owner-run on Windows 2026-07-20, PASSES.** Opening `test-images.7z` from a NAS
-share mid-scan produced exactly ONE `rebuild_playlist` (`src_len` 116 -> 32, one epoch bump)
-and `src_len` then stayed at 32. No folder batch ever came back to extend the archive deck —
-the corruption this item exists to catch did not occur. With the two core tests underneath it
-(`an_archive_open_supersedes_an_in_flight_scan`, `a_folder_scan_supersedes_an_in_flight_archive_open`),
-**all six Windows items are now verified and step 2 is done.**
-
-### Cosmetic observations, recorded not chased
-
-Two one-frame ordering gaps, both cleared of the core and both benign. Recorded so they are not
-re-investigated from scratch, and so there is a starting point if either ever gets worse.
-
-1. **Door card flashes briefly over a photo on archive entry** (owner, `comic.cbr`). Chased with
-   `PB_DOOR_DIAG` and **the core is provably innocent**: across 923 frames there is not one with
-   `door_card=Some` while `archive_kind=None` (the bug signature), zero `ring-desync` /
-   `present_slot missed` lines, and the entry transition flips card->photo in a single frame.
-   It is also *not* a fade — the door card has no fade animation; `base_alpha` is the panel
-   opacity setting. Remaining hypothesis, **untested**: the card lives in the *retained* egui
-   overlay texture, which only re-renders when dirtied (`App::door_sig`, `main.rs:535`), so a
-   stale overlay can composite over the new photo for a frame or two. At 120 Hz that is 8-16 ms,
-   which matches "a split second" and why it felt shorter on the second attempt. Owner: "not a
-   major UX issue... but I'll keep an eye on it."
-2. **`archive_scope` lags the deck by one frame** on archive entry: the first draw after
-   `rebuild_playlist` shows `src_len=32` (archive contents) with `archive_scope=false`, and the
-   next frame has it `true`. Same family as (1). Harmless as observed — the door card is already
-   `None` by then — but anything keying off `archive_scope` sees one frame of the old answer. (session MRU auto-try on a second
-archive, Cancel mid-load on a large `.7z`, plain-`.zip` fast path from a *fresh* session, and
-scan-over-archive supersession).
-
-### Verified — what was actually run, and where
-
-| what | platform | evidence |
-|---|---|---|
-| Step 1 (dir-scan) in the core | both | 867 tests in `pb-app-core` |
-| Step 1 — macOS shell rewired, **−202/+82** | macOS | builds, runs, 36 `pb-mac-ffi` tests; owner smoke: unchanged, which **is** the pass condition for a pure-DRY move |
-| Step 1 — winit shell rewired, **−270/+102** | Windows | native `clippy -D warnings` + tests on the self-hosted runner; owner smoke: builds, pill correct |
-| Step 1 — winit pill covers the pre-bootstrap phase (UX change) | Windows | owner-confirmed |
-| Linux gate (`clippy -D warnings` on `pb-app` + tests + release build) | Linux/docker | PASS, run locally from the Mac |
-| Step 2 (archive-open) in the core | macOS | 9 tests; **not wired to either shell yet** |
-| Empty-deck cancel restores the welcome hint | both | core test + the macOS follow-up in `8f69b709` |
-| Step 2 — **macOS shell rewired, −216/+72** | macOS | 38 `pb-mac-ffi` tests; plain `.zip` (sync fast path) and encrypted `.7z` both open; owner entered the correct password and got in |
-| Step 2 — **winit shell rewired** | Windows target only | `clippy --all-targets -D warnings` for `x86_64-pc-windows-msvc`; **never executed** |
-| Wrong-password inline error (bug fix) | macOS | owner-confirmed; regression test fails with the fix reverted |
-| Password error row no longer shifts the layout | macOS | owner-reported, fixed, host rebuilt |
-| No spinner flash on a fast archive open | macOS | owner-reported, fixed (`LOADING_DIALOG_DELAY`), owner-confirmed "much better" |
-| Focus returns to the password field after a rejection | macOS | owner-reported, fixed, owner-confirmed — retry without clicking |
-| Wrong → wrong → correct password, end to end | macOS | owner-driven: retried until correct, archive opened |
-| Privacy gates after the archive move | macOS | redaction tests, `no_outcome_variant_can_leak_a_password`, `settings.rs` has **zero** `archive_passwords` references, no-trace test green |
-
-### Not verified — what the next machine must check
-
-**All of this is Windows-side, and none of it is checkable from a Mac.** `pb-app` cannot even
-be built here; everything below was type-checked via the cross-target compile only.
-
-1. **Open an encrypted `.7z` and enter the WRONG password.** It must show *"Incorrect password.
-   Please try again."* inline. Until 2026-07-20 it showed **nothing** — the field just cleared
-   — for every archive that routes through the Loading dialog. Windows had this bug identically;
-   only the synchronous-`.zip` path ever displayed the message.
-2. **Same dialog: the layout must not shift** when that error appears. The row is now always
-   laid out and only its colour changes (transparent when absent). Confirm nothing jumps and
-   there is no odd gap when there is no error.
-3. **Enter the correct password** — it should open, and a second encrypted archive with the
-   *same* password should not ask again (the session MRU auto-try).
-4. **Open a large `.7z` and hit Cancel** mid-load. It should close quietly, keep whatever was on
-   screen, and show no error dialog.
-5. **Open a plain `.zip`** — the synchronous fast path, which must open with no Loading dialog
-   flash at all.
-6. **Start a folder scan over an in-flight archive open, and vice versa.** The displaced worker
-   is now cancelled by the *core*, not the shell; a stale result must never rebuild the deck.
-
-7. **After a wrong password, focus should stay in the field** so you can retype immediately.
-   winit already does this (`set_password_error` sets `focus_password`, `dialog.rs:914`) and was
-   never broken — macOS was, and is fixed. Worth one confirming look, no code expected.
-8. **A fast archive open must not flash the "Opening…" dialog at all.** It is now revealed
-   only after `LOADING_DIALOG_DELAY` (250 ms), like the scan pill. Confirm a plain `.zip` shows
-   no dialog, and that a slow `.7z` still gets one with a working Cancel.
-
-If any of 1–2 or 7–8 look wrong, they are chrome-only and confined to `dialog.rs` /
-`prompt_archive_password` / `reveal_slow_archive_open`.
-
-**One loose end, macOS-side and cosmetic:** with the sheet suppressed, a small spinner now
-appears at the bottom left during a quick open. The owner likes it, but nobody has traced what
-draws it — `BlazeViewerMacApp.swift`'s overlay stack has no bottom-leading spinner, and the only
-bottom-left-capable element is the info line (`infoLineAlignment` = 0), a metadata pill. Benign,
-but it should be identified rather than relied on.
-
-### Cross-platform debt — landed for one shell, still owed on the other
-
-> ⚠ **The most dangerous category, because it is green.** A change can land, pass CI, and be
-> *wrong on the platform that could not compile it*. `808c99f9` fixed the empty-deck hint "in
-> the core so both shells get it" and pointed winit at it — but macOS kept its own copy and kept
-> the bug, and nothing failed. **Any commit that touches shared code it cannot fully verify must
-> add a line here.**
-
-| owed | to | raised by | status |
-|---|---|---|---|
-| `cancel_scan_command` → the core's version | macOS | `808c99f9` (Windows) | ✅ paid by `8f69b709` |
-| Wrong-password error + reserved error row — **egui half never run** | Windows | `e57fa033`, `428b160c` (Mac) | ⏳ **open** — see *Not verified* 1–2 |
-| Delay-gated Loading dialog — **egui half never run** | Windows | `7bb9c4d3` (Mac) | ⏳ **open** — see *Not verified* 7 |
-
-### Claimed — who is holding what right now
-
-> Prevents the other failure mode: duplicate work. Both machines fixed the `AppCore` struct
-> literal independently today, and the Mac session nearly rewrote `background.rs` from scratch
-> as `ops.rs` because it started from a stale HEAD. **Fetch, read this table, then claim.**
-
-| area | machine | since |
-|---|---|---|
-| *(released — step 2 shell migration landed)* | | |
-
-The Mac session's claim is **released** as of `428b160c`. Both shells are migrated.
-
-**Windows is now needed for a run only** — the full list is in *Not verified* above.
-
-### Next
-
-1. **Windows: run the checks in *Not verified*.** That is the only thing standing between step 2
-   and done. No code is expected to change unless something looks wrong.
-2. ~~**Delete winit's dead Scanning dialog**~~ ✅ **DONE 2026-07-20** (-208/+23). The snag
-   resolved as: `shell_dialog_kind` now returns `Option` and the one caller skips `None` — the
-   core never emits `ShowDialog(Scanning)` (its only uses are on the `Dismissed` path), so there
-   is nothing to open, and `None` makes a future violation visible instead of silently opening
-   the wrong window. `core_dialog_kind` stayed (it IS used, as a fn *value* in
-   `kind.map(core_dialog_kind)` — a `core_dialog_kind(` grep misses that; the compiler caught it)
-   and is simply total without a Scanning arm. `contract::DialogKind::Scanning` untouched, as
-   macOS still names it. Also took three orphaned helpers and their tests.
-   ~~OLD:~~ **Delete winit's dead Scanning dialog** — `DialogRequest::Scanning`, `DialogOutcome::
-   ScanningCancelled`, and `dialog.rs`'s whole `Scanning` view. Nothing constructs it since
-   `f3ca4795`; it is `#[allow(dead_code)]`-marked and the owner has confirmed the pill on
-   Windows, so its revert-safety reason has expired. ⚠ One snag: `contract::DialogKind::Scanning`
-   must **stay** (macOS uses it via `close_dialog_kinds`), so `shell_dialog_kind` /
-   `contract_dialog_kind` in `main.rs` need a story once winit's own variant goes — they are
-   currently total matches between the two enums. **Best done on Windows**, since it is
-   `pb-app`-only and wants a run afterwards.
-3. **Then task #126 is done.** The "strays" (`apply_menu_state`, `confirm_delete_permanent`, the
-   two toggles) were deliberately scoped out in §5a and want their own task; `#125` (splitting
-   `app_core_impl.rs`) is the separate follow-on, and is now *more* attractive because this task
-   added ~400 lines to the core that #125 will sort into the right cluster once.
+1. **macOS: an untraced bottom-left spinner** during a quick open with the sheet suppressed.
+   Owner likes it; nobody has identified what draws it. ⚠ **Not** the Windows retry spinner
+   fixed here — different trigger, same description.
+2. **Two cosmetic one-frame ordering gaps**, both cleared of the core, recorded so they are
+   not re-investigated from scratch:
+   - The **door card flashes over a photo** on archive entry. `PB_DOOR_DIAG` over 923 frames
+     shows *zero* instances of the bug signature (`door_card=Some` with `archive_kind=None`)
+     and zero ring desyncs, and there is no fade animation. Remaining **untested** hypothesis:
+     the card lives in the retained egui overlay texture (`App::door_sig`), so a stale overlay
+     can composite over the new photo for a frame or two — 8–16 ms at 120 Hz.
+   - **`archive_scope` lags the deck by one frame** on archive entry.
+3. **The "strays"** — `apply_menu_state`, `confirm_delete_permanent`, `toggle_recursive`,
+   `toggle_show_archives`. Deferred out by §5a as not-worker-lifecycle code; subtask 3 is
+   marked *cancelled*, not skipped. They want their own task.
+4. **#125** — splitting `app_core_impl.rs`, the separate follow-on.
 
 ### Known-red, and NOT ours — do not chase
 
 - `pb-decode`'s `plain_fixtures_have_no_dovi_summary` fails on both Windows runners with
-  `FFmpeg decoder: Decoder not found`. Pre-existing: identical failure in run `29716604750`,
-  hours before this task's first commit. It keeps the ffprobe lane red regardless of what lands.
-- The `linux-gate` runner failed on a Docker **keychain** error, not on code — fixed 2026-07-20
-  by dropping `credsStore` from `~/.docker/config.json` (the runner has no interactive session
-  to unlock the keychain, and the gate only pulls public images).
-- Two `pb-app-core` video-probe tests (`a_real_video_probes_off_thread…`,
-  `copy_details_mid_probe…`) are **flaky**, not failing — timing-dependent off-thread probes
-  that pass on an idle box.
+  `FFmpeg decoder: Decoder not found`. Pre-existing, hours before this task's first commit.
+- Two `pb-app-core` video-probe tests are **flaky**, not failing — timing-dependent
+  off-thread probes that pass on an idle box.
+- `linux-gate` failed on a Docker **keychain** error, not code — fixed 2026-07-20 by dropping
+  `credsStore` from `~/.docker/config.json`.
 
 ---
 
@@ -463,7 +308,7 @@ a password; the zeroizing teardown still runs on both platforms; `settings.save(
 cannot reach it. Add an explicit test that a moved password is redacted in `{:?}` output,
 and re-run the no-trace integration test before landing.
 
-## 7. Sequencing
+## 7. Sequencing (as executed)
 
 0. **The coordinator + runtime/clock + dialog identity** (section 5a), *before* either flow.
 1. **`dir_scan`** - 5 functions, one dialog kind, no password path, no retry. It is
