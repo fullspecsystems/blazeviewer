@@ -9,6 +9,12 @@ with any pre-release suffix carried only by the tag.
 
 ### Fixed
 
+- Malformed-but-viewable images now display instead of getting stuck on the loading spinner
+  forever. Some files — for example JPEGs exported by government or scanner software — are
+  technically damaged (stray bytes between headers, a cut-off tail) yet decode fine in Preview
+  and other viewers; Blaze Viewer was refusing them outright. It now salvages them the way
+  those other viewers do, and the file's details panel notes that it was recovered from a
+  damaged file, and why.
 - Opening an archive no longer flashes a progress spinner for a split second. The "Opening…"
   window now appears only if the archive actually takes a moment to open, the way folder
   scanning has always worked. It also waits a little longer than the folder pill does before

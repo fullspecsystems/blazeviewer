@@ -188,7 +188,10 @@ mod tests {
         let jpeg = crate::encode_jpeg_rgba8(&rgba, 16, 16, 90).expect("encode");
         let (_rgba, w, h, _icc, recovered) = decode_rgba_with_icc(&jpeg).expect("decode");
         assert_eq!((w, h), (16, 16));
-        assert!(recovered.is_none(), "a well-formed JPEG must not be flagged recovered");
+        assert!(
+            recovered.is_none(),
+            "a well-formed JPEG must not be flagged recovered"
+        );
     }
 
     #[test]

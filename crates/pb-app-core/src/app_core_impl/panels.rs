@@ -619,6 +619,19 @@ impl AppCore {
             .unwrap_or_default()
     }
 
+    /// The current photo's recovery notice (task #127): a human-readable reason when
+    /// the file was **malformed but salvaged** by the decode ladder (e.g. `"Extra
+    /// bytes between headers"` for a JPEG a strict decoder rejects). Non-empty means
+    /// the details panel should show a "recovered from a damaged file" notice so a
+    /// user digging into the file learns the full story; empty means a clean decode
+    /// (the shell shows nothing). Reads the displayed photo's cached metadata.
+    pub fn recovered_notice(&self) -> String {
+        self.current
+            .as_ref()
+            .and_then(|m| m.recovered.clone())
+            .unwrap_or_default()
+    }
+
     /// A change-detection snapshot of the natively-drawn info readout — `(main, codec, live,
     /// animated)` when visible, `None` when hidden. The tick diffs it so a native info line
     /// re-pulls on a real content change (a photo swap), never per tick. Alignment/opacity

@@ -4051,6 +4051,26 @@ impl AppCore {
             if !self.meta_cache.contains_key(&item) {
                 let m = meta_for(self.source.as_ref(), item, &self.root, img);
                 self.meta_cache.insert(item, m);
+            } else if img.recovered.is_some() {
+                // The cache was seeded by whichever decode landed FIRST — for the parked
+                // target that's usually the preview (often a clean embedded thumbnail),
+                // which carries no recovery flag. When the malformed FULL decode arrives
+                // and salvages it (task #127), merge the flag into the cached meta and the
+                // live `current` mirror, so the details notice appears without a
+                // re-navigation. Only ever sets it, never clears — a clean full can't
+                // un-recover an item.
+                if let Some(m) = self.meta_cache.get_mut(&item) {
+                    if m.recovered.is_none() {
+                        m.recovered = img.recovered.clone();
+                    }
+                }
+                if self.displayed_item == Some(item) {
+                    if let Some(cur) = self.current.as_mut() {
+                        if cur.recovered.is_none() {
+                            cur.recovered = img.recovered.clone();
+                        }
+                    }
+                }
             }
             // Byte accounting (mip plan §4d): an Original uploads WITH its mip chain (unless
             // source-ICC mode 1, which is never mipped), so its true VRAM is ~4/3× L0 — record
@@ -5364,6 +5384,7 @@ mod tests {
             size: None,
             codec: "PNG",
             animated: None,
+            recovered: None,
         };
         // Fill a regenerable cache past the high-water mark, and a user-edit map alongside it.
         for i in 0..6000 {
@@ -5400,6 +5421,7 @@ mod tests {
             size: None,
             codec: "JPEG",
             animated: None,
+            recovered: None,
         });
         core.info_line = true;
 
@@ -5450,6 +5472,133 @@ mod tests {
         assert!(!core.info_line_visible());
     }
 
+    #[test]
+    fn recovered_notice_surfaces_a_malformed_files_reason() {
+        use crate::meta::PhotoMeta;
+        let mut core = test_core();
+        // A clean decode carries no reason → the details panel shows no notice.
+        core.current = Some(PhotoMeta {
+            rel: "trip/clean.jpg".to_string(),
+            w: 4032,
+            h: 3024,
+            size: None,
+            codec: "JPEG",
+            animated: None,
+            recovered: None,
+        });
+        assert_eq!(core.recovered_notice(), "");
+
+        // A malformed-but-recovered decode carries the reason → the notice shows it.
+        core.current = Some(PhotoMeta {
+            rel: "trip/ticket.jpg".to_string(),
+            w: 4864,
+            h: 3616,
+            size: None,
+            codec: "JPEG",
+            animated: None,
+            recovered: Some("Extra bytes between headers".to_string()),
+        });
+        assert_eq!(core.recovered_notice(), "Extra bytes between headers");
+
+        // No current photo → empty (no panic).
+        core.current = None;
+        assert_eq!(core.recovered_notice(), "");
+    }
+
+    #[test]
+    fn the_details_panel_shows_a_recovery_notice_for_a_malformed_file() {
+        use crate::meta::PhotoMeta;
+        let mut core = test_core();
+        core.source = Arc::new(FsSource::new(vec![PathBuf::from("trip/ticket.jpg")]));
+        core.displayed_item = Some(0);
+        core.current = Some(PhotoMeta {
+            rel: "trip/ticket.jpg".to_string(),
+            w: 4864,
+            h: 3616,
+            size: None,
+            codec: "JPEG",
+            animated: None,
+            recovered: Some("Extra bytes between headers".to_string()),
+        });
+
+        // A recovered file gets a "Recovered" row naming the reason, right in Details.
+        let rows = core.details_panel().rows;
+        assert!(
+            rows.iter().any(|r| matches!(r,
+                DetailRow::Pair { label, value }
+                    if label == "Recovered" && value.contains("Extra bytes between headers"))),
+            "a recovered file must show the notice row; got {rows:?}"
+        );
+
+        // A clean decode (no reason) shows no such row.
+        core.current.as_mut().unwrap().recovered = None;
+        let clean = core.details_panel().rows;
+        assert!(
+            !clean
+                .iter()
+                .any(|r| matches!(r, DetailRow::Pair { label, .. } if label == "Recovered")),
+            "a clean file must not show a Recovered row; got {clean:?}"
+        );
+    }
+
+    /// **Regression (task #127).** The parked target shows its embedded preview
+    /// (often a clean thumbnail) FIRST — that seeds `meta_cache`/`current` with no
+    /// recovery flag. When the malformed FULL decode lands later, salvaged by the
+    /// ladder, its flag must merge into the already-seeded cache and the live mirror,
+    /// or the details notice never appears (the exact symptom the owner hit on
+    /// IMG_1340: the image displayed, but Details showed nothing).
+    #[test]
+    fn a_later_full_decode_merges_the_recovery_flag_the_clean_preview_lacked() {
+        use crate::meta::PhotoMeta;
+        let mut core = test_core();
+        core.source = photos_named(&["ticket.jpg"]);
+        core.playlist = Playlist::new(1, 0);
+        core.fit = Some(FitBox {
+            max_width: 800,
+            max_height: 600,
+        });
+        core.targets = vec![0];
+        core.ring = ResidentRing::new(4);
+        core.displayed_item = Some(0);
+
+        // The clean preview already landed → cache + current carry NO flag.
+        let preview = PhotoMeta {
+            rel: "ticket.jpg".into(),
+            w: 4864,
+            h: 3616,
+            size: None,
+            codec: "JPEG",
+            animated: None,
+            recovered: None,
+        };
+        core.meta_cache.insert(0, preview.clone());
+        core.current = Some(preview);
+        core.preview_resident.insert(0);
+
+        // The malformed FULL Original decode lands, salvaged by the recovery ladder.
+        let mut img = rgba_full(64, 48, 4864, 3616);
+        img.recovered = Some("Extra bytes between headers".into());
+        core.pending_uploads.push(Outcome::synthetic(
+            0,
+            core.epoch,
+            core.content_gen,
+            pb_core::RepKind::Original,
+            Ok(img),
+        ));
+        core.drain_results();
+
+        assert_eq!(
+            core.meta_cache.get(&0).and_then(|m| m.recovered.as_deref()),
+            Some("Extra bytes between headers"),
+            "the full decode's recovery flag must merge into the preview-seeded cache"
+        );
+        assert_eq!(
+            core.current.as_ref().and_then(|m| m.recovered.as_deref()),
+            Some("Extra bytes between headers"),
+            "and into the live `current` mirror so the details notice appears"
+        );
+    }
+
     /// `info_line_visible()` is what the **native macOS shell** actually polls
     /// (`CoreModel.swift`) to show/hide its SwiftUI info-line view — unlike the
     /// winit HUD path, it never looks at `info_line_shown`. So `Tab` must suppress
@@ -5465,6 +5614,7 @@ mod tests {
             size: None,
             codec: "JPEG",
             animated: None,
+            recovered: None,
         });
         core.info_line = true;
         assert!(core.info_line_visible());
@@ -5913,6 +6063,7 @@ mod tests {
             size: None,
             codec: "JPEG",
             animated: None,
+            recovered: None,
         });
         core.displayed_item = Some(0);
         core.dispatch_action(Action::Info); // line on
@@ -6932,6 +7083,7 @@ mod tests {
             size: None,
             codec: "PNG",
             animated: None,
+            recovered: None,
         };
         let mut core = compare_core(3);
         core.meta_cache.insert(0, meta(100, 80));
@@ -6972,6 +7124,7 @@ mod tests {
             size: None,
             codec: "PNG",
             animated: None,
+            recovered: None,
         };
         let mut core = compare_core(3);
         core.meta_cache.insert(0, meta(100, 80));
@@ -7411,6 +7564,7 @@ mod tests {
                 size: None,
                 codec: "MKV",
                 animated: None,
+                recovered: None,
             },
         );
         // The very next presented frame adopts it — chrome comes alive mid-play.
@@ -7447,6 +7601,7 @@ mod tests {
             size: None,
             codec: "MKV",
             animated: None,
+            recovered: None,
         });
         core.toggle_play_pause(); // the real routing → Session backend
         assert!(
@@ -7633,6 +7788,7 @@ mod tests {
             size: None,
             codec: "MP4",
             animated: None,
+            recovered: None,
         });
         assert!(core.info_line_visible(), "precondition: the line is on");
 
@@ -7689,6 +7845,7 @@ mod tests {
             size: None,
             codec: "MP4",
             animated: None,
+            recovered: None,
         });
 
         let sid = VideoSessionId(1);
@@ -8319,6 +8476,7 @@ mod tests {
             size: None,
             codec: "MP4",
             animated: None,
+            recovered: None,
         });
         let (session, io) = VideoSession::new(VideoSessionId(1), 16);
         core.video = Some(ActiveVideoBackend::Session(ActiveVideo::new(session, 0)));
@@ -8374,6 +8532,7 @@ mod tests {
             size: None,
             codec: "MP4",
             animated: None,
+            recovered: None,
         });
         let (session, io) = VideoSession::new(VideoSessionId(1), 16);
         core.video = Some(ActiveVideoBackend::Session(ActiveVideo::new(session, 0)));
@@ -9236,6 +9395,7 @@ mod tests {
             size: None,
             codec: "PNG",
             animated: None,
+            recovered: None,
         });
         core.invalidate_geometry();
         assert_eq!(
@@ -9329,6 +9489,7 @@ mod tests {
             size: None,
             codec: "JPEG",
             animated: None,
+            recovered: None,
         }
     }
 
@@ -10056,7 +10217,7 @@ mod tests {
             color: pb_decode::ColorTransform::srgb(),
             peak: 1.0,
             animated: None,
-        recovered: None,
+            recovered: None,
         }
     }
 
@@ -13030,6 +13191,7 @@ mod tests {
             size: None,
             codec: "PNG",
             animated: None,
+            recovered: None,
         });
         core.target_item = Some(0);
         core.mark_resolved(0);
@@ -13642,7 +13804,7 @@ mod tests {
             color: pb_decode::ColorTransform::srgb(),
             peak: 1.0,
             animated: None,
-        recovered: None,
+            recovered: None,
         }
     }
 
@@ -14140,6 +14302,7 @@ mod tests {
             size: Some(271_000_000),
             codec: "ZIP",
             animated: None,
+            recovered: None,
         };
         let parts = core.info_line_parts(&door);
         assert!(parts.contains(&"271 MB".to_string()), "{parts:?}");
@@ -14155,6 +14318,7 @@ mod tests {
             size: None,
             codec: "JPEG",
             animated: None,
+            recovered: None,
         };
         let parts = core.info_line_parts(&photo);
         assert!(parts.contains(&"4032×3024".to_string()), "{parts:?}");

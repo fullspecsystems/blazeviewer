@@ -68,6 +68,16 @@ impl AppCore {
                 label: "Codec".to_string(),
                 value: meta.codec.to_uppercase(),
             });
+            // Recovery notice (task #127): this file was malformed but the decode
+            // ladder salvaged it. Surface it right under the codec so anyone digging
+            // into the details learns the file is non-conforming — and why it may
+            // look imperfect — rather than the damage being silent.
+            if let Some(reason) = &meta.recovered {
+                rows.push(DetailRow::Pair {
+                    label: "Recovered".to_string(),
+                    value: format!("damaged file, shown anyway ({reason})"),
+                });
+            }
         }
         // Animation facts (frame count, live current frame, rate, loop) — right under
         // the codec so an animated file reads as one block.

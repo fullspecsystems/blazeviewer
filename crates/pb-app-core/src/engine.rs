@@ -448,6 +448,7 @@ pub fn meta_for(
         size: source.size_hint(item),
         codec: img.codec,
         animated: img.animated,
+        recovered: img.recovered.clone(),
     }
 }
 

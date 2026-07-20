@@ -28,6 +28,12 @@ pub struct PhotoMeta {
     /// sequence on macOS), which kind — so the viewer can offer on-demand playback
     /// (the ▶ P hint, task #37). `None` for a still. Sniffed during decode.
     pub animated: Option<AnimationKind>,
+    /// `Some(reason)` when this image was **malformed but recovered** by the decode
+    /// ladder (task #127) — e.g. a JPEG a strict decoder rejects that lenient/OS-codec
+    /// rungs salvage. Surfaced as a notice in the details/info panel so a user digging
+    /// into a file learns it was non-conforming. `None` for a clean decode. Derived
+    /// from [`pb_decode::DecodedImage::recovered`]; RAM-only, never persisted.
+    pub recovered: Option<String>,
 }
 
 /// A byte count as a person reads it: `271 MB`, `4.2 GB`, `812 KB`.
