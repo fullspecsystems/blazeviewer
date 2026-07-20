@@ -4678,7 +4678,7 @@ mod tests {
 
     /// A core with a live **Native** backend on item 0 — the macOS sample-buffer /
     /// AVPlayer shape, which is what MKV and WebM actually take since Phase 3F.
-    fn core_with_a_native_video() -> AppCore {
+    pub(super) fn core_with_a_native_video() -> AppCore {
         let mut core = test_core();
         let sid = pb_decode::VideoSessionId(7);
         let mut proxy = crate::video_native::NativeVideoProxy::new(0, sid, false);
@@ -5892,7 +5892,7 @@ mod tests {
     // --- "Text in image" state machine (task #45): drive `poll_text_scan` with a
     // hand-fed channel — the worker/OCR backend stays out of these tests entirely.
 
-    fn text_result(qr: &[&str], lines: &[&str]) -> crate::image_text::ImageText {
+    pub(super) fn text_result(qr: &[&str], lines: &[&str]) -> crate::image_text::ImageText {
         crate::image_text::ImageText {
             qr: qr.iter().map(|s| s.to_string()).collect(),
             lines: lines.iter().map(|s| s.to_string()).collect(),
@@ -5912,7 +5912,7 @@ mod tests {
         });
     }
 
-    fn clipboard_text_effects(core: &AppCore) -> Vec<(String, Option<String>)> {
+    pub(super) fn clipboard_text_effects(core: &AppCore) -> Vec<(String, Option<String>)> {
         core.effects
             .iter()
             .filter_map(|e| match e {
@@ -8306,7 +8306,7 @@ mod tests {
     // -- media-track Details rows (task #98) --------------------------------
 
     /// Seed the Details cache for `item` with a catalog, as a probe would.
-    fn seed_details(
+    pub(super) fn seed_details(
         core: &mut AppCore,
         item: usize,
         media: Option<pb_decode::MediaTrackCatalog>,
@@ -9098,7 +9098,7 @@ mod tests {
 
     // --- Poster selection (task #114, phase 1) ------------------------------
 
-    fn poster_payload(item: usize, fitted: (u32, u32)) -> pb_decode::PosterSelection {
+    pub(super) fn poster_payload(item: usize, fitted: (u32, u32)) -> pb_decode::PosterSelection {
         let img = |w: u32, h: u32| pb_decode::DecodedImage {
             width: w,
             height: h,
@@ -11937,7 +11937,7 @@ mod tests {
     /// held (the lost-key-up race): `held` claims Space is down, but no release will ever come.
     /// `hold_start`/`initial_delay` are pinned so the tick's step-3 advance machinery stays out
     /// of the way — the subject under test is the 3b sharpen gate, not hold-to-blaze.
-    fn stuck_preview_core() -> AppCore {
+    pub(super) fn stuck_preview_core() -> AppCore {
         let mut core = test_core();
         core.source = photos_named(&["a.jpg"]);
         core.playlist = Playlist::new(1, 0).with_cursor(0);
