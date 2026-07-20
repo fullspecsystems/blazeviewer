@@ -38,6 +38,21 @@ use crate::scan::{ScanProgress, ScanUpdate};
 /// now the only one.
 pub const SCAN_DIALOG_DELAY: Duration = Duration::from_millis(250);
 
+/// The scanned folder's display name: the first root's folder name.
+///
+/// Both shells derived this independently and **disagreed on the fallback** — winit's
+/// `scan_display_name` returned the literal `"folder"` for a root with no file name (`/`, or a
+/// bare drive letter), while the macOS copy fell through to `root.display()`, printing a raw
+/// path into a headline. winit's is adopted: a headline reading *Scanning "folder"…* is worse
+/// than a name but better than *Scanning "C:\"…*, and neither shell should be choosing.
+pub fn scan_display_name(roots: &[std::path::PathBuf]) -> String {
+    roots
+        .first()
+        .and_then(|r| r.file_name())
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "folder".to_string())
+}
+
 /// An in-flight directory walk. Private state of the core; the shells no longer keep a copy.
 pub struct DirScanState {
     /// Identity from the shared generation space, so a late batch from a superseded walk —
@@ -107,6 +122,37 @@ pub enum ScanDialogRequest {
     },
     /// Drop the progress dialog: a photo is on screen, the walk finished, or the worker died.
     Close,
+}
+
+/// A live, read-only view of the walk in flight — everything a shell needs to draw whatever
+/// scan chrome it prefers, queryable every frame.
+///
+/// This is the **reconciliation** half of the design Codex asked for in plan §5a.2 ("shells
+/// should reconcile toward a desired dialog state rather than execute unqualified imperative
+/// commands"), and it is what lets one core serve two genuinely different presentations: the
+/// core owns the *facts* (is a walk running, is it slow, is a photo up yet, how far along),
+/// and each shell owns the *policy* of what chrome those facts warrant.
+///
+/// It also removes the stale-close hazard by construction for this flow. There is no late
+/// imperative `Close` that can arrive after a newer walk started, because the core never
+/// issues one — it only ever describes the state of whatever operation is current *now*.
+#[derive(Clone, PartialEq, Debug)]
+pub struct ScanStatus {
+    /// The scanned folder's display name (a chrome headline).
+    pub name: String,
+    /// Images found so far.
+    pub found: usize,
+    /// The sub-folder currently being walked, blank while it is still the root (which would
+    /// only repeat [`Self::name`]). Blanked here rather than in each shell because both want
+    /// it and neither wants to re-derive the comparison.
+    pub current_dir: String,
+    /// The walk has outlasted [`SCAN_DIALOG_DELAY`] — slow enough to be worth telling the
+    /// user about. A fast folder never reports `true`, so chrome never flashes.
+    pub slow: bool,
+    /// A photo is on screen: the first non-empty batch has bootstrapped the view. Chrome that
+    /// blocks input (winit's modal dialog) must hide once this is true; ambient chrome (the
+    /// macOS pill) deliberately stays up for the rest of the walk.
+    pub bootstrapped: bool,
 }
 
 /// The outcome of one [`super::AppCore::poll_dir_scan`] tick.

@@ -492,6 +492,11 @@ pub struct AppCore {
     /// The in-flight directory walk, if any (task #126 step 1). Previously duplicated as
     /// `struct DirScan` in *both* shells, field for field.
     pub dir_scan: Option<crate::dir_scan::DirScanState>,
+    /// The tag `scan::stream_scan` stamps on each update it sends. Distinct from the walk's
+    /// [`OpId`](crate::background::OpId) because the worker is handed this *before*
+    /// `arm_dir_scan` mints the id, and because `OpId` is deliberately opaque. Monotonic; the
+    /// per-scan channel makes it a defensive second check rather than the real staleness gate.
+    pub scan_wire_gen: u64,
     /// Flicker-compare pin (task #43): the pinned photo's playlist index. `Y` flips
     /// between it and the current photo; the pin rides the prefetch want-list at
     /// top-2 priority so the flip is always a ring rebind, never a decode. RAM-only

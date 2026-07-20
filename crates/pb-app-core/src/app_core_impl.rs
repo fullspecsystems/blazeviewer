@@ -199,6 +199,7 @@ impl AppCore {
             presented_kind: None,
             bg: crate::background::BackgroundOps::new(),
             dir_scan: None,
+            scan_wire_gen: 0,
             #[cfg(test)]
             rebind_count: 0,
             target_item: None,
@@ -6654,6 +6655,78 @@ impl AppCore {
     //
     // Moved off the two shells, which each carried a byte-similar copy. The shells keep only
     // dialog realisation; everything below is shell-neutral and unit-tested.
+
+    /// Start a folder walk on a worker thread — **the production entry point** both shells
+    /// call in place of their own `begin_dir_scan` copies.
+    ///
+    /// Walking a large or deeply nested tree (the worst case: someone opens `~/Library`) takes
+    /// many seconds, and doing it synchronously froze the run loop and could get the app killed
+    /// as unresponsive. So the walk streams over a channel and the current view stays up until
+    /// its first batch lands.
+    ///
+    /// Returns the operation this **superseded**, if any. Today the caller must still stop a
+    /// displaced *archive open* itself, because that worker is the shell's until step 2 moves
+    /// it; a displaced walk is already stopped here.
+    ///
+    /// Non-`Source::Scan` input is rejected **before** any state is touched. The shell copies
+    /// bumped the generation and cleared tombstones first and returned late, which was harmless
+    /// with one caller but is a latent bug in a generally callable core transition (plan §5a).
+    pub fn begin_dir_scan(
+        &mut self,
+        source: pb_core::open::Source,
+        cursor: pb_core::open::Cursor,
+    ) -> Option<(crate::background::OpId, crate::background::OpKind)> {
+        let pb_core::open::Source::Scan { roots, recursive } = source else {
+            return None; // explicit lists and archives are routed elsewhere by `open_plan`
+        };
+        let name = crate::dir_scan::scan_display_name(&roots);
+        let root = roots.first().cloned().unwrap_or_else(|| PathBuf::from("."));
+        let scan_root = roots.first().cloned();
+        // The live Show Archives preference (task #104), read at spawn time: with it off the
+        // walk drops archive "doors" so the deck never lists them.
+        let show_archives = self.settings.show_archives;
+        let progress = crate::scan::ScanProgress::new();
+        let worker_progress = progress.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        // The wire generation is the worker's own tag on each update. It stays distinct from
+        // the `OpId` because `stream_scan` stamps it, and only `arm_dir_scan` knows the id.
+        let wire_gen = self.scan_wire_gen.wrapping_add(1);
+        self.scan_wire_gen = wire_gen;
+        std::thread::spawn(move || {
+            crate::scan::stream_scan(
+                roots,
+                recursive,
+                show_archives,
+                cursor,
+                root,
+                scan_root,
+                wire_gen,
+                worker_progress,
+                tx,
+            );
+        });
+        self.arm_dir_scan(wire_gen, rx, progress, name)
+    }
+
+    /// A live view of the walk in flight, for whatever scan chrome a shell draws. `None` when
+    /// no walk is running. Cheap and non-mutating, so it is safe to call every frame.
+    pub fn scan_status(&self) -> Option<crate::dir_scan::ScanStatus> {
+        let scan = self.dir_scan.as_ref()?;
+        let current = scan.progress.current();
+        Some(crate::dir_scan::ScanStatus {
+            found: scan.progress.found(),
+            current_dir: if current == scan.name {
+                String::new()
+            } else {
+                current
+            },
+            slow: self
+                .bg
+                .is_slow(self.now, crate::dir_scan::SCAN_DIALOG_DELAY),
+            bootstrapped: self.scan_bootstrapped,
+            name: scan.name.clone(),
+        })
+    }
 
     /// Install an already-spawned walk. Returns the operation it **superseded**, if any, so
     /// the caller can stop that worker.
@@ -18482,6 +18555,81 @@ mod tests {
         let (tx, rx) = std::sync::mpsc::channel();
         core.arm_dir_scan(1, rx, crate::scan::ScanProgress::new(), "Photos".into());
         (core, tx)
+    }
+
+    /// `begin_dir_scan` must reject a non-scan source **before touching any state**. The shell
+    /// copies bumped the generation and cleared tombstones first and returned late — harmless
+    /// with exactly one caller, a latent bug in a generally callable core transition (§5a).
+    #[test]
+    fn begin_dir_scan_validates_before_it_mutates() {
+        let mut core = test_core();
+        core.deleted.insert(std::path::PathBuf::from("/gone.jpg"));
+
+        let superseded = core.begin_dir_scan(
+            pb_core::open::Source::Archive(std::path::PathBuf::from("/a.zip")),
+            pb_core::open::Cursor::First,
+        );
+
+        assert_eq!(superseded, None);
+        assert!(core.dir_scan.is_none(), "no walk was armed");
+        assert_eq!(core.bg.active(), None, "no generation was claimed");
+        assert!(!core.scanning);
+        assert!(
+            core.deleted.contains(std::path::Path::new("/gone.jpg")),
+            "tombstones survive a rejected open - the shells cleared them first"
+        );
+    }
+
+    /// The status query is what lets one core drive two different scan chromes: it reports
+    /// `slow` and `bootstrapped` as SEPARATE facts, so a shell can show ambient chrome for the
+    /// whole walk (macOS, and winit's pill) while blocking chrome hides once a photo is up.
+    #[test]
+    fn scan_status_reports_slow_and_bootstrapped_independently() {
+        let (mut core, _tx) = armed_scan_core();
+        let start = core.now;
+
+        let s = core.scan_status().expect("a walk is in flight");
+        assert_eq!(s.name, "Photos");
+        assert!(!s.slow, "a fresh walk is not yet worth any chrome");
+        assert!(!s.bootstrapped);
+
+        core.now = start + crate::dir_scan::SCAN_DIALOG_DELAY;
+        assert!(core.scan_status().unwrap().slow, "past the delay");
+
+        // A photo lands. `slow` must NOT be cleared by it - they answer different questions.
+        core.scan_bootstrapped = true;
+        let s = core.scan_status().unwrap();
+        assert!(s.slow && s.bootstrapped);
+
+        // Unlike `should_reveal`'s latch, the query keeps answering for the whole walk.
+        core.now = start + Duration::from_secs(30);
+        assert!(core.scan_status().unwrap().slow);
+    }
+
+    /// No walk, no status - so chrome driven by it disappears the moment the walk ends.
+    #[test]
+    fn scan_status_is_none_once_the_walk_ends() {
+        let (mut core, tx) = armed_scan_core();
+        assert!(core.scan_status().is_some());
+        tx.send((1, crate::scan::ScanUpdate::Done)).unwrap();
+        core.poll_dir_scan();
+        assert!(core.scan_status().is_none());
+    }
+
+    /// The sub-folder line is blanked while the walk is still in the root, so chrome does not
+    /// print the headline twice. Both shells did this independently; the core does it once.
+    #[test]
+    fn scan_status_blanks_the_subfolder_while_it_repeats_the_headline() {
+        let mut core = test_core();
+        let (_tx, rx) = std::sync::mpsc::channel();
+        let progress = crate::scan::ScanProgress::new();
+        core.arm_dir_scan(1, rx, progress.clone(), "Photos".into());
+
+        progress.set_current("Photos".into());
+        assert_eq!(core.scan_status().unwrap().current_dir, "");
+
+        progress.set_current("Photos/2019".into());
+        assert_eq!(core.scan_status().unwrap().current_dir, "Photos/2019");
     }
 
     /// The invariant phase 0 exists for, now end-to-end: an archive open supersedes an

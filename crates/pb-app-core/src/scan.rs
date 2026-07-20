@@ -521,7 +521,7 @@ impl ScanProgress {
     /// Worker-side: publish the directory now being walked (relative to the scan root).
     /// A poisoned lock just means a prior writer panicked mid-update — drop the value
     /// rather than propagate; a stale caption is harmless.
-    fn set_current(&self, dir: String) {
+    pub(crate) fn set_current(&self, dir: String) {
         if let Ok(mut g) = self.inner.current.lock() {
             *g = dir;
         }

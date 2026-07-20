@@ -139,6 +139,22 @@ impl BackgroundOps {
     pub fn revealed(&self) -> bool {
         self.active.is_some_and(|o| o.revealed)
     }
+
+    /// Whether the in-flight operation has outlasted `delay` — the same "slow enough to tell
+    /// the user" fact as [`should_reveal`](Self::should_reveal), but **as a continuous
+    /// predicate rather than a one-shot latch**, and without `&mut`.
+    ///
+    /// The two exist because the two chrome shapes ask different questions. A *modal* dialog
+    /// is an event ("open one, once") and wants the latch, or it re-opens every tick. An
+    /// *ambient pill* is a state ("is one warranted right now?") and must stay answerable for
+    /// the whole walk — a latch would report `true` on exactly one tick and `false` forever
+    /// after, so a pill driven by `should_reveal` would flicker for a single frame.
+    ///
+    /// Consequently this does **not** consume the reveal: a shell may call it every frame.
+    pub fn is_slow(&self, now: Instant, delay: Duration) -> bool {
+        self.active
+            .is_some_and(|o| now.saturating_duration_since(o.started) >= delay)
+    }
 }
 
 #[cfg(test)]
@@ -275,6 +291,45 @@ mod tests {
             ops.should_reveal(late + delay, delay),
             Some((open, OpKind::ArchiveOpen))
         );
+    }
+
+    /// `is_slow` answers the same question as `should_reveal` but keeps answering it, which
+    /// is what an ambient pill needs: a latch would report `true` for one frame only.
+    #[test]
+    fn is_slow_is_continuous_where_should_reveal_latches() {
+        let now = t0();
+        let delay = Duration::from_millis(250);
+        let mut ops = BackgroundOps::new();
+        ops.begin(OpKind::DirScan, now);
+
+        assert!(!ops.is_slow(now, delay), "not yet");
+        assert!(!ops.is_slow(now + Duration::from_millis(249), delay));
+
+        let late = now + Duration::from_millis(250);
+        assert!(ops.is_slow(late, delay), "true at the deadline");
+        assert!(
+            ops.is_slow(late + Duration::from_secs(9), delay),
+            "and stays true for the rest of the walk"
+        );
+
+        // Consuming the one-shot reveal must not change the continuous answer.
+        assert!(ops.should_reveal(late, delay).is_some());
+        assert!(ops.should_reveal(late, delay).is_none(), "latched");
+        assert!(
+            ops.is_slow(late, delay),
+            "the pill's answer survives the dialog's latch being consumed"
+        );
+    }
+
+    /// Nothing in flight is never slow, however long the clock runs.
+    #[test]
+    fn a_finished_operation_is_not_slow() {
+        let now = t0();
+        let delay = Duration::from_millis(250);
+        let mut ops = BackgroundOps::new();
+        let (id, _) = ops.begin(OpKind::DirScan, now);
+        assert!(ops.finish(id));
+        assert!(!ops.is_slow(now + Duration::from_secs(9), delay));
     }
 
     /// Identity is drawn from one space across kinds, so ids never collide between a scan
