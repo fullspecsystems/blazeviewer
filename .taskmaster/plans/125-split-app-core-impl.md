@@ -1,6 +1,7 @@
 # Task 125 — Split `app_core_impl.rs` into concern-scoped `impl AppCore` blocks
 
-**Status:** plan, rev 1 (pre-Codex). **Scope gate:** this is audit finding #1 remediation
+**Status:** **in progress** — rev 2, re-measured at `facd7e5c` (2026-07-20) after #126. Step 1
+(the `prefs` rehearsal + the verifier) has landed; see *Progress* below. **Scope gate:** this is audit finding #1 remediation
 **(a) only** — see §2, which is the most important section in this document.
 
 ## Where this slots into the technical-debt audit
@@ -25,8 +26,8 @@ happen while #109/#119/#121 all did.
 | commit | date | `app_core_impl.rs` |
 |---|---:|---:|
 | `8b5dc30b` (the audit's own baseline) | 2026-07-18 | 15,898 |
-| `939c0bce` | 2026-07-19 | 20,546 |
-| `HEAD` (`5f3b4429`) | 2026-07-19 | 20,932 |
+| `5f3b4429` (when this plan was filed) | 2026-07-19 | 20,932 |
+| `facd7e5c` (re-measured, after #126) | 2026-07-20 | **22,105** |
 
 **+5,034 lines (+32%) in about a day.** The audit flagged this file as its #1 debt and
 warned its numbers would drift; they drifted by a third within 24 hours. Its stated figures
@@ -34,9 +35,13 @@ warned its numbers would drift; they drifted by a third within 24 hours. Its sta
 
 Current, re-measured at `HEAD`:
 
-- **20,932 lines** — 11,963 production, 8,970 tests
-- **349 production methods**, essentially one flat `impl AppCore`
-- next-largest file in the repo is `gpu.rs` at 7,127, so this is ~2.9× the runner-up
+- **22,105 lines** — 12,504 production, 9,602 tests
+- **363 production methods**, essentially one flat `impl AppCore`
+- next-largest file in the repo is `gpu.rs` at 7,127, so this is **~3.1× the runner-up**
+
+#126 added ~1,170 lines to it, exactly as §11 predicted — which is the argument for doing
+#126 first (its new lifecycle code gets sorted into the right cluster once, not twice), and
+also why the figures below are re-measured rather than quoted from the filing.
 
 Three concrete costs paid during task #124 alone, all attributable to file size:
 
@@ -229,3 +234,55 @@ Worth stating plainly so the task isn't oversold. After a perfect execution:
 This task buys tractability, and it makes (b) approachable. It is not itself the cure the
 audit is pointing at. The audit calls its item 3 *"the large, high-value program the other
 findings mostly reduce to"* — but per §2a that framing over-sizes what is actually left.
+
+---
+
+## Progress
+
+### Step 1 — DONE 2026-07-20: the verifier, and the `prefs` rehearsal
+
+**`scripts/verify-pure-move.py`** implements §3's safety property. Snapshot the crate, move
+code, check: it compares the multiset of `(fn name, body hash)` across every `.rs` in the
+crate, so a dropped, invented or edited body fails loudly regardless of which file it lives in.
+
+Byte-level rather than AST — no `syn` dependency, and stricter. It brace-matches while
+skipping string/char/raw-string literals and comments, because `println!("{}")` alone derails
+a naive matcher.
+
+**The verifier is itself tested**, since the whole safety argument rests on it:
+
+| self-check | result |
+|---|---|
+| unchanged tree | ✅ verifies |
+| one function deleted | ✅ `MISSING/CHANGED request_cancel` |
+| one body edited (a comment added) | ✅ same name, two different hashes |
+
+Its limits are documented in the script and are real: it compares **functions only**, so
+`use` lines, structs, constants and attributes still need review; and it cannot detect a
+method moved between impl blocks for *different types* (out of scope here — #125 moves only
+within `impl AppCore`).
+
+**Layout decision (§6 was left open).** Not the proposed `core/` subdirectory: `dir_scan.rs`,
+`archive_open.rs` and `background.rs` are orchestration too and already sit top-level, so that
+distinction was dead on arrival. Instead Rust's `foo.rs` + `foo/` pairing —
+`app_core_impl.rs` keeps its name and gains `app_core_impl/prefs.rs` beside it. Zero renames,
+no new concept, and the ownership is obvious from the path.
+
+**The rehearsal:** `apply_keymap`, `refresh_theme`, `apply_settings`, `keymap_shortcut` →
+`app_core_impl/prefs.rs` (161 lines). Compiled first try; verifier reports **2039 → 2039
+functions, all byte-identical**; re-verified *after* `cargo fmt` to prove formatting did not
+reflow anything; clippy clean; workspace green.
+
+### Finding: the cluster inventory has false positives
+
+`rebind_same_item` was auto-clustered into *prefs* because its name contains `bind`. It is
+residency code from #124. So the §4 table is a **starting point, not an assignment** — its
+per-cluster LOC figures are approximate and each cluster needs the human read that subtask 2
+already calls for. The prefs cluster was 5 by the script and 4 in reality.
+
+### Next
+
+1. **Subtask 2 — triage the ~60 unassigned methods**, and re-check the auto-assignments for
+   more false positives of the `rebind_same_item` kind. Output is a written assignment list.
+2. Then the small leaves (`archive`, `scan`, `view`), then the mid ones, then `video`.
+3. §9's anti-regrowth guard is still an **open owner call**.
