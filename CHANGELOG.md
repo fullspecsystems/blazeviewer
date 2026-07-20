@@ -7,6 +7,14 @@ with any pre-release suffix carried only by the tag.
 
 ## [Unreleased]
 
+### Changed
+
+- Scanning a big folder on Windows and Linux now shows the same unobtrusive progress pill as
+  the rest of the walk, instead of a separate "Scanning Folder" window that appeared first and
+  then handed over to the pill. It shows the folder being walked, a live count and a Cancel
+  button, and it no longer takes over the screen before your first photo arrives. macOS already
+  worked this way.
+
 ### Fixed
 
 - Zooming in now shows real detail instead of magnifying the screen-sized picture. Blaze

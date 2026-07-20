@@ -414,12 +414,39 @@ silent regression in one direction or a double-cancel in the other.
 | Phase 0 — wake contract | ✅ not needed — the core's 9 existing workers already share one (channel → `Option<Handle>` → `try_recv` in `tick` → a `work_pending()` arm); scan/archive already match it |
 | Step 1 — core owns spawn + pump + status query | ✅ `a78bfddd` |
 | Step 1 — **mac rewired** | ✅ `71f78e01`, **−202/+82**, 36 tests green, app runs |
-| Step 1 — winit rewired | ⏳ next; needs the cross-check, and carries the §12.3 pill change |
-| Step 1 — owner interactive smoke on macOS | ⏳ pending (pill, its Cancel, quit mid-scan) |
+| Step 1 — **winit rewired** | ✅ `f3ca4795`, **−270/+102**, clippy-clean cross-checked |
+| Step 1 — owner interactive smoke | ⏳ pending — macOS (pill, Cancel, quit mid-scan) **and Windows** (§12.8) |
 | Step 2 — archive-open | ⏸ not started; read §12.6 first |
 
-**The DRY win is now real on one shell**: one copy of the dir-scan lifecycle is deleted and
-the surviving implementation is the tested core one. It becomes a full win when winit follows.
+**The DRY win is real.** Both copies of the dir-scan lifecycle are deleted; the surviving
+implementation is the tested core one. Net ≈ −290 lines across the two shells.
+
+### 12.8 What is NOT verified, and what would catch it
+
+Honest ledger, because the §8 gate is "exercised, not assumed":
+
+- **macOS** — builds and runs here; a 3,623-file tree scans with clean stderr. **Not** checked
+  interactively: the pill's appearance, its Cancel, quit-mid-scan.
+- **winit** — `cargo check` *and* `clippy --all-targets -D warnings` clean for
+  `x86_64-pc-windows-msvc`, but **never executed**; `pb-app` cannot run on a Mac. The pill
+  change is therefore type-verified and behaviour-unverified. Three things need a Windows run:
+  1. the pill during the **pre-bootstrap** phase, where it now appears on an empty canvas — does
+     it coexist with the welcome/open panel or overlap it?
+  2. the `Searching…` zero-state actually showing (the count is 0 for that whole phase);
+  3. **cancel with an empty deck** — the old dialog's Cancel discarded the partial via
+     `ScanningCancelled`; the pill's `cancel_scan_command` keeps it. Pre-bootstrap there is
+     nothing to keep, so they converge, but confirm it restores the welcome screen rather than
+     stranding a blank canvas.
+
+The Scanning window is retained and `#[allow(dead_code)]`-marked precisely so failure of any of
+those is a one-line revert (`scan_pill_visible`), not a rebuild. Delete it once confirmed.
+
+### 12.9 Cross-check memo correction
+
+`crates/pb-app/Cargo.toml` + `pb-app-core/Cargo.toml` need `ureq` at
+`default-features = false` **plus `features = ["json"]`** — the recorded recipe omits the
+second half, and without it `describe.rs:224` loses `send_json` and `pb-app-core` fails to
+build for the Windows target before `pb-app` is even reached.
 
 ### 11.4 Status at end of session
 
