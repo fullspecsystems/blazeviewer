@@ -872,6 +872,7 @@ impl App {
             archive_loading: false,
             redraw_pending: false,
             resize_hold: None,
+            fit_stash: [None, None],
             scan_bootstrapped: false,
             password_archive: None,
             archive_passwords: Vec::new(),
