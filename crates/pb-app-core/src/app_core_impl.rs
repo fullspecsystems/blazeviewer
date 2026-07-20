@@ -6185,6 +6185,7 @@ impl AppCore {
             }
         }
         let mut jobs = head;
+        let head_len = jobs.len();
         jobs.append(&mut previews);
         jobs.append(&mut fulls);
         // Parked full-res tier (#106.7): when PARKED (no nav key held), keep a small
@@ -6193,12 +6194,17 @@ impl AppCore {
         // those photos is an instant rebind, not a re-decode. Radius from `full_res_radius`;
         // order is current → compare-pin → sequential neighbours (§ pin). Excludes video /
         // archive doors / SVG / RAW and anything past the gigapixel ceiling (§8/§9). While a key
-        // is held this whole tier is empty (blazing stays lean). Collected here but appended
-        // **below the thumb fills** (§5): a full-res Original decode is ~400 ms, and priority is
-        // list position, so keeping it under the thumb strip is what stops a few big originals
-        // from starving the visible thumbnails (owner-reported). With the strip closed there are
-        // no thumb jobs, so it still decodes right after the fulls — the toggle stays fast.
+        // is held this whole tier is empty (blazing stays lean).
+        //
+        // Priority split (#123, owner 2026-07-19): the CURRENT photo's own job ranks directly
+        // after the current display ladder — parked means F / 1:1 / zoom is the next likely
+        // action, and its prerequisite must not queue behind dozens of neighbour refills (each
+        // F re-queues them all, which kept the Original perpetually at the back — the "way
+        // after the pie" wait). The REST of the tier stays appended **below the thumb fills**
+        // (§5): that below-thumbs calibration was about the whole tier's big originals starving
+        // visible thumbnails (owner-reported); one bounded job does not reopen it.
         let mut parked: Vec<Job> = Vec::new();
+        let mut parked_current: Vec<Job> = Vec::new();
         if self.held_nav().is_none() {
             let (other_kind, other_fit) = match dk {
                 pb_core::RepKind::Fit => (pb_core::RepKind::Original, None),
@@ -6281,9 +6287,21 @@ impl AppCore {
                             }
                         }
                     }
-                    parked.push(Job::display(it, other_fit, false));
+                    // #123: the current photo's job jumps to the head split; neighbours
+                    // (and the pin) stay in the below-thumbs tail. (A parked VIDEO's
+                    // poster pre-install above keeps its own #114 pacing — photos only.)
+                    if Some(it) == self.playlist.current() {
+                        parked_current.push(Job::display(it, other_fit, false));
+                    } else {
+                        parked.push(Job::display(it, other_fit, false));
+                    }
                 }
             }
+        }
+        // #123: the current photo's parked job (at most one) lands directly after its
+        // own display ladder — ahead of every neighbour preview/full and the thumbs.
+        for (i, j) in parked_current.into_iter().enumerate() {
+            jobs.insert(head_len + i, j);
         }
         // Thumbnails fills (task #83): appended BELOW every display want (the
         // merged-scheduler order), only while the strip is visible and the user
@@ -17639,6 +17657,58 @@ mod tests {
             build(u64::MAX),
             "ample budget: the same want IS emitted (no over-suppression)"
         );
+    }
+
+    /// #123 fix 1: parked, the CURRENT photo's Original ranks directly after its own
+    /// display ladder — never behind the neighbour refill (each F re-queues dozens of
+    /// neighbour decodes, which kept the Original perpetually at the back: the owner's
+    /// "way after the pie" wait). Neighbour/pin parked jobs stay in the below-thumbs tail.
+    #[test]
+    fn the_current_photos_parked_original_outranks_the_neighbour_refill() {
+        let mut core = test_core();
+        core.source = photos_named(&["a.jpg", "b.jpg", "c.jpg"]);
+        core.playlist = Playlist::new(3, 0).with_cursor(0);
+        core.fit = Some(FitBox {
+            max_width: 100,
+            max_height: 100,
+        });
+        core.view.mode = ScaleMode::Fit;
+        core.settings.full_res_radius = 1;
+
+        core.request_prefetch();
+
+        let log = core.pool.enqueued();
+        let orig0 = log
+            .iter()
+            .position(|&k| {
+                k == (
+                    0,
+                    crate::decode_pool::Purpose::Display,
+                    pb_core::RepKind::Original,
+                )
+            })
+            .expect("the current photo's Original is wanted");
+        let first_neighbour = log
+            .iter()
+            .position(|&k| k.0 != 0)
+            .expect("neighbour work is wanted");
+        assert!(
+            orig0 < first_neighbour,
+            "parked: the current photo's Original must outrank the neighbour refill; log: {log:?}"
+        );
+        let orig1 = log.iter().position(|&k| {
+            k == (
+                1,
+                crate::decode_pool::Purpose::Display,
+                pb_core::RepKind::Original,
+            )
+        });
+        if let Some(orig1) = orig1 {
+            assert!(
+                orig1 > first_neighbour,
+                "…while NEIGHBOUR Originals stay in the low-priority tail; log: {log:?}"
+            );
+        }
     }
 
     /// #122 item 1: a TAP's advance GPU-sharpens with the key still down — the derive is
