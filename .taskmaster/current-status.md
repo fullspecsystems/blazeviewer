@@ -1,15 +1,18 @@
 # Blaze Viewer — Current Status (session handoff)
 
-_Last updated: 2026-07-20 (rev 25). Session ran on **Windows**, with a macOS session working
+_Last updated: 2026-07-20 (rev 26). Session ran on **Windows**, with a macOS session working
 the same tasks in parallel through the day. Everything below is on `main`, pushed._
 
 ---
 
 # ▶️ START HERE
 
-**#124 (zoom) and #126 (DRY the shells) are both COMPLETE.** **#125 (split
-`app_core_impl.rs`) is IN PROGRESS — steps 1 and 2 landed; the file is 22,105 → 20,557
-with 10 concern files and a written charter.** That is the live work.
+**#124 (zoom) and #126 (DRY the shells) are both COMPLETE. #125 (split
+`app_core_impl.rs`) has reached its STOP POINT — every leaf is split, 22,105 → 14,218 lines,
+26 concern files.** What remains in the parent is the charter (lifecycle, dispatch, residency &
+present engine); splitting the engine is a deliberate STOP (§7 step 5), a separate task if ever.
+**There is no live #125 work to continue** — the next thing a fresh session picks is from the
+backlog below, or the one Mac-only verification item in the plan's `## Handoff`.
 
 New this session and worth reading before writing any code:
 **`docs/where-code-goes.md`** — an ordered decision procedure for where a new function
@@ -18,136 +21,63 @@ belongs. **"Put it on `AppCore`" is the last answer, not the first.** Linked fro
 
 ---
 
-# 🧱 #125 — split `app_core_impl.rs` (LIVE)
+# ✅ #125 — split `app_core_impl.rs` (LEAVES DONE, at the STOP point)
 
-Plan: `.taskmaster/plans/125-split-app-core-impl.md` (rev 4 — **read its assignment list and
-`## Handoff` before touching this file**).
+Plan: `.taskmaster/plans/125-split-app-core-impl.md` (rev 5 — read *Progress* → "Step 3" and
+`## Handoff`).
 
-### Where it stands
+**Result: 22,105 → 14,218 lines, 26 concern files under `app_core_impl/`** (production
+12,504 → 4,730, 80 methods). Every leaf concern is now its own `app_core_impl/<name>.rs` block:
+`animation archive_open audio_tracks background clipboard compare delete describe dir_scan
+image_text item_kind menu meta nav open panels prefs save_rotation secret slideshow subtitles
+thumbs toast tree undo video view`. 9-of-10 early ones and most later ones pair with an
+existing logic module (the two-halves rule).
 
-**10 concern files under `app_core_impl/`, 20,557 lines left in the parent.** Landed as 6
-commits, alternating pure moves with clearly-labelled visibility edits:
+**How it was verified.** Alternating commits: pure moves (each `verify-pure-move` **2051 →
+2051 byte-identical**, re-checked after `cargo fmt`) and clearly-labelled `pub(super)`
+visibility edits (each flagging *only* its expected names, hand-diffed to keyword-only).
+`clippy --workspace --all-targets -D warnings` clean, `cargo test --workspace` green, and the
+**ship build** `pwsh scripts/build-windows.ps1` (`libheif,dav1d,ffprobe`) succeeds.
+**Codex-reviewed clean** at the stop point on visibility / scope-resolution / cfg (plan → *Codex
+review*).
 
-| | |
-|---|---|
-| pure moves | `dir_scan` + `archive_open` (13 fns) · `image_text` + `describe` (13) · `delete` + `undo` + `save_rotation` + `clipboard` (15) |
-| visibility edits | `supersede` → `background.rs` · `ensure_text_scan`/`ensure_describe_scan` · `reinsert_after_restore` |
+**The STOP (§7 step 5).** What's left in the parent is the charter and nothing else: lifecycle,
+dispatch, deck ingestion, and the residency & present engine (`tick`, `dispatch_action`,
+`request_prefetch`, `drain_results`, `present_item`, the fit-stash/GPU-derive block, …).
+Splitting the engine is genuinely coupled hot-path work and is a **separate task with its own
+plan if ever** — do not continue on momentum. The charter is now a test, not a slogan: the
+`effective_*` accessors and menu projection were moved out precisely because they contradicted
+it.
 
-Every pure move verified **2051 → 2051 function items, byte-identical**, re-checked after
-`cargo fmt`. Every edit commit flagged exactly its expected names and was hand-diffed to confirm
-the delta was only the keyword. Workspace clippy `-D warnings` and all tests green at each step.
+**One Mac-only verification owed** (plan `## Handoff`): `video.rs`/`animation.rs` hold
+macOS-gated methods no Windows build type-checks. They moved byte-identically and were audited
+fully `crate::`-qualified, so scope can't rebind them — but a Mac should build `pb-mac-ffi` once
+to confirm "compiles on macOS". Verification, not owed work. **The parent is released** — no
+longer claimed; anyone may edit it.
 
-**9 of the 10 pair with a logic module that already existed** — the two-halves rule working as
-§9 predicted.
+### Reusable machinery left behind (in `scratchpad/`, not committed — the verifier is the keeper)
 
-### The finding that changed the approach
+`extract.py` (cut methods with docs+attrs, bounded to the production impl, bracket-depth
+attribute walk), `privcheck.py` (which privates need `pub(super)` — scans parent + `mod tests`
++ all siblings), `namecheck.py` (would `mod X;` collide with an import), `wiremods.py` (rewrite
+the sorted `mod` block). If the engine split is ever taken up, these are the starting point.
 
-**`app_core_impl.rs` is already ordered.** Concerns sit in *contiguous* spans, because methods
-were appended next to their relatives. A cluster is one unbroken cut, which is why four landed
-in a session. **The plan's §4 name-clustered table is superseded — read the file in order
-instead.** The remaining assignment list (13 destinations + the charter remainder) is in the
-plan under *Step 2*.
+### ⚠ Ten traps now, all learned the hard way (full text in plan §3c + "Traps 7–10")
 
-### The shape of it, in five lines
-
-- `app_core_impl.rs` is **22,105 lines** (12,504 production + 9,602 tests, **363 methods**),
-  ~3.1× the next-largest file in the repo.
-- Split it into concern-scoped **`impl AppCore` blocks** in `app_core_impl/<concern>.rs`.
-  Rust lets an inherent impl span modules in one crate, so this is a **pure move**: no call
-  site, type, signature or visibility changes.
-- Verified by `scripts/verify-pure-move.py` — snapshot, move, check.
-- **Leaf-first.** The residency/present engine and `tick`/`dispatch_action` move **last or
-  not at all**.
-- Scope gate: this is audit finding #1 remediation **(a) only**. It splits the *file*, not
-  the god object. Do not drift into (b)/(c).
-
-### How to work it
-
-```sh
-python scripts/verify-pure-move.py selftest                       # the tool's own tests
-python scripts/verify-pure-move.py snapshot crates/pb-app-core/src > /tmp/before.json
-# ...move one cluster...
-python scripts/verify-pure-move.py check crates/pb-app-core/src /tmp/before.json
-cargo fmt --all && cargo clippy --all-targets && cargo test --workspace
-```
-
-One cluster per commit. Land it the same day it is written (merge-conflict discipline, §8).
-Stage explicit paths — **never `git add -A`**; the owner edits concurrently.
-
-### ⚠ Six traps, all learned the hard way
-
-1. **Private methods break when they move** (§3c). A private `fn` moved into
-   `app_core_impl/<x>.rs` becomes private *to that child*, and the parent can no longer call
-   it. `handle` calls private `apply_scan_batch`/`apply_archive`; `tick` calls private
-   `drive_fs_tree`. Fix: leave cross-concern entry points in the parent, **or** make the moved
-   method `pub(super)` (same effective visibility region). **`pub(super)` IS an edit** — give
-   it its own labelled commit so a real change cannot hide inside a move. The `prefs`
-   rehearsal dodged this only because all four of its methods were `pub`.
-2. **The cluster table (§4) is a starting point, not an assignment.** `rebind_same_item` was
-   auto-clustered into *prefs* because its name contains `bind` — it is residency code from
-   #124. Re-read every auto-assignment; the LOC figures are approximate.
-3. **The verifier proves textual conservation, NOT behavioural equivalence.** It cannot see
-   scope/import resolution (`app_core_impl.rs` has a glob `use crate::engine::*`), module-
-   sensitive macros (`file!`/`line!`/`module_path!`), same-name swaps, or non-function items.
-   Each moved module uses `use super::*;` so it inherits the parent's scope verbatim — any
-   *narrowing* of imports is a separate reviewed step. Never call a passing run "proven
-   correct"; say "nothing was dropped, invented or edited".
-4. **Anchors churn.** Every `app_core_impl.rs:NNNN` reference in plans/memory goes stale.
-   Accepted and unavoidable.
-5. **`cargo check` is not enough — use `clippy --all-targets`.** A moved private method can
-   break *only the test build*: `mod tests` lives inside `app_core_impl.rs`, so it can reach a
-   parent-private method, but once that method moves into a child it is a **sibling's** private
-   and the tests lose it. `reinsert_after_restore` did exactly this. Ask the §3c private-method
-   question of tests too.
-6. **The visibility edit goes FIRST, in place, as its own commit.** §3c says separate commits
-   but not which order — and move-then-widen has no compiling intermediate state, so there is no
-   commit to make. Widening in the parent first gives a reviewable 2-line diff against the
-   unmoved file, and the move then verifies perfectly clean. (Transient wart: `super` of
-   `app_core_impl` is the crate root, so `pub(super)` reads as `pub(crate)` until the method
-   actually moves.)
-
-### Done so far
-
-- **`scripts/verify-pure-move.py`** — hashes **attributes + signature + body** per function,
-  compares the multiset across the crate. Has a `selftest` (array returns, bodyless trait
-  decls, braces in strings/raw strings, `fn ` in comments, lifetimes, nested fns, attribute
-  and visibility sensitivity). ⚠ Its first version had a **false negative found by Codex, not
-  by me**: any `;` before `{` read as a bodyless declaration, so `fn f() -> [u8; 3]` was
-  untracked — 5 functions invisible in `app_core_impl.rs` alone. Fixed and pinned.
-- **Layout decided:** *not* a `core/` subdirectory (`dir_scan.rs`, `archive_open.rs`,
-  `background.rs` are orchestration too and already sit top-level). Rust's `foo.rs` + `foo/`
-  pairing instead — `app_core_impl.rs` keeps its name and gains `app_core_impl/prefs.rs`.
-- **Step 1 rehearsal:** `apply_keymap`, `refresh_theme`, `apply_settings`, `keymap_shortcut`
-  → `app_core_impl/prefs.rs` (161 lines). Verified 2051 → 2051 items byte-identical, re-checked
-  *after* `cargo fmt`.
-
-### Next on #125
-
-Subtask 2 (the triage) is **done** — its output is the assignment list in the plan. Work it
-top-down:
-
-1. The small four in one commit: `slideshow`, `secret`, `compare`, `thumbs`. Then `hud` + `meta`.
-2. `tree`, `panels`, `view`, `nav`, `animation` — one commit each.
-3. `video` (~90 fns) last among the leaves, **split three ways** (`video` / `audio_tracks` /
-   `subtitles`) rather than one 3k file.
-4. **Stop and reassess** before residency. Do not pre-commit to moving it.
-
-⚠ **Claimed on Windows.** `app_core_impl.rs` is the repo's #1 churn file and these moves
-relocate large spans — a concurrent edit to it conflicts badly. A Mac session should take
-something else or coordinate first.
-
-### The point of the whole thing (do not oversell it)
-
-It buys navigability, review size and merge-conflict surface. It does **not** reduce coupling —
-`AppCore` keeps all ~165 `pub` fields and every method's privilege to touch them. Codex said
-this independently and it is recorded in §11. The *charter* is what makes it stick:
-
-> **`app_core_impl.rs` holds the `AppCore` lifecycle, dispatch, and the residency & present
-> engine. Nothing else.**
-
-Anti-regrowth is **structural, not a lint** (owner call): the split must leave no "misc"
-bucket, and `docs/where-code-goes.md`'s **two-halves rule** (a new subsystem module gets its
-`app_core_impl/<name>.rs` in the same commit) is the mechanism.
+1. A moved private breaks its parent caller → `pub(super)`, as its **own labelled commit**.
+2. §4's name-clustered table is superseded — the file is **already ordered**; read it in order.
+3. The verifier proves **textual conservation, not behaviour** — can't see scope/imports,
+   module-macros, same-name swaps, non-function items.
+4. `app_core_impl.rs:NNNN` anchors churn — accepted.
+5. `cargo check` misses it — a moved private can break **only the test build**. Use
+   `clippy --all-targets`.
+6. The visibility edit goes **FIRST, in place** — move-then-widen has no compiling intermediate.
+7. **Bare crate-module imports collide with a paired `mod`** (`slideshow`, `hud`→`toast`) —
+   §3a firing for real, compiler-only. `namecheck.py` pre-checks.
+8. **`privcheck` must scan already-split siblings**, not just the parent (`refresh_info_line_visibility`).
+9. **The extractor severed multi-line `#[cfg(any(…))]`** — the one bug that could have silently
+   dropped a cfg gate; caught by both the compiler and the hash. Fixed to rewind by bracket depth.
+10. **Same-name items in `mod tests`** (`stream_frame`) — extractor now bounds to the production impl.
 
 ---
 
