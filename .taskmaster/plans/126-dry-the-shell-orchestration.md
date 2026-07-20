@@ -217,7 +217,15 @@ The Mac session's claim is **released** as of `428b160c`. Both shells are migrat
 
 1. **Windows: run the checks in *Not verified*.** That is the only thing standing between step 2
    and done. No code is expected to change unless something looks wrong.
-2. **Delete winit's dead Scanning dialog** — `DialogRequest::Scanning`, `DialogOutcome::
+2. ~~**Delete winit's dead Scanning dialog**~~ ✅ **DONE 2026-07-20** (-208/+23). The snag
+   resolved as: `shell_dialog_kind` now returns `Option` and the one caller skips `None` — the
+   core never emits `ShowDialog(Scanning)` (its only uses are on the `Dismissed` path), so there
+   is nothing to open, and `None` makes a future violation visible instead of silently opening
+   the wrong window. `core_dialog_kind` stayed (it IS used, as a fn *value* in
+   `kind.map(core_dialog_kind)` — a `core_dialog_kind(` grep misses that; the compiler caught it)
+   and is simply total without a Scanning arm. `contract::DialogKind::Scanning` untouched, as
+   macOS still names it. Also took three orphaned helpers and their tests.
+   ~~OLD:~~ **Delete winit's dead Scanning dialog** — `DialogRequest::Scanning`, `DialogOutcome::
    ScanningCancelled`, and `dialog.rs`'s whole `Scanning` view. Nothing constructs it since
    `f3ca4795`; it is `#[allow(dead_code)]`-marked and the owner has confirmed the pill on
    Windows, so its revert-safety reason has expired. ⚠ One snag: `contract::DialogKind::Scanning`

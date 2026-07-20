@@ -17,6 +17,8 @@ with any pre-release suffix carried only by the tag.
   retry after a wrong password.
 - Cancelling a slow archive part-way through no longer forgets the password you already
   entered. Open a smaller archive with the same password next and it just opens.
+- Cancelling a folder scan before any photo has appeared now returns you to the welcome
+  screen instead of leaving a blank window.
 - After a wrong password, the cursor stays in the password box on macOS, so you can just type
   the next attempt instead of clicking back into the field first.
 - Entering the wrong password for an encrypted archive now tells you so, instead of silently

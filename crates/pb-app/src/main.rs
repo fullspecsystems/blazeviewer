@@ -641,19 +641,6 @@ enum DialogRequest {
         message: String,
         progress: pb_source::OpenProgress,
     },
-    /// The folder "Scanning…" determinate-progress dialog.
-    /// ⚠ **Unreachable since task #126** (owner call 2026-07-20: unify on the ambient pill).
-    /// The scan pill now covers the pre-bootstrap phase this window used to own, so nothing
-    /// constructs this any more. Retained rather than deleted until the pill is smoke-tested
-    /// on Windows — this Mac can type-check the winit shell (via the `x86_64-pc-windows-msvc`
-    /// cross-check) but cannot run it. If the pill is wrong, restoring the window is a one-line
-    /// gate flip in `scan_pill_visible`; once it is confirmed, delete this variant and
-    /// `dialog.rs`'s whole `Scanning` view with it.
-    #[allow(dead_code)]
-    Scanning {
-        message: String,
-        progress: ScanProgress,
-    },
 }
 
 /// What the user did in the dialog window — the shell's raw extraction from egui. The shell
@@ -688,8 +675,6 @@ enum DialogOutcome {
     SettingsCancelled,
     /// The archive "Opening…" dialog's Cancel.
     LoadingCancelled,
-    /// The folder "Scanning…" dialog's Cancel.
-    ScanningCancelled,
     /// A Confirm dialog answered (`true` = the destructive action was confirmed).
     ConfirmAnswered(bool),
     /// A Message (or any other) dialog's OK / close.
@@ -1201,20 +1186,9 @@ impl App {
     /// Only closes are acted on.
     fn poll_dir_scan(&mut self) {
         let poll = self.core.poll_dir_scan();
-        if matches!(poll.dialog, pb_app_core::dir_scan::ScanDialogRequest::Close) {
-            self.close_scanning_dialog();
-        }
         // No images: keep whatever is on screen and toast it (③ keep-deck-until-photos).
         if let Some(scanned) = poll.found_no_photos {
             self.core.scan_found_no_photos(&scanned);
-        }
-    }
-
-    /// Close the dialog window only if it's the Scanning progress view. Leaves any other
-    /// dialog (Settings, Message, …) untouched.
-    fn close_scanning_dialog(&mut self) {
-        if self.dialog.as_ref().map(|d| d.kind()) == Some(dialog::DialogKind::Scanning) {
-            self.dialog = None;
         }
     }
 
@@ -1234,7 +1208,6 @@ impl App {
         if !self.core.cancel_scan_command() {
             return; // nothing was running
         }
-        self.close_scanning_dialog();
         self.core.show_toast("Scan stopped");
     }
 
@@ -3000,7 +2973,6 @@ impl App {
                 // every edit was already applied + persisted live via `live_edit` above.
                 Some(dialog::DialogKind::Settings) => DialogOutcome::SettingsCancelled,
                 Some(dialog::DialogKind::Loading) => DialogOutcome::LoadingCancelled,
-                Some(dialog::DialogKind::Scanning) => DialogOutcome::ScanningCancelled,
                 Some(dialog::DialogKind::Confirm) => DialogOutcome::ConfirmAnswered(confirmed),
                 _ => DialogOutcome::Closed,
             };
@@ -3028,7 +3000,6 @@ impl App {
             }
             DialogOutcome::SettingsCancelled => contract::DialogResult::SettingsCancelled,
             DialogOutcome::LoadingCancelled => contract::DialogResult::LoadingCancelled,
-            DialogOutcome::ScanningCancelled => contract::DialogResult::ScanningCancelled,
             DialogOutcome::ConfirmAnswered(c) => contract::DialogResult::ConfirmAnswered(c),
             DialogOutcome::Closed => contract::DialogResult::Closed,
         };
@@ -3273,7 +3244,9 @@ impl App {
                     // still open via their own flow paths). Maps the shell-neutral kind onto the
                     // shell's `dialog::DialogKind` and defers the actual window to `open_dialog`.
                     contract::CoreEffect::ShowDialog(kind) => {
-                        self.open_dialog(shell_dialog_kind(kind));
+                        if let Some(kind) = shell_dialog_kind(kind) {
+                            self.open_dialog(kind);
+                        }
                     }
                     // Close the open dialog window (NS0 5.6 — the ubiquitous dialog-outcome close).
                     contract::CoreEffect::CloseDialog => self.dialog = None,
@@ -3511,21 +3484,6 @@ impl App {
                 if let Some(d) = dlg.as_mut() {
                     d.set_progress(Some(progress));
                     d.request_redraw();
-                }
-                self.dialog = dlg;
-            }
-            DialogRequest::Scanning { message, progress } => {
-                let mut dlg = dialog::DialogWindow::open(
-                    dialog::DialogKind::Scanning,
-                    event_loop,
-                    refresh,
-                    &message,
-                    &self.core.settings,
-                    &self.core.keymap,
-                    parent.as_deref(),
-                );
-                if let Some(d) = dlg.as_mut() {
-                    d.set_scan(&message, progress);
                 }
                 self.dialog = dlg;
             }
@@ -4473,22 +4431,30 @@ impl ApplicationHandler for App {
 /// shell's own [`dialog::DialogKind`] — a 1:1 mirror (NS0 5.6). The payload-carrying kinds
 /// (Confirm/Message/Password/Loading/Scanning) currently reach the shell through their flow
 /// paths, not `ShowDialog`, but the map is total so it stays correct as those invert.
-fn shell_dialog_kind(kind: contract::DialogKind) -> dialog::DialogKind {
+fn shell_dialog_kind(kind: contract::DialogKind) -> Option<dialog::DialogKind> {
     match kind {
-        contract::DialogKind::About => dialog::DialogKind::About,
-        contract::DialogKind::Settings => dialog::DialogKind::Settings,
-        contract::DialogKind::Confirm => dialog::DialogKind::Confirm,
-        contract::DialogKind::Message => dialog::DialogKind::Message,
-        contract::DialogKind::Password => dialog::DialogKind::Password,
-        contract::DialogKind::AskImage => dialog::DialogKind::AskImage,
-        contract::DialogKind::Loading => dialog::DialogKind::Loading,
-        contract::DialogKind::Scanning => dialog::DialogKind::Scanning,
+        contract::DialogKind::About => Some(dialog::DialogKind::About),
+        contract::DialogKind::Settings => Some(dialog::DialogKind::Settings),
+        contract::DialogKind::Confirm => Some(dialog::DialogKind::Confirm),
+        contract::DialogKind::Message => Some(dialog::DialogKind::Message),
+        contract::DialogKind::Password => Some(dialog::DialogKind::Password),
+        contract::DialogKind::AskImage => Some(dialog::DialogKind::AskImage),
+        contract::DialogKind::Loading => Some(dialog::DialogKind::Loading),
+        // This shell has no Scanning window any more — the ambient pill covers the whole walk
+        // (task #126). The kind stays in the *contract* because macOS still names it, but the
+        // core never emits `ShowDialog(Scanning)` (its only uses are on the `Dismissed` path),
+        // so there is nothing to open and nothing to map onto. `None` rather than a bogus
+        // substitute: if that assumption ever stops holding, the effect is dropped visibly
+        // here rather than silently opening the wrong window.
+        contract::DialogKind::Scanning => None,
     }
 }
 
 /// The reverse of [`shell_dialog_kind`] — the shell's [`dialog::DialogKind`] → the shell-neutral
-/// [`contract::DialogKind`] the core reasons about (NS0 5.6: carried on `DialogResult::Dismissed`
-/// so the core can tell a Scanning dismiss from the others).
+/// [`contract::DialogKind`] the core reasons about (NS0 5.6: carried on `DialogResult::Dismissed`).
+///
+/// Total without a `Scanning` arm since #126 removed this shell's Scanning window: the contract
+/// keeps that kind for macOS, but no winit dialog can ever be one, so none can be dismissed as one.
 fn core_dialog_kind(kind: dialog::DialogKind) -> contract::DialogKind {
     match kind {
         dialog::DialogKind::About => contract::DialogKind::About,
@@ -4498,7 +4464,6 @@ fn core_dialog_kind(kind: dialog::DialogKind) -> contract::DialogKind {
         dialog::DialogKind::Password => contract::DialogKind::Password,
         dialog::DialogKind::AskImage => contract::DialogKind::AskImage,
         dialog::DialogKind::Loading => contract::DialogKind::Loading,
-        dialog::DialogKind::Scanning => contract::DialogKind::Scanning,
     }
 }
 
