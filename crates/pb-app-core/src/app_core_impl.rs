@@ -4680,7 +4680,7 @@ fn run_platform_video_producer(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use test_support::{DeriveOk, FakeArchive, clipboard_text_effects, core_with_a_native_video, five_photos, make_resident, photos_named, poster_payload, rgba_full, seed_details, stuck_preview_core, test_core, text_result, track};
+    use test_support::{DeriveOk, FakeArchive, StashOk, clipboard_text_effects, core_with_a_native_video, five_photos, make_resident, photos_named, poster_payload, rgba_full, seed_details, stuck_preview_core, test_core, text_result, track};
     use crate::contract::{CoreEvent, Modifiers};
     use crate::PbKey;
 
@@ -8987,98 +8987,6 @@ mod tests {
     }
 
     // ── #123 fix 2: the geometry-pair Fit stash ──
-
-    /// A `Renderer` double with working stash semantics: tracks the presented ring slot
-    /// (so `stash_fit`'s verify-the-presented-slot rule is real) and two stash slots.
-    #[derive(Default)]
-    struct StashOk {
-        presented: Option<usize>,
-        stashed: [bool; 2],
-    }
-
-    impl pb_render::Renderer for StashOk {
-        fn resize(&mut self, _: u32, _: u32) {}
-        fn set_image(
-            &mut self,
-            _: &[u8],
-            _: u32,
-            _: u32,
-            _: pb_render::ColorTransform,
-            _: bool,
-            _: f32,
-        ) {
-        }
-        fn clear_image(&mut self) {}
-        fn set_view(&mut self, _: pb_render::ViewTransform) {}
-        fn set_overlay(&mut self, _: Option<(&[u8], u32, u32)>, _: u32, _: u32) {}
-        fn set_info_line(&mut self, _: Option<(&[u8], u32, u32)>, _: u32, _: pb_render::HAlign) {}
-        fn reserve_ring(&mut self, _: usize, _: u32, _: u32) {}
-        #[allow(clippy::too_many_arguments)]
-        fn upload_slot(
-            &mut self,
-            _: usize,
-            _: &[u8],
-            _: u32,
-            _: u32,
-            _: pb_render::ColorTransform,
-            _: bool,
-            _: f32,
-            _: bool,
-        ) -> bool {
-            true
-        }
-        fn present_slot(&mut self, slot: usize) -> bool {
-            self.presented = Some(slot);
-            true
-        }
-        fn stash_fit(&mut self, stash_idx: usize, ring_slot: usize) -> bool {
-            if stash_idx < 2 && self.presented == Some(ring_slot) {
-                self.stashed[stash_idx] = true;
-                true
-            } else {
-                false
-            }
-        }
-        fn present_stash(&mut self, stash_idx: usize) -> bool {
-            if stash_idx < 2 && self.stashed[stash_idx] {
-                self.presented = None;
-                true
-            } else {
-                false
-            }
-        }
-        fn clear_stash(&mut self, stash_idx: usize) {
-            if stash_idx < 2 {
-                self.stashed[stash_idx] = false;
-            }
-        }
-        fn surface_size(&self) -> (u32, u32) {
-            (0, 0)
-        }
-        fn set_letterbox(&mut self, _: [u8; 3]) {}
-        fn set_toast(&mut self, _: Option<(&[u8], u32, u32)>, _: u32) {}
-        fn set_pie(&mut self, _: Option<(&[u8], u32, u32)>, _: u32) {}
-        fn set_tree(&mut self, _: Option<(&[u8], u32, u32)>, _: u32) {}
-        fn set_subtitle_overlay(&mut self, _: Option<(&[u8], u32, u32)>, _: f32, _: f32) {}
-        fn device(&self) -> &pb_render::wgpu::Device {
-            unreachable!("headless test double")
-        }
-        fn queue(&self) -> &pb_render::wgpu::Queue {
-            unreachable!("headless test double")
-        }
-        fn set_egui_overlay(&mut self, _: Option<&pb_render::wgpu::Texture>) {}
-        fn image_size(&self) -> (u32, u32) {
-            (0, 0)
-        }
-        fn set_edr_headroom(&mut self, _: f32) {}
-        fn hdr_surface_wants_edr(&self) -> Option<bool> {
-            None
-        }
-        fn poll(&self) {}
-        fn render(&mut self) -> Result<bool, pb_render::RenderError> {
-            Ok(true)
-        }
-    }
 
     /// A parked core with item 0's definitive Fit resident and presented via `StashOk`.
     fn stash_test_core(fit: FitBox) -> AppCore {
