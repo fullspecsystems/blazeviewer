@@ -8,6 +8,9 @@ with any pre-release suffix carried only by the tag.
 ## [Unreleased]
 
 ### Changed
+- **Holding a pan or zoom key ramps up more gently.** The hold-to-pan/hold-to-zoom
+  acceleration now starts slower, takes a bit longer to build, and tops out lower, so
+  fine framing at the start of a hold feels more controlled instead of lurching to speed.
 - **Movie posters are chosen once and stay consistent.** A video's poster frame is now picked
   by a single scan per film, and its thumbnail is cut from the same frame — the strip and the
   main view can no longer show different pictures for the same movie. The pick itself is

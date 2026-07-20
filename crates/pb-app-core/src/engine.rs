@@ -161,9 +161,13 @@ fn is_jpeg_name(name: &str) -> bool {
 /// control the owner asked for. Time-based so it's frame-rate independent.
 /// `MIN_RATE` is the **tap** speed (a quick tap barely leaves the ramp floor):
 /// halved 2026-07-14 so a tap nudges ~1–3 px on a high-refresh display.
-pub const ZOOM_MIN_RATE: f32 = 0.18;
-pub const ZOOM_MAX_RATE: f32 = 2.2;
-pub const ZOOM_RAMP_SECS: f32 = 0.9;
+/// Retuned 2026-07-19 (task #67, owner feel note — the ramp still accelerated
+/// too aggressively): `MIN_RATE` halved again, `RAMP_SECS` doubled, `MAX_RATE`
+/// cut to ~2/3 — gentler start, slower build, lower ceiling. `RAMP_SECS`
+/// nudged back down the same day (owner: "a little faster") after smoke.
+pub const ZOOM_MIN_RATE: f32 = 0.09;
+pub const ZOOM_MAX_RATE: f32 = 1.47;
+pub const ZOOM_RAMP_SECS: f32 = 1.4;
 
 /// Eased progress of a hold ramp: `0` at press → `1` after `ramp_secs`, with a
 /// **quadratic ease-in** (`p²`) so the first part of a hold moves slowly (fine
@@ -197,9 +201,13 @@ pub const GESTURE_PAN_DIR: f32 = 1.0;
 /// owner's note). Time-based, frame-rate independent. `MIN_SPEED` is the **tap**
 /// speed (a quick tap barely leaves the ramp floor): halved 2026-07-14 so a tap
 /// nudges ~1–3 px on a high-refresh display.
-pub const PAN_MIN_SPEED: f32 = 170.0;
-pub const PAN_MAX_SPEED: f32 = 2700.0;
-pub const PAN_RAMP_SECS: f32 = 0.9;
+/// Retuned 2026-07-19 (task #67, owner feel note — the ramp still accelerated
+/// too aggressively): `MIN_SPEED` halved again, `RAMP_SECS` doubled, `MAX_SPEED`
+/// cut to ~2/3 — gentler start, slower build, lower ceiling. Same shape as zoom.
+/// `RAMP_SECS` nudged back down the same day (owner: "a little faster") after smoke.
+pub const PAN_MIN_SPEED: f32 = 85.0;
+pub const PAN_MAX_SPEED: f32 = 1800.0;
+pub const PAN_RAMP_SECS: f32 = 1.4;
 
 /// Repeat interval for the held frame-step scrub (`,`/`.`), after the initial tap
 /// delay (`initial_delay`). ~14 fps — quick enough to scrub, slow enough to read (#37).
