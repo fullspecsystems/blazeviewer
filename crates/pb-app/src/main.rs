@@ -120,9 +120,9 @@ use pb_app_core::engine::{
 use pb_app_core::engine::decode_item;
 use pb_app_core::metrics::StageTimes;
 // Playlist-resolution currency migrated to pb-app-core (NS0 5.6 Step 2): the `Resolved` snapshot
-// + the `ScanUpdate` stream message. The resolver *functions* still run on the shell's scan/archive
-// worker threads (which stay here); they produce these core types.
-use pb_app_core::scan::{self, Resolved, ScanUpdate};
+// The resolver *functions* still run on the shell's archive worker thread (which stays here
+// until #126 step 2); they produce these core types. `ScanUpdate` went with the walk.
+use pb_app_core::scan::{self, Resolved};
 // Re-export so the shell's `ScanProgress` refs + dialog.rs's `crate::ScanProgress` stay unchanged.
 pub use pb_app_core::archive;
 pub use pb_app_core::scan::ScanProgress;
@@ -138,11 +138,9 @@ static POOL_DECODE_MS: std::sync::Mutex<Vec<(f64, String)>> = std::sync::Mutex::
 /// decode closure, which has no access to the `StageTimes`).
 static METRICS_ON_FLAG: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
-/// How long an off-thread directory scan must run before the "Scanning Folder" progress
-/// dialog appears. A normal folder resolves in well under this, so the common case never
-/// flashes a dialog (and never pays for the extra window); only a genuinely large/nested
-/// tree (the `~/Library` case) reveals it — with a live count, current folder, and Cancel.
-const SCAN_DIALOG_DELAY: Duration = Duration::from_millis(250);
+// NOTE (task #126 step 1): `SCAN_DIALOG_DELAY` lived here, and independently in the macOS
+// shell at the same 250 ms — one value, two sources of truth. It is now
+// `pb_app_core::dir_scan::SCAN_DIALOG_DELAY`, applied by the core's `scan_status().slow`.
 
 /// How often the scan card is re-rasterized at most. The live current-folder line changes per
 /// directory (fast); throttling the rebuild keeps the software composite off the hot path
@@ -419,13 +417,9 @@ struct App {
     /// Monotonic id for archive-open requests; a newer open bumps it so a superseded
     /// load's result is discarded when it finally arrives.
     archive_gen: u64,
-    /// An in-flight background **directory scan** (a large/recursive folder is walked
-    /// off the event loop so it can't beachball — then crash — the way opening a huge
-    /// tree like `~/Library` did). `None` when no scan is running.
-    dir_scan: Option<DirScan>,
-    /// Monotonic id for directory-scan requests; a newer open bumps it so a superseded
-    /// scan's result is discarded when it finally arrives.
-    scan_gen: u64,
+    // The walk's handle and generation counter now live on `AppCore` (task #126 step 1):
+    // `core.dir_scan` plus the shared `core.bg` generation space that `archive_load` joins
+    // in step 2.
     /// A launch input (an archive) deferred until the window exists, so the viewer
     /// appears immediately and a slow / encrypted / failed open uses the spinner +
     /// dialogs instead of blocking startup or only logging. Fired once in `resumed`.
@@ -649,6 +643,14 @@ enum DialogRequest {
         progress: pb_source::OpenProgress,
     },
     /// The folder "Scanning…" determinate-progress dialog.
+    /// ⚠ **Unreachable since task #126** (owner call 2026-07-20: unify on the ambient pill).
+    /// The scan pill now covers the pre-bootstrap phase this window used to own, so nothing
+    /// constructs this any more. Retained rather than deleted until the pill is smoke-tested
+    /// on Windows — this Mac can type-check the winit shell (via the `x86_64-pc-windows-msvc`
+    /// cross-check) but cannot run it. If the pill is wrong, restoring the window is a one-line
+    /// gate flip in `scan_pill_visible`; once it is confirmed, delete this variant and
+    /// `dialog.rs`'s whole `Scanning` view with it.
+    #[allow(dead_code)]
     Scanning {
         message: String,
         progress: ScanProgress,
@@ -859,6 +861,7 @@ impl App {
             presented_kind: None,
             bg: Default::default(),
             dir_scan: None,
+            scan_wire_gen: 0,
             target_item: None,
             compare_pin: None,
             compare_return: None,
@@ -1007,8 +1010,6 @@ impl App {
             dialog: None,
             archive_load: None,
             archive_gen: 0,
-            dir_scan: None,
-            scan_gen: 0,
             pending_launch: None,
             live_audio: None,
             video_audio: None,
@@ -1142,7 +1143,6 @@ impl App {
         // corruption. Drop the scan handle now so no stale folder batch survives this open.
         // (The core also guards the extend, so this is belt-and-braces + stops the worker sooner.)
         self.cancel_dir_scan();
-        self.dir_scan = None;
         // The synchronous ZIP shortcut is only safe when NO auto-try will run: a wrong-password
         // ZIP attempt decrypts the entire first entry (up to ~1 GiB via `ZipSource::password_ok`),
         // so any auto-try must go off the event loop. With an empty cache and no user password
@@ -1305,194 +1305,51 @@ impl App {
         }
     }
 
-    /// Start scanning a folder source off the event loop. Walking a large or deeply
-    /// nested tree (the worst case: someone opens `~/Library`) can take many seconds;
-    /// doing it synchronously froze the run loop (beachball) and could then get the
-    /// unresponsive app killed. So the walk runs on a worker thread and the resolved
-    /// playlist is picked up in [`poll_dir_scan`](App::poll_dir_scan) — the current view
-    /// stays until it lands. A second open supersedes the first via `scan_gen` + the
-    /// shared cancel flag, so a giant in-flight scan is abandoned rather than left to
-    /// finish. Mirrors the async archive path ([`begin_archive_open`](App::begin_archive_open)).
+    /// Start a streaming folder walk (`CoreEffect::BeginDirScan`).
+    ///
+    /// The whole lifecycle — spawn, generation, supersession, cancel, the slow-walk timer —
+    /// is `AppCore`'s since task #126 step 1; this shell keeps only its own chrome.
+    ///
+    /// ⚠ The archive-open cancel is **unconditional**, not driven by `begin_dir_scan`'s
+    /// `superseded` return. That worker is not registered in the core's generation space until
+    /// step 2, so the core always reports `None` — wiring it to that return compiles, reads
+    /// correctly and silently drops the cross-type supersession that stops the "door card over
+    /// a photo" corruption (#109 item 1). Flip it in the same commit that registers the open.
     fn begin_dir_scan(&mut self, source: Source, cursor: open::Cursor) {
-        // Abandon any scan already running — its result would be stale, and it may be a
-        // huge walk we don't want competing for I/O with the new one.
-        self.cancel_dir_scan();
-        self.core.deleted.clear(); // fresh scan → fresh universe, no stale tombstones
-        self.scan_gen += 1;
-        let generation = self.scan_gen;
-        let progress = ScanProgress::new();
-        let name = scan_display_name(&source);
-        // `begin_dir_scan` is only reached for a folder scan (`open_input` routes explicit
-        // lists and archives elsewhere); pull the roots + recursive flag for the walk.
-        let (roots, recursive) = match source {
-            Source::Scan { roots, recursive } => (roots, recursive),
-            _ => return,
-        };
-        // Cross-type supersession (cross-deck open race, 2026-07-17): starting a folder scan must
-        // also drop any in-flight archive open — otherwise a stale `ArchiveResolved` landing after
-        // this rebuilds the deck back onto the archive on top of the folder we're now scanning.
-        // Symmetric with the scan-drop in `begin_archive_open`.
         if let Some(prev) = self.archive_load.take() {
             prev.progress.request_cancel();
         }
-        let root = roots.first().cloned().unwrap_or_else(|| PathBuf::from("."));
-        let scan_root = roots.first().cloned();
-        let worker_progress = progress.clone();
-        // Read the live Show Archives preference (task #104) at spawn time: with it off, the
-        // walk drops archive "doors" so the deck never lists them.
-        let show_archives = self.core.settings.show_archives;
-        let (tx, rx) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
-            scan::stream_scan(
-                roots,
-                recursive,
-                show_archives,
-                cursor,
-                root,
-                scan_root,
-                generation,
-                worker_progress,
-                tx,
-            );
-        });
-        // If a Scanning dialog is already up (a previous slow scan the user then re-opened
-        // over), re-point it at this new walk in place — same window, no flicker — so it
-        // tracks the new folder instead of showing a now-frozen old count.
-        if self.dialog.as_ref().map(|d| d.kind()) == Some(dialog::DialogKind::Scanning) {
-            let msg = scan_message(&name);
-            if let Some(d) = self.dialog.as_mut() {
-                d.set_scan(&msg, progress.clone());
-            }
-        }
-        self.core.scanning = true; // core mirror: use sequential-only prefetch while streaming
-        self.core.scan_bootstrapped = false; // fresh scan → first non-empty batch bootstraps
-        self.dir_scan = Some(DirScan {
-            generation,
-            rx,
-            progress,
-            name,
-            started: Instant::now(),
-        });
+        let _superseded = self.core.begin_dir_scan(source, cursor);
     }
 
-    /// Pick up a finished background directory scan (called each `about_to_wait` tick).
-    /// On a result for the current generation: rebuild the playlist, or — if the folder
-    /// held no supported images — log and keep whatever is on screen (an open failure
-    /// never blanks the current photo); either way the Scanning dialog (if up) closes.
-    /// While a scan is still running and has outlasted [`SCAN_DIALOG_DELAY`], reveal the
-    /// "Scanning Folder" progress dialog (live image count + current folder + Cancel) so a
-    /// genuinely slow walk shows it's working and is cancellable. Mirrors
-    /// [`poll_archive_load`](App::poll_archive_load).
+    /// Drain the walk's channel into the core each tick, then reconcile this shell's chrome.
+    ///
+    /// The ambient pill is *state-driven* (it reads `core.scan_status()` every frame), so
+    /// there is nothing to reveal here — the pre-bootstrap phase that used to open a modal
+    /// `DialogKind::Scanning` window is now the pill's too (task #126, owner call 2026-07-20).
+    /// Only closes are acted on.
     fn poll_dir_scan(&mut self) {
-        use std::sync::mpsc::TryRecvError;
-        // Drain every snapshot queued this tick (several batches may have piled up), applying
-        // each as it comes: the first non-empty one bootstraps the view, the rest extend it.
-        loop {
-            let (cur_gen, recv) = match self.dir_scan.as_ref() {
-                Some(scan) => (scan.generation, scan.rx.try_recv()),
-                None => return,
-            };
-            match recv {
-                Ok((generation, ScanUpdate::Batch(resolved))) => {
-                    if generation != cur_gen {
-                        continue; // superseded by a newer open (defensive; rx is per-scan)
-                    }
-                    // The core filters mid-scan deletes, bootstraps the first non-empty batch
-                    // (`scan_bootstrapped`), and extends the rest — see `AppCore::apply_scan_batch`.
-                    self.core.handle(contract::CoreEvent::ScanBatch(resolved));
-                    // A photo is on screen now — a revealed Scanning dialog has served its
-                    // purpose; drop it so browsing starts at the first image, not the end
-                    // of the walk (the scan-count chip takes over as progress).
-                    if self.core.scan_bootstrapped {
-                        self.close_scanning_dialog();
-                    }
-                }
-                Ok((generation, ScanUpdate::Done)) => {
-                    if generation != cur_gen {
-                        continue; // superseded
-                    }
-                    // Capture the scanned folder's name before dropping the handle — an empty
-                    // folder toasts with it (③) instead of stranding / interrupting.
-                    let scanned = self
-                        .dir_scan
-                        .as_ref()
-                        .map(|s| s.name.clone())
-                        .unwrap_or_default();
-                    self.dir_scan = None; // walk finished — drop the worker handle
-                    let never_bootstrapped = !self.core.scan_bootstrapped;
-                    // Core: resume normal prefetch + restore the open hint if the deck stayed empty.
-                    self.core.handle(contract::CoreEvent::ScanDone);
-                    self.close_scanning_dialog(); // walk finished — drop the progress dialog
-                    if never_bootstrapped {
-                        // No images: keep whatever's on screen; a non-modal toast (never a
-                        // blocking alert) if a deck is already up (③ keep-deck-until-photos).
-                        self.core.scan_found_no_photos(&scanned);
-                    }
-                    return;
-                }
-                Err(TryRecvError::Empty) => {
-                    // Still scanning and nothing on screen yet: once the walk is slow enough
-                    // to notice, reveal the Scanning dialog (count + current folder + Cancel).
-                    // Gated on `!scan_bootstrapped` so it never pops over an already-shown photo,
-                    // and only when no other dialog is up *or queued* (don't steal a
-                    // Settings/Message window the user opened over a background scan, and don't
-                    // overwrite a Password/Message request `poll_archive_load` queued into
-                    // `pending_dialog` earlier this same tick — it opens at the end of the drain).
-                    let reveal = !self.core.scan_bootstrapped
-                        && self
-                            .dir_scan
-                            .as_ref()
-                            .is_some_and(|s| s.started.elapsed() >= SCAN_DIALOG_DELAY);
-                    if reveal && self.dialog.is_none() && self.pending_dialog.is_none() {
-                        let (name, progress) = match self.dir_scan.as_ref() {
-                            Some(s) => (s.name.clone(), s.progress.clone()),
-                            None => return,
-                        };
-                        self.open_scanning_dialog(&name, progress);
-                    }
-                    return;
-                }
-                Err(TryRecvError::Disconnected) => {
-                    self.dir_scan = None;
-                    self.core.scanning = false;
-                    self.close_scanning_dialog(); // worker died — don't strand its dialog
-                    return;
-                }
-            }
+        let poll = self.core.poll_dir_scan();
+        if matches!(poll.dialog, pb_app_core::dir_scan::ScanDialogRequest::Close) {
+            self.close_scanning_dialog();
+        }
+        // No images: keep whatever is on screen and toast it (③ keep-deck-until-photos).
+        if let Some(scanned) = poll.found_no_photos {
+            self.core.scan_found_no_photos(&scanned);
         }
     }
 
-    /// Open the deferred "Scanning Folder" progress dialog for an in-flight folder walk
-    /// (a live image count, the current subfolder, and a Cancel button). Mirrors the 7z
-    /// loading dialog in [`begin_archive_open`](App::begin_archive_open); only called once
-    /// the scan has outlasted [`SCAN_DIALOG_DELAY`] and no other dialog is showing.
-    fn open_scanning_dialog(&mut self, name: &str, progress: ScanProgress) {
-        let msg = scan_message(name);
-        self.pending_dialog = Some(DialogRequest::Scanning {
-            message: msg,
-            progress,
-        });
-    }
-
-    /// Close the dialog window only if it's the Scanning progress view (a folder scan
-    /// finished, was cancelled, or its worker died). Leaves any other dialog
-    /// (Settings, Message, …) untouched.
+    /// Close the dialog window only if it's the Scanning progress view. Leaves any other
+    /// dialog (Settings, Message, …) untouched.
     fn close_scanning_dialog(&mut self) {
         if self.dialog.as_ref().map(|d| d.kind()) == Some(dialog::DialogKind::Scanning) {
             self.dialog = None;
         }
     }
 
-    /// Ask the in-flight directory scan (if any) to stop. The worker bails at its next
-    /// entry; [`poll_dir_scan`](App::poll_dir_scan) (or the superseding open) then drops
-    /// it. Used when a newer open arrives and on teardown.
+    /// Ask the in-flight directory scan (if any) to stop.
     fn cancel_dir_scan(&mut self) {
-        if let Some(scan) = self.dir_scan.as_ref() {
-            scan.progress.request_cancel();
-        }
-        // Every cancel path clears `dir_scan` immediately after; keep the core mirror in sync
-        // so a `request_prefetch` after the cancel uses the normal (random-ahead) prefetch.
-        self.core.scanning = false;
+        self.core.cancel_dir_scan();
     }
 
     /// User command (File ▸ Stop Scanning, or a bound key): stop an in-flight folder scan,
@@ -1500,11 +1357,10 @@ impl App {
     /// playlist is already live). Resumes normal prefetch (the deck is final now) and flashes
     /// a confirmation. A no-op when no scan is running (the menu item is disabled then).
     fn cancel_scan_command(&mut self) {
-        if self.dir_scan.is_none() {
+        if self.core.dir_scan.is_none() {
             return;
         }
         self.cancel_dir_scan();
-        self.dir_scan = None;
         self.close_scanning_dialog();
         self.core.request_prefetch();
         self.core.show_toast("Scan stopped");
@@ -2853,7 +2709,7 @@ impl App {
             self.core.settings.subtitles,
             self.core.can_save_rotation(),
             self.core.can_reveal(),
-            self.dir_scan.is_some(),
+            self.core.dir_scan.is_some(),
             // `None` = nothing to undo (disabled "Undo"); `Some(label)` = enabled w/ label.
             self.core.undo_stack.last().map(UndoAction::menu_label),
             native_fullscreen,
@@ -3299,42 +3155,32 @@ impl App {
             .handle(contract::CoreEvent::DialogResolved(result));
     }
 
-    /// The ambient **scan status card**: while a folder scan is streaming in (and the first
-    /// photo is already up), show a fixed-width card in the top-right (equal inset from the top
-    /// and right edges) — `Scanning "Folder"`, the folder currently being walked, the browsable
-    /// count (`8,230 images found`), and a centered **Cancel Scan** button. The count *is* the
-    /// progress (Codex P3: the **browsable** `source.len()`, not the worker's look-ahead
-    /// `found`). Deferred past [`SCAN_DIALOG_DELAY`] so a quick folder never flashes it;
-    /// rebuilt only when its content changes and no faster than [`SCAN_CARD_REFRESH`] (the
-    /// current-folder line changes per directory); cleared when the scan ends.
-    /// Whether the ambient scan pill should be on screen: a folder scan is streaming in, a
-    /// photo is up, and the walk has outlasted [`SCAN_DIALOG_DELAY`] (so a fast folder never
-    /// flashes it). The egui overlay draws it (the SwiftUI `ScanPillView` parity); the
-    /// pre-bootstrap slow-scan case is still the separate `DialogKind::Scanning` window.
+    /// Whether the ambient scan pill should be on screen: a folder walk is streaming in and
+    /// has outlasted the slow-walk delay (so a fast folder never flashes it).
+    ///
+    /// Deliberately does **not** gate on `bootstrapped` any more (task #126, owner call
+    /// 2026-07-20). It used to, which is why the *pre-bootstrap* phase needed a separate
+    /// modal `DialogKind::Scanning` window; the pill is non-blocking and covers both phases,
+    /// exactly as the macOS host has always done. That is what `ScanStatus` reporting `slow`
+    /// and `bootstrapped` as separate facts buys.
     fn scan_pill_visible(&self) -> bool {
-        self.core.displayed_item.is_some()
-            && self.core.scan_bootstrapped
-            && self
-                .dir_scan
-                .as_ref()
-                .is_some_and(|s| s.started.elapsed() >= SCAN_DIALOG_DELAY)
+        self.core.scan_status().is_some_and(|s| s.slow)
     }
 
     /// The scan pill's data for this overlay frame (heading name, browsable count, current
-    /// sub-folder), or `None` when no pill is shown. Scan state is shell-owned (`dir_scan`),
-    /// so the shell builds this rather than a core accessor.
+    /// sub-folder), or `None` when no pill is shown.
+    ///
+    /// The count is the **browsable** `source.len()`, not the worker's look-ahead `found`
+    /// (Codex P3) — so it stays the shell's read, while name/current come from the core.
     fn scan_pill_frame(&self) -> Option<panels_ui::ScanPill> {
-        if !self.scan_pill_visible() {
+        let status = self.core.scan_status()?;
+        if !status.slow {
             return None;
         }
-        let scan = self.dir_scan.as_ref()?;
-        // The current folder; blanked while it's just the root (it duplicates the heading).
-        let cur = scan.progress.current();
-        let current = if cur == scan.name { String::new() } else { cur };
         Some(panels_ui::ScanPill {
-            name: scan.name.clone(),
+            name: status.name,
             found: self.core.source.len(),
-            current,
+            current: status.current_dir,
         })
     }
 
@@ -3560,7 +3406,6 @@ impl App {
                     // Cancel the in-flight directory scan + drop its worker handle.
                     contract::CoreEffect::CancelScan => {
                         self.cancel_dir_scan();
-                        self.dir_scan = None;
                     }
                     // Request the in-flight archive open stop (the poll frees it; no-op if none).
                     contract::CoreEffect::CancelArchiveLoad => self.cancel_archive_load(),
@@ -4803,26 +4648,6 @@ fn egui_cursor_to_winit(c: egui::CursorIcon) -> CursorIcon {
     }
 }
 
-/// The folder name shown in the Scanning dialog ("Scanning "name"…") — the first scan
-/// root's own name, falling back to its full path for a root with no file name (e.g. `/`).
-fn scan_display_name(source: &Source) -> String {
-    if let Source::Scan { roots, .. } = source {
-        if let Some(first) = roots.first() {
-            return first
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_else(|| first.display().to_string());
-        }
-    }
-    "folder".to_string()
-}
-
-/// The Scanning dialog's headline ("Scanning "name"…"), with typographic quotes/ellipsis
-/// to match the loading dialog's "Opening "name"…".
-fn scan_message(name: &str) -> String {
-    format!("Scanning \u{201c}{name}\u{201d}\u{2026}")
-}
-
 /// Scan `dir` for supported images, sorted by full path — a thin synchronous wrapper
 /// over [`collect_images`] used by the tests. Production callers go through
 /// [`resolve_source`] (which calls `collect_images` directly with a [`ScanProgress`]
@@ -4990,26 +4815,8 @@ fn sorted_image_walk(root: &Path, recursive: bool) -> Vec<PathBuf> {
         .collect()
 }
 
-/// An in-flight background **directory scan**. A large/recursive folder is walked off
-/// the event loop — the synchronous walk used to block winit for seconds (macOS
-/// beachball) and then crash when the unresponsive window/GPU surface was torn down
-/// (opening `~/Library` was the report). It now **streams**: snapshots ride back over `rx`
-/// as the walk descends (see [`ScanUpdate`]), tagged with `generation` so a superseded scan
-/// (a newer open bumped `App::scan_gen`) is discarded; `progress.cancel` lets that newer
-/// open — or quit, or the Cancel button — stop a giant walk early. Mirrors [`ArchiveLoad`].
-struct DirScan {
-    generation: u64,
-    rx: std::sync::mpsc::Receiver<(u64, ScanUpdate)>,
-    /// Shared count + current-folder progress and the cancel flag for the walk. The
-    /// Scanning dialog reads it; Cancel / Esc / a superseding open / teardown flip its
-    /// cancel flag so the walk bails at its next entry.
-    progress: ScanProgress,
-    /// The folder name shown in the Scanning dialog ("Scanning "name"…").
-    name: String,
-    /// When the scan was dispatched, so the Scanning dialog is deferred to slow scans
-    /// only (a normal folder resolves in milliseconds and never flashes it).
-    started: Instant,
-}
+// NOTE (task #126 step 1): `struct DirScan` lived here, field-for-field identical to the
+// macOS shell's copy. Both are gone; the core owns the walk (`pb_app_core::dir_scan`).
 
 /// An in-flight background archive open. A `.7z` is eager-decompressed off the event
 /// loop; the [`Resolved`] (or error) rides back over `rx` tagged with `generation`,
@@ -5605,15 +5412,6 @@ mod tests {
         assert!(!point_in_rect(rect, 99.0, 65.0), "left of the rect");
         assert!(!point_in_rect(rect, 150.0, 81.0), "below the rect");
         assert!(!point_in_rect(rect, 250.0, 65.0), "right of the rect");
-    }
-
-    #[test]
-    fn scan_display_name_uses_the_first_root_folder_name() {
-        let source = Source::Scan {
-            roots: vec![PathBuf::from("/photos/Vacation Pics")],
-            recursive: true,
-        };
-        assert_eq!(scan_display_name(&source), "Vacation Pics");
     }
 
     #[test]

@@ -1295,7 +1295,17 @@ fn scan_pill(
     let heading = format!("Scanning {}", pill.name);
     // Group the count with thousands separators (like the Inspector's "1,234 bytes") — a deep
     // recursive scan reaches six or seven digits, and "1232945 found" is hard to parse.
-    let count = format!("{} found", pb_hud::hud::format_thousands(pill.found as u64));
+    //
+    // Before the first match, say "Searching…" rather than "0 found", so a deep-but-sparse
+    // tree doesn't look like it has failed. Ported from the Scanning dialog this pill replaced
+    // (task #126): the pill now covers the PRE-bootstrap phase too, where the count is zero by
+    // definition, so without this it would read "0 found" for that entire phase — which is the
+    // exact impression the dialog's fallback was written to avoid.
+    let count = if pill.found == 0 {
+        "Searching\u{2026}".to_string()
+    } else {
+        format!("{} found", pb_hud::hud::format_thousands(pill.found as u64))
+    };
 
     let head_font = FontId::new(SCAN_HEADING_SIZE, FontFamily::Name(pb_ui::SEMIBOLD.into()));
     let count_font = FontId::new(SCAN_COUNT_SIZE, FontFamily::Proportional);

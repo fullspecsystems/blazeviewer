@@ -199,3 +199,27 @@ impl std::fmt::Debug for ScanDialogRequest {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    /// Ported from the winit shell, which owned the only copy of this test while both shells
+    /// owned a copy of the function.
+    #[test]
+    fn display_name_uses_the_first_root_folder_name() {
+        assert_eq!(
+            scan_display_name(&[PathBuf::from("/photos/Vacation Pics")]),
+            "Vacation Pics"
+        );
+    }
+
+    /// The fallback the two shells disagreed on: winit said "folder", macOS printed the raw
+    /// path into the headline. winit's is the one that survived.
+    #[test]
+    fn a_root_with_no_file_name_falls_back_to_a_word_not_a_path() {
+        assert_eq!(scan_display_name(&[PathBuf::from("/")]), "folder");
+        assert_eq!(scan_display_name(&[]), "folder");
+    }
+}
