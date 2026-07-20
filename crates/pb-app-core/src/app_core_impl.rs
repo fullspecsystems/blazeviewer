@@ -1881,7 +1881,7 @@ impl AppCore {
     /// `Tab`-hidden (state stays "on" for when panels reveal), draw it when revealed
     /// — mirrors `refresh_tree_visibility`. Applied eagerly rather than left to the
     /// next tick, since the app sleeps when idle and a tick may not run again soon.
-    fn refresh_info_line_visibility(&mut self) {
+    pub(super) fn refresh_info_line_visibility(&mut self) {
         if self.info_line && !self.panels.hidden {
             if !self.info_line_shown || self.info_line_item != self.displayed_item {
                 self.show_info_line();
