@@ -173,6 +173,17 @@ impl EguiOverlay {
         build: impl FnMut(&egui::Context),
     ) {
         pb_ui::apply_style(&self.ctx, self.dark);
+        // Belt: lay out and render at the *same* size. `take_egui_input` reads
+        // `window.inner_size()` live every frame (egui-winit 0.29), while `self.size` — the
+        // target texture and the render viewport — only moves when the shell calls
+        // [`resize`]. If those ever disagree, egui lays the panels out for the real window
+        // but paints them into a differently-sized texture, which `pb-render`'s 1:1
+        // fullscreen-triangle compositor then stretches over the viewport (the ~10x,
+        // aspect-distorted toolbar bug). Re-asserting the live size here makes that class of
+        // desync unrepresentable regardless of which shell path drove the resize. No-ops when
+        // already in sync, which is every normal frame.
+        let live = window.inner_size();
+        self.resize(device, live.width, live.height);
         let raw_input = self.state.take_egui_input(window);
         let full_output = self.ctx.run(raw_input, build);
         // Capture egui's desired cursor for the shell's single-writer cursor resolve (the

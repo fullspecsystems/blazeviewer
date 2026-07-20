@@ -2395,6 +2395,15 @@ impl App {
     /// never tell the core its new size — leaving the empty-state Open panel centered for
     /// the old surface until a manual resize or hover re-centered it.
     fn handle_resized(&mut self, width: u32, height: u32) {
+        // The egui overlay's offscreen target must track the surface, and this is the one
+        // funnel every resize path goes through — so resize it here rather than at each call
+        // site. Three of the four callers (`heal_surface_if_dropped` and `apply_window_mode`'s
+        // synchronously-applied `request_inner_size`es) emit no `WindowEvent::Resized`, so
+        // they used to leave the overlay at its old size; `pb-render` composites it with a
+        // fullscreen triangle that maps the texture 1:1 to the viewport, so any mismatch
+        // visibly stretches the panels and the toolbar. Idempotent: `EguiOverlay::resize`
+        // no-ops when the size is unchanged.
+        self.resize_overlay(width, height);
         // Compute the fit-change *before* `handle` updates the core's fit, so the shell can
         // gate its GPU/window bits (the macOS EDR re-assert + the redraw) on the same
         // signal without recomputing it inside the core.
@@ -4075,6 +4084,26 @@ impl ApplicationHandler for App {
             self.drain_effects(event_loop);
             return;
         }
+        // Anything that is neither the dialog nor the main window is a **stale** window's
+        // trailing event, and must not be mistaken for the viewer's. The check above is
+        // negative-only, so without this positive guard those events fall through and are
+        // applied to the main window — including a `Resized`, which then drives
+        // `resize_overlay` + `handle_resized` at the *dialog's* ~500x250 size.
+        //
+        // Opening an **encrypted archive** hits this every time: the flow opens a Loading
+        // dialog window, then replaces it with the Password one (`open_pending_dialog`'s
+        // `self.dialog = dlg` drops the old window). Events already queued for the dropped
+        // Loading window arrive after `self.dialog` points at its successor, so they no
+        // longer match — and its 500x250 `Resized` shrank the egui overlay target. The photo
+        // healed on the next tick (`heal_surface_if_dropped`), but the overlay stayed small
+        // and `pb-render`'s 1:1 fullscreen-triangle compositor stretched it across the whole
+        // viewport: the ~10x, aspect-distorted toolbar.
+        if let Some(main) = self.window.as_ref() {
+            if main.id() != id {
+                self.drain_effects(event_loop);
+                return;
+            }
+        }
         // Feed the egui rich-panel overlay the events it needs. Two classes:
         //   • pointer/scroll — only while a panel is open, and if egui takes it (the
         //     pointer is over a panel) we swallow it so it interacts with the panel
@@ -4157,14 +4186,11 @@ impl ApplicationHandler for App {
                 if size.width == 0 || size.height == 0 {
                     return;
                 }
-                // Resize + re-lay-out the egui overlay *before* `handle_resized`'s
+                // `handle_resized` resizes + re-lays-out the egui overlay first, *before* its
                 // synchronous redraw, so the frame it presents composites the overlay at the
                 // new size instead of stretching the previous (old-size) texture across the
-                // new viewport. The overlay is drawn via a fullscreen triangle that maps the
-                // texture 1:1 to the viewport, so a size mismatch visibly stretches the panels
-                // during a live resize drag. egui already recorded the new size from the same
-                // event above (the `track` branch), so the re-layout reflows correctly.
-                self.resize_overlay(size.width, size.height);
+                // new viewport. egui already recorded the new size from the same event above
+                // (the `track` branch), so the re-layout reflows correctly.
                 self.handle_resized(size.width, size.height);
             }
 

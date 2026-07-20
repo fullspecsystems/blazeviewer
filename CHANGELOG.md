@@ -7,6 +7,11 @@ with any pre-release suffix carried only by the tag.
 
 ## [Unreleased]
 
+### Fixed
+
+- Opening a password-protected archive no longer blows the toolbar and panels up to a huge,
+  stretched size. They stayed that way until you resized the window; now they don't.
+
 ## [0.3.0] - 2026-07-19
 
 ### Highlights
