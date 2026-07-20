@@ -32,13 +32,46 @@ history — none of it is live state.
 | Linux gate (`clippy -D warnings` on `pb-app` + tests + release build) | Linux/docker | PASS, run locally from the Mac |
 | Step 2 (archive-open) in the core | macOS | 9 tests; **not wired to either shell yet** |
 | Empty-deck cancel restores the welcome hint | both | core test + the macOS follow-up in `8f69b709` |
+| Step 2 — **macOS shell rewired, −216/+72** | macOS | 38 `pb-mac-ffi` tests; plain `.zip` (sync fast path) and encrypted `.7z` both open; owner entered the correct password and got in |
+| Step 2 — **winit shell rewired** | Windows target only | `clippy --all-targets -D warnings` for `x86_64-pc-windows-msvc`; **never executed** |
+| Wrong-password inline error (bug fix) | macOS | owner-confirmed; regression test fails with the fix reverted |
+| Password error row no longer shifts the layout | macOS | owner-reported, fixed, host rebuilt |
+| No spinner flash on a fast archive open | macOS | owner-reported, fixed (`LOADING_DIALOG_DELAY`), owner-confirmed "much better" |
+| Privacy gates after the archive move | macOS | redaction tests, `no_outcome_variant_can_leak_a_password`, `settings.rs` has **zero** `archive_passwords` references, no-trace test green |
 
 ### Not verified — what the next machine must check
 
-- **Nothing outstanding for step 1.** It is closed on both platforms.
-- **Step 2 is core-only.** Neither shell uses `AppCore::{begin,poll,cancel}_archive_open` or
-  `archive_status()` yet, so the production archive path is still the shells' own duplicated
-  copies. Nothing about step 2 has been exercised by a running app on any platform.
+**All of this is Windows-side, and none of it is checkable from a Mac.** `pb-app` cannot even
+be built here; everything below was type-checked via the cross-target compile only.
+
+1. **Open an encrypted `.7z` and enter the WRONG password.** It must show *"Incorrect password.
+   Please try again."* inline. Until 2026-07-20 it showed **nothing** — the field just cleared
+   — for every archive that routes through the Loading dialog. Windows had this bug identically;
+   only the synchronous-`.zip` path ever displayed the message.
+2. **Same dialog: the layout must not shift** when that error appears. The row is now always
+   laid out and only its colour changes (transparent when absent). Confirm nothing jumps and
+   there is no odd gap when there is no error.
+3. **Enter the correct password** — it should open, and a second encrypted archive with the
+   *same* password should not ask again (the session MRU auto-try).
+4. **Open a large `.7z` and hit Cancel** mid-load. It should close quietly, keep whatever was on
+   screen, and show no error dialog.
+5. **Open a plain `.zip`** — the synchronous fast path, which must open with no Loading dialog
+   flash at all.
+6. **Start a folder scan over an in-flight archive open, and vice versa.** The displaced worker
+   is now cancelled by the *core*, not the shell; a stale result must never rebuild the deck.
+
+7. **A fast archive open must not flash the "Opening…" dialog at all.** It is now revealed
+   only after `LOADING_DIALOG_DELAY` (250 ms), like the scan pill. Confirm a plain `.zip` shows
+   no dialog, and that a slow `.7z` still gets one with a working Cancel.
+
+If any of 1–2 or 7 look wrong, they are chrome-only and confined to `dialog.rs` /
+`prompt_archive_password` / `reveal_slow_archive_open`.
+
+**One loose end, macOS-side and cosmetic:** with the sheet suppressed, a small spinner now
+appears at the bottom left during a quick open. The owner likes it, but nobody has traced what
+draws it — `BlazeViewerMacApp.swift`'s overlay stack has no bottom-leading spinner, and the only
+bottom-left-capable element is the info line (`infoLineAlignment` = 0), a metadata pill. Benign,
+but it should be identified rather than relied on.
 
 ### Cross-platform debt — landed for one shell, still owed on the other
 
@@ -51,7 +84,8 @@ history — none of it is live state.
 | owed | to | raised by | status |
 |---|---|---|---|
 | `cancel_scan_command` → the core's version | macOS | `808c99f9` (Windows) | ✅ paid by `8f69b709` |
-| *(none open)* | | | |
+| Wrong-password error + reserved error row — **egui half never run** | Windows | `e57fa033`, `428b160c` (Mac) | ⏳ **open** — see *Not verified* 1–2 |
+| Delay-gated Loading dialog — **egui half never run** | Windows | `7bb9c4d3` (Mac) | ⏳ **open** — see *Not verified* 7 |
 
 ### Claimed — who is holding what right now
 
@@ -61,33 +95,28 @@ history — none of it is live state.
 
 | area | machine | since |
 |---|---|---|
-| **Step 2 shell migration — BOTH shells + winit's Scanning-dialog deletion** | **macOS** | 2026-07-20 ~16:20 MDT |
+| *(released — step 2 shell migration landed)* | | |
 
-⛔ **Windows: please do not start step 2 shell work.** Not a turf claim — a structural one.
-This piece touches `pb-app` *and* `pb-mac-ffi` in one change, and only a Mac can compile both
-(`pb-mac-ffi` natively, `pb-app` via the `x86_64-pc-windows-msvc` cross-check). A Windows
-session cannot finish it: it would land the winit half green and owe the mac half as
-cross-platform debt — precisely the failure this ledger exists to stop.
+The Mac session's claim is **released** as of `428b160c`. Both shells are migrated.
 
-**What Windows is needed for, once this lands:** a *run*. Open a password-protected archive
-(correct password, then a wrong one, then cancel at the prompt), open a large `.7z` and cancel
-mid-load, and open a plain `.zip` (the synchronous fast path). Those cannot be checked from
-here at all.
+**Windows is now needed for a run only** — the full list is in *Not verified* above.
 
 ### Next
 
-1. **Migrate both shells onto the core's archive-open lifecycle** (~250 lines deleted per
-   shell): `struct ArchiveLoad`, `archive_gen`, `begin/poll/finish/fail/cancel_archive_open`,
-   `prompt_archive_password`. Whichever machine takes it **must claim it above** — it touches
-   both shells and is the worst possible thing to do concurrently.
-2. **Flip the shells' unconditional cross-cancel** to `begin_*`'s `superseded` return in that
-   same commit — see the trap in the session log (§12.6). The core now cancels both directions
-   itself, so leaving the shell cancels in place is a double-cancel.
-3. **Delete winit's dead Scanning dialog**, bundled with (1) since it touches the same
-   `dialog.rs`. Open question there: `contract::DialogKind::Scanning` must stay for macOS, so
-   `shell_dialog_kind`/`contract_dialog_kind` (`main.rs`) need a story once winit's variant goes.
-4. **Re-run the privacy gates after (1)**: the redaction tests, `settings.save()`
-   unreachability, the zeroizing teardown on **both** platforms, and the no-trace test (§6).
+1. **Windows: run the checks in *Not verified*.** That is the only thing standing between step 2
+   and done. No code is expected to change unless something looks wrong.
+2. **Delete winit's dead Scanning dialog** — `DialogRequest::Scanning`, `DialogOutcome::
+   ScanningCancelled`, and `dialog.rs`'s whole `Scanning` view. Nothing constructs it since
+   `f3ca4795`; it is `#[allow(dead_code)]`-marked and the owner has confirmed the pill on
+   Windows, so its revert-safety reason has expired. ⚠ One snag: `contract::DialogKind::Scanning`
+   must **stay** (macOS uses it via `close_dialog_kinds`), so `shell_dialog_kind` /
+   `contract_dialog_kind` in `main.rs` need a story once winit's own variant goes — they are
+   currently total matches between the two enums. **Best done on Windows**, since it is
+   `pb-app`-only and wants a run afterwards.
+3. **Then task #126 is done.** The "strays" (`apply_menu_state`, `confirm_delete_permanent`, the
+   two toggles) were deliberately scoped out in §5a and want their own task; `#125` (splitting
+   `app_core_impl.rs`) is the separate follow-on, and is now *more* attractive because this task
+   added ~400 lines to the core that #125 will sort into the right cluster once.
 
 ### Known-red, and NOT ours — do not chase
 
