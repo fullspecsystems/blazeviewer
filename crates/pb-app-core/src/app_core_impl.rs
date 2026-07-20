@@ -40,6 +40,9 @@ mod undo;
 mod video;
 mod view;
 
+#[cfg(test)]
+mod test_support;
+
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -4639,6 +4642,7 @@ fn run_platform_video_producer(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use test_support::{five_photos, make_resident, photos_named, rgba_full, test_core};
     use crate::contract::{CoreEvent, Modifiers};
     use crate::{PbKey, Viewport};
 
@@ -5249,24 +5253,6 @@ mod tests {
             !e.selection.always_forced,
             "turning the setting off must reach the engine, not just the file"
         );
-    }
-
-    pub(super) fn test_core() -> AppCore {
-        AppCore::headless(Viewport {
-            width: 1,
-            height: 1,
-            scale_factor: 1.0,
-        })
-    }
-
-    /// A five-item source named `a.jpg`..`e.jpg` under a folder, for the launch-start tests.
-    pub(super) fn five_photos() -> Arc<dyn ItemSource> {
-        Arc::new(FsSource::new(
-            ["a", "b", "c", "d", "e"]
-                .iter()
-                .map(|n| PathBuf::from(format!("photos/{n}.jpg")))
-                .collect(),
-        ))
     }
 
     #[test]
@@ -9472,15 +9458,6 @@ mod tests {
 
     // ── #106.7: parked full-res tier + instant Fit↔1:1 rebind ──
 
-    pub(super) fn photos_named(names: &[&str]) -> Arc<dyn ItemSource> {
-        Arc::new(FsSource::new(
-            names
-                .iter()
-                .map(|n| PathBuf::from(format!("p/{n}")))
-                .collect(),
-        ))
-    }
-
     fn meta_dims(rel: &str, w: u32, h: u32) -> crate::meta::PhotoMeta {
         crate::meta::PhotoMeta {
             rel: rel.into(),
@@ -10118,21 +10095,6 @@ mod tests {
         assert_eq!(core.full_res_radius(), 0);
     }
 
-    /// Populate the ring so `item` is resident in `rep` at the core's current content gen.
-    pub(super) fn make_resident(
-        core: &mut AppCore,
-        item: usize,
-        rep: pb_core::Representation,
-        keep: &[usize],
-    ) {
-        let cg = core.content_gen;
-        let res = core
-            .ring
-            .reserve_bytes(item, cg, rep, 64, keep)
-            .expect("a free slot");
-        assert!(core.ring.mark_resident(item, res.slot, cg, rep));
-    }
-
     // ── #109 item 4: the fail-loud ring bridge ──
 
     /// A `Renderer` double whose `upload_slot` REFUSES every upload — the answer a real
@@ -10199,25 +10161,6 @@ mod tests {
         fn poll(&self) {}
         fn render(&mut self) -> Result<bool, pb_render::RenderError> {
             Ok(true)
-        }
-    }
-
-    /// A definitive full-quality decode (`is_preview: false`, sized to the fit) for the
-    /// #109.4 refused-upload tests.
-    pub(super) fn rgba_full(w: u32, h: u32, orig_w: u32, orig_h: u32) -> pb_decode::DecodedImage {
-        pb_decode::DecodedImage {
-            width: w,
-            height: h,
-            orig_width: orig_w,
-            orig_height: orig_h,
-            codec: "JPEG",
-            format: pb_decode::PixelFormat::Rgba8,
-            pixels: vec![0; (w * h * 4) as usize],
-            is_preview: false,
-            color: pb_decode::ColorTransform::srgb(),
-            peak: 1.0,
-            animated: None,
-            recovered: None,
         }
     }
 
