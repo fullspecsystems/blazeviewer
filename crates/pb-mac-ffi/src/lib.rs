@@ -2703,12 +2703,18 @@ impl AppCoreHandle {
     /// File ▸ Stop Scanning — stop the in-flight walk, **keeping what streamed in**
     /// (the winit `cancel_scan_command` mirrored). No-op when no scan is running.
     fn cancel_scan_command(&mut self) {
-        if self.core.dir_scan.is_none() {
-            return;
+        // The core owns the policy (task #126): cancel, keep the partial deck, resume normal
+        // prefetch, and restore the welcome hint when the cancel leaves nothing on screen.
+        //
+        // That last part is the 2026-07-20 fix for ledger item 3, and this shell was still
+        // running its own copy calling the bare `cancel_dir_scan`, so macOS was NOT getting it
+        // — the Windows session fixed the hole "in the core so both shells get it" and pointed
+        // winit at it, but could not compile this crate to finish the job. Exactly the
+        // half-verified-by-construction case the cross-machine handoff exists for.
+        if !self.core.cancel_scan_command() {
+            return; // nothing was running
         }
-        self.cancel_dir_scan();
         self.close_dialog_kinds(&[contract::DialogKind::Scanning]);
-        self.core.request_prefetch();
         self.core.show_toast("Scan stopped");
     }
 
