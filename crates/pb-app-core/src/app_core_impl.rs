@@ -5251,7 +5251,7 @@ mod tests {
         );
     }
 
-    fn test_core() -> AppCore {
+    pub(super) fn test_core() -> AppCore {
         AppCore::headless(Viewport {
             width: 1,
             height: 1,
@@ -5260,7 +5260,7 @@ mod tests {
     }
 
     /// A five-item source named `a.jpg`..`e.jpg` under a folder, for the launch-start tests.
-    fn five_photos() -> Arc<dyn ItemSource> {
+    pub(super) fn five_photos() -> Arc<dyn ItemSource> {
         Arc::new(FsSource::new(
             ["a", "b", "c", "d", "e"]
                 .iter()
@@ -9472,7 +9472,7 @@ mod tests {
 
     // ── #106.7: parked full-res tier + instant Fit↔1:1 rebind ──
 
-    fn photos_named(names: &[&str]) -> Arc<dyn ItemSource> {
+    pub(super) fn photos_named(names: &[&str]) -> Arc<dyn ItemSource> {
         Arc::new(FsSource::new(
             names
                 .iter()
@@ -10119,7 +10119,7 @@ mod tests {
     }
 
     /// Populate the ring so `item` is resident in `rep` at the core's current content gen.
-    fn make_resident(
+    pub(super) fn make_resident(
         core: &mut AppCore,
         item: usize,
         rep: pb_core::Representation,
@@ -10204,7 +10204,7 @@ mod tests {
 
     /// A definitive full-quality decode (`is_preview: false`, sized to the fit) for the
     /// #109.4 refused-upload tests.
-    fn rgba_full(w: u32, h: u32, orig_w: u32, orig_h: u32) -> pb_decode::DecodedImage {
+    pub(super) fn rgba_full(w: u32, h: u32, orig_w: u32, orig_h: u32) -> pb_decode::DecodedImage {
         pb_decode::DecodedImage {
             width: w,
             height: h,
