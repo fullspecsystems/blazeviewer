@@ -4642,7 +4642,7 @@ fn run_platform_video_producer(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use test_support::{five_photos, make_resident, photos_named, rgba_full, test_core};
+    use test_support::{five_photos, make_resident, photos_named, rgba_full, test_core, track};
     use crate::contract::{CoreEvent, Modifiers};
     use crate::{PbKey, Viewport};
 
@@ -8431,27 +8431,6 @@ mod tests {
             .collect()
     }
 
-    fn track(codec: &str, lang: &str) -> pb_decode::MediaTrack {
-        pb_decode::MediaTrack {
-            id: pb_decode::TrackId {
-                catalog_generation: 1,
-                local_id: 0,
-            },
-            kind: pb_decode::TrackKind::Audio,
-            language: Some(lang.into()),
-            title: None,
-            codec_raw: codec.to_ascii_lowercase(),
-            codec: codec.into(),
-            capability: pb_decode::TrackCapability::Playable,
-            flags: pb_decode::TrackFlags::none(),
-            audio: Some(pb_decode::AudioFormat {
-                channels: 2,
-                layout: Some("stereo".into()),
-                sample_rate: 48000,
-            }),
-            external: false,
-        }
-    }
 
     /// A described catalog reaches the Details table as real per-track rows — the
     /// user-visible point of task #98 (this is what retires the `Audio: Yes` placeholder).

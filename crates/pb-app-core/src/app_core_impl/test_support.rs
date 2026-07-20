@@ -74,3 +74,25 @@ pub(super) fn rgba_full(w: u32, h: u32, orig_w: u32, orig_h: u32) -> pb_decode::
         recovered: None,
     }
 }
+
+pub(super) fn track(codec: &str, lang: &str) -> pb_decode::MediaTrack {
+    pb_decode::MediaTrack {
+        id: pb_decode::TrackId {
+            catalog_generation: 1,
+            local_id: 0,
+        },
+        kind: pb_decode::TrackKind::Audio,
+        language: Some(lang.into()),
+        title: None,
+        codec_raw: codec.to_ascii_lowercase(),
+        codec: codec.into(),
+        capability: pb_decode::TrackCapability::Playable,
+        flags: pb_decode::TrackFlags::none(),
+        audio: Some(pb_decode::AudioFormat {
+            channels: 2,
+            layout: Some("stereo".into()),
+            sample_rate: 48000,
+        }),
+        external: false,
+    }
+}
