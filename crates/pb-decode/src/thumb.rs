@@ -52,6 +52,7 @@ fn derive_rgba8(img: DecodedImage, fit: FitBox) -> Result<DecodedImage, DecodeEr
         color: ColorTransform::srgb(),
         peak: 1.0,
         animated: img.animated,
+        recovered: None,
     })
 }
 
@@ -110,6 +111,7 @@ fn derive_f16(img: DecodedImage, fit: FitBox) -> Option<DecodedImage> {
         color: ColorTransform::srgb(),
         peak: 1.0,
         animated: img.animated,
+        recovered: None,
     })
 }
 
@@ -289,6 +291,7 @@ mod tests {
             color: ColorTransform::srgb(),
             peak: 1.0,
             animated: None,
+            recovered: None,
         }
     }
 
@@ -395,6 +398,7 @@ mod tests {
             color: ColorTransform::srgb(),
             peak: 4.0,
             animated: None,
+            recovered: None,
         };
         let t = derive_thumbnail(img, 512).unwrap();
         assert_eq!(t.format, PixelFormat::Rgba8);
@@ -432,6 +436,7 @@ mod tests {
             color: ColorTransform::srgb(),
             peak: 1.0,
             animated: None,
+            recovered: None,
         };
         let t = derive_f16(
             img,
@@ -461,6 +466,7 @@ mod tests {
             color: ColorTransform::srgb(),
             peak: 1.0,
             animated: None,
+            recovered: None,
         };
         assert!(derive_thumbnail(img, 512).is_none());
     }

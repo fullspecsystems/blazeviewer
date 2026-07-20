@@ -808,6 +808,7 @@ pub fn video_placeholder(container: crate::video::VideoContainer) -> DecodedImag
         color: pb_decode::ColorTransform::srgb(),
         peak: 1.0,
         animated: None,
+        recovered: None,
     }
 }
 
@@ -970,6 +971,7 @@ pub fn archive_placeholder(kind: pb_source::ArchiveKind) -> DecodedImage {
         color: pb_decode::ColorTransform::srgb(),
         peak: 1.0,
         animated: None,
+        recovered: None,
     }
 }
 

@@ -102,6 +102,7 @@ pub(crate) fn finalize_oriented(
         // The caller's decode entry sets this from a header sniff; decoders here only
         // ever produce the still first frame.
         animated: None,
+        recovered: None,
     })
 }
 
@@ -158,6 +159,7 @@ pub(crate) fn finalize_hdr_scrgb(
         color: ColorTransform::srgb(), // already scene-linear; shader passes through
         peak,
         animated: None,
+        recovered: None,
     })
 }
 

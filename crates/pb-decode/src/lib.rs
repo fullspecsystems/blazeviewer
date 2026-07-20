@@ -359,6 +359,13 @@ pub struct DecodedImage {
     /// the first frame (the canonical still everywhere); this only flags that an
     /// on-demand multi-frame [`decode_animation`] playback is available (task #37).
     pub animated: Option<AnimationKind>,
+    /// `Some(reason)` when the source was **malformed but recovered** — the primary
+    /// (strict) decode rejected it and a lenient/fallback rung on the recovery ladder
+    /// produced these pixels anyway (task #127). `reason` is the original strict-mode
+    /// error (e.g. `"Extra bytes between headers"`), human-readable, for the
+    /// details-panel notice so a user digging into a file learns the full story. `None`
+    /// for a clean decode. RAM-only, never persisted (privacy).
+    pub recovered: Option<String>,
 }
 
 impl DecodedImage {
@@ -569,6 +576,7 @@ impl ImageDecoder for SolidColorDecoder {
             color: ColorTransform::srgb(),
             peak: 1.0,
             animated: None,
+            recovered: None,
         })
     }
 
@@ -629,12 +637,73 @@ fn decode_bytes_inner(
     #[cfg(target_os = "macos")]
     backends.push(&imageio);
     backends.push(&images);
-    for backend in backends {
-        if backend.can_decode(bytes) {
-            return backend.decode(&req);
-        }
+    let Some(backend) = backends.into_iter().find(|b| b.can_decode(bytes)) else {
+        return Err(DecodeError::Unsupported);
+    };
+    match backend.decode(&req) {
+        Ok(img) => Ok(img),
+        // The chosen backend rejected a malformed file. Don't give up — walk the
+        // rest of the recovery ladder (task #127). zune already tried strict→lenient
+        // internally; this covers the harder cases (e.g. a truncated JPEG that even
+        // lenient zune can't finish) by handing the bytes to the tolerant OS codec,
+        // then the image crate as a last, best-effort rung.
+        Err(primary_err) => recover_via_fallback(&req, primary_err),
     }
-    Err(DecodeError::Unsupported)
+}
+
+/// Recovery ladder rungs 2–3 (task #127): the primary backend errored on a
+/// malformed file. Try the **OS imaging codec** (macOS Image I/O / Windows WIC) —
+/// which is markedly more tolerant of truncation and spec violations than the
+/// pure-Rust decoders — then the **image crate** (a different implementation of the
+/// same formats; the only extra rung on Linux). The first rung that produces pixels
+/// wins and is flagged `recovered` with the *primary* error as the reason; if every
+/// rung fails the file is genuinely undecodable and the primary error propagates so
+/// the shell can show a real "can't display" state rather than a stuck spinner.
+///
+/// The OS codecs' `can_decode` is ISOBMFF-only (they exist here for HEIC/AVIF), so
+/// we call their `decode` directly rather than routing through the sniff.
+fn recover_via_fallback(
+    req: &DecodeRequest,
+    primary_err: DecodeError,
+) -> Result<DecodedImage, DecodeError> {
+    let reason = primary_err.to_string();
+    let finish = |mut img: DecodedImage| -> DecodedImage {
+        // A content sniff gives the true codec name — the OS decoders label
+        // everything they touch here "HEIF"/from their ISOBMFF path, which would
+        // mislabel a recovered JPEG in the details panel.
+        if let Some(codec) = sniffed_codec(req.bytes) {
+            img.codec = codec;
+        }
+        img.recovered = Some(reason.clone());
+        img
+    };
+    #[cfg(target_os = "macos")]
+    if let Ok(img) = ImageIoDecoder.decode(req) {
+        return Ok(finish(img));
+    }
+    #[cfg(windows)]
+    if let Ok(img) = WicDecoder.decode(req) {
+        return Ok(finish(img));
+    }
+    if let Ok(img) = ImageCrateDecoder.decode(req) {
+        return Ok(finish(img));
+    }
+    Err(primary_err)
+}
+
+/// The content-sniffed codec name (`"JPEG"`, `"PNG"`, …) for a recovered image, so
+/// the OS-codec rung's generic label doesn't mislabel it. `None` when the sniff is
+/// inconclusive (keep whatever the decoder reported).
+fn sniffed_codec(bytes: &[u8]) -> Option<&'static str> {
+    match image::guess_format(bytes).ok()? {
+        image::ImageFormat::Jpeg => Some("JPEG"),
+        image::ImageFormat::Png => Some("PNG"),
+        image::ImageFormat::WebP => Some("WebP"),
+        image::ImageFormat::Gif => Some("GIF"),
+        image::ImageFormat::Tiff => Some("TIFF"),
+        image::ImageFormat::Bmp => Some("BMP"),
+        _ => None,
+    }
 }
 
 /// Decode in-memory image `bytes` the way [`decode_image_file`] would, but taking
@@ -889,6 +958,33 @@ mod tests {
             assert_eq!((img.orig_width, img.orig_height), (3, 2), "{codec} dims");
             assert!(img.is_well_formed(), "{codec} buffer");
         }
+    }
+
+    #[test]
+    fn a_malformed_jpeg_is_recovered_and_flagged_through_the_full_dispatch() {
+        // End-to-end (task #127): a JPEG with stray bytes between headers — which
+        // strict zune rejects — must still decode via decode_bytes, arrive upright
+        // and correctly sized, keep the JPEG codec label, and carry the recovered
+        // flag so the details panel can surface the notice.
+        let rgba = vec![200u8; 16 * 16 * 4];
+        let good = encode_jpeg_rgba8(&rgba, 16, 16, 90).expect("encode");
+        // Stray bytes between the first two marker segments (FF D8 FF kept intact so
+        // the sniff still routes it to JPEG) — strict zune rejects, lenient recovers.
+        let seg_len = u16::from_be_bytes([good[4], good[5]]) as usize;
+        let boundary = 2 + 2 + seg_len;
+        let mut bad = Vec::with_capacity(good.len() + 3);
+        bad.extend_from_slice(&good[..boundary]);
+        bad.extend_from_slice(&[0x00, 0x00, 0x00]);
+        bad.extend_from_slice(&good[boundary..]);
+
+        let img = decode_bytes(&bad, None, false).expect("recovered decode");
+        assert_eq!(img.codec, "JPEG");
+        assert_eq!((img.orig_width, img.orig_height), (16, 16));
+        assert!(img.is_well_formed());
+        assert!(
+            img.recovered.is_some(),
+            "a recovered malformed JPEG must carry the recovered reason"
+        );
     }
 
     #[test]

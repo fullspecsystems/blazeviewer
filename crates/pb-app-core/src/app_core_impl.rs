@@ -2556,6 +2556,7 @@ impl AppCore {
                                 color: pb_decode::ColorTransform::srgb(),
                                 peak: 1.0,
                                 animated: None,
+                                recovered: None,
                             }
                         });
                         match tile {
@@ -9346,6 +9347,7 @@ mod tests {
             color: pb_decode::ColorTransform::srgb(),
             peak: 1.0,
             animated: None,
+            recovered: None,
         };
         pb_decode::PosterSelection {
             choice: pb_decode::PosterChoice {
@@ -9720,6 +9722,7 @@ mod tests {
                 color: c,
                 peak: 1.0,
                 animated: None,
+                recovered: None,
             }
         };
         let mut p0 = poster_payload(0, (800, 450));
@@ -10053,6 +10056,7 @@ mod tests {
             color: pb_decode::ColorTransform::srgb(),
             peak: 1.0,
             animated: None,
+        recovered: None,
         }
     }
 
@@ -12658,6 +12662,7 @@ mod tests {
             color: pb_decode::ColorTransform::srgb(),
             peak: 1.0,
             animated: None,
+            recovered: None,
         };
         core.pending_uploads.push(
             Outcome::synthetic(
@@ -12717,6 +12722,7 @@ mod tests {
             color: pb_decode::ColorTransform::srgb(),
             peak: 1.0,
             animated: None,
+            recovered: None,
         };
         core.pending_uploads.push(Outcome::synthetic(
             0,
@@ -13079,6 +13085,7 @@ mod tests {
             color: pb_decode::ColorTransform::srgb(),
             peak: 1.0,
             animated: None,
+            recovered: None,
         };
         core.pending_uploads.push(Outcome::synthetic(
             0,
@@ -13134,6 +13141,7 @@ mod tests {
             color: pb_decode::ColorTransform::srgb(),
             peak: 1.0,
             animated: None,
+            recovered: None,
         };
         core.pending_uploads.push(Outcome::synthetic(
             0,
@@ -13181,6 +13189,7 @@ mod tests {
             color: pb_decode::ColorTransform::srgb(),
             peak: 1.0,
             animated: None,
+            recovered: None,
         };
         core.pending_uploads.push(Outcome::synthetic(
             0,
@@ -13229,6 +13238,7 @@ mod tests {
             color: pb_decode::ColorTransform::srgb(),
             peak: 1.0,
             animated: None,
+            recovered: None,
         };
         core.pending_uploads.push(Outcome::synthetic(
             0,
@@ -13594,6 +13604,7 @@ mod tests {
             color: pb_decode::ColorTransform::srgb(),
             peak: 1.0,
             animated: None,
+            recovered: None,
         };
         core.thumbs_capture(Outcome::synthetic(
             2,
@@ -13631,6 +13642,7 @@ mod tests {
             color: pb_decode::ColorTransform::srgb(),
             peak: 1.0,
             animated: None,
+        recovered: None,
         }
     }
 

@@ -119,6 +119,7 @@ pub fn decode_video_poster(
         color,
         peak: 1.0,
         animated: None,
+        recovered: None,
     })
 }
 

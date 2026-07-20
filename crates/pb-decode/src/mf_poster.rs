@@ -204,6 +204,7 @@ fn cut_selection(
             color: src.color,
             peak: src.peak,
             animated: None,
+            recovered: None,
         })
     };
     let thumb_img = Some(cut(&img, thumb_fit)?);
@@ -332,6 +333,7 @@ pub fn decode_video_poster_replay(
                 color: info.color,
                 peak: 1.0,
                 animated: None,
+                recovered: None,
             };
             let choice = crate::PosterChoice {
                 origin_hns,
@@ -705,6 +707,7 @@ unsafe fn poster_inner(
             color: info.color,
             peak: 1.0,
             animated: None,
+            recovered: None,
         },
         choice,
     ))

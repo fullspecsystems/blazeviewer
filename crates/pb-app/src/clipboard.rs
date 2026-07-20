@@ -227,6 +227,7 @@ mod tests {
             color: ColorTransform::srgb(),
             peak: 1.0,
             animated: None,
+            recovered: None,
         }
     }
 

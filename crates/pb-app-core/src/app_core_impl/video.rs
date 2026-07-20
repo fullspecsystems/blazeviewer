@@ -198,6 +198,7 @@ impl AppCore {
             color: pb_decode::ColorTransform::srgb(),
             peak: 1.0,
             animated: None,
+            recovered: None,
         };
         let rep_kind = self.display_kind();
         self.pending_uploads

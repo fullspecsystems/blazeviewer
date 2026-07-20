@@ -1562,6 +1562,40 @@
             "status": "done"
           }
         ]
+      },
+      {
+        "id": 127,
+        "title": "Lenient decode + recovery ladder + graceful failure for malformed images",
+        "description": "Malformed-but-recoverable images (a JPEG with extra bytes between headers, or a truncated tail) must still display. Make decode maximally lenient (zune strict then lenient then OS codec ladder), flag recovered images and surface a notice in the details panel, and replace the stuck loading pie on a genuinely-undecodable file with a clear can't-display placeholder.",
+        "status": "in-progress",
+        "priority": "medium",
+        "dependencies": [],
+        "subtasks": [
+          {
+            "id": 1,
+            "title": "pb-decode: recovery ladder + recovered flag",
+            "description": "zune strict-first then lenient; on error fall back to OS codec (ImageIO/WIC) then image crate; flag DecodedImage.recovered with the reason. Tests with crafted malformed JPEGs.",
+            "status": "pending"
+          },
+          {
+            "id": 2,
+            "title": "pb-app-core: recovered map + details-panel notice + reliable present_failed",
+            "description": "Carry recovered reason per-item (RAM-only), show a notice line in the details/info panel, ensure a truly-failed decode resolves the pie.",
+            "status": "pending"
+          },
+          {
+            "id": 3,
+            "title": "macOS shell: kill the pie + placeholder + notice display",
+            "description": "Swift host must react to the failed/resolved state (stop spinner, show placeholder) and render the recovery notice.",
+            "status": "pending"
+          },
+          {
+            "id": 4,
+            "title": "winit shell: placeholder parity (cross-platform debt)",
+            "description": "Windows/Linux placeholder + notice; verify on Windows.",
+            "status": "pending"
+          }
+        ]
       }
     ],
     "metadata": {

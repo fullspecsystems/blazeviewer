@@ -384,6 +384,7 @@ fn assemble_poster(
         },
         peak: full_conv.peak(),
         animated: None,
+        recovered: None,
     })
 }
 
