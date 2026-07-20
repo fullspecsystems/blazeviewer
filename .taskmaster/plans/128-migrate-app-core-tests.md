@@ -1,6 +1,6 @@
 # Task 128 — Migrate the `app_core_impl` tests into their concern modules
 
-**Status:** planned — 2026-07-20. Direct completion of **#125's original intent** (§4: "their tests
+**Status:** in progress — 2026-07-20. Step 0 (the `test_support` module) landed; the 144-test name/subject classification is the next work unit. Direct completion of **#125's original intent** (§4: "their tests
 travel with them, which is where the bulk of the test lines goes"; §6: "each a single `impl AppCore`
 block plus its own `mod tests`"). #125 moved the *methods* and stopped at its charter boundary; it left
 every test behind. This finishes the job.
@@ -288,6 +288,77 @@ corrections, all folded in above:
 The through-line of all four: for tests, **the byte-hash is necessary but not sufficient**, because test bodies
 lean on generically-named, relocation-sensitive helpers. The name-set multiset + the config matrix + the per-test
 scope audit are what make a move trustworthy.
+
+## Progress
+
+### Step 0 — DONE 2026-07-20: `test_support` module + baseline
+
+Two commits (the #125 widen-then-move pattern applied to fixtures):
+- `26f39b55` — the five cross-concern fixtures widened to `pub(super)` in place (keyword-only diff).
+- `53d9cdb0` — moved to `app_core_impl/test_support.rs`. **Test-name multiset identical, 881 → 881**
+  (the primary check, first real exercise); 878 passed + 3 ignored unchanged; clippy clean. The 5
+  byte-hash flags are the unavoidable de-indent (nested module → module scope), hand-diffed identical.
+
+**Baseline captured:** `scratchpad/tests_before.txt` — 881 unique leaf names (uniqueness holds, so the
+multiset argument is sound). #127 landed first (recovery ladder for malformed images), adding 3 tests
+(296 → 299 in `mod tests`) and correctly putting its new methods in `meta.rs`/`panels.rs`.
+
+**Two wiring facts for the next migrator:**
+- The parent `mod` block is not alphabetical past `…undo, video, view` — match real neighbours.
+- `test_support` needed `use crate::Viewport` — `use super::*` gives production scope only, not the
+  test-only prelude (`use crate::{PbKey, Viewport}`, contract/animation/dir_scan/archive_open imports)
+  that lived inside `mod tests`. Each concern's `mod tests` will need its slice of that old prelude.
+
+### ⚠ Finding: the fixture tiers need per-fixture verification (as §3b warned)
+
+`settle_at` was tentatively mapped to *video* in the first classification pass. It is not — it is a
+**general navigation helper** (`jump_to` + set `target_item`/`displayed_item`), used by the *compare*
+tests too. So it is **cross-concern → `test_support`**, not video-local. Confirmed by reading its body,
+not its name. The lesson the plan already stated, now with a concrete instance: **verify each "local"
+fixture against its actual callers before moving it with one concern** — a mis-tier strands another
+concern's tests.
+
+Known-shared so far (→ `test_support`): the 5 already moved, **plus `settle_at`** (confirmed), plus the
+heavy hitters still to promote as their first consumer migrates: `photos_named`✓, `track` (27 uses,
+tier unverified), `make_resident`✓. Concern-local confirmed: `compare_core` (compare), `zoom_test_core`
+(view), `thumb_test_core`/`tiny_thumb` (thumbs), `archive_core`/`armed_archive_core` (archive),
+`core_with_a_native_video`/`core_with_a_playing_video` (video).
+
+### Classification status (step 1 deliverable, in progress)
+
+The fixture pass (`scratchpad/fixture_spread.txt`) resolves **155 of 299** tests to a concern by the
+concern-local fixture they use. **144 remain** — they use only shared fixtures or none, so they need
+name/subject reading (§7 rule 2). That 144-test read is the next work unit and the real bulk of the
+task; it was deliberately not rushed at the end of a long session.
+
+**The `compare` concern is fully scoped and ready to be the step-1 rehearsal:** 9 tests
+(`sibling_results_are_stale_guarded…`, `compare_toggle_pins_first_then_flips…`, `compare_pin_moves_and_unpins`,
+`compare_flip_never_interrupts…`, `compare_pin_survives_a_same_deck_rebuild…`,
+`compare_pin_rides_the_prefetch_want_list…`, `deleting_down_to_the_empty_state_clears_the_pin`,
+`compare_carry_applies_only_to_matching_geometry`, `compare_carry_is_staged_for_the_flips_first_frame…`),
+the `compare_core` fixture (concern-local, moves with them), and a prerequisite: **promote `settle_at`
+to `test_support` first**. `compare_identity`/`compare_carry_view` are already `pub(super)` from #125.
+
+### Next
+
+1. Promote `settle_at` (and re-verify `track`'s tier) into `test_support`.
+2. Rehearse the full concern-test loop on `compare` — this is what exercises the name-set *path change*
+   and the §5a per-test scope audit, which step 0 (fixtures only) did not.
+3. Do the 144-test name/subject classification → the written assignment list.
+4. Then concern-by-concern, smallest first, `video`/`panels`/`tree` last.
+
+## Handoff
+
+**Verified (Windows):** step 0's two commits — name-set 881 → 881 identical, suite 878+3 unchanged,
+clippy clean, byte-hash hand-diffed. Everything pushed to `main`.
+
+**Not verified / owed:** the macOS-gated *test* paths (`cfg(target_os="macos")`) can't be `--list`ed from
+Windows, same as #125's macOS methods — a Mac must confirm the video/animation test moves when they happen.
+None have moved yet, so nothing is owed there today.
+
+**Claimed:** `app_core_impl.rs`'s `mod tests` is the migration target on **Windows**. It is huge and churny;
+coordinate before editing it concurrently. #127 (error-handling) is the one other active toucher — it adds
+tests near the decode/`present_failed` path; fold, don't race.
 
 ## 11. Interaction with #127 (error-handling, in flight on another machine)
 
