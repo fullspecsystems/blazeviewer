@@ -6308,6 +6308,19 @@ impl AppCore {
         // is parked — an expensive cold fill must never race a blaze. T0 capture
         // covers the strip during flight anyway.
         if self.thumbs.enabled && self.thumbs_visible() && self.held_nav().is_none() {
+            // Items already carrying a DISPLAY want in this pass — the head ladder,
+            // previews and fulls. A video's display poster becomes its tile via
+            // `thumbs_capture`, so a thumb walk for one of these would be a second
+            // concurrent walk of the same film.
+            //
+            // Deliberately NOT the parked tier: it is appended after this block, and it
+            // never contains a video anyway (`full_res_eligible` excludes them). If that
+            // ever changes, this set must move below the append.
+            let display_wanted: std::collections::HashSet<usize> = jobs
+                .iter()
+                .filter(|w| w.purpose == crate::decode_pool::Purpose::Display)
+                .map(|w| w.item)
+                .collect();
             if let Some(cur) = self.playlist.current() {
                 let demand = self.thumbs.demand(cur);
                 for it in self.thumbs.cache.fill_plan(
@@ -6318,6 +6331,37 @@ impl AppCore {
                     if self.failed.contains(&it)
                         || self.thumbs.failed.contains(&it)
                         || pending_items.contains(&it)
+                    {
+                        continue;
+                    }
+                    // A VIDEO whose display poster walk is already in THIS pass needs no
+                    // thumb walk: `thumbs_capture` turns that poster into the tile when it
+                    // lands. Without this the same film is walked twice concurrently — the
+                    // double walk #114's selection removes on Windows, which has no
+                    // equivalent off it.
+                    //
+                    // `pending_items` cannot cover this: it is built from
+                    // `pending_uploads`, i.e. decodes that have already RETURNED, so a walk
+                    // still in flight — precisely the multi-second network case — is
+                    // invisible to it.
+                    //
+                    // Keyed on "a display want exists for this item in this pass", NOT on
+                    // "it is a video": the strip's warm range is far wider than the display
+                    // window, and films outside it must still fill themselves. The emission
+                    // is level-triggered, so a cancelled display walk simply re-plans the
+                    // thumb next pass.
+                    //
+                    // Scoped to the platforms with NO selection pipeline. On Windows the
+                    // selection branch below owns this — and it must keep running, because
+                    // it also unions `Demand::Thumb` into the ledger, which is what routes a
+                    // FAILED walk into `thumbs.failed`. Suppressing ahead of it would leave
+                    // that attribution unrecorded on a Windows placeholder pass.
+                    if !crate::engine::poster_select_supported()
+                        && display_wanted.contains(&it)
+                        && matches!(
+                            crate::video::item_kind(self.source.as_ref(), it),
+                            crate::video::LibraryItemKind::Video(_)
+                        )
                     {
                         continue;
                     }
@@ -17656,6 +17700,85 @@ mod tests {
         assert!(
             build(u64::MAX),
             "ample budget: the same want IS emitted (no over-suppression)"
+        );
+    }
+
+    /// A movie must never be walked TWICE in one pass — once for the display poster and
+    /// again for its thumbnail tile.
+    ///
+    /// On Windows the #114 selection unions the two demands into one job. Off Windows there
+    /// is no selection, and the only guard (`pending_items`) is built from `pending_uploads`
+    /// — decodes that have already RETURNED. A display poster walk still *in flight* is
+    /// invisible to it, so the thumb tier scheduled a second concurrent walk of the same
+    /// film. Since `thumbs_capture` now retains a video's displayed image as its tile, that
+    /// second walk produces nothing the first one wasn't already going to produce: it is
+    /// pure duplicated network work, competing for the very workers the first walk needs.
+    #[test]
+    fn a_video_is_never_walked_twice_in_one_pass_for_display_and_thumb() {
+        let mut core = thumb_test_core();
+        core.source = photos_named(&["film0.mkv", "film1.mkv", "film2.mkv"]);
+        core.playlist = Playlist::new(3, 0).with_cursor(0);
+        core.fit = Some(FitBox {
+            max_width: 100,
+            max_height: 100,
+        });
+        // Viewport BEFORE the toggle: `toggle_thumbnails` itself calls `request_prefetch`,
+        // and `pool.enqueued()` is cumulative — setting it afterward would mix two planning
+        // passes into one assertion.
+        core.thumbs.viewport = Some(((0, 2), (0, 2)));
+        core.toggle_thumbnails();
+
+        let log = core.pool.enqueued();
+        for item in 0..3 {
+            let display = log
+                .iter()
+                .any(|&(i, p, _)| i == item && p == crate::decode_pool::Purpose::Display);
+            let thumb = log
+                .iter()
+                .any(|&(i, p, _)| i == item && p == crate::decode_pool::Purpose::Thumb);
+            assert!(
+                !(display && thumb),
+                "item {item} got BOTH a display and a thumb walk in one pass — \
+                 the display poster already becomes the tile; log: {log:?}"
+            );
+        }
+    }
+
+    /// …but a film with NO display want still gets its own thumb walk. The suppression above
+    /// must key on "a display walk is coming", never on "it is a video" — otherwise films
+    /// outside the display window (the strip's warm range is far wider) would never fill.
+    #[test]
+    fn a_video_outside_the_display_window_still_gets_its_own_thumb_walk() {
+        let mut core = thumb_test_core();
+        let names: Vec<String> = (0..40).map(|i| format!("film{i}.mkv")).collect();
+        let refs: Vec<&str> = names.iter().map(|s| s.as_str()).collect();
+        core.source = photos_named(&refs);
+        core.playlist = Playlist::new(40, 0).with_cursor(0);
+        core.fit = Some(FitBox {
+            max_width: 100,
+            max_height: 100,
+        });
+        core.thumbs.viewport = Some(((0, 39), (0, 39)));
+        core.toggle_thumbnails();
+
+        let log = core.pool.enqueued();
+        // Accept either purpose: off Windows a far film is a `Thumb` fill, while the
+        // selection platform routes the same demand through `PosterSelect`. Asserting
+        // `Thumb` alone would pass here and fail on Windows, where this crate also builds.
+        let far_thumb_work = log
+            .iter()
+            .filter(|&&(i, p, _)| {
+                i > 8
+                    && matches!(
+                        p,
+                        crate::decode_pool::Purpose::Thumb
+                            | crate::decode_pool::Purpose::PosterSelect
+                    )
+            })
+            .count();
+        assert!(
+            far_thumb_work > 0,
+            "films beyond the display window must still be walked for a tile; log: {log:?}"
         );
     }
 
