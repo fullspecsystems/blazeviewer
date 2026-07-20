@@ -405,3 +405,11 @@ impl pb_render::Renderer for StashOk {
     }
 }
 
+pub(super) const ARCHIVE: &[&str] = &[
+    "a/b/one.jpg",
+    "a/b/c/two.jpg",
+    "a/bc/three.jpg", // `a/bc` must never match a scope of `a/b`
+    "a/four.jpg",
+    "top.jpg",
+];
+

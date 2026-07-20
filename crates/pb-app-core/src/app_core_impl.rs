@@ -4680,7 +4680,7 @@ fn run_platform_video_producer(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use test_support::{DeriveOk, FakeArchive, clipboard_text_effects, core_with_a_native_video, five_photos, make_resident, photos_named, poster_payload, rgba_full, seed_details, stuck_preview_core, test_core, text_result, track};
+    use test_support::{ARCHIVE, DeriveOk, FakeArchive, clipboard_text_effects, core_with_a_native_video, five_photos, make_resident, photos_named, poster_payload, rgba_full, seed_details, stuck_preview_core, test_core, text_result, track};
     use crate::contract::{CoreEvent, Modifiers};
     use crate::PbKey;
 
@@ -5408,14 +5408,6 @@ mod tests {
         });
         core
     }
-
-    const ARCHIVE: &[&str] = &[
-        "a/b/one.jpg",
-        "a/b/c/two.jpg",
-        "a/bc/three.jpg", // `a/bc` must never match a scope of `a/b`
-        "a/four.jpg",
-        "top.jpg",
-    ];
 
     fn deck_names(core: &AppCore) -> Vec<&str> {
         (0..core.source.len())
