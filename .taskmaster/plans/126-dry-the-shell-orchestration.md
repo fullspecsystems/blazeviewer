@@ -325,9 +325,43 @@ points for "cancel mid-walk" / "teardown in flight"), which remains open.
 | Phase 0 — identity-stamped dialogs (Codex P0) | ❌ not started |
 | Phase 0 — injectable worker runtime | ❌ not started |
 | Phase 0 — wake contract | ❌ not started |
-| Step 1 half A — dir-scan into the core, winit rewired | ❌ not started |
-| Step 1 half B — mac rewired | ⛔ **impossible from this machine** (§0) |
+| Step 1 — dir-scan state machine in the core + 11 tests | ✅ on the branch |
+| Step 1 — winit rewired onto it | ⏸ **deliberately deferred, see 11.5** |
+| Step 1 — mac rewired | ⛔ **impossible from this machine** (§0) |
 
 `BackgroundOps` is additive and wired to nothing, so the branch is safe to leave or discard.
 The next session should do identity-stamped dialogs (the P0) before moving dir-scan, since
 retrofitting dialog identity after the flow moves is the painful order.
+
+### 11.5 Why the winit shell was deliberately left unwired
+
+The core now owns the dir-scan lifecycle and the shells' copies are redundant — but neither
+shell has been migrated yet, on purpose.
+
+The interim API is a **return value** (`ScanPoll` / `ScanDialogRequest`) rather than a
+`CoreEffect`, because §0 forbids touching the shared contract from this machine. The very
+next piece of work — the phase-0 P0, on a Mac — replaces that with **identity-stamped dialog
+effects** and migrates both shells onto them together.
+
+So rewiring winit now would migrate it **twice**: once onto `ScanPoll`, then again onto the
+final effects a day later, with a throwaway shell diff in the repo's #1 churn file in
+between. Leaving it lets the Mac session move both shells once, onto the shape that lasts.
+
+**Consequence to be honest about:** no shell code has been deleted yet, so *the DRY win is
+not yet realised*. What exists is the tested, canonical implementation both shells will
+adopt. If the Mac session never happens, this commit is net-neutral-plus-tests, not a win.
+
+### 11.6 Exact starting point for the macOS session
+
+1. Read §0, §5a, and §11 here. Nothing needs re-deriving.
+2. Do the **P0 first**: give `CoreEffect::ShowDialog`/`CloseDialog`/`SetDialogChecking` an
+   operation id, and have shells reconcile toward a desired dialog state rather than execute
+   imperative commands. `BackgroundOps::OpId` is the identity to stamp. ~50 sites in
+   `pb-mac-ffi`, 3 of them constructing `ShowDialog`.
+3. Then migrate **both** shells' dir-scan onto `AppCore::{arm,poll,cancel}_dir_scan`,
+   deleting `struct DirScan`, `SCAN_DIALOG_DELAY` and the ~150 duplicated lines from each.
+   Keep the shell-side gate on *whether it may* reveal (it must not steal a Settings window
+   or overwrite a queued Password request) — that is genuine shell knowledge.
+4. Verify on macOS: open a folder, open a password-protected archive, cancel a slow scan,
+   quit mid-scan.
+5. Only then start step 2 (archive-open), which carries the `SecretString` path in §6.
