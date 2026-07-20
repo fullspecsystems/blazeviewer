@@ -1,6 +1,6 @@
 # Blaze Viewer — Current Status (session handoff)
 
-_Last updated: 2026-07-20 (rev 24). Session ran on **Windows**, with a macOS session working
+_Last updated: 2026-07-20 (rev 25). Session ran on **Windows**, with a macOS session working
 the same tasks in parallel through the day. Everything below is on `main`, pushed._
 
 ---
@@ -8,7 +8,8 @@ the same tasks in parallel through the day. Everything below is on `main`, pushe
 # ▶️ START HERE
 
 **#124 (zoom) and #126 (DRY the shells) are both COMPLETE.** **#125 (split
-`app_core_impl.rs`) is IN PROGRESS — step 1 landed.** That is the live work.
+`app_core_impl.rs`) is IN PROGRESS — steps 1 and 2 landed; the file is 22,105 → 20,557
+with 10 concern files and a written charter.** That is the live work.
 
 New this session and worth reading before writing any code:
 **`docs/where-code-goes.md`** — an ordered decision procedure for where a new function
@@ -19,7 +20,33 @@ belongs. **"Put it on `AppCore`" is the last answer, not the first.** Linked fro
 
 # 🧱 #125 — split `app_core_impl.rs` (LIVE)
 
-Plan: `.taskmaster/plans/125-split-app-core-impl.md` (rev 3, Codex round 1 folded).
+Plan: `.taskmaster/plans/125-split-app-core-impl.md` (rev 4 — **read its assignment list and
+`## Handoff` before touching this file**).
+
+### Where it stands
+
+**10 concern files under `app_core_impl/`, 20,557 lines left in the parent.** Landed as 6
+commits, alternating pure moves with clearly-labelled visibility edits:
+
+| | |
+|---|---|
+| pure moves | `dir_scan` + `archive_open` (13 fns) · `image_text` + `describe` (13) · `delete` + `undo` + `save_rotation` + `clipboard` (15) |
+| visibility edits | `supersede` → `background.rs` · `ensure_text_scan`/`ensure_describe_scan` · `reinsert_after_restore` |
+
+Every pure move verified **2051 → 2051 function items, byte-identical**, re-checked after
+`cargo fmt`. Every edit commit flagged exactly its expected names and was hand-diffed to confirm
+the delta was only the keyword. Workspace clippy `-D warnings` and all tests green at each step.
+
+**9 of the 10 pair with a logic module that already existed** — the two-halves rule working as
+§9 predicted.
+
+### The finding that changed the approach
+
+**`app_core_impl.rs` is already ordered.** Concerns sit in *contiguous* spans, because methods
+were appended next to their relatives. A cluster is one unbroken cut, which is why four landed
+in a session. **The plan's §4 name-clustered table is superseded — read the file in order
+instead.** The remaining assignment list (13 destinations + the charter remainder) is in the
+plan under *Step 2*.
 
 ### The shape of it, in five lines
 
@@ -47,7 +74,7 @@ cargo fmt --all && cargo clippy --all-targets && cargo test --workspace
 One cluster per commit. Land it the same day it is written (merge-conflict discipline, §8).
 Stage explicit paths — **never `git add -A`**; the owner edits concurrently.
 
-### ⚠ Four traps, all learned the hard way
+### ⚠ Six traps, all learned the hard way
 
 1. **Private methods break when they move** (§3c). A private `fn` moved into
    `app_core_impl/<x>.rs` becomes private *to that child*, and the parent can no longer call
@@ -67,6 +94,17 @@ Stage explicit paths — **never `git add -A`**; the owner edits concurrently.
    correct"; say "nothing was dropped, invented or edited".
 4. **Anchors churn.** Every `app_core_impl.rs:NNNN` reference in plans/memory goes stale.
    Accepted and unavoidable.
+5. **`cargo check` is not enough — use `clippy --all-targets`.** A moved private method can
+   break *only the test build*: `mod tests` lives inside `app_core_impl.rs`, so it can reach a
+   parent-private method, but once that method moves into a child it is a **sibling's** private
+   and the tests lose it. `reinsert_after_restore` did exactly this. Ask the §3c private-method
+   question of tests too.
+6. **The visibility edit goes FIRST, in place, as its own commit.** §3c says separate commits
+   but not which order — and move-then-widen has no compiling intermediate state, so there is no
+   commit to make. Widening in the parent first gives a reviewable 2-line diff against the
+   unmoved file, and the move then verifies perfectly clean. (Transient wart: `super` of
+   `app_core_impl` is the crate root, so `pub(super)` reads as `pub(crate)` until the method
+   actually moves.)
 
 ### Done so far
 
@@ -85,14 +123,18 @@ Stage explicit paths — **never `git add -A`**; the owner edits concurrently.
 
 ### Next on #125
 
-1. **Subtask 2 — the triage.** Read the ~60 unassigned methods AND re-check the auto-assigned
-   ones. Per cluster ask two questions: **(a) subsystem or topic?** — a subsystem owns state
-   and gets its own module; a topic is just related `AppCore` methods and gets an
-   `app_core_impl/` file. **(b) which methods are private, and do they stay in the parent or
-   become `pub(super)`?** Output is a written assignment list, not code.
-2. Then the small leaves (`archive`, `scan`, `view`), the mid ones (`files`, `tree`,
-   `panels`), then `video` (96 fns) last among the leaves.
-3. **Stop and reassess** before residency. Do not pre-commit to moving it.
+Subtask 2 (the triage) is **done** — its output is the assignment list in the plan. Work it
+top-down:
+
+1. The small four in one commit: `slideshow`, `secret`, `compare`, `thumbs`. Then `hud` + `meta`.
+2. `tree`, `panels`, `view`, `nav`, `animation` — one commit each.
+3. `video` (~90 fns) last among the leaves, **split three ways** (`video` / `audio_tracks` /
+   `subtitles`) rather than one 3k file.
+4. **Stop and reassess** before residency. Do not pre-commit to moving it.
+
+⚠ **Claimed on Windows.** `app_core_impl.rs` is the repo's #1 churn file and these moves
+relocate large spans — a concurrent edit to it conflicts badly. A Mac session should take
+something else or coordinate first.
 
 ### The point of the whole thing (do not oversell it)
 
