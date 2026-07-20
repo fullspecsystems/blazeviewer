@@ -1580,10 +1580,20 @@ fn password_dialog(
                     if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                         result = Some(true);
                     }
-                    if let Some(err) = error {
-                        ui.add_space(12.0);
-                        ui.colored_label(egui::Color32::from_rgb(220, 90, 90), err);
-                    }
+                    // The error row is ALWAYS laid out and only its colour changes, so a
+                    // wrong password does not shove everything below it down mid-retry
+                    // (owner nitpick, 2026-07-20). Same reserve-the-row trick the scan pill
+                    // uses for its sub-folder line.
+                    ui.add_space(12.0);
+                    ui.colored_label(
+                        match error {
+                            Some(_) => egui::Color32::from_rgb(220, 90, 90),
+                            // Transparent rather than skipped: it still occupies its row.
+                            None => egui::Color32::TRANSPARENT,
+                        },
+                        // A non-empty placeholder so the row has a real text height.
+                        error.unwrap_or(" "),
+                    );
                     if checking {
                         ui.add_space(12.0);
                         ui.horizontal(|ui| {

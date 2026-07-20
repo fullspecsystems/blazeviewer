@@ -30,11 +30,16 @@ struct PasswordSheetView: View {
                 .focused($focused)
                 .onSubmit { model.passwordSubmit() }
                 .disabled(model.dialogChecking)
-            if !model.passwordError.isEmpty {
-                Text(model.passwordError)
-                    .font(.callout)
-                    .foregroundStyle(.red)
-            }
+            // The error line is ALWAYS laid out, and only its opacity changes — so a wrong
+            // password does not shove the buttons down and resize the sheet under the user's
+            // cursor mid-retry. Same reserve-the-row trick the scan pill uses for its
+            // sub-folder line. `reservesSpace` keeps the height even while the text is empty.
+            Text(model.passwordError.isEmpty ? " " : model.passwordError)
+                .font(.callout)
+                .foregroundStyle(.red)
+                .lineLimit(1, reservesSpace: true)
+                .opacity(model.passwordError.isEmpty ? 0 : 1)
+                .accessibilityHidden(model.passwordError.isEmpty)
             HStack(spacing: 8) {
                 if model.dialogChecking {
                     ProgressView().controlSize(.small)
