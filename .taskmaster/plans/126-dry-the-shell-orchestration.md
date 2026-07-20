@@ -1,6 +1,8 @@
 # Task 126 — DRY the two shells: move dir-scan + archive-open orchestration into the core
 
-**Status:** plan, rev 1 (pre-Codex).
+**Status:** plan, **rev 2 - Codex round 1 folded**. Codex verdict: *"approve the direction,
+but revise the plan before implementation. Add a phase zero."* Its architectural requirements
+are now section 5a; a hard tooling constraint found while starting work is section 0.
 **Relationship to #125:** do **this first**. See §1.
 
 ## The one-sentence version
@@ -8,6 +10,39 @@
 Two shells hand-maintain identical copies of the dir-scan and archive-open worker
 lifecycles. The core already owns the logic, already spawns threads, and already has the
 contract vocabulary — so move the lifecycle in and let both shells become event pumps.
+
+---
+
+## 0. HARD CONSTRAINT: the macOS half cannot be written from the Windows box
+
+`crates/pb-mac-ffi/src/lib.rs:22` is `#![cfg(target_os = "macos")]` - **the entire crate is
+compiled out on every non-macOS target.** Verified empirically, not assumed: injecting a
+deliberate syntax error into `struct DirScan` and running `cargo check -p pb-mac-ffi` on
+Windows produces **zero errors**. A `--workspace` build makes it an empty staticlib.
+
+Consequences, severe for this task specifically:
+
+- Changes to the mac shell cannot be compiled, type-checked, linted or tested from the
+  Windows dev box. Not "hard to verify" - **not verifiable at all**.
+- The half living in `pb-mac-ffi` is exactly the half Codex identifies as carrying the real
+  platform-specific risk (dialog realization, main-actor drain ordering, the Swift password
+  boundary).
+
+**So the work splits into two independently landable halves:**
+
+| half | where | verifiable on Windows? |
+|---|---|---|
+| **A** - core machinery + the winit shell rewired | `pb-app-core`, `pb-app` | yes: compiles, unit tests, clippy |
+| **B** - the mac shell rewired onto the same core | `pb-mac-ffi` + `mac/` | **no - requires a macOS machine** |
+
+Half A is a strict improvement alone: the canonical lifecycle lands in the core with tests
+and one of the two copies retires. The mac shell keeps its copy until B, so the count goes
+2 -> 2 but one becomes authoritative and tested. **The DRY win is not realised until B
+lands**, and B must be done on a Mac by someone who can run it.
+
+**Rule for half A: additive-only changes to `pb-app-core`'s public surface.** The mac shell
+compiles against it and cannot be checked here, so nothing it uses may change signature or
+disappear. Breaking changes are deferred to B.
 
 ---
 
@@ -111,7 +146,65 @@ window on winit, a SwiftUI sheet on macOS) — already effect-routed via
 `CoreEffect`. The expected diffstat is roughly **−390 lines in each shell**, +~400 in the
 core. A step that does not *delete* meaningfully from both shells has not achieved anything.
 
-## 6. ⚠ Privacy constraint (non-negotiable)
+## 5a. Phase zero - Codex's architectural requirements (fold before implementing)
+
+Codex round 1 approved the direction but ruled the plan under-specified. Four requirements
+must land *before* either flow moves, or they get retrofitted painfully:
+
+1. **An operation-identity / cancellation coordinator, first.** Codex on the ordering in
+   section 7: *"The stated order is incomplete. Establish the shared cross-operation
+   cancellation/generation coordinator first. Without that preparation, moving only
+   directory scanning creates split ownership of a single invariant."* Dir-scan and
+   archive-open supersede **each other**, so their generation/cancel policy is one
+   invariant; moving one flow without the shared coordinator splits its ownership across
+   crates - strictly worse than today.
+2. **Identity-stamped dialogs (the P0).** Today's `ShowDialog`/`CloseDialog` are
+   *kind-only*, so a late close from generation N can dismiss the dialog belonging to
+   generation N+1. Effects must carry an operation id, and shells should **reconcile toward
+   a desired dialog state** rather than execute unqualified imperative commands; stale
+   show/update/close/`DialogResolved` are ignored by identity. Codex: *"the main
+   platform-specific resistance to unification is not the worker, but realization and
+   acknowledgement of its UI state."*
+3. **Injectable runtime + clock.** Core-owned threads do **not** break headless tests
+   (`renderer = None` is orthogonal) - but uninjectable `thread::spawn`, real filesystem
+   work and `Instant::now()` make the state machine's tests slow and nondeterministic.
+   Production uses `std::thread::spawn`; tests drive workers manually with a fake clock and
+   explicit completion points. Keep it a *private core-runtime* abstraction, not a broad
+   public trait. Store a **deadline supplied by the injected clock**, not a bare `Instant`,
+   so the reveal-delay test is not a real-time test.
+4. **A defined wake contract** - how a worker's completion wakes the core on each platform
+   (winit's event-loop proxy vs the macOS main-actor drain).
+
+Also folded, same round:
+
+- **Section 8's effect-sequence assertion is too brittle** and is replaced - see the
+  rewritten section 8.
+- **`ScanProgress` (a shared atomic) is not an FFI-safe progress model.** SwiftUI should not
+  observe a Rust synchronisation object. Expose immutable snapshots, or a query keyed by
+  operation id. Half B's problem, but design for it in A.
+- **Error/disconnect semantics are unspecified** and must be defined: worker panic, sender
+  dropped with no terminal update, receiver disconnected after cancel, progress arriving
+  after a terminal message, duplicate terminals, send-failure because the operation was
+  superseded, an invalid `BeginDirScan` payload.
+- **`begin_dir_scan` mutates state before validating its input** (it flips cancellation,
+  clears tombstones and bumps the generation before confirming the `Source` is
+  `Source::Scan`). Harmless in a shell method with one caller; a latent bug once it is a
+  generally callable core transition. Validate first, or take a scan-specific input type.
+- **The "strays" (`apply_menu_state`, `confirm_delete_permanent`, the toggles) become their
+  own task.** They are not worker-lifecycle code, and bundling them blurs the acceptance
+  boundary. Section 7 step 3 is deferred out of #126.
+- **Line deletion is evidence, not the acceptance contract.** The real criterion: *neither
+  shell owns operation generation, cancellation, retry, timeout or stale-result policy.*
+
+**Rejected, with reasons.** Codex was asked whether a `ShellOrchestration` trait or one
+generic worker-lifecycle abstraction would be better. Both were rejected and I agree: a
+trait *"risks preserving shell-owned policy behind two implementations"* - DRY-looking while
+keeping two policies - and a single generic lifecycle is premature because scans are
+**streaming** while archive opens are **one-shot, retrying and secret-bearing**. The shape
+adopted instead is a core-owned coordinator plus **two bespoke state machines sharing small
+private primitives** (identity, cancellation, wake, deadline, terminal cleanup).
+
+## 6. Privacy constraint (non-negotiable)
 
 The archive-password path carries `SecretString`s under the Second Directive: zeroized on
 drop, redacted `Debug`, never `Display`ed or serialized, never a `Settings` field, wiped at
@@ -126,15 +219,18 @@ and re-run the no-trace integration test before landing.
 
 ## 7. Sequencing
 
-1. **`dir_scan` first** — 5 functions, one dialog kind, no password path, no retry. It is
+0. **The coordinator + runtime/clock + dialog identity** (section 5a), *before* either flow.
+1. **`dir_scan`** - 5 functions, one dialog kind, no password path, no retry. It is
    the whole pattern in miniature: spawn, pump, supersede, cancel, reveal-after-delay.
    Prove the shape here.
 2. **`archive_open`** — the hard one: password prompt, wrong-password re-prompt, RAM
    pre-flight, progress, the `SecretString` path (§6), and the Loading→Password dialog
    transition. Do not start until step 1 has landed on both platforms.
-3. **The strays** — `apply_menu_state`, `confirm_delete_permanent`, `toggle_recursive`,
-   `toggle_show_archives`. Small, independent, and a good place to stop if fatigue sets in.
-4. **Then #125** (the file split), with these ~800 lines already gone from the shells.
+3. ~~The strays~~ **deferred out of this task** per section 5a (not worker-lifecycle code).
+4. **Then #125** (the file split), with these lines already gone from the shells.
+
+Each of 0/1/2 splits into half A (core + winit, verifiable here) and half B (mac, needs a
+Mac) per section 0.
 
 ## 8. Verification (this is NOT #125's body-diff — the structure genuinely changes)
 
@@ -146,12 +242,19 @@ behavioural proof:
   core they become unit-testable for the first time. Write the state-machine tests
   *first*: supersede-by-generation, cancel mid-walk, reveal-after-delay, wrong-password
   re-prompt, teardown-while-in-flight.
-- **One test, both platforms.** A core-level test asserting the emitted `CoreEffect`
-  sequence for a scan/open is the structural replacement for "keep two copies in sync by
-  hand" — that is the actual deliverable, more than the line count.
-- **macOS must be exercised, not assumed.** The mac host cannot be tested from the Windows
-  dev box. Every step needs a real macOS run before the next begins: open a folder, open a
-  password-protected archive, cancel a slow scan, quit mid-scan.
+- **Assert semantic invariants, NOT an effect transcript** (Codex P1: a full ordered
+  sequence pins incidental details, like whether a progress update drains before a dialog
+  reveal). Pin instead: only the latest operation may modify the deck; starting either
+  operation cancels and invalidates the other; no Scanning dialog before the delay, and at
+  most once for a still-current slow scan; a cancelled generation emits no successful
+  terminal application; a wrong password re-prompts for the *same* operation; a successful
+  password is promoted once and never emitted back to the UI; teardown permits no later deck
+  or dialog mutation; every terminal path clears the active operation. Use **partial-order**
+  assertions where ordering is genuinely semantic (`Begin` < reveal; `PasswordSubmitted` <
+  retry/success; `Cancel` < ignored completion).
+- **macOS must be exercised, not assumed, and per section 0 it cannot even be COMPILED
+  from the Windows box.** Half B needs a real macOS machine: build, then open a folder, open
+  a password-protected archive, cancel a slow scan, and quit mid-scan.
 - Re-run the no-trace integration test (`viewing_a_folder_writes_nothing_to_disk`) and the
   static write-path audit after step 2.
 
