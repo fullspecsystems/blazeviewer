@@ -12,6 +12,8 @@ with any pre-release suffix carried only by the tag.
 - Opening an archive no longer flashes a progress spinner for a split second. The "Opening…"
   window now appears only if the archive actually takes a moment to open, the way folder
   scanning has always worked.
+- After a wrong password, the cursor stays in the password box on macOS, so you can just type
+  the next attempt instead of clicking back into the field first.
 - Entering the wrong password for an encrypted archive now tells you so, instead of silently
   clearing the box and leaving you guessing. This only ever worked for plain `.zip` files; for
   `.7z` and the tar family — and any archive unlocked by a remembered password — the message

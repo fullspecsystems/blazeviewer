@@ -37,6 +37,8 @@ history — none of it is live state.
 | Wrong-password inline error (bug fix) | macOS | owner-confirmed; regression test fails with the fix reverted |
 | Password error row no longer shifts the layout | macOS | owner-reported, fixed, host rebuilt |
 | No spinner flash on a fast archive open | macOS | owner-reported, fixed (`LOADING_DIALOG_DELAY`), owner-confirmed "much better" |
+| Focus returns to the password field after a rejection | macOS | owner-reported, fixed, owner-confirmed — retry without clicking |
+| Wrong → wrong → correct password, end to end | macOS | owner-driven: retried until correct, archive opened |
 | Privacy gates after the archive move | macOS | redaction tests, `no_outcome_variant_can_leak_a_password`, `settings.rs` has **zero** `archive_passwords` references, no-trace test green |
 
 ### Not verified — what the next machine must check
@@ -60,11 +62,14 @@ be built here; everything below was type-checked via the cross-target compile on
 6. **Start a folder scan over an in-flight archive open, and vice versa.** The displaced worker
    is now cancelled by the *core*, not the shell; a stale result must never rebuild the deck.
 
-7. **A fast archive open must not flash the "Opening…" dialog at all.** It is now revealed
+7. **After a wrong password, focus should stay in the field** so you can retype immediately.
+   winit already does this (`set_password_error` sets `focus_password`, `dialog.rs:914`) and was
+   never broken — macOS was, and is fixed. Worth one confirming look, no code expected.
+8. **A fast archive open must not flash the "Opening…" dialog at all.** It is now revealed
    only after `LOADING_DIALOG_DELAY` (250 ms), like the scan pill. Confirm a plain `.zip` shows
    no dialog, and that a slow `.7z` still gets one with a working Cancel.
 
-If any of 1–2 or 7 look wrong, they are chrome-only and confined to `dialog.rs` /
+If any of 1–2 or 7–8 look wrong, they are chrome-only and confined to `dialog.rs` /
 `prompt_archive_password` / `reveal_slow_archive_open`.
 
 **One loose end, macOS-side and cosmetic:** with the sheet suppressed, a small spinner now
