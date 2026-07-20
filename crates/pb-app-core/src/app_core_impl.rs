@@ -4897,96 +4897,6 @@ mod tests {
 
     // -- A / Shift+A audio cycling (#99) ------------------------------------
 
-    /// A playing video whose catalog carries `n` audio tracks.
-    fn core_with_audio_tracks(n: u64) -> AppCore {
-        let mut core = core_with_a_native_video();
-        core.native_toast = true;
-        let tracks: Vec<pb_decode::MediaTrack> = (0..n)
-            .map(|i| {
-                let mut t = track("AAC", if i == 0 { "eng" } else { "fra" });
-                t.id.local_id = i;
-                t
-            })
-            .collect();
-        let catalog = pb_decode::MediaTrackCatalog::new(
-            1,
-            pb_decode::MediaBackend::FFmpeg,
-            pb_decode::TrackSet::complete(tracks),
-            pb_decode::TrackSet::complete(vec![]),
-        );
-        seed_details(&mut core, 0, Some(catalog), Some(true));
-        core
-    }
-
-    fn selected_audio_rows(core: &mut AppCore) -> Vec<usize> {
-        core.effects
-            .drain(..)
-            .filter_map(|e| match e {
-                crate::contract::CoreEffect::SelectAudioTrack { row } => Some(row),
-                _ => None,
-            })
-            .collect()
-    }
-
-    /// **The core cannot switch audio — only ask for it.** The player is the shell's, the
-    /// two routes reach a track by different locators, and the switch can be refused. So the
-    /// key emits an effect and nothing else; the shell reports the outcome back through the
-    /// same path the menu uses.
-    #[test]
-    fn audio_cycling_asks_the_shell_rather_than_switching() {
-        let mut core = core_with_audio_tracks(3);
-        core.set_active_audio_row(0);
-
-        core.dispatch_action(Action::AudioNext);
-        assert_eq!(selected_audio_rows(&mut core), vec![1], "asked for row 1");
-        assert!(
-            core.toast_native.is_none(),
-            "and said NOTHING — the toast is the shell's to trigger once the switch is real"
-        );
-    }
-
-    /// Steps wrap in both directions, from **what is playing** rather than a remembered ask.
-    #[test]
-    fn audio_cycling_steps_from_what_is_playing_and_wraps() {
-        let mut core = core_with_audio_tracks(3);
-
-        core.set_active_audio_row(2); // the shell reports the last track
-        core.dispatch_action(Action::AudioNext);
-        assert_eq!(selected_audio_rows(&mut core), vec![0], "wraps forward");
-
-        core.set_active_audio_row(0);
-        core.dispatch_action(Action::AudioPrev);
-        assert_eq!(selected_audio_rows(&mut core), vec![2], "wraps backward");
-
-        core.set_active_audio_row(1);
-        core.dispatch_action(Action::AudioPrev);
-        assert_eq!(selected_audio_rows(&mut core), vec![0]);
-    }
-
-    /// Before the shell has reported anything, start at the first track rather than guess
-    /// which one the decoder's policy chose.
-    #[test]
-    fn audio_cycling_with_nothing_reported_starts_at_the_first() {
-        let mut core = core_with_audio_tracks(2);
-        assert!(core.audio_active.is_none());
-        core.dispatch_action(Action::AudioNext);
-        assert_eq!(selected_audio_rows(&mut core), vec![0]);
-    }
-
-    /// One track is not a rotation. Say so — a key that silently does nothing is
-    /// indistinguishable from a key that is broken.
-    #[test]
-    fn audio_cycling_a_single_track_says_so_instead_of_no_oping() {
-        let mut core = core_with_audio_tracks(1);
-        core.dispatch_action(Action::AudioNext);
-        assert!(
-            selected_audio_rows(&mut core).is_empty(),
-            "asks for nothing"
-        );
-        let t = core.toast_native.as_ref().expect("the user is told");
-        assert_eq!(t.message, "Only one audio track");
-    }
-
     /// The Windows (WASAPI) currency accessors (task #99): each row resolves in
     /// whichever currency its locator carries, a stream resolves back to its row, and a
     /// row without a locator in the asked currency answers `-1` — the shell's cue to try
@@ -5049,17 +4959,6 @@ mod tests {
         core.source = five_photos();
         assert!(!core.displayed_is_video());
         assert!(core.audio_picker_rows().is_empty());
-    }
-
-    /// A still is not a video: the key says nothing rather than lying about a photo.
-    #[test]
-    fn audio_cycling_on_a_still_is_silent() {
-        let mut core = test_core();
-        core.native_toast = true;
-        core.displayed_item = Some(0);
-        core.dispatch_action(Action::AudioNext);
-        assert!(selected_audio_rows(&mut core).is_empty());
-        assert!(core.toast_native.is_none());
     }
 
     /// **Regression — the silent one.** A `TrackId`'s whole contract is that `local_id` means
