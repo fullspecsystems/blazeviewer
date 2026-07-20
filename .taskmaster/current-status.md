@@ -1,207 +1,218 @@
 # Blaze Viewer — Current Status (session handoff)
 
-_Last updated: 2026-07-19 (rev 23). This session ran on the **macOS** side. Landed: #109
-item 1, the #113 on-device verify (DONE), the **#121 poster-walk DRY refactor** (phases 1 +
-3a; phase 2/MF came from the Windows side), and the **macOS thumbnail-strip fix** — first
-tile 199 ms, down from ~60 s, owner-measured. The parallel Windows agent landed #109.4,
-#119/#122/#123-fix-1 in the same window; all merged (see the ID-collision note below)._
+_Last updated: 2026-07-20 (rev 24). Session ran on **Windows**, with a macOS session working
+the same tasks in parallel through the day. Everything below is on `main`, pushed._
+
 ---
 
-# ▶️ START HERE — #114 is DONE and on main (`a987d0d6` tip)
+# ▶️ START HERE
 
-**The poster pipeline** (task #114, plan: `.taskmaster/plans/114-poster-pipeline-one-run.md`
-rev 4 + its review log — 3 design review rounds + 3 implementation review rounds, all folded):
+**#124 (zoom) and #126 (DRY the shells) are both COMPLETE.** **#125 (split
+`app_core_impl.rs`) is IN PROGRESS — step 1 landed.** That is the live work.
 
-1. **One judged walk per movie per session.** The `PosterSelect` pool work kind (geometry-
-   neutral, content-gen-keyed, level-triggered, thumb-cap→display class promotion) + the
-   `PosterSelector` ledger on AppCore. Every consumer (display Fit, strip tile, parked
-   Original) fans out from ONE typed payload.
-2. **Fixed-size judging** (`POSTER_JUDGE_WIDTH` 256): the detail gate is resolution-
-   independent for the grain/white-title-card class (the Ali Wong fix). ⚠ HONEST LIMIT
-   (probed on The Holdovers): real MF-scaled pixels can still flip borderline picks between
-   different-fit walks (39.29 s vs 81.0 s) — the ARCHITECTURE (one walk + surviving choice +
-   replay) is the consistency guarantee, not the judge.
-3. **The choice is a replayable locator** (`PosterChoice`, absolute `origin + relative` —
-   MPEG-TS-correct, applied to the walk's own deep seeks too). Replay = fresh reader +
-   decode-forward with identity enforcement (miss ⇒ error ⇒ scored-walk fallback). Measured:
-   **273 ms** at 4K DoVi over SMB vs a 1.2–2.6 s walk.
-4. **Walk variants A/B'd on the corpus** (48 films, counterbalanced): fitted vs native a wash
-   at 1080p, native 15–20% slower at 4K, 0 pick mismatches ⇒ **fitted is the default**
-   (`PB_POSTER_WALK=native` = the lever). `NATIVE_WALK_CAP` = 2 admission permits for
-   native-class jobs (native walks + all replays).
-5. **Videos resize like photos**: the native winner installs as `RepKind::Original` (mode-0
-   only; mode-1/P3 memoized in `original_blocked`, their fp16 bake rides 110d) — parked
-   videos pre-install via replay in spare capacity, then fullscreen/1:1 GPU-derives.
-6. **Nav never blocks on a poster**: instant tile (the strip's own cached tile, staged
-   straight into the upload queue) or the flat placeholder, upgraded in place. The
-   selection's ready-made tile also lands DIRECTLY in the thumb cache the same tick as the
-   poster (`a987d0d6` — the derive queue drops under burst and used to throw it away).
-7. **Bounded retry** (all item kinds): one demand-re-entry second chance per failed item per
-   session (`retry.rs`); recovery clears BOTH domains' gates. The old "one SMB hiccup blanks
-   a tile forever" behavior is gone.
-8. **BDMV `.m2ts` posters**: `MF_E_INVALID_POSITION` typed at the COM layer; the deep walk
-   returns its head best instead of discarding it.
+New this session and worth reading before writing any code:
+**`docs/where-code-goes.md`** — an ordered decision procedure for where a new function
+belongs. **"Put it on `AppCore`" is the last answer, not the first.** Linked from
+`CLAUDE.md` → *Working norms*.
 
-**Owner verdict:** "a good improvement — not perfect, sometimes still slow to load, but
-limited by SMB over network among other things." ACCEPTED residual: first-visit walks over
-SMB are 1–2.5 s by nature (once per movie per session); a cross-session on-disk poster cache
-would fix cold starts but is a PRIVACY-CHARTER amendment (viewing-derived persistence,
-ADR-018) — owner's call, deliberately not implemented.
+---
 
-**Also merged this session (earlier):** the whole #110/item-6/watchdog rendering arc (rev-19
-notes), the branch cleanup (four stale branches deleted), and **79.10 NVDEC** from the wt1
-worktree (seek convert-skip + HDR P010; its status note rode its own commits). The 79.10
-rebase integration exposed + fixed a broken `run_video_producer` test call site
-(`6b08e44a`).
+# 🧱 #125 — split `app_core_impl.rs` (LIVE)
 
-## Next actions
-1. **Re-measure the strip** (`PB_THUMB_DIAG=1`) on the Videos share. Two fixes landed since
-   the 199 ms reading: the poster-tile retention that produced it, AND the double-walk
-   removal (`d71c3f92`) — every film in the display window was being walked TWICE
-   concurrently. The ~700 ms/tile plateau should be smaller; that number decides whether
-   the #114 selection parity is ever worth its risk.
-2. **#121 subtask 4 (FFmpeg 3b)** — interrupt classification (cancel vs elapsed deadline vs
-   real decode error, `ffmpeg/poster.rs:224`). Small, doable on the Mac, closes a known gap.
-3. **#123** — owner-owned (fix 1 landed `c1b4d707`, plan rev 2 implementation-ready).
-4. **#109 items 2/3/5** — shared open generation, decode identity, present_item propagation.
-   Items 1 and 4 are done.
-5. **#112 profiles** — design rev 4 implementation-ready, paused at owner sign-off.
-6. **#106.1 byte cache / #106.3 read throttling** — the COLD-read side. #106.4 measured warm
-   reads at ~37 ms vs 300–500 ms decode, so this only pays cold; that is the 7 s first photo.
-7. **Low value now:** #121 subtasks 5/6 + #92.2 (AVFoundation). MOV/MP4 on this library are
-   smartphone clips that open on content, so they never deep-walk — the gap is pinned by an
-   `#[ignore]`d test and costs nothing sitting there.
+Plan: `.taskmaster/plans/125-split-app-core-impl.md` (rev 3, Codex round 1 folded).
 
-## ⚠️ Task-ID collision (2026-07-19) — read before filing a task
-Both sides filed a **#115** concurrently: the Windows agent's "compcol RAR dependency" (which
-kept the number) and this session's poster-walk refactor (**renumbered #121**). The phase-1
-commit `7089c548` still says "#115 phase 1" — same work. **Re-fetch before picking an id.**
+### The shape of it, in five lines
 
-# ▶️ THIS SESSION (macOS) — what landed
+- `app_core_impl.rs` is **22,105 lines** (12,504 production + 9,602 tests, **363 methods**),
+  ~3.1× the next-largest file in the repo.
+- Split it into concern-scoped **`impl AppCore` blocks** in `app_core_impl/<concern>.rs`.
+  Rust lets an inherent impl span modules in one crate, so this is a **pure move**: no call
+  site, type, signature or visibility changes.
+- Verified by `scripts/verify-pure-move.py` — snapshot, move, check.
+- **Leaf-first.** The residency/present engine and `tick`/`dispatch_action` move **last or
+  not at all**.
+- Scope gate: this is audit finding #1 remediation **(a) only**. It splits the *file*, not
+  the god object. Do not drift into (b)/(c).
 
-- **#109 item 1 (`5089f36a`)** — the macOS shell now cross-cancels its two deck-installing
-  workers (archive open ⇄ folder scan), closing mode B. Also fixed a stale `pb-mac-ffi`
-  fixture that had been RED on `main` since `cd07a388` (`handle_on_a_door` never stamped
-  `presented_epoch`, so the `door_presented()` gate hid the card).
-- **#113 VERIFIED on Metal** — the #110/ADR-024 arc rides free on macOS, no porting:
-  `[sharp-diag] GPU-derived Fit` fires on every fullscreen toggle, and `PB_SCALE_POLICY=cpu`
-  is a clean A/B (zero derive lines, CPU re-decode at each new fit dim). All 69 `pb-render`
-  tests pass headless on Metal, including the real GPU derive suite (they `.expect("no GPU
-  adapter")` and diff GPU vs a CPU reference — so WGSL→MSL is genuinely correct, not merely
-  compiling). ⚠ **Two traps for whoever re-runs this:** test #110 on a **JPEG** — a RAW is
-  excluded from the parked tier, so a folder whose first item is a `.NEF` shows zero derive
-  lines and looks broken; and `110-manual-test-script.md:74` was **stale** (it claimed macOS
-  uses the `remap_ring` trait default — it does not: shared `rebuild_ring`
-  (`app_core_impl.rs:8046`) calls `WgpuRenderer`'s override at `gpu.rs:3709`).
-  NOT exercised: the watchdog (needs real hold-to-blaze pressure) and any crispness/feel
-  judgment — those need the owner's eyes.
-- **#121 phases 1 + 3a** — see below.
+### How to work it
 
-# 🧱 #121 — one poster walk (the DRY refactor the owner asked for)
+```sh
+python scripts/verify-pure-move.py selftest                       # the tool's own tests
+python scripts/verify-pure-move.py snapshot crates/pb-app-core/src > /tmp/before.json
+# ...move one cluster...
+python scripts/verify-pure-move.py check crates/pb-app-core/src /tmp/before.json
+cargo fmt --all && cargo clippy --all-targets && cargo test --workspace
+```
 
-Plan: `.taskmaster/plans/121-one-poster-walk-driver.md` (rev 2, Codex round 1 folded:
-no P0, 5×P1 + 3×P2). **Why:** `deep_scan` and `Best` existed near-verbatim TWICE
-(`mf_poster.rs:695`/`477` and `ffmpeg/poster.rs:352`/`122` — same comments word-for-word) and
-not at all in `av_poster.rs`, and they drifted: two-scale scoring landed in FFmpeg only
-(`cfd55ffe`), origin capture + judge-size scoring + the BDMV degrade in MF only (#114).
-Addresses tech-debt-audit finding **#5**.
+One cluster per commit. Land it the same day it is written (merge-conflict discipline, §8).
+Stage explicit paths — **never `git add -A`**; the owner edits concurrently.
 
-- **Phase 1 (`7089c548`)** — `pb-decode/src/poster_walk.rs`: the policy once, behind
-  `PosterBackend` (duration/cancelled/seek/scan) + `Best<F>` + `SeekError` + `ScanOutcome`.
-  24 tests where the policy had none, driven by a `FakeBackend` with no video in it.
-- **Phase 3a** — the FFmpeg backend ported onto the driver; the scRGB judge hoisted into
-  `video.rs`, so **every** poster threshold now lives there.
-- **LOAD-BEARING:** `ScanOutcome{Good,Exhausted,Stop}` is not a bool because MF's typed
-  `MF_E_INVALID_POSITION` degrade fires from **two** sites — the `SetCurrentPosition` seek
-  (`mf_poster.rs:763`) *and* the post-seek `ReadSample` inside the burst (`:658`, caught at
-  `deep_scan:752`). Collapsing the second into "found nothing" silently turns "stop, keep the
-  head best" into "try the next offset". Codex caught this; the rev-1 design had it wrong.
-- `video::rational_to_hns` is the one locator conversion (signed i128, saturating, `None` on a
-  bad denominator — **never** a silent 0, and never `pts_to_duration`, which clamps and
-  round-trips through f64).
+### ⚠ Four traps, all learned the hard way
 
-## Diag levers (debug console only)
-`PB_SHARP_DIAG`, `PB_DOOR_DIAG`, `PB_PERF`, `PB_SCALE_POLICY=cpu`, `PB_DERIVE_KERNEL`,
-`PB_DERIVE_MIP_BIAS`, `PB_POSTER_WALK=native|fitted`, `PB_AUDIO_TRACE`, `PB_VIDEO_DIAG`,
-`PB_AV_SYNC`. Probes: `probe_one_file` / `ab_poster_walk` (ignored tests, pb-decode;
-`PB_PROBE_FILE` / `PB_POSTER_AB_DIR`). Corpus: `\\beenas\Media\Movies`,
-`D:\Media\Pictures\…\Wedding`.
+1. **Private methods break when they move** (§3c). A private `fn` moved into
+   `app_core_impl/<x>.rs` becomes private *to that child*, and the parent can no longer call
+   it. `handle` calls private `apply_scan_batch`/`apply_archive`; `tick` calls private
+   `drive_fs_tree`. Fix: leave cross-concern entry points in the parent, **or** make the moved
+   method `pub(super)` (same effective visibility region). **`pub(super)` IS an edit** — give
+   it its own labelled commit so a real change cannot hide inside a move. The `prefs`
+   rehearsal dodged this only because all four of its methods were `pub`.
+2. **The cluster table (§4) is a starting point, not an assignment.** `rebind_same_item` was
+   auto-clustered into *prefs* because its name contains `bind` — it is residency code from
+   #124. Re-read every auto-assignment; the LOC figures are approximate.
+3. **The verifier proves textual conservation, NOT behavioural equivalence.** It cannot see
+   scope/import resolution (`app_core_impl.rs` has a glob `use crate::engine::*`), module-
+   sensitive macros (`file!`/`line!`/`module_path!`), same-name swaps, or non-function items.
+   Each moved module uses `use super::*;` so it inherits the parent's scope verbatim — any
+   *narrowing* of imports is a separate reviewed step. Never call a passing run "proven
+   correct"; say "nothing was dropped, invented or edited".
+4. **Anchors churn.** Every `app_core_impl.rs:NNNN` reference in plans/memory goes stale.
+   Accepted and unavoidable.
 
-# 🎬 macOS thumbnail strip — FIXED (2026-07-19), with the measurement
+### Done so far
 
-**Symptom (owner, on `\\beenas.local\Media\Videos`):** opening the strip on a movie folder
-showed blank placeholders for **nearly a minute**.
+- **`scripts/verify-pure-move.py`** — hashes **attributes + signature + body** per function,
+  compares the multiset across the crate. Has a `selftest` (array returns, bodyless trait
+  decls, braces in strings/raw strings, `fn ` in comments, lifetimes, nested fns, attribute
+  and visibility sensitivity). ⚠ Its first version had a **false negative found by Codex, not
+  by me**: any `;` before `{` read as a bodyless declaration, so `fn f() -> [u8; 3]` was
+  untracked — 5 functions invisible in `app_core_impl.rs` alone. Fixed and pinned.
+- **Layout decided:** *not* a `core/` subdirectory (`dir_scan.rs`, `archive_open.rs`,
+  `background.rs` are orchestration too and already sit top-level). Rust's `foo.rs` + `foo/`
+  pairing instead — `app_core_impl.rs` keeps its name and gains `app_core_impl/prefs.rs`.
+- **Step 1 rehearsal:** `apply_keymap`, `refresh_theme`, `apply_settings`, `keymap_shortcut`
+  → `app_core_impl/prefs.rs` (161 lines). Verified 2051 → 2051 items byte-identical, re-checked
+  *after* `cargo fmt`.
 
-**Root cause — starvation, NOT throughput.** The pool's documented order is "every
-display/poster want ahead of every thumb want" (decode_pool.rs:22), so thumb fills cannot
-begin until the whole display prefetch window drains — and on a movie folder every one of
-those is a multi-second network walk. Two wrong diagnoses were tried first and are recorded
-so nobody re-derives them: (1) "raise the thumb concurrency cap" — wrong layer, a
-concurrency limit would trickle tiles from second one, not withhold them for a minute;
-(2) "the #114 selection dedup is the cure" — it halves work per VISITED movie but does not
-reduce N distinct movies × one walk each.
+### Next on #125
 
-**The fix (`6b701b3b`, workstream A):** `thumbs_capture` now retains a VIDEO's displayed
-image as its tile even when the strip has never been opened — a video's displayed image IS
-its poster, already paid for by a 300–1600 ms walk. It fires on EVERY Display-purpose
-outcome, prefetch-window items included, so the whole window's posters become tiles as they
-land. Photos keep the `enabled` gate (a photo thumb is a cheap local re-decode; capturing
-every displayed photo would put a derive on every frame of a blaze).
-⚠ **The trap:** gating on `capture` instead of `enabled` — the obvious reading — is a NO-OP
-off Windows: `enable_capture()`'s only call site is `land_selection_tile`, which is
-`cfg!(windows)`. The hook must TURN capture on, not test it.
+1. **Subtask 2 — the triage.** Read the ~60 unassigned methods AND re-check the auto-assigned
+   ones. Per cluster ask two questions: **(a) subsystem or topic?** — a subsystem owns state
+   and gets its own module; a topic is just related `AppCore` methods and gets an
+   `app_core_impl/` file. **(b) which methods are private, and do they stay in the parent or
+   become `pub(super)`?** Output is a written assignment list, not code.
+2. Then the small leaves (`archive`, `scan`, `view`), the mid ones (`files`, `tree`,
+   `panels`), then `video` (96 fns) last among the leaves.
+3. **Stop and reassess** before residency. Do not pre-commit to moving it.
 
-**Measured after (owner, `PB_THUMB_DIAG=1`, same share):** first tile **199 ms** (from ~60 s),
-10 tiles <1 s, 70 tiles in 17 s. Two regimes: a fast head/tail (~44–100 ms/tile — tiles from
-posters already walked) around a **~700 ms/tile plateau from ~1 s to ~15 s**, which is
-independent fill walks contending with the still-draining display window.
+### The point of the whole thing (do not oversell it)
 
-**Second fix, same session (`d71c3f92`):** the display window's films were also being walked
-TWICE concurrently — a Display poster walk AND a Thumb fill walk — because the only guard
-(`pending_items`) is built from `pending_uploads`, i.e. decodes that have already RETURNED, so
-an in-flight walk was invisible to it. Since the poster now becomes the tile, that second walk
-was pure duplicated network work competing for the workers the first one needed. Scoped to
-`!poster_select_supported()` so the Windows selection branch keeps its `Demand::Thumb` union
-(which is what routes a FAILED walk into `thumbs.failed` — Codex P2). Proven by the failing
-test's enqueue log, mutation-verified, and its sibling test pins that films OUTSIDE the display
-window still fill themselves.
+It buys navigability, review size and merge-conflict surface. It does **not** reduce coupling —
+`AppCore` keeps all ~165 `pub` fields and every method's privilege to touch them. Codex said
+this independently and it is recorded in §11. The *charter* is what makes it stick:
 
-**What the plateau would cost to remove:** ONLY the #114 selection parity (workstream C)
-collapses the display walk and the thumb fill into one job, so there is no contention —
-worth ~10–14 s on that folder. Deliberately NOT scheduled: large, contract-heavy, and
-second-order now. Revisit only if it grates in real use.
+> **`app_core_impl.rs` holds the `AppCore` lifecycle, dispatch, and the residency & present
+> engine. Nothing else.**
+
+Anti-regrowth is **structural, not a lint** (owner call): the split must leave no "misc"
+bucket, and `docs/where-code-goes.md`'s **two-halves rule** (a new subsystem module gets its
+`app_core_impl/<name>.rs` in the same commit) is the mechanism.
+
+---
+
+# ✅ #126 — DRY the two shells (COMPLETE 2026-07-20)
+
+Plan: `.taskmaster/plans/126-dry-the-shell-orchestration.md` (see its `## Outcome`).
+
+Both shells' dir-scan and archive-open copies are gone (**~−800 lines across the two**),
+replaced by one tested core implementation: `background.rs` (one generation space across both
+operation kinds), `dir_scan.rs`, `archive_open.rs`. All six Windows verification items and the
+macOS run passed. winit's dead Scanning dialog deleted (−208/+23).
+
+**Five defects found along the way** (none were the point of the task): the empty-deck welcome
+hint (both shells), the "Checking…" spinner rendering under the button bar on password retry,
+the Opening-dialog boundary flash (gate 250 → **500 ms**), the wrong-password message that
+never showed for anything routing through the Loading dialog, and cancel-with-a-proven-password
+now promoting it to the session MRU (gated on `progress.done() > 0`).
+
+⚠ **Do not "fix" the residual boundary flash with a minimum display duration** — considered and
+rejected; the rationale is in `LOADING_DIALOG_DELAY`'s doc comment. Read it before changing
+the value.
+
+**Open, not part of the task:** the macOS untraced bottom-left spinner during a quick open
+(needs a Mac); two cosmetic one-frame gaps (door card over a photo on archive entry — core
+proven innocent over 923 frames; `archive_scope` lagging the deck by one frame); and the
+**"strays"** (`apply_menu_state`, `confirm_delete_permanent`, `toggle_recursive`,
+`toggle_show_archives`) — deliberately deferred out, subtask 3 is *cancelled* not skipped, and
+they want their own task.
+
+---
+
+# ✅ #124 — zoom binds the resident Original (COMPLETE, owner-verified)
+
+Smooth zoom (`=`/`-`, pinch, Ctrl+scroll, hold-to-zoom) in Fit mode magnified the fit-sized
+texture. `display_kind()` picked the rep from `view.mode` alone, so zoom could never reach the
+ring's `Original` — even when #106.7 had it resident. Now a present-time selector
+(`present_kind`) binds it; decode targets stay mode-derived (pinned by a test).
+
+⚠ **The trap:** `present_item` resets zoom/pan via `view_for`, so the rebind needs its own
+view-preserving path (`rebind_same_item`) which must **not** re-stamp `last_present` (slideshow
+dwell). ⚠ **The Codex P0:** three background paths rebind the Fit slot for the displayed item —
+`try_gpu_sharpen`, `try_gpu_derive_fit`, and the `drain_results` sharpen landing. All now
+decline while `presented_kind == Original`. **House rule: background work may change residency
+or quality, never the presented representation.**
+
+Also fixed this session: a **dialog-window `Resized` was being applied to the main window**
+(negative-only id filter in `window_event`), which stretched the toolbar ~10×.
+
+---
+
+# ⏭️ Backlog beyond #125 (carried forward, unchanged)
+
+1. **#121 subtask 4 (FFmpeg 3b)** — interrupt classification (cancel vs deadline vs real
+   decode error, `ffmpeg/poster.rs:224`). Small, Mac-doable, closes a known gap.
+2. **#109 items 2/3/5** — shared open generation, decode identity, `present_item` propagation.
+   Items 1 and 4 are done. ⚠ Its **item 1 is stale**: the audit's claim that macOS lacks the
+   cross-cancel is **false** (corrected in `technical-debt-audit.md` 2026-07-20).
+3. **#112 profiles** — design rev 4 implementation-ready, paused on owner sign-off.
+4. **#106.1 byte cache / #106.3 read throttling** — the COLD-read side; only pays cold.
+5. **Re-measure the thumb strip** (`PB_THUMB_DIAG=1`) on the Videos share — two fixes landed
+   after the 199 ms reading. The number decides whether #114 selection parity is ever worth it.
+6. **Low value:** #121 subtasks 5/6, #92.2 (AVFoundation).
+
+---
 
 # 📓 Load-bearing knowledge (don't re-derive)
 
-- **ADR-024 + #114 together**: previews/placeholders are transient; the display converges to
-  a resident-Original derivation (photos AND parked videos now). The selection ledger is
-  content-gen-fenced; its Fit artifact is `(epoch, FitBox)`-tagged; budget guards are CARVED
-  per artifact (`synthetic_carved`).
-- **The pool's selection contracts** (decode_pool.rs): epoch-exempt, gen-replaced,
-  level-triggered (absorb_results at the top of every emission pass closes the
-  sent-but-undrained double-walk window), promotion mutates queued class + notifies,
-  `took_thumb_slot`/native permits are class-at-admission.
-- **Replay identity is strict** (tolerance 0.5 s): a miss errors into a scored-walk fallback
-  — never silently different pixels under the same locator.
-- **`Outcome.preview` vs `img.is_preview`**, **present_slot-not-present_item for in-place
-  upgrades**, **`prefetch_fulls()` order IS the decode priority** — all rev-19 rules stand.
-- **Mode-1 (enabled-transform 8-bit) textures are unmipped and underive-able** by renderer
-  design — anything wanting to derive must install mode-0 or fp16 mode-2 (110d).
-- **Git:** everything is on `main`, pushed. Stage explicit paths, never `-a`. SSH-signed, no
-  AI trailers. Codex review loop at section boundaries (owner expects verified anchors,
-  multiple rounds). The owner drives the app while you work — confirm the About build id.
+- **Cross-machine:** `CLAUDE.md` → *Working across two machines*. One `## Handoff` section per
+  plan is the only place live cross-machine state lives. Never mark verified what you could
+  not run. ⚠ **`pb-app` builds `AppCore` as a struct literal; `pb-mac-ffi` uses
+  `AppCore::new_host`** — so adding an `AppCore` field breaks winit and *not* the Mac, with no
+  warning on the Mac. It has already broken `main` once.
+- **`pb-mac-ffi` is `#![cfg(target_os = "macos")]`** — on Windows it compiles to an empty
+  staticlib, so a syntax error in it produces **zero** errors. Mac-shell edits are unverifiable
+  from Windows. The reverse also holds: `pb-app`'s `build.rs` hard-errors on macOS, so the Mac
+  reaches it only via the `x86_64-pc-windows-msvc` cross-check (which needs `ureq` at
+  `default-features = false` **plus `features = ["json"]`**).
+- **Windows build:** `pwsh scripts/build-windows.ps1 -Run`. A bare `cargo run` omits `ffprobe`
+  → silent AC-3/DTS. ⚠ A **running exe blocks the linker** (`Access is denied`, os error 5) —
+  close the app before rebuilding.
+- **Codex:** unreliable on this repo's big files — 2 of 4 runs produced *nothing*, exhausting
+  their budget just reading. It works when you **inline the relevant code into the prompt** and
+  ask ≤3 focused questions. When it does work it is worth it: it found the verifier's false
+  negative and #126's dialog-identity P0.
+- **Git:** everything on `main`, pushed. Stage explicit paths, never `-a`. SSH-signed, no AI
+  attribution trailers. The owner drives the app while you work.
 
-# ⏸ PARALLEL TRACK — Windows video/audio
+## Diag levers (debug console only)
 
-79.10 NVDEC **shipped** (this session, wt1). Older notes stand: poster deep-walk done +
-good-enough (#92.1; macOS half open); the pause/play audio gap was Bluetooth (NOT the app);
-the FFmpeg→MF locator bridge stays dead. Diag + build rules unchanged (`build-windows.ps1
--Run`; a bare `cargo run` ships silent AC-3/DTS).
+`PB_SHARP_DIAG`, `PB_DOOR_DIAG`, `PB_PERF`, `PB_THUMB_DIAG`, `PB_SCALE_POLICY=cpu`,
+`PB_DERIVE_KERNEL`, `PB_DERIVE_MIP_BIAS`, `PB_POSTER_WALK=native|fitted`, `PB_AUDIO_TRACE`,
+`PB_VIDEO_DIAG`, `PB_AV_SYNC`. Probes: `probe_one_file` / `ab_poster_walk` (ignored tests in
+pb-decode; `PB_PROBE_FILE` / `PB_POSTER_AB_DIR`).
 
-# 📌 macOS TODO — #113 (verify the rendering + poster arcs) + #109 item 1
+Corpus: `\\beenas\Media\Movies`, `D:\Media\Pictures\…\Wedding`,
+`D:\Media\2002-password-is-test.7z` (encrypted, password `test`),
+`D:\Media\test-archives\`, `D:\Media\Pictures.zip`.
 
-Full details in tasks.json #113 + rev-19's section (in git history). Everything since (the
-#114 arc) is ALSO shared-code: pb-app-core orchestration + `WgpuRenderer` + the shared walk
-policy constants — EXCEPT `engine::poster_select_supported()` gates selection to Windows, so
-macOS keeps legacy poster behavior until the parity pass (#114 phase 5) flips it after
-on-device verification.
+## Known-red, NOT ours
+
+- `pb-decode`'s `plain_fixtures_have_no_dovi_summary` — `FFmpeg decoder: Decoder not found`,
+  pre-existing on both Windows runners.
+- Two `pb-app-core` video-probe tests are **flaky**, not failing (timing-dependent off-thread
+  probes; pass on an idle box).
+- **Read step results, not job conclusions**, on this repo's CI right now.
+
+## ⚠️ Task-ID collisions — re-fetch before filing
+
+Happened once already (#115 filed twice; the poster refactor became #121). Highest id in use
+is **#126**.
