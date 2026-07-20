@@ -357,3 +357,45 @@ impl AppCore {
         });
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app_core_impl::test_support::{test_core};
+
+    /// `open_disk_target` (task #108): a `Directory` re-roots as a folder scan; an `Archive`
+    /// opens as its own deck (the door / File-open path), never a folder scan.
+    #[test]
+    fn open_disk_target_routes_folders_and_archives_apart() {
+        let mut core = test_core();
+        core.effects.clear();
+        core.open_disk_target(crate::folder_tree::DiskTarget::Archive(PathBuf::from(
+            "/p/a.zip",
+        )));
+        assert!(
+            core.effects.iter().any(|e| matches!(
+                e,
+                contract::CoreEffect::BeginArchiveOpen { path, .. } if path.as_path() == Path::new("/p/a.zip")
+            )),
+            "an archive target opens the archive"
+        );
+        assert!(
+            !core
+                .effects
+                .iter()
+                .any(|e| matches!(e, contract::CoreEffect::BeginDirScan { .. })),
+            "an archive target is never a folder scan"
+        );
+
+        core.effects.clear();
+        core.open_disk_target(crate::folder_tree::DiskTarget::Directory(PathBuf::from(
+            "/p/dir",
+        )));
+        assert!(
+            core.effects
+                .iter()
+                .any(|e| matches!(e, contract::CoreEffect::BeginDirScan { .. })),
+            "a directory target re-roots as a folder scan"
+        );
+    }
+}
