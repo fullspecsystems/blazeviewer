@@ -315,6 +315,41 @@
       "subtasks": [],
       "archivedDate": "2026-07-19",
       "archivedReason": "done"
+    },
+    {
+      "id": 67,
+      "title": "Smoother hold-to-pan / hold-to-zoom — gentler acceleration curve",
+      "description": "Owner feel note (2026-07-09): holding the pan/zoom keys accelerates too aggressively and doesn't feel smooth — want a slower, gentler ramp with smoother motion. The hold-to-view loop is AppCore::apply_view_holds (crates/pb-app-core/src/app_core_impl.rs:5642), driven by the tuning constants in crates/pb-app-core/src/engine.rs: zoom e-folding rate ramps ZOOM_MIN_RATE 0.5 -> ZOOM_MAX_RATE 2.5 over ZOOM_RAMP_SECS 0.7 (exp() applied multiplicatively about center); pan speed ramps PAN_MIN_SPEED 450 -> PAN_MAX_SPEED 3200 px/s over PAN_RAMP_SECS 0.7. Both are already time-based (frame-rate independent, dt-clamped to 0.1s) so 'smoother' here means the FEEL of the ramp, not a timing bug. Two levers: (a) TUNING — lower the max rate/speed and/or lengthen the ramp so it starts and stays gentler (e.g. PAN_MAX ~1800-2400, ZOOM_MAX ~1.5-2.0, RAMP ~1.0-1.2s), a one-file constant change; (b) CURVE SHAPE — the ramp is currently LINEAR in t (min + (max-min)*(t/ramp)); an ease-in (smoothstep / t^2) keeps fine control longer at the start before building speed, which reads as 'smoother'. Optional stretch: a short release ease-out / inertia so motion doesn't stop dead on key-up. Shared-core feel change (helps macOS + Linux too), surfaced while testing on Windows; keep it a measured, owner-in-the-loop tuning pass, not a blind edit.",
+      "status": "done",
+      "priority": "medium",
+      "dependencies": [],
+      "details": "Scope options, cheapest first: (1) Retune the six constants (ZOOM_MIN/MAX_RATE, ZOOM_RAMP_SECS, PAN_MIN/MAX_SPEED, PAN_RAMP_SECS) for a gentler start and lower top speed — pure constant edit in engine.rs, no logic change. (2) Swap the linear ramp for an ease-in in apply_view_holds: factor the shared 'min + (max-min) * shape(t/ramp)' into a small pure helper (e.g. ease_in(u)=u*u or smoothstep) so zoom and pan share one curve and it's unit-testable (assert monotonic, ease_in(0)=0, ease_in(1)=1, gentler-than-linear midpoint). Keep the multiplicative exp() zoom-about-center and the pan clamp untouched. (3) Optional inertia: on key release, decay the last velocity over ~150-250ms instead of zeroing zoom_started/pan_started immediately — bigger change, own subtask, only if the owner still wants more polish after (1)+(2). Note the scroll-wheel/trackpad steps (WHEEL_ZOOM_STEP, PIXEL_ZOOM_STEP, WHEEL_PAN_STEP, PINCH_GAIN) are a SEPARATE input path (AppCore::scroll, not apply_view_holds) — the owner's note is about held-key motion, so leave the gesture constants unless they ask. Prime directive: this is off the photo hot path (only runs while a pan/zoom key is held), so feel is free to change; still no per-frame heap alloc. Consider whether any of these should become settings (nav ramp/start/max are already configurable) vs hard-coded; default to constants unless the owner wants a knob.",
+      "testStrategy": "Primarily owner feel-test on device (Windows first, then confirm macOS/Linux unchanged-for-the-better): hold each pan direction and zoom in/out, confirm the start is gentle enough for fine framing and the top speed is comfortable, not lurchy. If the ramp is refactored into a pure ease helper, unit-test the curve (endpoints, monotonicity, gentler-than-linear midpoint). Regression: apply_view_holds still returns changed=true only while keys are held (loop keeps polling) and pan stays clamped to image bounds; keypress->photon nav timing is untouched (this path is nav-independent).",
+      "subtasks": [
+        {
+          "id": 1,
+          "title": "Retune the ramp constants (gentler start, lower top speed)",
+          "description": "Adjust ZOOM_MIN/MAX_RATE + ZOOM_RAMP_SECS and PAN_MIN/MAX_SPEED + PAN_RAMP_SECS in engine.rs; owner feel-checks candidate values on device. One-file change.",
+          "status": "done",
+          "parentId": "undefined"
+        },
+        {
+          "id": 2,
+          "title": "Ease-in curve shape (shared pure helper)",
+          "description": "Replace the linear t-ramp in apply_view_holds with a shared ease-in (smoothstep / t^2) helper used by both zoom and pan; unit-test endpoints + monotonicity + gentler-than-linear midpoint. (Already in place before this pass — hold_ramp already used a quadratic p*p ease-in.)",
+          "status": "done",
+          "parentId": "undefined"
+        },
+        {
+          "id": 3,
+          "title": "Optional: release ease-out / inertia",
+          "description": "Only if still wanted after 1+2: decay the last pan/zoom velocity over ~150-250ms on key-up instead of stopping dead, so motion settles smoothly. Own subtask because it adds state to the hold loop. Not pursued — tuning + the existing ease-in were enough (owner: \"I think this is solid\", 2026-07-19).",
+          "status": "cancelled",
+          "parentId": "undefined"
+        }
+      ],
+      "archivedDate": "2026-07-19",
+      "archivedReason": "done"
     }
   ]
 }
