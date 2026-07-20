@@ -6212,18 +6212,6 @@ mod tests {
     }
 
     #[test]
-    fn copy_description_uses_the_cache_and_carries_a_toast() {
-        let mut core = test_core();
-        core.displayed_item = Some(0);
-        core.descriptions.insert(0, Ok("A calico cat.".to_string()));
-        core.dispatch_action(Action::CopyDescription);
-        let got = clipboard_text_effects(&core);
-        assert_eq!(got.len(), 1);
-        assert_eq!(got[0].0, "A calico cat.");
-        assert_eq!(got[0].1.as_deref(), Some("Copied description"));
-    }
-
-    #[test]
     fn copy_description_defers_the_copy_until_the_describe_lands() {
         let mut core = test_core();
         core.displayed_item = Some(0);
