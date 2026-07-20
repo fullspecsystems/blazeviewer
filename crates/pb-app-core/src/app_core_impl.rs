@@ -13,6 +13,7 @@
 /// call site, type, signature or visibility changes. `app_core_impl.rs` keeps lifecycle,
 /// dispatch and the residency engine.
 mod archive_open;
+mod background;
 mod dir_scan;
 mod prefs;
 
@@ -6514,40 +6515,6 @@ impl AppCore {
         self.poster_sel.end_pass();
         self.pool
             .set_targets(self.epoch, self.content_gen, &self.source, &jobs);
-    }
-
-    // ── Directory-scan worker lifecycle (task #126 step 1) ────────────────────────────────
-    //
-    // Moved off the two shells, which each carried a byte-similar copy. The shells keep only
-    // dialog realisation; everything below is shell-neutral and unit-tested.
-
-    // ── Archive-open worker lifecycle (task #126 step 2) ──────────────────────────────────
-    //
-    // The companion to the dir-scan block above. Moved off the two shells, which each carried
-    // a byte-similar copy. Read `crate::archive_open`'s privacy note before touching the
-    // password path.
-
-    /// Stop whatever operation `superseded` names. The core owns **both** workers now, so this
-    /// is the one place cross-type supersession is performed as well as decided — the split
-    /// that made it a per-call-site convention (and a recurring bug) is gone.
-    fn supersede(
-        &mut self,
-        superseded: Option<(crate::background::OpId, crate::background::OpKind)>,
-    ) {
-        match superseded {
-            Some((_, crate::background::OpKind::DirScan)) => {
-                if let Some(prev) = self.dir_scan.take() {
-                    prev.request_cancel();
-                }
-                self.scanning = false;
-            }
-            Some((_, crate::background::OpKind::ArchiveOpen)) => {
-                if let Some(prev) = self.archive_load.take() {
-                    prev.request_cancel();
-                }
-            }
-            None => {}
-        }
     }
 
     /// The decode-to-fit target for the current mode: the display size in Fit mode

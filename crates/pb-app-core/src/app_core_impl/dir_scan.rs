@@ -6,6 +6,9 @@
 //! `app_core_impl.rs` — right next to their own module, because an `AppCore` method had
 //! nowhere else to go. That is the growth this pairing exists to stop.
 //!
+//! Both flows were moved off the two shells by #126, which each carried a byte-similar copy;
+//! the shells keep only dialog realisation. Everything here is shell-neutral and unit-tested.
+//!
 //! Every method moved byte-identically; see `scripts/verify-pure-move.py`.
 
 use super::*;

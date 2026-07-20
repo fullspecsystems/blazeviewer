@@ -5,6 +5,8 @@
 //! constant); this file holds the `impl AppCore` methods that begin, poll, finish, fail and
 //! cancel an open, including the password-retry path.
 //!
+//! Read [`crate::archive_open`]'s privacy note before touching the password path.
+//!
 //! Every method moved byte-identically; see `scripts/verify-pure-move.py`.
 
 use super::*;
