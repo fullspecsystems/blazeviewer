@@ -2077,7 +2077,7 @@ impl AppCore {
     /// T0 capture (task #83): the ring upload just finished with this outcome's
     /// CPU buffer — hand it to the derive thread instead of dropping it. O(1)
     /// (a bounded `try_send`); a no-op until the strip is first opened.
-    fn thumbs_capture(&mut self, o: crate::decode_pool::Outcome) {
+    pub(super) fn thumbs_capture(&mut self, o: crate::decode_pool::Outcome) {
         if o.key.purpose != crate::decode_pool::Purpose::Display {
             return;
         }
@@ -3380,7 +3380,7 @@ impl AppCore {
 
     /// The pinned item's rebuild-stable identity: the full path where one exists,
     /// else the archive-entry name.
-    fn compare_identity(&self, item: usize) -> String {
+    pub(super) fn compare_identity(&self, item: usize) -> String {
         match self.source.path(item) {
             Some(p) => p.to_string_lossy().into_owned(),
             None => self.source.name(item).to_string(),
@@ -3416,7 +3416,7 @@ impl AppCore {
     /// The live zoom/pan to carry across a flip to `to`, or `None` when the view is
     /// the default or the two photos don't share geometry (same pixel dimensions AND
     /// the same rotation override — otherwise the crop wouldn't map anyway).
-    fn compare_carry_view(&self, to: usize) -> Option<(f32, [f32; 2])> {
+    pub(super) fn compare_carry_view(&self, to: usize) -> Option<(f32, [f32; 2])> {
         if self.view.zoom == 1.0 && self.view.pan == [0.0, 0.0] {
             return None; // default view — nothing worth carrying
         }
