@@ -9,13 +9,14 @@
 //!   dimensions, frame rate, duration, audio presence, color). ~15–25 ms (spike-
 //!   measured); never decodes a frame, never reads the file into RAM.
 //! * [`decode_video_poster`] — decode a genuinely-visible poster frame (a **scored
-//!   best-so-far walk**: a head pass over the first [`POSTER_HEAD_FRAMES`] frames,
-//!   then, for a clip whose intro is black/logo/fade, a **deep seek past the intro**
-//!   at [`POSTER_SEEK_OFFSETS`] — recreating the reader per offset, since a warm HEVC
-//!   reposition blocks ~1 s while a fresh open is ~86 ms even over SMB), fitted to the
-//!   display via the MF video processor. Fallback is the best-scoring frame seen, never
-//!   the last. Mirrors the FFmpeg backend (`ffmpeg::poster`); both read one policy from
-//!   [`crate::video`].
+//!   best-so-far walk**: a head pass over the first [`crate::video::POSTER_HEAD_FRAMES`]
+//!   frames, then, for a clip whose intro is black/logo/fade, a **deep seek past the
+//!   intro** at [`crate::video::POSTER_SEEK_OFFSETS`] — recreating the reader per offset,
+//!   since a warm HEVC reposition blocks ~1 s while a fresh open is ~86 ms even over SMB),
+//!   fitted to the display via the MF video processor. Fallback is the best-scoring frame
+//!   seen, never the last. That **policy is not written here**: it is the one shared walk
+//!   in [`crate::poster_walk`], which this module drives as a [`PosterBackend`] — the same
+//!   driver the FFmpeg and AVFoundation backends use (task #121).
 //!
 //! Failure is graceful and *diagnostic*: a container MF can't open reports a
 //! different error than a missing codec (`MF_E_UNSUPPORTED_BYTESTREAM_TYPE` vs
@@ -49,10 +50,8 @@ use windows::Win32::System::Com::StructuredStorage::PROPVARIANT;
 use windows::Win32::System::Variant::{VT_I8, VT_UI8};
 
 use crate::mf_video::{ensure_mf, native_color, sample_to_rgba};
-use crate::video::{
-    poster_deep_cap, POSTER_BURST_FRAMES, POSTER_DEADLINE, POSTER_DEEP_MIN, POSTER_HEAD_FRAMES,
-    POSTER_SEEK_OFFSETS,
-};
+use crate::poster_walk::{walk_poster, Best, PosterBackend, ScanOutcome, SeekError};
+use crate::video::POSTER_DEADLINE;
 use crate::{common, DecodeError, DecodedImage, FitBox, PixelFormat};
 
 // `VideoStreamInfo` is the platform-neutral probe result (`crate::video`); both this
@@ -471,45 +470,137 @@ pub(crate) unsafe fn stream_info(reader: &IMFSourceReader) -> Result<VideoStream
     })
 }
 
-/// The best-scoring poster candidate seen so far, with its dimensions (a deep-seek
-/// reader could in principle negotiate a different size, so the winner carries its
-/// own dims for the final fit). Only the winning frame is kept resident.
-struct Best {
-    score: f32,
-    frame: Option<(Vec<u8>, u32, u32)>,
-    /// The retained frame's RAW MF timestamp (100 ns units, absolute — the
-    /// stream's origin has NOT been subtracted). Task #114: this is what makes
-    /// the choice replayable.
-    ts_hns: i64,
+/// The Media Foundation half of the shared poster walk (task #121).
+///
+/// The *policy* — which offsets, in what order, when a deadline ends the walk, what
+/// survives a refusal — lives once in [`crate::poster_walk`]. This supplies only the
+/// Windows *mechanics*: recreate-to-seek, RGB32 negotiation, the typed
+/// invalid-position refusal, and off-thread reader retirement.
+struct MfPosterBackend<'a> {
+    /// The caller-owned head reader, already negotiated. **Never retired here** —
+    /// [`poster_selected_input`] owns it and retires it once `poster_inner` returns.
+    /// Holding an owned clone would create a second COM reference that later drops
+    /// *inline*, which is exactly the ~1 s HEVC teardown this module exists to keep
+    /// off the decode worker.
+    head: &'a IMFSourceReader,
+    /// The reader created by the most recent deep seek, if any. Owned, and retired
+    /// off-thread on replacement (top of [`PosterBackend::seek`]) and on `Drop`.
+    positioned: Option<IMFSourceReader>,
+    input: &'a crate::VideoInput,
+    /// Negotiated `(w, h, stride)` of whichever reader is current — a reopened reader
+    /// can in principle negotiate a different size, so each burst reads its own.
+    dims: (u32, u32, i32),
+    /// The size each reopen *asks* for: the head negotiation's dims.
+    want: (u32, u32),
+    duration: Option<Duration>,
+    /// The stream's first-sample timestamp — the ABSOLUTE origin every seek and the
+    /// stored choice are anchored to (MPEG-TS files start nonzero; a bare relative
+    /// offset seeks the wrong place there — task #114 / playback's `origin + relative`
+    /// lesson). Set by the head burst's first sample.
+    origin: Option<i64>,
+    cancel: &'a AtomicBool,
 }
 
-impl Best {
-    fn new() -> Self {
-        Self {
-            score: f32::NEG_INFINITY,
-            frame: None,
-            ts_hns: 0,
+impl MfPosterBackend<'_> {
+    /// The reader the next burst reads from: the deep-seek reader once one exists,
+    /// the caller's head reader before that.
+    fn reader(&self) -> &IMFSourceReader {
+        self.positioned.as_ref().unwrap_or(self.head)
+    }
+
+    /// Retire the deep-seek reader, if one is held. Every path that can lose a
+    /// reader funnels through here — `seek` before it opens a replacement, and
+    /// `Drop` — so no early return can leak one into an inline teardown.
+    fn retire_positioned(&mut self) {
+        if let Some(reader) = self.positioned.take() {
+            retire_reader(reader);
+        }
+    }
+}
+
+impl Drop for MfPosterBackend<'_> {
+    fn drop(&mut self) {
+        self.retire_positioned();
+    }
+}
+
+impl PosterBackend for MfPosterBackend<'_> {
+    /// Owned RGBA plus the dims it was decoded at (a deep-seek reader could
+    /// negotiate a different size, so the winner carries its own for the final fit).
+    type Frame = (Vec<u8>, u32, u32);
+
+    fn duration(&self) -> Option<Duration> {
+        self.duration
+    }
+
+    fn cancelled(&self) -> bool {
+        self.cancel.load(Ordering::Relaxed)
+    }
+
+    /// **Recreate** the reader positioned at `target` rather than repositioning the
+    /// warm one: a warm HEVC reposition blocks ~1 s (spike-measured) while a fresh
+    /// open is ~86 ms even over SMB.
+    fn seek(&mut self, target: Duration) -> Result<(), SeekError> {
+        // Retire the previous burst's reader BEFORE opening its replacement — the
+        // same ordering the old `deep_scan` had (retire immediately after each
+        // burst), so at most one deep reader is ever held.
+        self.retire_positioned();
+        let origin = self.origin.unwrap_or(0);
+        match unsafe { reopen_at_rgb32(self.input, self.want, target, origin) } {
+            Ok((reader, w, h, stride)) => {
+                self.positioned = Some(reader);
+                self.dims = (w, h, stride);
+                Ok(())
+            }
+            // A raw BDMV stream refusing positioned reads: no deeper offset can ever
+            // succeed, so the walk stops and the accumulated head best becomes the
+            // poster (task #114 phase 4). `reopen_at_rgb32` already retired the
+            // reader it opened.
+            Err(e) if is_invalid_position(&e) => Err(SeekError::Refused),
+            // Any other failure is just this offset — try the next one.
+            Err(_) => Err(SeekError::Failed),
         }
     }
 
-    /// Offer a scored frame for the *fallback* ranking; keep it if it beats the
-    /// current best (first max wins — deterministic, so path and in-RAM posters
-    /// stay bit-identical). Used only until a genuinely-good frame is found.
-    fn consider(&mut self, score: f32, rgba: Vec<u8>, w: u32, h: u32, ts_hns: i64) {
-        if self.frame.is_none() || score > self.score {
-            self.score = score;
-            self.frame = Some((rgba, w, h));
-            self.ts_hns = ts_hns;
+    fn scan(
+        &mut self,
+        limit: usize,
+        best: &mut Best<Self::Frame>,
+        deadline: Instant,
+    ) -> Result<ScanOutcome, DecodeError> {
+        let dims = self.dims;
+        // Only a POSITIONED reader can legitimately answer "positioned reads not
+        // permitted", and only there does that refusal mean "stop, keep the head
+        // best". Read from the head reader the same error is a genuine failure and
+        // must propagate — exactly as it did before task #121.
+        let positioned = self.positioned.is_some();
+        // `origin` rides a local so the burst can borrow the reader out of `self`
+        // immutably; it is written back below, before any caller can observe it.
+        let mut origin = self.origin;
+        let outcome = unsafe {
+            burst(
+                self.reader(),
+                dims,
+                positioned,
+                limit,
+                best,
+                &mut origin,
+                self.cancel,
+                deadline,
+            )
+        };
+        // Only the HEAD burst defines the origin: it is the stream's FIRST sample
+        // timestamp, and a deep burst starts mid-stream by construction. The old
+        // `deep_scan` enforced this by handing each deep burst a pre-set value it
+        // could not overwrite; the rule is stated directly here instead. It matters
+        // only in the corner where the head decoded nothing at all — there the
+        // origin must stay unset (falling back to 0) rather than be redefined by a
+        // deep sample, or `PosterChoice` would split the same absolute timestamp
+        // differently than it does today.
+        if !positioned {
+            self.origin = origin;
         }
-    }
-
-    /// Take this frame as the winner outright — the walk found a genuinely-good
-    /// poster and stops here, so it is the result regardless of what earlier
-    /// frames out-*ranked* it (ranking only decides the all-bad fallback).
-    fn win(&mut self, rgba: Vec<u8>, w: u32, h: u32, ts_hns: i64) {
-        self.score = f32::INFINITY;
-        self.frame = Some((rgba, w, h));
-        self.ts_hns = ts_hns;
+        outcome
     }
 }
 
@@ -555,39 +646,29 @@ unsafe fn poster_inner(
     }
 
     let mut best = Best::new();
-    // The stream's first-sample timestamp — the ABSOLUTE origin every seek and
-    // the stored choice are anchored to (MPEG-TS files start nonzero; a bare
-    // relative offset seeks the wrong place there — task #114 / playback's
-    // `origin + relative` lesson).
-    let mut origin: Option<i64> = None;
-    // Phase 1 — the cheap head walk from the start. A clip that opens on content
-    // settles here; a dark/logo/fade opening leaves `best` weak and falls through.
-    let good = scan(
-        reader,
-        (w, h, stride),
-        POSTER_HEAD_FRAMES,
-        &mut best,
-        &mut origin,
-        cancel,
-        deadline,
-    )?;
-    // Phase 2 — seek past the intro (feature-film case), shallow → deep, stopping at
-    // the first good frame so the poster is as early as the intro allows.
-    if !good {
-        deep_scan(
+    // The cheap head walk, then — only if it found nothing good — the shallow→deep
+    // seeks past the intro (the feature-film case). That policy is SHARED (task
+    // #121, `poster_walk::walk_poster`); this module supplies only the mechanics.
+    // Either outcome assembles from `best`: the fallback is the least-black frame.
+    let origin = {
+        let mut backend = MfPosterBackend {
+            head: reader,
+            positioned: None,
             input,
-            (w, h),
-            info.duration,
-            &mut best,
-            origin.unwrap_or(0),
+            dims: (w, h, stride),
+            want: (w, h),
+            duration: info.duration,
+            origin: None,
             cancel,
-            deadline,
-        )?;
-    }
+        };
+        let _good = walk_poster(&mut backend, &mut best, deadline)?;
+        backend.origin
+        // `backend` drops HERE, retiring the last deep-seek reader off-thread
+        // before the fit below — as prompt as the old per-burst `retire_reader`.
+    };
 
-    let best_ts = best.ts_hns;
-    let (rgba, bw, bh) = best
-        .frame
+    let ((rgba, bw, bh), best_ts) = best
+        .take()
         .ok_or_else(|| DecodeError::Corrupt("video decoded no frames".into()))?;
 
     // If the processor already scaled, this fit is a no-op; the native-size
@@ -629,47 +710,77 @@ unsafe fn poster_inner(
     ))
 }
 
-/// Decode up to `limit` frames from `reader`'s current position, scoring each into
-/// `best`. `Ok(true)` as soon as a clearly-good frame is found (caller stops),
-/// `Ok(false)` when the limit / EOF / the overall deadline is reached first. The
-/// deadline is a best-so-far fallback, not an error (a poster is a background
-/// nicety); `cancel` is (the pool retiring the job).
-unsafe fn scan(
+/// How a burst's `ReadSample` failure concludes.
+///
+/// The post-seek `ReadSample` refusing positioned reads is the **second**
+/// invalid-position site (the first is the seek itself), and the reason a burst
+/// reports three outcomes rather than a `bool`: collapsing this into "found nothing"
+/// would march the walk on through every deeper offset that cannot possibly succeed,
+/// regressing the task-#114 phase-4 BDMV degrade.
+///
+/// `positioned` is load-bearing. Only a reader created by a deep seek can meaningfully
+/// answer "positioned reads not permitted", and only there does the refusal mean *stop
+/// and keep the head best*. From the un-positioned head reader the very same HRESULT is
+/// a genuine failure and must propagate — which is what it did before task #121, when
+/// the head walk's `?` carried it straight out of `poster_inner`.
+fn classify_burst_read(e: DecodeError, positioned: bool) -> Result<ScanOutcome, DecodeError> {
+    if positioned && is_invalid_position(&e) {
+        Ok(ScanOutcome::Stop)
+    } else {
+        Err(e)
+    }
+}
+
+/// One burst: decode up to `limit` frames from `reader`'s current position, judging
+/// each into `best`.
+///
+/// This is the mechanics half of [`PosterBackend::scan`] — the shared driver
+/// ([`crate::poster_walk::walk_poster`]) owns which position a burst starts from and
+/// what each conclusion means. `positioned` says whether `reader` was created by a
+/// deep seek, which is what makes an invalid-position refusal degrade rather than
+/// fail.
+#[allow(clippy::too_many_arguments)]
+unsafe fn burst(
     reader: &IMFSourceReader,
     size: (u32, u32, i32),
+    positioned: bool,
     limit: usize,
-    best: &mut Best,
+    best: &mut Best<(Vec<u8>, u32, u32)>,
     origin: &mut Option<i64>,
     cancel: &AtomicBool,
     deadline: Instant,
-) -> Result<bool, DecodeError> {
+) -> Result<ScanOutcome, DecodeError> {
     let (w, h, stride) = size;
     let video = MF_SOURCE_READER_FIRST_VIDEO_STREAM.0 as u32;
     for _ in 0..limit {
         if cancel.load(Ordering::Relaxed) {
-            return Err(DecodeError::Corrupt("cancelled".into()));
+            return Err(DecodeError::Corrupt("poster walk cancelled".into()));
         }
+        // The driver only checks BETWEEN bursts, so the per-sample check is this
+        // backend's half of the contract: without it a single burst on hostile input
+        // could overrun the watchdog. Expiry keeps the best so far — never an error
+        // (a poster is a background nicety).
         if Instant::now() >= deadline {
-            return Ok(false);
+            return Ok(ScanOutcome::Stop);
         }
         let mut flags = 0u32;
         let mut ts_hns = 0i64;
         let mut sample = None;
-        reader
-            .ReadSample(
-                video,
-                0,
-                None,
-                Some(&mut flags),
-                Some(&mut ts_hns),
-                Some(&mut sample),
-            )
-            .map_err(map_read_err)?;
+        if let Err(e) = reader.ReadSample(
+            video,
+            0,
+            None,
+            Some(&mut flags),
+            Some(&mut ts_hns),
+            Some(&mut sample),
+        ) {
+            return classify_burst_read(map_read_err(e), positioned);
+        }
         if flags & (MF_SOURCE_READERF_ENDOFSTREAM.0 as u32) != 0 {
             break;
         }
         let Some(sample) = sample else { continue };
-        // The head scan's first sample defines the stream origin (deep bursts
+        // The head burst's first sample defines the stream origin (deep bursts
         // arrive with it already set — get_or_insert keeps the first).
         origin.get_or_insert(ts_hns);
         let rgba = sample_to_rgba(&sample, w, h, stride)
@@ -680,80 +791,12 @@ unsafe fn scan(
         // so a white/vignette title card never ends the walk.
         let (good, score) = crate::video::poster_judge(&rgba, w, h);
         if good {
-            best.win(rgba, w, h, ts_hns);
-            return Ok(true);
+            best.win((rgba, w, h), ts_hns);
+            return Ok(ScanOutcome::Good);
         }
-        best.consider(score, rgba, w, h, ts_hns);
+        best.consider_with(score, ts_hns, || (rgba, w, h));
     }
-    Ok(false)
-}
-
-/// Phase 2 of the walk: seek past the intro (feature-film case), shallow → deep,
-/// stopping at the first good frame. Each offset **recreates the reader positioned
-/// there** — a warm HEVC reposition blocks ~1 s (spike), a fresh open is ~86 ms even
-/// over SMB — and retires it off-thread. Returns whether a clearly-good frame landed.
-unsafe fn deep_scan(
-    input: &crate::VideoInput,
-    dims: (u32, u32),
-    duration: Option<Duration>,
-    best: &mut Best,
-    origin_hns: i64,
-    cancel: &AtomicBool,
-    deadline: Instant,
-) -> Result<bool, DecodeError> {
-    let Some(dur) = duration else {
-        return Ok(false);
-    };
-    if dur < POSTER_DEEP_MIN {
-        return Ok(false);
-    }
-    let cap = poster_deep_cap(dur);
-    let mut last = Duration::ZERO;
-    for off in POSTER_SEEK_OFFSETS {
-        let target = off.min(cap);
-        // Skip offsets the head walk already covered (~1 s) and duplicates (a short
-        // clip collapses the deeper offsets onto the cap).
-        if target <= Duration::from_secs(1) || target <= last {
-            continue;
-        }
-        last = target;
-        if cancel.load(Ordering::Relaxed) {
-            return Err(DecodeError::Corrupt("cancelled".into()));
-        }
-        if Instant::now() >= deadline {
-            return Ok(false);
-        }
-        // A seek that won't open (a bad offset) moves to the next offset —
-        // EXCEPT the typed invalid-position refusal (a raw BDMV stream, task
-        // #114 phase 4): no deeper offset can ever succeed there, so stop and
-        // let the accumulated head best serve as the poster.
-        let (reader, w, h, stride) = match reopen_at_rgb32(input, dims, target, origin_hns) {
-            Ok(v) => v,
-            Err(e) if is_invalid_position(&e) => return Ok(false),
-            Err(_) => continue,
-        };
-        let mut deep_origin = Some(origin_hns);
-        let r = scan(
-            &reader,
-            (w, h, stride),
-            POSTER_BURST_FRAMES,
-            best,
-            &mut deep_origin,
-            cancel,
-            deadline,
-        );
-        retire_reader(reader);
-        match r {
-            Ok(true) => return Ok(true),
-            Ok(false) => {}
-            // The post-seek ReadSample refusing positioned reads: same class,
-            // same degrade — the head best survives instead of being discarded
-            // (this `?` used to throw the whole walk's work away).
-            Err(e) if is_invalid_position(&e) => return Ok(false),
-            Err(e) => return Err(e),
-        }
-    }
-    Ok(false)
+    Ok(ScanOutcome::Exhausted)
 }
 
 /// Open a fresh reader, negotiate the same fitted RGB32 output, and position it at
@@ -1181,6 +1224,42 @@ mod tests {
         assert!(!is_invalid_position(&DecodeError::Corrupt(
             "positioned reads refused".into()
         )));
+    }
+
+    /// The classification above says *what* the error is; this says what the WALK does
+    /// with it — the half that had no coverage on either walk site before task #121
+    /// (the driver's `FakeBackend` tests pin the policy, but the MF-specific
+    /// head-vs-positioned distinction is only decidable here).
+    ///
+    /// The asymmetry is deliberate and is the behavior-neutrality contract of phase 2:
+    /// a deep-seek reader's refusal degrades to the head best (#114 phase 4), while the
+    /// identical HRESULT from the head reader stays a hard failure, exactly as the old
+    /// `poster_inner` head `?` made it.
+    #[test]
+    fn only_a_positioned_reader_degrades_on_an_invalid_position_refusal() {
+        let refusal = || {
+            map_read_err(windows::core::Error::from_hresult(windows::core::HRESULT(
+                0xC00D_36E5u32 as i32,
+            )))
+        };
+        // From a deep-seek reader: stop the walk, keep what the head found.
+        assert_eq!(
+            classify_burst_read(refusal(), true).unwrap(),
+            ScanOutcome::Stop
+        );
+        // From the head reader: a genuine failure, propagated.
+        let e = classify_burst_read(refusal(), false).unwrap_err();
+        assert!(is_invalid_position(&e));
+
+        // And nothing else degrades — masking real corruption behind a fallback
+        // poster is worse than no poster.
+        let other = || {
+            map_read_err(windows::core::Error::from_hresult(windows::core::HRESULT(
+                0xC00D_36B4u32 as i32,
+            )))
+        };
+        assert!(classify_burst_read(other(), true).is_err());
+        assert!(classify_burst_read(other(), false).is_err());
     }
 
     /// Focused one-file probe (owner bug reports): walk at the thumb fit vs the

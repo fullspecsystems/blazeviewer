@@ -341,6 +341,36 @@ Backend-level:
    `SeekError`, `FakeBackend`. Nothing wired. Pure addition, zero behavior change.
 2. **MF onto the driver** — delete `deep_scan` + `Best`; implement the trait incl. the
    retirement contract. Windows cross-check + full `pb-decode` suite. **Behavior-neutral.**
+   **DONE 2026-07-19, on Windows** (so not a blind port — risk 1 did not apply).
+   `MfPosterBackend` holds the caller's head reader by **reference** (never retired here;
+   an owned clone would be the second COM ref that drops inline) and the deep-seek reader
+   by value, retired off-thread at the top of the next `seek` — the old per-burst ordering
+   — with a `Drop` impl as the catch-all, and the backend scoped so it drops *before* the
+   final fit rather than holding a reader across it. Two neutrality decisions the rev-2
+   text did not spell out, both now pinned in code comments:
+   - **The invalid-position degrade is gated on `positioned`.** Mapping it to
+     `ScanOutcome::Stop` unconditionally would have changed the HEAD walk, where that
+     HRESULT previously propagated out of `poster_inner` via `?`. Only a deep-seek reader
+     degrades; the head reader still fails hard. Extracted as `classify_burst_read` purely
+     so it is testable without an `IMFSourceReader`, and tested over all four combinations
+     — the walk-site coverage the rev-2 text noted `:1174` never had.
+   - **Only the HEAD burst may define `origin`.** The old code enforced this implicitly by
+     handing each deep burst a pre-set `Some(origin)` it could not overwrite. Stating it
+     directly matters in one corner: if the head decodes nothing at all, the origin must
+     stay unset (→ 0) rather than be redefined by a deep sample, or `PosterChoice` would
+     split the same absolute timestamp differently than today. (Every consumer uses
+     `origin + relative` as a pair, so replay was safe either way — closed anyway, because
+     "behavior-neutral" is this phase's whole contract.)
+
+   **Evidence it is neutral, not just asserted:** the `ab_poster_walk` probe was run over
+   8 real feature films × 2 walk variants (16 walks) **before and after** the refactor.
+   All 16 chosen-frame timestamps are identical (146.2 / 10.4 / 41.7 / 44.0 / 18.0 / 10.4
+   / 10.4 / 40.9 s), 0 pick mismatches, 0 failures. Warm-cache totals: 6126/6163 ms after
+   vs 6200/6197 ms before — no regression. (A first pass appeared ~9% slower purely
+   because the refactor ran cold and the baseline ran warm; re-measured warm-vs-warm.)
+   Workspace: 1483 tests pass, `clippy --workspace --all-targets -D warnings` clean, and
+   the ship-feature build (`libheif,dav1d,ffprobe`) links. **Owner smoke still wanted** —
+   the probe covers the pick, not the on-screen tile.
 3. **FFmpeg, split** (Codex P2-3, for clean bisection):
    - **3a** mechanical port + scRGB judge hoist + `ts_hns`. **DONE 2026-07-19.**
      ⚠ **Deviation from the rev-2 split, recorded honestly:** the driver's *between-burst*
@@ -374,7 +404,8 @@ mechanical-vs-semantic.
 
 ## Success criteria
 
-1. `deep_scan` and `Best` exist **exactly once** in the repo.
+1. `deep_scan` and `Best` exist **exactly once** in the repo. ✅ **Met 2026-07-19** —
+   `fn deep_scan` no longer exists anywhere; `struct Best` is only `poster_walk.rs:65`.
 2. Every poster judging threshold, and the one rational→hns conversion, live in `video.rs`.
 3. All three backends reach posters through `walk_poster`.
 4. The walk policy has real unit tests (it has none today), including both invalid-position
