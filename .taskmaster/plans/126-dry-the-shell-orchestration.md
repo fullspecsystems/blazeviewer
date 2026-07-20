@@ -61,7 +61,18 @@ history — none of it is live state.
 
 | area | machine | since |
 |---|---|---|
-| *(nothing claimed — both idle)* | | |
+| **Step 2 shell migration — BOTH shells + winit's Scanning-dialog deletion** | **macOS** | 2026-07-20 ~16:20 MDT |
+
+⛔ **Windows: please do not start step 2 shell work.** Not a turf claim — a structural one.
+This piece touches `pb-app` *and* `pb-mac-ffi` in one change, and only a Mac can compile both
+(`pb-mac-ffi` natively, `pb-app` via the `x86_64-pc-windows-msvc` cross-check). A Windows
+session cannot finish it: it would land the winit half green and owe the mac half as
+cross-platform debt — precisely the failure this ledger exists to stop.
+
+**What Windows is needed for, once this lands:** a *run*. Open a password-protected archive
+(correct password, then a wrong one, then cancel at the prompt), open a large `.7z` and cancel
+mid-load, and open a plain `.zip` (the synchronous fast path). Those cannot be checked from
+here at all.
 
 ### Next
 
