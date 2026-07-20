@@ -52,7 +52,7 @@ use crate::panels::{
 use crate::pb_key::PbKey;
 use crate::video_native::ActiveVideoBackend;
 use crate::{
-    settings, slideshow, timing, Action, AppCore, FitStash, InspectorTab, NativeToast, Nav, Panels,
+    settings, timing, Action, AppCore, FitStash, InspectorTab, NativeToast, Nav, Panels,
     SlotContent, Toast, ToastIcon, UndoAction,
 };
 
@@ -145,7 +145,7 @@ impl AppCore {
             // Derived from the settings model like the real shell (main.rs), not a
             // separate literal that can drift from `Settings::default()`.
             initial_delay: Duration::from_millis(settings.hold_delay_ms as u64),
-            slideshow: slideshow::Slideshow::default(),
+            slideshow: crate::slideshow::Slideshow::default(),
             mods: contract::Modifiers::NONE,
             esc_guard_until: None,
             persist_prefs: false, // headless/tests: never write the real settings.toml
@@ -3205,7 +3205,8 @@ impl AppCore {
         }
         if let Some(ss) = self.launch.slideshow {
             if let Some(secs) = ss.interval_secs {
-                self.slideshow.interval = slideshow::clamp_interval(Duration::from_secs_f64(secs));
+                self.slideshow.interval =
+                    crate::slideshow::clamp_interval(Duration::from_secs_f64(secs));
             }
             self.slideshow.on = true;
             self.last_present = Some(self.now);
@@ -7741,7 +7742,7 @@ impl AppCore {
     /// slideshow's current slide gets more / less remaining time immediately.
     pub fn adjust_slideshow(&mut self, steps: i32) {
         let interval = self.slideshow.adjust(steps);
-        self.show_toast(&slideshow::format_interval(interval));
+        self.show_toast(&crate::slideshow::format_interval(interval));
     }
 
     /// The current slideshow interval, formatted for display (e.g. `4s`, `0.5s`) — the
@@ -7749,7 +7750,7 @@ impl AppCore {
     /// slideshow control (task #55). Reflects live adjustments, not just the configured
     /// default, since it reads the running `slideshow.interval`.
     pub fn slideshow_interval_display(&self) -> String {
-        slideshow::format_interval(self.slideshow.interval)
+        crate::slideshow::format_interval(self.slideshow.interval)
     }
 
     /// Request the native picker (`O` = file(s), `Shift+O` = folder). Computes the start
