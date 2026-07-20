@@ -35,6 +35,11 @@ match `THIRD-PARTY-NOTICES.md`.
 
 ## Not covered here
 
+- **Sparkle** (macOS auto-update, MIT) — deliberately not in this folder, because everything
+  here is copied to Windows and Linux too and Sparkle is macOS-only. Its `LICENSE` is staged
+  into the app bundle as `sparkle-LICENSE.txt` at build time, copied from the resolved SwiftPM
+  artifact so it tracks `mac/Package.resolved` automatically (`scripts/build-swift-host.sh`,
+  which hard-fails if it is missing). See `THIRD-PARTY-NOTICES.md`.
 - **Rust crates** — predominantly MIT/Apache-2.0. A generated inventory (`cargo about`) is still
   an open item; see `THIRD-PARTY-NOTICES.md`.
 - **OS codecs** (Windows WIC / Media Foundation, macOS Image I/O + VideoToolbox) — components of

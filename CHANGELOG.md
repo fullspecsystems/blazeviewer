@@ -210,6 +210,10 @@ automatically on the next archive in the folder. Nothing is ever unpacked to dis
 
 ### Fixed
 
+- **The About panel on macOS now carries its open-source attribution.** It credits FFmpeg and
+  its GNU LGPL v2.1 license and points at the full license texts inside the app bundle, which
+  Windows and Linux already did. The bundle also now includes Sparkle's license text alongside
+  the others.
 - **Movie thumbnails appear almost immediately instead of after a minute of blank placeholders.** A film's poster is now kept as its thumbnail the moment it's generated, even with the thumbnail strip closed, so opening the strip shows the films you've already browsed past straight away rather than re-scanning every one of them (macOS and Linux; Windows already worked this way). Measured over a network share: first thumbnail 0.2 s, down from roughly a minute.
 - **Films are no longer scanned twice over the network (macOS and Linux).** Every film in view
   was being scanned once for its main poster and again, at the same time, for its thumbnail —

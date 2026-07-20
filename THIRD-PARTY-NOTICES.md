@@ -22,6 +22,7 @@ missing rather than shipping a binary without them:
 | libde265 | 1.1.1 | same vcpkg commit |
 | dav1d | 1.5.3 | same vcpkg commit |
 | FFmpeg | **8.1.2** on Windows (vcpkg) · **8.1.1** on macOS (pinned tarball + sha256 in `scripts/build-ffmpeg-macos.sh`) | as noted |
+| Sparkle (macOS only) | 2.9.4 | `mac/Package.resolved` (SwiftPM) |
 
 Linux takes libheif/FFmpeg from the build distro and bundles the resulting shared objects, so
 its versions track that distro rather than the vcpkg pin.
@@ -108,6 +109,30 @@ ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ```
+
+## Sparkle (macOS auto-update) — MIT
+
+Embedded as `Sparkle.framework` in `Blaze Viewer.app/Contents/Frameworks` (task #65). **macOS
+only** — Windows updates via Velopack and Linux via the self-updating AppImage, so no other
+platform carries it. Homepage: https://sparkle-project.org
+
+MIT asks only that the copyright notice and permission notice travel with the binary; there is
+no relink or source obligation, and no on-screen notice requirement (unlike the LGPL libraries
+above, which is why the About panel names FFmpeg but not Sparkle). The version is pinned by
+`mac/Package.resolved` rather than a build script, so it moves when that file does.
+
+Its `LICENSE` also carries the notices for the code Sparkle vendors — **bsdiff 4.3**
+(BSD-2-Clause, © 2003-2005 Colin Percival) and **sais-lite** (MIT) — so shipping that one file
+verbatim discharges all three at once. It is copied into `Contents/Resources/licenses/
+sparkle-LICENSE.txt` straight from the resolved SwiftPM artifact that gets embedded, so it
+cannot drift from the version actually shipped; `scripts/build-swift-host.sh` hard-fails if it
+is missing.
+
+> Historical note: Sparkle was bundled from task #65 but appeared in neither this file nor the
+> app bundle's `licenses/` folder until task #77 — the same per-artifact gap as the macOS
+> attribution, found the same way. The bundle-time guard in `scripts/build-swift-host.sh` now
+> walks `Contents/Frameworks` and fails on any binary whose license text is not staged, which
+> covers frameworks and dylibs alike.
 
 ## libheif (HEIF/HEIC container) — LGPL-3.0-or-later
 

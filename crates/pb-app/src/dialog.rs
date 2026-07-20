@@ -1311,6 +1311,12 @@ fn bundled_libraries() -> Vec<(&'static str, &'static str)> {
 /// LGPL-3.0 §4(c) requires is a *pointer to the copies*, so this has to name a real path —
 /// and the release scripts put them exactly here (`release-windows.ps1`,
 /// `build-swift-host.sh`, `release-linux.sh`).
+///
+/// ⚠ The macOS arm is effectively dead code: the Mac ships the SwiftUI host in `mac/` and
+/// never links `pb-app`. Its live counterpart is `aboutPanelOptions()` in
+/// `mac/Sources/BlazeViewerMac/CoreModel.swift`, guarded at bundle time by
+/// `scripts/build-swift-host.sh`. Changing the notice here does NOT change what Mac users
+/// see — update both.
 const LICENSE_DIR_HINT: &str = if cfg!(target_os = "macos") {
     "Full license texts are inside the app bundle, in Contents/Resources/licenses."
 } else if cfg!(target_os = "linux") {

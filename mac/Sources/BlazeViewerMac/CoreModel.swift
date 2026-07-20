@@ -1252,8 +1252,23 @@ final class CoreModel {
 
     /// Extras for the standard About panel, matching the egui About card's content:
     /// the git build stamp (PBBuildID from Info.plist, stamped by build-swift-host.sh)
-    /// shown as "Version X.Y.Z (hash)", and a credits block with the tagline and a
-    /// clickable GitHub link. Name, icon, version, and copyright come from the bundle.
+    /// shown as "Version X.Y.Z (hash)", and a credits block with the tagline, a
+    /// clickable GitHub link, and the bundled-library attribution. Name, icon,
+    /// version, and copyright come from the bundle.
+    ///
+    /// The attribution is a licence condition, not courtesy (task #77). LGPL-2.1 §6
+    /// asks for a prominent notice naming the Library plus a reference to the licence
+    /// copies, and this panel prints a copyright line, so it is the work that carries
+    /// it. The winit shell satisfies the same obligation in
+    /// `crates/pb-app/src/dialog.rs` (`bundled_libraries` / `LICENSE_DIR_HINT`) — keep
+    /// the two in step, but **not** by copying that list: it is feature-derived for
+    /// Windows and names libheif, libde265, and dav1d, none of which macOS links.
+    /// `pb-decode/build.rs` excludes macOS from libheif (HEIC decodes via Image I/O)
+    /// and gates dav1d on Windows alone (AVIF likewise goes through Image I/O here),
+    /// so FFmpeg is the only attributable native library in `Contents/Frameworks`.
+    /// Naming any of the others would be a false attribution, which is its own
+    /// defect. Verify against a real artifact before editing this list:
+    /// `ls "Blaze Viewer.app/Contents/Frameworks/"`.
     private static func aboutPanelOptions() -> [NSApplication.AboutPanelOptionKey: Any] {
         var options: [NSApplication.AboutPanelOptionKey: Any] = [:]
         if let build = Bundle.main.object(forInfoDictionaryKey: "PBBuildID") as? String,
@@ -1276,6 +1291,21 @@ final class CoreModel {
                 attributes: [
                     .font: NSFont.systemFont(ofSize: NSFont.smallSystemFontSize),
                     .link: URL(string: "https://blazeviewer.app")!,
+                    .paragraphStyle: center,
+                ]))
+        // Fine print: secondary colour so it reads as attribution rather than competing
+        // with the tagline. The path named here is real and staged by
+        // build-swift-host.sh, which hard-fails if the LGPL text is missing.
+        credits.append(
+            NSAttributedString(
+                string: """
+                    \n\nFFmpeg \u{a9} the FFmpeg developers (GNU LGPL v2.1)
+                    Full license texts are inside the app bundle, in \
+                    Contents/Resources/licenses.
+                    """,
+                attributes: [
+                    .font: NSFont.systemFont(ofSize: NSFont.smallSystemFontSize),
+                    .foregroundColor: NSColor.secondaryLabelColor,
                     .paragraphStyle: center,
                 ]))
         options[.credits] = credits

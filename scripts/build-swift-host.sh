@@ -180,6 +180,23 @@ echo "==> Embedding Sparkle.framework"
 mkdir -p "$APP_DIR/Contents/Frameworks"
 cp -R "$SPARKLE_FW" "$APP_DIR/Contents/Frameworks/"
 
+# Sparkle's license text (task #77). MIT: "The above copyright notice and this permission
+# notice shall be included in all copies or substantial portions of the Software" — we ship
+# the framework binary, so that notice has to travel with it. Its LICENSE also carries the
+# vendored bsdiff (BSD-2-Clause) and sais-lite (MIT) notices, so the verbatim file covers
+# all three at once.
+#
+# Sourced from the resolved artifact rather than a checked-in copy: it sits beside the very
+# xcframework being embedded, so it cannot drift from the version that ships when
+# Package.resolved moves. That is exactly the staleness licenses/README.md warns about
+# ("when a pinned version moves, re-copy these"), avoided by construction. It is also why
+# this is NOT in repo licenses/ — that folder is copied to Windows and Linux too, and
+# Sparkle is macOS-only.
+SPARKLE_LICENSE="$(dirname "$(dirname "$(dirname "$SPARKLE_FW")")")/LICENSE"
+[ -f "$SPARKLE_LICENSE" ] ||
+	{ echo "error: Sparkle LICENSE not found at $SPARKLE_LICENSE — MIT requires the copyright notice ship with the binary, and Sparkle.framework is embedded. Check the artifact layout after a Sparkle version bump." >&2; exit 1; }
+cp "$SPARKLE_LICENSE" "$APP_DIR/Contents/Resources/licenses/sparkle-LICENSE.txt"
+
 # --bundle-ffmpeg: make the .app self-contained (no Homebrew FFmpeg dependency). Builds the
 # pinned LGPL FFmpeg on first run, copies its dylibs into Frameworks, rewrites the binary's
 # load commands to @rpath, and audits the closure. DEV-ONLY (ad-hoc signed).
@@ -192,6 +209,44 @@ if [[ "$BUNDLE_FFMPEG" == "1" ]]; then
 	echo "==> Bundling FFmpeg into $APP_DIR (self-contained)"
 	"$REPO_ROOT/scripts/bundle-ffmpeg-macos.sh" "$APP_DIR" --libdir "$FF_LIBDIR"
 fi
+
+# Attribution drift guard (task #77). The obligation is PER-ARTIFACT, but it used to be
+# enforced only by a unit test in crates/pb-app — the winit shell, which macOS never
+# builds. A green test suite therefore "proved" a notice the Mac never showed, and every
+# DMG through 0.3.0 shipped without it. So check the thing that actually ships: walk
+# Contents/Frameworks and hold every bundled third-party binary to its license's terms.
+#
+# Two DIFFERENT obligations, deliberately not conflated:
+#   LICENSE  — the text must ship (all of them: LGPL-2.1 §6, MIT, BSD-2-Clause).
+#   CREDITS  — the name must appear in the About panel. Only copyleft needs this;
+#              LGPL binds a work that "displays copyright notices during execution" to
+#              carry the Library's among them. MIT/BSD ask for the notice in the
+#              distribution, not on screen, so demanding a credits line for Sparkle
+#              would be inventing a requirement.
+#
+# Matching is family-level (libavcodec.62.dylib -> "libav*" -> FFmpeg), so a soname or
+# version bump does not trip it. Anything unrecognised hard-fails rather than being
+# waved through — that is the case this exists to catch.
+CREDITS_SRC="$REPO_ROOT/mac/Sources/BlazeViewerMac/CoreModel.swift"
+LIC_DIR="$APP_DIR/Contents/Resources/licenses"
+for item in "$APP_DIR/Contents/Frameworks"/*; do
+	[ -e "$item" ] || continue
+	base="$(basename "$item")"
+	case "$base" in
+		# name-in-credits | license file that must be present
+		libav*|libsw*|libpostproc*) need_credit="FFmpeg";  need_lic="ffmpeg-COPYING.LGPLv2.1.txt" ;;
+		libheif*|libde265*)         need_credit="libheif"; need_lic="libheif-COPYING.txt" ;;
+		libdav1d*)                  need_credit="";        need_lic="dav1d-COPYING.txt" ;;
+		Sparkle.framework)          need_credit="";        need_lic="sparkle-LICENSE.txt" ;;
+		# Unknown: fail loudly rather than guess. If it is genuinely notice-free, add it
+		# here explicitly with the reason.
+		*) echo "error: $base is bundled but this guard does not know its attribution. Add it to the case in $0 with its license file, and name it in aboutPanelOptions() if its license requires an on-screen notice." >&2; exit 1 ;;
+	esac
+	[ -f "$LIC_DIR/$need_lic" ] ||
+		{ echo "error: $base ships in Contents/Frameworks but $need_lic is missing from Contents/Resources/licenses. Its license requires the text to travel with the binary." >&2; exit 1; }
+	[ -z "$need_credit" ] || grep -q "$need_credit" "$CREDITS_SRC" ||
+		{ echo "error: $base ships in Contents/Frameworks but '$need_credit' is not named in the About panel credits ($CREDITS_SRC). LGPL requires a prominent notice in the work that displays copyright." >&2; exit 1; }
+done
 
 echo "==> Done: $APP_DIR"
 if [[ "$RUN" == 1 ]]; then
