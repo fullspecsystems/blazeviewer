@@ -1540,8 +1540,8 @@
           {
             "id": 1,
             "title": "Move the dir-scan lifecycle into AppCore (the pattern in miniature)",
-            "description": "5 functions, one dialog kind, no password path, no retry: spawn, pump, supersede-by-generation, cancel, reveal-after-delay. State-machine tests first. Both shells must lose their DirScan struct, their SCAN_DIALOG_DELAY, and ~150 lines each. Gate on a real macOS run before subtask 2 begins. [2026-07-20: DONE on both shells. Core owns spawn+pump+status (a78bfddd); mac \u2212202/+82 (71f78e01); winit \u2212270/+102 (f3ca4795), which also unified winit onto the ambient pill per owner call. Verified: 851 core + 36 mac tests, macOS app runs, winit cross-checked clippy-clean for x86_64-pc-windows-msvc. REVIEW = owner smoke: macOS pill/Cancel/quit-mid-scan, and Windows pill incl. the pre-bootstrap phase + cancel-with-empty-deck.]",
-            "status": "review"
+            "description": "5 functions, one dialog kind, no password path, no retry: spawn, pump, supersede-by-generation, cancel, reveal-after-delay. State-machine tests first. Both shells must lose their DirScan struct, their SCAN_DIALOG_DELAY, and ~150 lines each. Gate on a real macOS run before subtask 2 begins. [2026-07-20: DONE on both shells. Core owns spawn+pump+status (a78bfddd); mac \u2212202/+82 (71f78e01); winit \u2212270/+102 (f3ca4795), which also unified winit onto the ambient pill per owner call. Verified: 851 core + 36 mac tests, macOS app runs, winit cross-checked clippy-clean for x86_64-pc-windows-msvc. REVIEW = owner smoke: macOS pill/Cancel/quit-mid-scan, and Windows pill incl. the pre-bootstrap phase + cancel-with-empty-deck.] [2026-07-20 CLOSED: owner smoke-tested BOTH platforms \u2014 macOS unchanged (the pass condition for a pure-DRY move), Windows builds and looks correct incl. the unified pill. Windows native clippy -D warnings + tests green on the self-hosted runner. Remaining cleanup: delete the retained #[allow(dead_code)] Scanning dialog from pb-app, now that its revert-safety reason has expired.]",
+            "status": "done"
           },
           {
             "id": 2,

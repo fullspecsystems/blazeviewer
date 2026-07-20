@@ -415,13 +415,37 @@ silent regression in one direction or a double-cancel in the other.
 | Step 1 — core owns spawn + pump + status query | ✅ `a78bfddd` |
 | Step 1 — **mac rewired** | ✅ `71f78e01`, **−202/+82**, 36 tests green, app runs |
 | Step 1 — **winit rewired** | ✅ `f3ca4795`, **−270/+102**, clippy-clean cross-checked |
-| Step 1 — owner interactive smoke | ⏳ pending — macOS (pill, Cancel, quit mid-scan) **and Windows** (§12.8) |
+| Step 1 — owner interactive smoke | ✅ **both platforms, 2026-07-20** — macOS unchanged (the pass condition), Windows builds and looks correct |
 | Step 2 — archive-open | ⏸ not started; read §12.6 first |
 
 **The DRY win is real.** Both copies of the dir-scan lifecycle are deleted; the surviving
 implementation is the tested core one. Net ≈ −290 lines across the two shells.
 
-### 12.8 What is NOT verified, and what would catch it
+### 12.8 RESOLVED — verification ledger, closed 2026-07-20
+
+All four lanes came back green for this change. Kept as a record of what was actually checked
+rather than assumed.
+
+| lane | result |
+|---|---|
+| macOS build + run + 36 tests | ✅ here |
+| macOS interactive (owner) | ✅ "looks and works the same as always" — which **is** the pass condition: that migration was pure DRY with no intended behaviour change |
+| Windows native `clippy -D warnings` + tests | ✅ self-hosted CI run `29753422401` |
+| Windows cross-check from the Mac | ✅ clippy-clean for `x86_64-pc-windows-msvc` |
+| Windows interactive (owner) | ✅ "builds and looks correct" — this is the one CI could never answer |
+
+⚠ **CI caveat worth remembering:** that same run shows `windows`, `windows-arm64` and
+`linux-gate` red, and **none of it is this change**. `pb-decode`'s
+`plain_fixtures_have_no_dovi_summary` fails with `FFmpeg decoder: Decoder not found`
+identically in run `29716604750` from 10 hours earlier (same test, same `337 passed; 1
+failed`), and `linux-gate` was failing only because OrbStack was not running. Read the *step*
+results, not the job conclusion, on this repo right now.
+
+**Consequence:** the retained `DialogRequest::Scanning` + `dialog.rs` Scanning view were kept
+`#[allow(dead_code)]` only until this confirmation. It has arrived, so they are now deletable —
+that is the first thing the next commit does.
+
+#### The original ledger (what was open before)
 
 Honest ledger, because the §8 gate is "exercised, not assumed":
 
