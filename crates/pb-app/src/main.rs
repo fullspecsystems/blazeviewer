@@ -956,7 +956,7 @@ impl App {
             pending_video_bytes: None,
             pending_poster_bytes: std::collections::HashMap::new(),
             poster_req_seq: 0,
-            poster_inflight: std::collections::HashSet::new(),
+            poster_inflight: std::collections::HashMap::new(),
             poster_read_tx,
             poster_read_rx,
             video_read_tx,
