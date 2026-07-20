@@ -11,7 +11,10 @@ with any pre-release suffix carried only by the tag.
 
 - Opening an archive no longer flashes a progress spinner for a split second. The "Opening…"
   window now appears only if the archive actually takes a moment to open, the way folder
-  scanning has always worked.
+  scanning has always worked. It also waits a little longer than the folder pill does before
+  appearing, since it is a window rather than a quiet corner badge.
+- The password box no longer draws its "Checking…" spinner underneath the buttons when you
+  retry after a wrong password.
 - After a wrong password, the cursor stays in the password box on macOS, so you can just type
   the next attempt instead of clicking back into the field first.
 - Entering the wrong password for an encrypted archive now tells you so, instead of silently

@@ -120,9 +120,28 @@ pub struct ArchiveStatus {
 /// (owner-reported 2026-07-20). Chrome that appears and vanishes faster than the eye resolves is
 /// worse than no chrome — it reads as a glitch.
 ///
-/// Same 250 ms as the scan delay, deliberately: they are the same judgement about the same
-/// human, and two different numbers would only invite drift.
-pub const LOADING_DIALOG_DELAY: Duration = Duration::from_millis(250);
+/// **500 ms, deliberately longer than the scan pill's 250 ms** (owner call 2026-07-20). The
+/// previous value was 250 ms with the note *"the same judgement about the same human, and two
+/// different numbers would only invite drift"* — that reasoning is answered rather than
+/// ignored: it is **not** the same judgement, because the two surfaces cost the user
+/// differently.
+///
+/// * The scan pill is **ambient** — a small non-blocking pill in the corner. Showing it early
+///   is nearly free, so a low bar is right.
+/// * This is a **modal dialog window**. It takes focus and interrupts. A higher bar for
+///   interrupting than for informing is principled, not drift.
+///
+/// Why 500 and not more: past roughly a second a user starts wondering whether the machine is
+/// working at all, so the indicator has to arrive comfortably before that. 500 ms sits in the
+/// band where it reassures without ever being the reason you waited.
+///
+/// ⚠ **Do not "fix" the residual boundary flash with a minimum display duration.** An open
+/// that lands just past the gate still paints and closes quickly, and the standard cure is to
+/// hold the dialog open for a few hundred ms once shown. That was considered and **rejected**:
+/// it trades a few ms of visual blip for a real, deliberate delay on every slow-ish open, in an
+/// app whose whole thesis is that the next action feels instant. Raising the gate makes the
+/// case rarer at zero cost; holding the dialog makes every affected open genuinely slower.
+pub const LOADING_DIALOG_DELAY: Duration = Duration::from_millis(500);
 
 /// The archive's display name for a headline: its file name, else a stable word.
 ///

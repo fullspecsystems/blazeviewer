@@ -19041,8 +19041,17 @@ mod tests {
         assert_eq!(s.name, "holiday.7z");
         assert!(!s.slow, "a fresh open warrants no chrome yet");
 
-        core.now += crate::dir_scan::SCAN_DIALOG_DELAY;
-        assert!(core.archive_status().unwrap().slow);
+        // Pin the ARCHIVE's own delay, not the scan pill's. This test previously advanced by
+        // SCAN_DIALOG_DELAY and passed only because the two constants happened to be equal;
+        // they diverged on 2026-07-20 (the modal dialog earns a higher bar than the ambient
+        // pill) and this is what caught it.
+        core.now += crate::archive_open::LOADING_DIALOG_DELAY - Duration::from_millis(1);
+        assert!(
+            !core.archive_status().unwrap().slow,
+            "just under the gate: still no chrome"
+        );
+        core.now += Duration::from_millis(1);
+        assert!(core.archive_status().unwrap().slow, "at the gate: reveal");
 
         core.cancel_archive_load();
         assert!(core.archive_status().is_none());

@@ -1580,28 +1580,46 @@ fn password_dialog(
                     if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                         result = Some(true);
                     }
-                    // The error row is ALWAYS laid out and only its colour changes, so a
-                    // wrong password does not shove everything below it down mid-retry
-                    // (owner nitpick, 2026-07-20). Same reserve-the-row trick the scan pill
-                    // uses for its sub-folder line.
+                    // ONE reserved status row — checking, or an error, or nothing. Two
+                    // things depend on it being exactly one row, always laid out:
+                    //
+                    // * **Always laid out**, so a wrong password does not shove everything
+                    //   below it down mid-retry (owner nitpick, 2026-07-20). Same
+                    //   reserve-the-row trick the scan pill uses for its sub-folder line.
+                    // * **Never two rows.** `set_password_error` clears `checking`, but
+                    //   `set_checking(true)` does NOT clear `password_error` — so the ordinary
+                    //   retry path (wrong password → error shown → retype → submit) had BOTH
+                    //   an error row and a "Checking…" row live at once. In a fixed 500x250
+                    //   window with a bottom button bar there is no room for both, and the
+                    //   spinner rendered underneath the buttons (owner-reported on Windows
+                    //   2026-07-20; the same untraced "bottom-left spinner" the macOS session
+                    //   had noticed and not explained).
+                    //
+                    // The height is pinned to one text line so the row cannot resize as it
+                    // changes state — a spinner is not exactly a line of text tall.
                     ui.add_space(12.0);
-                    ui.colored_label(
-                        match error {
-                            Some(_) => egui::Color32::from_rgb(220, 90, 90),
-                            // Transparent rather than skipped: it still occupies its row.
-                            None => egui::Color32::TRANSPARENT,
-                        },
-                        // A non-empty placeholder so the row has a real text height.
-                        error.unwrap_or(" "),
-                    );
-                    if checking {
-                        ui.add_space(12.0);
+                    let row_h = ui.text_style_height(&egui::TextStyle::Body);
+                    ui.allocate_ui(egui::vec2(ui.available_width(), row_h), |ui| {
                         ui.horizontal(|ui| {
-                            ui.spinner();
-                            ui.add_space(6.0);
-                            ui.label("Checking…");
+                            if checking {
+                                // Checking wins: it is the live state, and the error it may
+                                // be retrying is now stale.
+                                ui.spinner();
+                                ui.add_space(6.0);
+                                ui.label("Checking\u{2026}");
+                            } else {
+                                ui.colored_label(
+                                    match error {
+                                        Some(_) => egui::Color32::from_rgb(220, 90, 90),
+                                        // Transparent, not skipped: it still holds its row.
+                                        None => egui::Color32::TRANSPARENT,
+                                    },
+                                    // Non-empty placeholder so the row has real text height.
+                                    error.unwrap_or(" "),
+                                );
+                            }
                         });
-                    }
+                    });
                 },
             );
         });

@@ -19,7 +19,56 @@ contract vocabulary — so move the lifecycle in and let both shells become even
 Read this first; write it last. Everything below this section is durable design rationale or
 history — none of it is live state.
 
-**Last updated:** 2026-07-20, macOS session, at `8f69b709`.
+**Last updated:** 2026-07-20, **Windows session**, after the encrypted-archive smoke test.
+
+### Windows smoke test — DONE, with two defects found and fixed
+
+The step-2 winit shell had never been executed. It has now been, by the owner, against
+`D:\Media\2002-password-is-test.7z` and `D:\Media\Pictures.zip`.
+
+| *Not verified* item | result |
+|---|---|
+| 1 · wrong-password inline error | ✅ shows correctly |
+| 2 · layout must not shift | ✅ stable |
+| 7 · focus returns to the field | ✅ |
+| 8 · no spinner flash on a fast open | ⚠️ see *boundary flash* below |
+
+**Defect 1 — the "Checking…" spinner rendered under the button bar. FIXED.**
+`set_password_error` clears `checking`, but `set_checking(true)` does **not** clear
+`password_error` — so the ordinary retry path (wrong password → error shown → retype →
+submit) had *both* live at once. Since `428b160c` made the error row always laid out, that
+became two stacked rows in a fixed 500x250 window with a bottom button bar, and the spinner
+overflowed underneath it. Collapsed into **one reserved status row** (checking wins, else the
+error, else a transparent placeholder), height pinned to one text line via `allocate_ui` so
+the row cannot resize as it changes state. Owner-confirmed: *"a much nicer design."*
+
+⚠ **This is NOT the macOS untraced bottom-left spinner.** That one appears during a *quick
+open* with no password dialog involved; this one only while a password is being verified.
+Same description, different trigger — **the macOS one is still open and still untraced.**
+
+**Defect 2 — boundary flash. FIXED by raising the gate, not by a minimum display time.**
+`LOADING_DIALOG_DELAY` 250 → **500 ms**. An open landing at ~252 ms cleared the gate, painted,
+and closed ~2 ms later.
+
+- ⚠️ **Do not "fix" the residual flash with a minimum display duration.** Considered and
+  rejected: it trades a few ms of blip for a real, deliberate delay on every slow-ish open,
+  which is the wrong direction for this codebase. The rationale is in the constant's doc
+  comment — read it before changing the value.
+- The old comment argued this constant must stay equal to `SCAN_DIALOG_DELAY` (*"the same
+  judgement about the same human"*). That is answered, not ignored: the pill is **ambient**,
+  this is a **modal window**, and a higher bar for interrupting than for informing is
+  principled. Both numbers now carry the reasoning.
+- `archive_status_tracks_the_open` was advancing by `SCAN_DIALOG_DELAY` in an *archive* test
+  and only passed because the constants were equal. Now pins its own delay, both sides of it.
+
+**Worth knowing:** a plain `.zip` normally opens on the *synchronous* fast path where no
+dialog is possible at all. It only goes async when `will_autotry` is true — i.e. **the session
+password cache is non-empty**. So the flash was partly an artifact of testing an encrypted
+archive first; on a fresh launch the same 8.5 MB zip shows nothing.
+
+**Still not run on Windows:** *Not verified* items 3–6 (session MRU auto-try on a second
+archive, Cancel mid-load on a large `.7z`, plain-`.zip` fast path from a *fresh* session, and
+scan-over-archive supersession).
 
 ### Verified — what was actually run, and where
 
