@@ -276,3 +276,58 @@ behavioural proof:
   the core before #125 removes them. Expect the file to get slightly worse before it gets
   better; that is the correct order anyway, because moving these flows in first means #125
   sorts them into the right cluster once instead of twice.
+
+---
+
+## 11. Findings from the first working session (2026-07-19, unattended)
+
+Recorded as they were verified, so the next session does not re-derive them.
+
+### 11.1 The audit's cross-cancel claim is FALSE — correct it at the source
+
+Audit finding #3 / task #109 item 1 claims *"the mac shell still lacks the cross-cancel that
+Windows got in `8293a662`"*, and §4 of this plan carried it forward as unverified. **It is
+wrong.** `pb-mac-ffi`'s `begin_archive_open` contains the cross-cancel with an explicit
+citation:
+
+> Cross-type supersession (#109 item 1, winit parity — `8293a662`) … supersedes the scan too.
+
+So macOS is at parity here. This removes the one concrete benefit §4 hoped to claim for
+#126, and the task must not be justified on it. **Fix `technical-debt-audit.md` finding #3
+and task #109 item 1.**
+
+### 11.2 A real (harmless today) asymmetry in `cancel_dir_scan`
+
+- **macOS** clears the handle *inside* `cancel_dir_scan` (`self.dir_scan = None;`).
+- **winit** does not; its comment claims *"Every cancel path clears `dir_scan` immediately
+  after"* — and **two of its five call sites do not** (`begin_dir_scan`, which replaces the
+  handle anyway, and `clear_session_state`, which is teardown).
+
+So the behaviour is equivalent today and there is **no live bug** — but winit's version is
+correct only by a call-site convention its own comment overstates, while macOS's is correct
+by construction. **When unifying, adopt the macOS shape** (clear inside the function). This
+is a good example of the drift hazard being real without a bug being present.
+
+### 11.3 Codex's "injectable clock" requirement was already half-met
+
+`AppCore::now` already exists and is stamped by the shells once per event (NS0 5.5), and 18
+existing test sites already drive it. So no `Clock` trait is needed — the state machines just
+have to take `now` as a parameter instead of calling `Instant::now()`. `BackgroundOps` does
+this. What is *not* yet solved is the injectable **worker runtime** (deterministic completion
+points for "cancel mid-walk" / "teardown in flight"), which remains open.
+
+### 11.4 Status at end of session
+
+| item | state |
+|---|---|
+| Plan rev 2 (Codex round 1 folded) | ✅ on `main` |
+| Phase 0 — `BackgroundOps` coordinator + 7 tests | ✅ on `feat/126-dry-shell-orchestration` |
+| Phase 0 — identity-stamped dialogs (Codex P0) | ❌ not started |
+| Phase 0 — injectable worker runtime | ❌ not started |
+| Phase 0 — wake contract | ❌ not started |
+| Step 1 half A — dir-scan into the core, winit rewired | ❌ not started |
+| Step 1 half B — mac rewired | ⛔ **impossible from this machine** (§0) |
+
+`BackgroundOps` is additive and wired to nothing, so the branch is safe to leave or discard.
+The next session should do identity-stamped dialogs (the P0) before moving dir-scan, since
+retrofitting dialog identity after the flow moves is the painful order.
