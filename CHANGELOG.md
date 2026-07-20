@@ -7,6 +7,13 @@ with any pre-release suffix carried only by the tag.
 
 ## [Unreleased]
 
+### Fixed
+
+- Entering the wrong password for an encrypted archive now tells you so, instead of silently
+  clearing the box and leaving you guessing. This only ever worked for plain `.zip` files; for
+  `.7z` and the tar family — and any archive unlocked by a remembered password — the message
+  was suppressed.
+
 ### Changed
 
 - Scanning a big folder on Windows and Linux now shows the same unobtrusive progress pill as
@@ -24,6 +31,8 @@ with any pre-release suffix carried only by the tag.
   already loaded.
 - Opening a password-protected archive no longer blows the toolbar and panels up to a huge,
   stretched size. They stayed that way until you resized the window; now they don't.
+- The About box's tagline now mentions video, not just images, and the FFmpeg license line no
+  longer wraps awkwardly mid-parenthetical on macOS.
 
 ## [0.3.0] - 2026-07-19
 
