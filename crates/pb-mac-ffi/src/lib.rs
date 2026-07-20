@@ -1618,6 +1618,20 @@ impl AppCoreHandle {
         self.core.info_line_codec()
     }
 
+    /// The displayed item's decode-failure reason (task #127): non-empty when the
+    /// current file could not be decoded by any rung of the ladder. The host shows a
+    /// "can't display this image" placeholder over the canvas with this as the
+    /// subtitle; empty means the image decoded (possibly recovered).
+    fn current_decode_error(&self) -> String {
+        self.core.current_decode_error()
+    }
+
+    /// The displayed item's bare file name — the "can't display this image" placeholder
+    /// names the file (task #127).
+    fn current_file_name(&self) -> String {
+        self.core.current_file_name()
+    }
+
     /// Whether the current photo is a Live Photo — the host shows the livephoto mark by the
     /// codec instead of "Live" text.
     fn info_line_is_live(&self) -> bool {
@@ -4760,6 +4774,8 @@ mod ffi {
         fn info_line_visible(&self) -> bool;
         fn info_line_text(&self) -> String;
         fn info_line_codec(&self) -> String;
+        fn current_decode_error(&self) -> String;
+        fn current_file_name(&self) -> String;
         fn info_line_is_live(&self) -> bool;
         fn info_line_is_animated(&self) -> bool;
         fn info_line_is_video(&self) -> bool;

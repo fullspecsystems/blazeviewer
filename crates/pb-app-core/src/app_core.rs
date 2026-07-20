@@ -405,6 +405,11 @@ pub struct AppCore {
     pub behind: usize,
     /// Items whose decode failed (skipped / marked), so we don't retry them in a loop.
     pub failed: HashSet<usize>,
+    /// Per-item human-readable decode-error reason for the [`failed`](Self::failed)
+    /// items (task #127) — drives the "can't display this image" placeholder's subtitle
+    /// and a Details "Error" row. RAM-only, kept in lockstep with `failed`. `String`
+    /// is the cleaned decoder message (e.g. `"No more bytes"`).
+    pub failed_reason: HashMap<usize, String>,
     /// Paths deleted this session — hidden from the playlist without a rescan.
     pub deleted: HashSet<PathBuf>,
     /// Items currently showing only their preview (a full-decode upgrade can replace it).

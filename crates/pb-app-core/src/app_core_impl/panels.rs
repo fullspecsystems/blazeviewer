@@ -632,6 +632,28 @@ impl AppCore {
             .unwrap_or_default()
     }
 
+    /// The displayed item's decode-failure reason (task #127): non-empty when the
+    /// current photo could not be decoded by ANY rung of the recovery ladder — a
+    /// genuinely corrupt or unsupported file. The shell shows a "can't display this
+    /// image" placeholder (with this as the subtitle) instead of leaving a black canvas
+    /// and a spinning pie. Empty when the current item decoded (even if only recovered),
+    /// or when there is no current item.
+    pub fn current_decode_error(&self) -> String {
+        self.displayed_item
+            .filter(|i| self.failed.contains(i))
+            .and_then(|i| self.failed_reason.get(&i).cloned())
+            .unwrap_or_default()
+    }
+
+    /// The displayed item's bare file name (no path), or empty when nothing is shown.
+    /// Used by the "can't display this image" placeholder to name the file (task #127) —
+    /// where `current` is `None`, so the placeholder can't read the name from there.
+    pub fn current_file_name(&self) -> String {
+        self.displayed_item
+            .map(|i| crate::engine::file_name_of(self.source.name(i)))
+            .unwrap_or_default()
+    }
+
     /// A change-detection snapshot of the natively-drawn info readout — `(main, codec, live,
     /// animated)` when visible, `None` when hidden. The tick diffs it so a native info line
     /// re-pulls on a real content change (a photo swap), never per tick. Alignment/opacity

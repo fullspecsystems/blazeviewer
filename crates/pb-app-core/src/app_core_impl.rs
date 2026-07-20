@@ -211,6 +211,7 @@ impl AppCore {
             ahead: 8,
             behind: 2,
             failed: HashSet::new(),
+            failed_reason: std::collections::HashMap::new(),
             deleted: HashSet::new(),
             preview_resident: HashSet::new(),
             pending_uploads: Vec::new(),
@@ -1269,6 +1270,8 @@ impl AppCore {
             self.hold_start = None;
         }
 
+        self.resolve_parked_failure();
+
         // 3c. Slideshow auto-advance (task #23): on, not overridden by a held nav key or an open
         // dialog, and readiness-gated like hold-to-blaze (a not-ready slide holds, never skips).
         // An explicitly-played video suspends the advance until playback ends/stops (task #79
@@ -2326,6 +2329,7 @@ impl AppCore {
     fn retry_recover(&mut self, item: usize) {
         self.retry.recover(item);
         self.failed.remove(&item);
+        self.failed_reason.remove(&item);
         self.thumbs.failed.remove(&item);
     }
 
@@ -2396,6 +2400,7 @@ impl AppCore {
                 .collect();
             for it in display_edges {
                 self.failed.remove(&it);
+                self.failed_reason.remove(&it);
                 // The failure stamped the target as shown; a healed decode must
                 // actually present (the round-3 recovery contract).
                 if self.displayed_item == Some(it) || self.target_item == Some(it) {
@@ -3539,8 +3544,15 @@ impl AppCore {
     /// A target that failed to decode (corrupt/unreadable): count it as "shown"
     /// so the gated advance isn't stuck on it, but clear the previous frame's
     /// stale metadata — set a decode-error window title and drop the info panel so
-    /// neither misreports the held-over pixels as the failed photo. The previous
-    /// frame stays up rather than flashing black.
+    /// neither misreports the held-over pixels as the failed photo.
+    ///
+    /// **The canvas is BLANKED (task #127):** the previous photo's pixels are cleared so
+    /// the "can't display this image" placeholder stands over an empty surface, not the
+    /// last good image (owner request 2026-07-20 — a held-over photo reads as though *it*
+    /// is the broken one). This runs even mid-nav: navigating *to* a corrupt file holds
+    /// the nav key while `present_failed` fires, so a `held_nav`-gated clear left the old
+    /// image up — the exact bug the owner hit. A brief black frame while blazing *past* a
+    /// corrupt file is the acceptable cost; nav never stalls (the item is marked resolved).
     pub fn present_failed(&mut self, item: usize) {
         // Terminal at this epoch: a corrupt target counts as "resolved" so readiness
         // (`target_caught_up`) doesn't leave the loading pie spinning forever on it.
@@ -3552,6 +3564,10 @@ impl AppCore {
             "{name} ({}/{total}) - decode error",
             item + 1
         )));
+        if let Some(r) = self.renderer.as_mut() {
+            r.clear_image();
+        }
+        self.draw();
         // The info panel + line belonged to the previous photo — drop them (and redraw
         // to remove them). Only touch the renderer if something was actually showing.
         if self.overlay_shown || self.info_line_shown {
@@ -3616,6 +3632,22 @@ impl AppCore {
 
     /// Try to show `target_item`: present it on a ring hit, otherwise keep the
     /// previous frame (a miss is a hold, never a skip). Returns whether shown.
+    /// Re-resolve a terminally-failed **parked** target after a geometry-epoch bump.
+    /// `try_present_target` (which re-stamps a failed item via `present_failed`) only runs
+    /// under a held nav key — so an epoch bump *after* the item first failed (the window
+    /// settling on open, a resize) leaves `presented_epoch` stale, keeping
+    /// `target_caught_up` false and the loading pie spinning forever on a file that can
+    /// never decode (task #127). Re-stamp it here every tick; idempotent once caught up.
+    fn resolve_parked_failure(&mut self) {
+        if !self.target_caught_up() {
+            if let Some(item) = self.target_item {
+                if self.failed.contains(&item) {
+                    self.present_failed(item);
+                }
+            }
+        }
+    }
+
     pub fn try_present_target(&mut self) -> bool {
         let Some(item) = self.target_item else {
             return false;
@@ -3820,6 +3852,8 @@ impl AppCore {
                 if display_want {
                     eprintln!("poster selection failed for item {item}: {e}");
                     self.failed.insert(item);
+                    self.failed_reason
+                        .insert(item, crate::engine::clean_decode_reason(&e));
                     if self.target_item == Some(item) {
                         self.present_failed(item);
                     }
@@ -3949,6 +3983,8 @@ impl AppCore {
                 eprintln!("decode failed for item {item}: {e}");
                 self.retry_fail(item);
                 self.failed.insert(item);
+                self.failed_reason
+                    .insert(item, crate::engine::clean_decode_reason(e));
                 // Unstick the gated loop: a corrupt target counts as "shown".
                 // (Deferred out of the closure — `present_failed` needs &mut self.)
                 if self.target_item == Some(item) {
@@ -4362,6 +4398,8 @@ impl AppCore {
                 eprintln!("decode failed: {}: {e}", self.source.name(idx));
                 self.retry_fail(idx);
                 self.failed.insert(idx);
+                self.failed_reason
+                    .insert(idx, crate::engine::clean_decode_reason(&e));
                 // Keep the gate unstuck (count the bad file as "shown") and clear
                 // the stale frame's title/panel so they don't misreport it.
                 self.present_failed(idx);
@@ -5541,6 +5579,38 @@ mod tests {
         );
     }
 
+    /// **Regression (task #127).** A truly-undecodable file, PARKED, left the loading
+    /// pie spinning forever: `present_failed` resolves it at the current epoch, but the
+    /// window settling on open bumps the geometry epoch, and nothing re-stamps a failed
+    /// parked target (`try_present_target` runs only under a held nav key), so
+    /// `target_caught_up` stayed false and `tick_pie` kept the pie up. This is the exact
+    /// state the owner saw on a corrupt `dead.jpg`.
+    #[test]
+    fn a_parked_failed_target_reresolves_after_a_geometry_epoch_bump() {
+        let mut core = test_core();
+        core.source = photos_named(&["dead.jpg"]);
+        core.playlist = Playlist::new(1, 0);
+        core.target_item = Some(0);
+        core.failed.insert(0);
+        core.present_failed(0);
+        assert!(
+            core.target_caught_up(),
+            "present_failed resolves it at the current epoch"
+        );
+
+        // A geometry change (the window settling on open, or a resize) bumps the epoch,
+        // staling the stamp — exactly what happened between epoch 2 and 3 on the real file.
+        core.epoch += 1;
+        assert!(!core.target_caught_up(), "the epoch bump un-resolves it");
+
+        // Parked (no nav key held): the tick's resolve must re-stamp it.
+        core.resolve_parked_failure();
+        assert!(
+            core.target_caught_up(),
+            "a parked failed target must re-resolve after the bump, or the pie spins forever"
+        );
+    }
+
     /// **Regression (task #127).** The parked target shows its embedded preview
     /// (often a clean thumbnail) FIRST — that seeds `meta_cache`/`current` with no
     /// recovery flag. When the malformed FULL decode lands later, salvaged by the
@@ -5597,6 +5667,33 @@ mod tests {
             Some("Extra bytes between headers"),
             "and into the live `current` mirror so the details notice appears"
         );
+    }
+
+    #[test]
+    fn a_failed_decode_surfaces_a_cant_display_error_in_details() {
+        let mut core = test_core();
+        core.source = photos_named(&["dead.jpg"]);
+        core.playlist = Playlist::new(1, 0);
+        core.displayed_item = Some(0);
+        // The state after every rung of the ladder failed: item in `failed`, its reason
+        // recorded, and `current` cleared by `present_failed`.
+        core.failed.insert(0);
+        core.failed_reason.insert(0, "No more bytes".into());
+        core.current = None;
+
+        assert_eq!(core.current_decode_error(), "No more bytes");
+        let rows = core.details_panel().rows;
+        assert!(
+            rows.iter().any(|r| matches!(r,
+                DetailRow::Pair { label, value }
+                    if label == "Error" && value.contains("No more bytes"))),
+            "a failed file must show a can't-display Error row; got {rows:?}"
+        );
+
+        // A healthy displayed item reports no error (the placeholder stays hidden).
+        core.failed.remove(&0);
+        core.failed_reason.remove(&0);
+        assert_eq!(core.current_decode_error(), "");
     }
 
     /// `info_line_visible()` is what the **native macOS shell** actually polls

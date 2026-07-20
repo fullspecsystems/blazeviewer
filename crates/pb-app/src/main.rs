@@ -817,6 +817,7 @@ impl App {
             ahead: 8,
             behind: 2,
             failed: HashSet::new(),
+            failed_reason: std::collections::HashMap::new(),
             deleted: HashSet::new(),
             preview_resident: HashSet::new(),
             pending_uploads: Vec::new(),

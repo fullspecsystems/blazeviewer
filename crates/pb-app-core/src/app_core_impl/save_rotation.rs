@@ -82,6 +82,7 @@ impl AppCore {
                 self.meta_cache.remove(&item);
                 self.exif_cache.remove(&item); // the file's EXIF (Orientation) just changed
                 self.failed.remove(&item);
+                self.failed_reason.remove(&item);
                 self.preview_resident.remove(&item);
                 self.upgrade_done.remove(&item);
                 // A saved rotation rewrites the file's pixels-as-displayed → content change.

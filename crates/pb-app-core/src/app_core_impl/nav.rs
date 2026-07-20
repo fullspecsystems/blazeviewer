@@ -39,6 +39,7 @@ impl AppCore {
         self.describe_gen += 1;
         self.live_motion_cache.clear();
         self.failed.clear();
+        self.failed_reason.clear();
         self.thumbs.clear_deck();
         self.emit_panels_changed();
         self.preview_resident.clear();
@@ -160,6 +161,7 @@ impl AppCore {
         self.describe_gen += 1;
         self.live_motion_cache.clear();
         self.failed.clear();
+        self.failed_reason.clear();
         self.thumbs.clear_deck();
         self.emit_panels_changed();
         self.preview_resident.clear();

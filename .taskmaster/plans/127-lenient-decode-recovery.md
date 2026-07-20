@@ -65,14 +65,38 @@ ladder; #3 (kill the pie / placeholder) is the failure floor.
 
 ## Handoff
 
-**Verified (macOS, this session):** _pending — filled as steps land._
+**Verified (macOS, this session):**
+- **Step 1 (ladder):** committed `819fe56d`. Full pb-decode suite green (232), clippy clean.
+  Proven end-to-end on the **real** `IMG_1340.JPG`: `decode_bytes` → `codec=JPEG 4864x3616
+  recovered=Some("Extra bytes between headers")`. Crafted-fixture tests lock strict-clean vs
+  lenient-recover through the whole dispatch.
+- **Step 2 (notice + merge):** committed `fff18dc0`. The details "Recovered" row shows in the
+  mac inspector (built once in `exif_rows`, so winit's HUD table gets it too). Fixed the
+  preview-then-full ordering that hid the notice (the clean embedded thumbnail seeded
+  `meta_cache` first; `drain_results` now merges the later full decode's flag). Owner confirmed
+  the image displays; details notice verified live (the Original decode arrives recovered=Some
+  and merges). Tests: accessor, details row, merge regression. Clippy clean incl. `pb-mac-ffi`.
+- **Step 3 (graceful failure):** the stuck-pie root cause found + fixed — a PARKED failed
+  target wasn't re-resolved after a geometry-epoch bump (`try_present_target` runs only under a
+  held nav key), so `presented_epoch` stayed stale and `tick_pie` spun forever. `resolve_parked_
+  failure()` re-stamps it each tick (regression test). Added a `failed_reason` map, a
+  `current_decode_error()` accessor, a Details "Error" row, and a native `DecodeErrorView`
+  placeholder ("Can't display this image" + reason) shown like the door card. Core + `pb-mac-ffi`
+  + swift host all build; 876 pb-app-core tests green. **Owner visual confirmation of the
+  placeholder + pie-gone: PENDING at time of writing.**
 
-**Not verified — Windows must check:** step 4 (winit placeholder + notice) and that the
-`DecodedImage.recovered` field addition compiles in `pb-app` (struct literal in
-`pb-app/src/clipboard.rs` test helper — Windows-only). Mac cannot build `pb-app`; a Windows
-`cargo clippy -p pb-app --all-targets` is required after step 1.
+**Not verified — Windows must check (cross-platform debt):**
+1. **Two `AppCore`/`DecodedImage` struct-literal fields added blind from the Mac — the
+   documented trap that already broke `main` once:** `DecodedImage.recovered`
+   (`pb-app/src/clipboard.rs` test helper, in `819fe56d`) and `AppCore.failed_reason`
+   (`pb-app/src/main.rs:819` struct literal). A Windows `cargo clippy -p pb-app --all-targets`
+   (or the macOS→win cross-check) must confirm both compile. Both are mechanical `field: init,`
+   additions mirroring the struct defs; low risk, but unverifiable from the Mac.
+2. **Step 4 (winit parity):** the details "Recovered"/"Error" rows are shared (`exif_rows`) so
+   winit's HUD table already gets them — but the winit shell has **no equivalent of the
+   `DecodeErrorView` placeholder** (a genuinely-dead file on winit still shows black + a
+   "decode error" title). The pie fix IS shared (core `tick`), so the stuck pie is gone on winit
+   too. Only the centered placeholder graphic is owed on winit.
 
-**Cross-platform debt:** the `recovered` field touches `pb-app/src/clipboard.rs` (Windows shell
-test helper) — added blind from the Mac, must compile-check on Windows. Step 4 is owed on winit.
-
-**Claimed:** macOS session holds steps 1–3. Windows owns step 4 + the pb-app cross-check.
+**Claimed:** macOS session holds steps 1–3 (done, pending owner smoke). Windows owns the pb-app
+cross-check + step 4 (winit placeholder).

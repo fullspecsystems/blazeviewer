@@ -59,6 +59,17 @@ impl AppCore {
                 bold: false,
             });
         }
+        // A decode FAILURE (task #127): the file couldn't be shown by any rung of the
+        // ladder. `current` is None on a failed decode, so there are no dimensions/codec
+        // to report — name the reason here so the details still tell the full story
+        // (mirrors the placeholder shown on the canvas).
+        let decode_error = self.current_decode_error();
+        if !decode_error.is_empty() {
+            rows.push(DetailRow::Pair {
+                label: "Error".to_string(),
+                value: format!("can't display this image ({decode_error})"),
+            });
+        }
         if let Some(meta) = &self.current {
             rows.push(DetailRow::Pair {
                 label: "Dimensions".to_string(),

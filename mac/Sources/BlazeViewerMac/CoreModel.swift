@@ -142,6 +142,15 @@ final class CoreModel {
     private(set) var doorFormat = ""
     private(set) var doorShortcut = ""
 
+    /// A genuinely undecodable file's reason (task #127): non-empty when the item on
+    /// screen could not be decoded by any rung of the recovery ladder, so the canvas
+    /// shows a "can't display this image" placeholder instead of a black void and a
+    /// spinning pie. Tracks the item actually presented (pulled each pump like the door
+    /// card), never persisted.
+    private(set) var decodeError = ""
+    private(set) var decodeErrorName = ""
+    var decodeFailed: Bool { !decodeError.isEmpty }
+
     // MARK: - Native rich panels (task #54, mac-first) — the first is Help
 
     /// Whether the native SwiftUI Help panel should show, and its sections — refreshed
@@ -1906,6 +1915,18 @@ final class CoreModel {
             // Fades in with the same chrome animation as the panels — but the card is
             // content, so it must be up the moment the door is: no reveal delay, no timer.
             withAnimation(Layout.chromeFade) { doorVisible = door.visible }
+        }
+        // The decode-failure placeholder (task #127): also content, pulled here for the same
+        // reason as the door card — it tracks the item actually on screen (which lands from
+        // the decode pool on no marker). Compare-then-assign so an unchanged state doesn't
+        // re-render at 120 Hz.
+        let decodeErr = core.current_decode_error().toString()
+        if decodeErr != decodeError {
+            let name = decodeErr.isEmpty ? "" : core.current_file_name().toString()
+            withAnimation(Layout.chromeFade) {
+                decodeError = decodeErr
+                decodeErrorName = name
+            }
         }
         // Keep the toolbar's Play-Animation button in step with motion state the discrete
         // input paths miss: a new item reached under hold-to-blaze, or playback finishing on

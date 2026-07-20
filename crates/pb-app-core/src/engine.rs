@@ -1087,6 +1087,18 @@ pub fn file_name_of(name: &str) -> String {
         .to_string()
 }
 
+/// A human-readable decode-failure reason for the "can't display this image"
+/// placeholder and the Details "Error" row (task #127). Strips our `DecodeError`
+/// `Display` wrapper (`corrupt image: "…"`) and surrounding quotes so the user sees
+/// the bare cause (e.g. `No more bytes`), never internal formatting.
+pub fn clean_decode_reason(e: &DecodeError) -> String {
+    let s = match e {
+        DecodeError::Corrupt(s) => s.clone(),
+        other => other.to_string(),
+    };
+    s.trim().trim_matches('"').trim().to_string()
+}
+
 /// Whether physical-px point `(x, y)` lies within `[x0, y0, x1, y1]` (inclusive) — the
 /// overlay click hit-test (the scan-count chip today; EXIF copy buttons later).
 pub fn point_in_rect([x0, y0, x1, y1]: [f32; 4], x: f32, y: f32) -> bool {

@@ -30,6 +30,7 @@ impl AppCore {
                             self.meta_cache.remove(&idx);
                             self.exif_cache.remove(&idx); // EXIF Orientation reverted on disk
                             self.failed.remove(&idx);
+                            self.failed_reason.remove(&idx);
                             self.preview_resident.remove(&idx);
                             self.upgrade_done.remove(&idx);
                         }

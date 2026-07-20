@@ -268,6 +268,20 @@ struct ContentView: View {
                         .transition(.opacity)
                 }
             }
+            // The decode-failure placeholder (task #127) — content chrome for a file that
+            // can't be shown, drawn like the door card (above the empty canvas, below every
+            // real panel). Hidden while Help owns the center, so the two never overlap.
+            .overlay {
+                if model.decodeFailed && !model.helpVisible {
+                    DecodeErrorView(
+                        name: model.decodeErrorName,
+                        reason: model.decodeError,
+                        opacity: model.panelOpacity
+                    )
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+                    .transition(.opacity)
+                }
+            }
             // Native rich panels (task #54, mac-first) layer over the canvas here. The
             // core suppresses their HUD rasterization, so there's no double-draw; the
             // panel receives its own pointer/scroll (SwiftUI hit-tests it above the
