@@ -822,7 +822,7 @@ impl AppCore {
     /// paths with `path` re-inserted at `index` (its position when deleted, clamped to the current
     /// length), and navigate to it. A same-deck rebuild — the root is unchanged — so any *other*
     /// pending Deletion undo entries survive.
-    fn reinsert_after_restore(&mut self, index: usize, path: &Path) {
+    pub(super) fn reinsert_after_restore(&mut self, index: usize, path: &Path) {
         let mut paths: Vec<PathBuf> = (0..self.source.len())
             .filter_map(|i| self.source.path(i).map(Path::to_path_buf))
             .collect();
