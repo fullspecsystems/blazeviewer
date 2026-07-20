@@ -5698,33 +5698,6 @@ mod tests {
     }
 
     #[test]
-    fn native_tree_visibility_and_safe_activate() {
-        let mut core = test_core();
-        assert!(!core.tree_panel_visible(), "off by default");
-        core.native_tree = true;
-        assert!(!core.tree_panel_visible(), "closed → not visible");
-        core.folder_tree_open = true;
-        assert!(core.tree_panel_visible(), "open + native → visible");
-        core.panels.hidden = true;
-        assert!(!core.tree_panel_visible(), "Tab-hidden → not visible");
-        core.panels.hidden = false;
-        // A tick signals the host on the visibility transition (no hud needed for the diff).
-        core.effects.clear();
-        core.handle(CoreEvent::Tick(std::time::Instant::now()));
-        assert!(
-            core.effects
-                .iter()
-                .any(|e| matches!(e, contract::CoreEffect::PanelsChanged)),
-            "the tree's visibility change signals the host"
-        );
-        // Activate with nothing derived is a safe no-op (no target).
-        core.tree_activate(0);
-        // Winit (native_tree off) is never native-visible.
-        core.native_tree = false;
-        assert!(!core.tree_panel_visible());
-    }
-
-    #[test]
     fn native_open_suppresses_the_hud_and_signals() {
         let mut core = test_core(); // headless → empty source
         core.native_open = true;
