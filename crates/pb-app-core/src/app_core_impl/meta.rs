@@ -378,3 +378,255 @@ impl AppCore {
         rows
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app_core_impl::test_support::{five_photos, seed_details, test_core, track};
+
+    /// **Regression — the silent one.** A `TrackId`'s whole contract is that `local_id` means
+    /// something only within the generation it carries. The probe was handed the **deck**
+    /// generation, which every film in a folder shares, so an id minted on one film compared
+    /// equal against the next film's catalog and matched whatever stream sat at that
+    /// `local_id`: a subtitle track picked as Arabic came back as **Korean** on the next
+    /// episode — ticked, no error, no way to tell. `resolve_track`'s stale guard could never
+    /// fire, because the two generations were the same number.
+    ///
+    /// Each catalog must mint its own generation, and the deck's must stay a separate count.
+    /// (Verified to fail without the fix: both sides read 0.)
+    #[test]
+    fn each_probe_mints_its_own_catalog_generation() {
+        let mut core = test_core();
+        core.source = five_photos();
+
+        core.probe_details_blocking(0);
+        let first = core.catalog_seq;
+        core.probe_details_blocking(1);
+        let second = core.catalog_seq;
+
+        assert_ne!(
+            first, second,
+            "two files in one deck must not share a catalog generation — that is the bug"
+        );
+        assert!(second > first, "and it advances rather than cycling");
+        // The deck did not change, so its own generation must not have moved: conflating
+        // these two counts is exactly what caused the defect.
+        assert_eq!(
+            core.details_gen, 0,
+            "the deck generation is a separate question"
+        );
+    }
+
+    fn seeded_rows(core: &AppCore, item: usize) -> Vec<String> {
+        let d = core.exif_cache.get(&item).expect("seeded");
+        let mut rows = Vec::new();
+        if let Some(cat) = &d.media {
+            rows = crate::tracks::track_rows(cat, d.has_audio);
+        }
+        rows.iter()
+            .map(|r| match r {
+                DetailRow::Span { text, .. } => format!("[{text}]"),
+                DetailRow::Pair { label, value } => format!("{label}: {value}"),
+            })
+            .collect()
+    }
+
+    /// A described catalog reaches the Details table as real per-track rows — the
+    /// user-visible point of task #98 (this is what retires the `Audio: Yes` placeholder).
+    #[test]
+    fn a_described_catalog_becomes_per_track_details_rows() {
+        let mut core = test_core();
+        let cat = pb_decode::MediaTrackCatalog::new(
+            1,
+            pb_decode::MediaBackend::FFmpeg,
+            pb_decode::TrackSet::complete(vec![track("AAC", "eng")]),
+            pb_decode::TrackSet::complete(vec![]),
+        );
+        seed_details(&mut core, 0, Some(cat), Some(true));
+        assert_eq!(
+            seeded_rows(&core, 0),
+            vec![
+                "[Audio]",
+                "Track 1: English · AAC stereo · 48 kHz",
+                "Subtitles: No",
+            ]
+        );
+    }
+
+    /// The rule that matters most in the panel: a probe that could not enumerate a file
+    /// which *does* have audio must never render as "No audio".
+    #[test]
+    fn an_unenumerable_catalog_never_renders_as_no_audio() {
+        let mut core = test_core();
+        let cat =
+            pb_decode::MediaTrackCatalog::unavailable(1, pb_decode::MediaBackend::MediaFoundation);
+        seed_details(&mut core, 0, Some(cat), Some(true));
+        let rows = seeded_rows(&core, 0);
+        assert_eq!(rows, vec!["Audio: Present — details unavailable"]);
+        assert!(!rows.iter().any(|r| r == "Audio: No"));
+    }
+
+    /// A still (no catalog) adds no track rows at all.
+    #[test]
+    fn a_still_adds_no_track_rows() {
+        let mut core = test_core();
+        seed_details(&mut core, 0, None, None);
+        assert!(seeded_rows(&core, 0).is_empty());
+    }
+
+    /// Land a probe result as the worker would, so the staleness rules can be driven
+    /// without a real container.
+    fn fake_probe(core: &mut AppCore, gen: u64, item: usize, identity: &str) {
+        let (tx, rx) = std::sync::mpsc::channel();
+        tx.send(crate::app_core::ItemDetails {
+            size: 99,
+            fields: vec![("Video codec".into(), "HEVC".into())],
+            media: None,
+            has_audio: Some(true),
+            probe_state: crate::media_details::ProbeState::Ready,
+            dovi_incompatible: false,
+        })
+        .unwrap();
+        core.exif_cache
+            .insert(item, crate::app_core::ItemDetails::loading());
+        core.details_probe = Some(crate::media_details::DetailsProbe {
+            gen,
+            item,
+            identity: identity.to_string(),
+            copy_when_done: false,
+            rx,
+        });
+    }
+
+    #[test]
+    fn a_landed_probe_replaces_the_loading_entry_and_refreshes_the_panel() {
+        let mut core = test_core();
+        core.source = five_photos();
+        core.details_gen = 3;
+        let name = core.source.name(1).to_string();
+        fake_probe(&mut core, 3, 1, &name);
+
+        core.effects.clear();
+        core.poll_details_probe();
+        let d = core.exif_cache.get(&1).expect("cached");
+        assert_eq!(d.probe_state, crate::media_details::ProbeState::Ready);
+        assert_eq!(d.size, 99);
+        assert!(core
+            .effects
+            .iter()
+            .any(|e| matches!(e, contract::CoreEffect::PanelsChanged)));
+        assert!(core.details_probe.is_none());
+    }
+
+    /// The headline staleness rule: a probe that lands after a deck rebuild describes a
+    /// *different file* at that index, so it must be dropped, not cached.
+    #[test]
+    fn a_probe_landing_after_a_deck_rebuild_is_rejected() {
+        let mut core = test_core();
+        core.source = five_photos();
+        let name = core.source.name(1).to_string();
+        fake_probe(&mut core, 3, 1, &name);
+        core.details_gen = 4; // the deck was rebuilt while the worker ran
+
+        core.poll_details_probe();
+        assert_eq!(
+            core.exif_cache.get(&1).map(|d| d.probe_state),
+            Some(crate::media_details::ProbeState::Loading),
+            "the stale result must not overwrite the entry"
+        );
+        assert!(core.details_probe.is_none());
+    }
+
+    /// The subtler one the generation alone can't catch: same deck generation, but index
+    /// `item` now names a different file.
+    #[test]
+    fn a_probe_whose_item_now_names_a_different_file_is_rejected() {
+        let mut core = test_core();
+        core.source = five_photos();
+        fake_probe(&mut core, 0, 1, "some-other-file.mp4");
+
+        core.poll_details_probe();
+        assert_eq!(
+            core.exif_cache.get(&1).map(|d| d.probe_state),
+            Some(crate::media_details::ProbeState::Loading),
+            "identity mismatch must reject the result"
+        );
+    }
+
+    /// A dead worker must not leave the entry stuck on "Reading…" forever — the
+    /// placeholder is also the spawn guard, so a stuck `Loading` would never re-probe.
+    #[test]
+    fn a_dead_worker_marks_the_entry_failed_rather_than_hanging_on_loading() {
+        let mut core = test_core();
+        core.source = five_photos();
+        let name = core.source.name(1).to_string();
+        let (tx, rx) = std::sync::mpsc::channel::<crate::app_core::ItemDetails>();
+        drop(tx); // the worker died without sending
+        core.exif_cache
+            .insert(1, crate::app_core::ItemDetails::loading());
+        core.details_probe = Some(crate::media_details::DetailsProbe {
+            gen: core.details_gen,
+            item: 1,
+            identity: name,
+            copy_when_done: false,
+            rx,
+        });
+
+        core.poll_details_probe();
+        assert_eq!(
+            core.exif_cache.get(&1).map(|d| d.probe_state),
+            Some(crate::media_details::ProbeState::Failed)
+        );
+        assert!(core.details_probe.is_none());
+    }
+
+    /// The real thing, end to end: a real container, the real worker, the real poll.
+    /// `ensure_exif_cached` must return **without** the catalog (it did not block), and
+    /// the catalog must arrive on a later tick.
+    #[cfg(any(windows, target_os = "macos", all(unix, feature = "ffvideo")))]
+    #[test]
+    fn a_real_video_probes_off_thread_and_lands_its_catalog() {
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../pb-decode/tests/fixtures/video/multitrack.mp4");
+        assert!(fixture.exists(), "fixture missing: {}", fixture.display());
+
+        let mut core = test_core();
+        core.source = Arc::new(FsSource::new(vec![fixture]));
+        core.playlist = Playlist::new(1, 0);
+        core.displayed_item = Some(0);
+
+        core.ensure_exif_cached(0);
+        // The event loop was not made to wait for the container open.
+        assert_eq!(
+            core.exif_cache.get(&0).map(|d| d.probe_state),
+            Some(crate::media_details::ProbeState::Loading),
+            "ensure_exif_cached must not block on the probe"
+        );
+        assert!(core.details_probe.is_some());
+        assert!(core.work_pending(), "the probe must keep the loop ticking");
+
+        // Spin the poll as `tick` would, with a generous bound so a slow machine can't
+        // flake but a genuine hang still fails.
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while core.details_probe.is_some() && std::time::Instant::now() < deadline {
+            core.poll_details_probe();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let d = core.exif_cache.get(&0).expect("cached");
+        assert_eq!(
+            d.probe_state,
+            crate::media_details::ProbeState::Ready,
+            "probe never landed"
+        );
+        let cat = d.media.as_ref().expect("catalog landed");
+        assert_eq!(cat.audio.tracks.len(), 2, "the fixture's two audio tracks");
+        assert_eq!(d.has_audio, Some(true));
+        assert!(d
+            .fields
+            .iter()
+            .any(|(k, v)| k == "Video codec" && v == "H.264"));
+        // ...and it renders as real rows.
+        let rows = crate::tracks::track_rows(cat, d.has_audio);
+        assert!(matches!(&rows[0], DetailRow::Span { text, bold: true } if text == "Audio"));
+    }
+}
