@@ -862,6 +862,8 @@ impl App {
             bg: Default::default(),
             dir_scan: None,
             scan_wire_gen: 0,
+            archive_load: None,
+            archive_wire_gen: 0,
             target_item: None,
             compare_pin: None,
             compare_return: None,
