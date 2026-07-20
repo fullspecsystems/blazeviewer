@@ -148,3 +148,43 @@ fn container_label(path: &Path) -> &'static str {
         _ => "Video",
     }
 }
+
+/// The macOS twin of `mf_poster`'s `poster_deep_seeks_past_a_long_black_intro`, and the
+/// regression pin for **#92.2 / task #121 phase 4b**.
+///
+/// `deep_seek_black_lead.mp4` is 16 s and black for its first 7 s — well past the head
+/// walk — with high-contrast content after. On Windows the deep seek finds that content.
+/// On macOS an `.mp4` routes to THIS backend (`engine.rs`: AVFoundation is primary for the
+/// containers it can open), which has no deep seek at all: it walks ~30 frames / ~1 s from
+/// the start and hands back the least-black frame it saw. So this currently returns BLACK —
+/// the user-visible "feature films get black posters on the Mac" bug.
+///
+/// `#[ignore]` because it documents a known gap rather than guarding a fixed one; phase 4b
+/// (`av_poster` onto the shared walk driver) must make it pass and drop the attribute.
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::FitBox;
+
+    #[test]
+    #[ignore = "#92.2: AVFoundation has no deep walk yet — passes when task #121 phase 4b lands"]
+    fn poster_deep_seeks_past_a_long_black_intro() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/video/deep_seek_black_lead.mp4");
+        let img = decode_video_poster(
+            &path,
+            Some(FitBox {
+                max_width: 64,
+                max_height: 64,
+            }),
+            &AtomicBool::new(false),
+        )
+        .expect("poster");
+        assert!(img.is_well_formed());
+        assert!(
+            crate::video::poster_frame_bright_enough(&img.pixels),
+            "deep seek must land on the content past the 7 s black intro (mean luma {})",
+            crate::video::mean_luma_rgba8(&img.pixels, 1),
+        );
+    }
+}
