@@ -56,6 +56,18 @@ struct PasswordSheetView: View {
         .padding(20)
         .frame(width: 380)
         .onAppear { focused = true }
+        // Return focus to the field after a rejected attempt, so the user can just type again
+        // (owner-reported 2026-07-20). The field is `.disabled` while the attempt is checking,
+        // and disabling a focused SecureField drops focus without restoring it when re-enabled
+        // — so focus dies on SUBMIT, not on the error, and both of these are needed:
+        // `dialogChecking` covers the normal submit→reject cycle, and `passwordError` covers a
+        // rejection fast enough that the checking state never rendered.
+        .onChange(of: model.dialogChecking) { _, checking in
+            if !checking { focused = true }
+        }
+        .onChange(of: model.passwordError) { _, err in
+            if !err.isEmpty { focused = true }
+        }
     }
 }
 
