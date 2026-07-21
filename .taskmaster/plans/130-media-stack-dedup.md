@@ -76,11 +76,19 @@ Three layers, strongest first:
 1. **A NEW mock-backend unit test of the shared loop — the primary net, and a first-class deliverable.**
    The whole point of the trait is that the loop becomes drivable by a fake backend with **no real MF/FFmpeg
    and no video file**. A `MockBackend` returns scripted frames/EOS/seek results; the test sends
-   `Credit`/`SeekTo`/`Stop` on the real channel and asserts the exact `VideoProducerEvent` sequence — credit→
-   frame, seek→run-up-discards→landing-frame stamped at target, supersede-mid-runup, EOS→park→replay-on-seek,
-   generation stamping. This tests the *shared logic that both backends now share*, cross-platform, in
-   milliseconds, deterministically. Write it against the trait **before** porting the second backend, so it
-   pins the loop's contract.
+   `Credit`/`SeekTo`/`Stop` on the real channel and asserts the `VideoProducerEvent` sequence — credit→frame,
+   seek→run-up-discards→landing-frame stamped at target, supersede-mid-runup, EOS→park→replay-on-seek,
+   generation stamping. **Write it against the trait BEFORE (or concurrently with) lifting the FFmpeg loop**
+   (Codex — not after), so it pins the contract that MF is then ported *to*.
+   - ⚠ **Assert backend CALL ORDER, not only emitted events** (Codex). The extracted code is a protocol state
+     machine; a regression can call `seek`/`convert`/`make_frame` in the wrong order yet still emit a
+     plausible event stream. The mock records its call log; the test asserts on it.
+   - ⚠ **An instantaneous scripted decoder cannot exercise arrival races** (Codex). Use barriers/hooks so a
+     `SeekTo` can be injected *at a chosen point* inside the run-up (after the last command poll, before
+     convert/emit) — that is the generation-race hole (§8) and it only reproduces with controlled timing.
+   - ⚠ **Script non-trivial timestamps.** Include reordered (B-frame-like) and non-monotonic `ts`, and a
+     keyframe-before-target so the "first `ts >= target`" landing logic is actually exercised — Codex's #1 hole
+     (a one-frame-wrong seek landing) hides behind a clean CFR 0,1,2,3 script.
 2. **The existing producer integration tests must pass UNCHANGED.** `mf_video_producer.rs` already has ~10
    `#[test]`s that `spawn()` the real producer against a fixture video and assert on emitted events (they
    drive the wire protocol end-to-end). These are the characterization net for the MF backend. **Do not edit
@@ -110,31 +118,45 @@ Every row is the *only* thing that differs at that point in the loop. This table
 | frame construction | inline `VideoFrame{…}` twice, cloning session-constant `color` | `reader.make_frame(...)` — computes color **per-format per-call** |
 | close / drain | `retire_reader(r)` off-thread (HEVC teardown ~1 s) on every retire + exit | none — drops with `reader`; seeks reuse it |
 
-**Proposed trait** (grounded in the above; the `type Raw` is owned — `IMFSample` / `ff::frame::Video` — so no
-lifetime entanglement, and it forces a monomorphized `fn run<B: VideoProducerBackend>` rather than `dyn`, which
-is correct here anyway since both backends are `!Send` COM/libav handles on their own thread):
+**Proposed trait** (grounded in the above + Codex round 1; the `type Raw` is owned — `IMFSample` /
+`ff::frame::Video` — so no lifetime entanglement, and it forces a monomorphized `fn run<B: VideoProducerBackend>`
+rather than `dyn`, which is correct here anyway since both backends are `!Send` COM/libav handles on their own
+thread):
 
 ```rust
 trait VideoProducerBackend {
     type Raw;                    // owned pre-conversion frame
-    fn open(input, fit, opts, cancel) -> Result<(Self, Opened, Option<(i64, Vec<u8>)>), String>;
-    fn read_frame(&mut self)   -> Result<Option<(i64, Vec<u8>)>, String>;   // gaps hidden inside
+    fn open(input, fit, opts, cancel) -> Result<(Self, Opened), String> where Self: Sized;  // NO primed frame — §5.1
+    fn read_frame(&mut self)   -> Result<Option<(i64, Vec<u8>)>, String>;   // gaps hidden inside; serves the primed frame first
     fn decode_raw(&mut self)   -> Result<Option<(i64, Self::Raw)>, String>;
-    fn convert(&mut self, raw: &Self::Raw) -> Result<Vec<u8>, String>;
+    fn convert(&mut self, raw: Self::Raw) -> Result<Vec<u8>, String>;       // by value — single-use ownership (Codex)
     fn target_units(&self, target: Duration) -> i64;
     fn can_decode_forward(&self, target_units: i64) -> bool;
-    fn seek(&mut self, target_units: i64) -> Result<(), String>;
+    fn seek(&mut self, target_units: i64) -> Result<(), String>;           // must reset/flush decoder AND clear any primed state
     fn anchor_origin_seek(&mut self, target_units: i64, target: Duration);
     fn anchor_origin_seq(&mut self, ts: i64);
-    fn make_frame(&mut self, sid, gen, ts, pixels) -> VideoFrame;   // color differs per backend — keep here
-    fn park(&mut self);
-    fn close(self);
+    fn make_frame(&mut self, sid, gen, ts, pixels) -> VideoFrame;          // color differs per backend — keep here
+    fn shutdown(&mut self);      // explicit pre-drop hook if needed; see below
 }
+// Mandatory teardown (MF's off-thread retire_reader) goes in `impl Drop for B`, NOT a close(self) the
+// loop must remember to call — so an early return / error / panic-unwind cannot bypass it (Codex).
 ```
 
-**Loop keeps:** `gen`, `credits`, `pending`, the optional primed-first-frame, the `session_id` + event sender.
-**Backend owns:** the reader/decoder handle, `origin`, position (`last_ts`/`reader_pos`), `parked`/`eof_sent`,
-`w`/`h`/`format`, `color`, `kind`/converter, `manager`, `input`, HDR peak.
+⚠ **Three trait rules from Codex round 1, folded in:**
+- **No `close(self)`.** MF's `retire_reader` (the ~1 s off-thread HEVC teardown) is *mandatory* cleanup →
+  `impl Drop`, so no code path can skip it. A `shutdown(&mut self)` remains only if a backend needs explicit
+  pre-drop ordering; otherwise drop it too.
+- **`B::open` must run *on the producer thread*.** `IMFSourceReader` and libav contexts are `!Send`, so the
+  backend is constructed *inside* the spawned thread and never moved across a `thread::spawn` boundary. The
+  entry wrapper spawns first, then opens. Document this as a hard invariant.
+- **The real risk is semantic, not type-level.** `seek`, `anchor_origin_*`, `can_decode_forward` need
+  **precisely documented pre/postconditions** (esp. "`seek` leaves the decoder flushed and any primed frame
+  cleared"). Write them as `///` contracts the mock test then enforces.
+
+**Loop keeps:** `gen`, `credits`, `pending`, the `session_id` + event sender. **The primed-first-frame is NOT
+loop state** (see §5.1 — it lives inside the backend). **Backend owns:** the reader/decoder handle, `origin`,
+position (`last_ts`/`reader_pos`), `parked`/`eof_sent`, the initial/primed state, `w`/`h`/`format`, `color`,
+`kind`/converter, `manager`, `input`, HDR peak.
 
 ### 4a. Sequencing (Part A)
 
@@ -157,10 +179,19 @@ One backend per commit; keep each `run_*` wrapper behaviour-identical so the int
 
 ## 5. Part A complications (from the investigation, ranked)
 
-1. **FFmpeg-only planar prime — the biggest asymmetry.** FFmpeg must decode the first frame *before* `Opened`
-   to pick NV12/P010/fp16; MF negotiates from the media type and never primes. The shared S3 must carry an
-   optional pre-decoded first frame (`open` returns `Option<(i64, Vec<u8>)>`; S3 prepends it). There is also an
-   EOS-before-any-frame edge (`primed_empty`) with no MF analog — the loop must handle "primed frame is EOS."
+1. **FFmpeg-only planar prime — the biggest asymmetry. Keep it OUT of the shared loop (Codex round 1).**
+   FFmpeg must decode the first frame *before* it can pick NV12/P010/fp16; MF negotiates from the media type and
+   never primes. **Do NOT expose the primed frame from `open`** (an earlier draft did — it leaks the FFmpeg quirk
+   into the loop and makes `read_frame`'s `None` ambiguous between "not primed" and "priming hit EOS"). Instead
+   the backend owns an initial-state field and `read_frame`/`decode_raw` serve the primed frame before decoding
+   again:
+   ```rust
+   enum InitialState { NeedRead, Ready { ts: i64, pixels: Vec<u8> }, Eos }
+   // MF starts NeedRead; FFmpeg starts Ready{..} or Eos. `seek` MUST reset this to NeedRead
+   // (a seek before the first credit invalidates the primed frame — the critical rule, centralized here).
+   ```
+   The shared loop stays completely unaware of pixel-format probing. The EOS-before-any-frame edge becomes just
+   `InitialState::Eos` → `read_frame` returns EOS on first call, no special-casing in S3.
 2. **`Gap` surfaced (MF) vs hidden (FFmpeg).** MF returns a null-sample `Gap` tick to the loop, which retries;
    FFmpeg absorbs EAGAIN internally. Unify by pushing MF's gap-retry into the backend so the trait only yields
    Frame/EOS. Small, but re-shapes MF's read functions.
@@ -223,11 +254,33 @@ decoders** (`MfAudioDecoder`, `FfAudioDecoder`). These are real, but:
   itself or is cargo-culting the producer pattern onto code that doesn't rhyme as closely. File as a follow-up
   task with its own mapping. Do not pre-commit here.
 
+## 7a. Codex review (2026-07-20, round 1 — folded in)
+
+Reviewed with the trait + safety model inlined. Confirmed the trait is Rust-sound and the mock test is the
+right primary net. Four changes folded above:
+1. **Teardown → `Drop`, not `close(self)`** — MF's mandatory off-thread retire can't be allowed to be skipped
+   by an early return/panic (§4 trait block).
+2. **`open` runs on the producer thread** — `!Send` backends are constructed inside the spawned thread, never
+   moved across `thread::spawn` (§4 trait block).
+3. **The planar prime stays inside the backend** as an `InitialState` enum, not exposed from `open` — removes
+   the FFmpeg quirk from the shared loop and the `None`-ambiguity (§5.1). This was the single biggest
+   improvement to the design.
+4. **The mock test asserts call-order + uses timing hooks + non-trivial timestamps** — an idealized CFR mock
+   would miss the two subtlest holes (§8.1 wrong seek-landing frame, §8.2 generation race) (§3 layer 1).
+
+Codex's ranked "biggest holes" become the §8 risk table's top rows verbatim, because they are exactly the
+behaviours the three test layers can each individually miss.
+
 ## 8. Risks
 
 | risk | severity | mitigation |
 |---|---|---|
-| The shared loop subtly changes pacing/seek behaviour for one backend | **the top risk** | §3 layer-1 mock test pins the contract; port FFmpeg first (its loop is the model, lowest-risk), then MF against the tested spec; existing MF spawn tests must pass unchanged |
+| **Wrong seek-landing frame** (timebase rounding, keyframe seek, reordered ts change the first `ts>=target`) | **Codex #1 — top risk** | §3 layer-1 mock scripts reordered/keyframe timestamps; a VFR/B-frame corpus clip in the seek characterization; a one-frame landing error is otherwise invisible to CFR mocks and to the eye |
+| **Generation race during run-up** (superseding seek lands after the last poll, before emit → one stale frame) | high (Codex #2) | §3 timing-hook mock injects a SeekTo at exactly that point; preserve the existing supersede-poll placement verbatim |
+| **Stale FFmpeg primed frame after an early seek** | high (Codex #3) | §5.1 `InitialState` + `seek` MUST reset it to `NeedRead`; mock test: SeekTo before first Credit |
+| **EOS replay failure** (loop parks, but the real decoder stays drained because `seek` didn't flush) | high (Codex #4) | `seek` postcondition "leaves decoder flushed" is a documented `///` contract; real-corpus EOS→seek→replay check |
+| **Pacing drift** (credit consumption moves across an EOS/gap/error branch → drop/burst/busy-spin) | high (Codex #5) | keep S1 + credit accounting verbatim; mock asserts one-frame-per-credit and no busy-spin at zero credits |
+| The shared loop subtly changes pacing/seek behaviour for one backend | high | §3 layer-1 mock pins the contract; port FFmpeg first (its loop is the model), then MF against the tested spec; existing MF spawn tests pass unchanged |
 | "Fix while unifying" quietly changes semantics (the drift in §5.9) | high — destroys behaviour-equivalence | §2 scope gate: preserve each backend's current behaviour, file real bugs separately |
 | Real-video tests are flaky, mask a regression | high | §3: layer-1 mock test is deterministic and primary; treat green real-video runs as necessary-not-sufficient |
 | MF backend port is large (`&mut kind`, Gap, reader_pos all move at once) | medium | §4a step 3 does them together *inside* the struct but behind the already-tested loop; the loop can't regress if the mock test holds |
