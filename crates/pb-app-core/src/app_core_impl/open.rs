@@ -398,4 +398,140 @@ mod tests {
             "a directory target re-roots as a folder scan"
         );
     }
+    #[test]
+    fn cmd_folder_jumps_within_the_deck_between_sibling_folders() {
+        let mut core = test_core();
+        let base = std::env::temp_dir().join("pb_sibling_jump");
+        let paths = vec![
+            base.join("alpha/1.png"),
+            base.join("alpha/2.png"),
+            base.join("bravo/3.png"),
+            base.join("charlie/4.png"),
+        ];
+        let source: Arc<dyn ItemSource> = Arc::new(FsSource::new(paths));
+        core.rebuild_playlist(source, base.clone(), Some(base.clone()), true, 0);
+        assert_eq!(core.current_folder_abs(), Some(base.join("alpha")));
+        // ⌘→ jumps within the deck to bravo's first photo — no disk worker, no re-scan.
+        core.effects.clear();
+        core.open_sibling_cmd(1);
+        assert_eq!(core.target_item, Some(2), "jumped to bravo/3.png");
+        assert!(core.tree_io.is_none(), "in-deck jump uses no disk worker");
+        assert!(
+            !core
+                .effects
+                .iter()
+                .any(|e| matches!(e, contract::CoreEffect::BeginDirScan { .. })),
+            "an in-deck jump never re-roots the deck"
+        );
+        // The photo lands; ⌘→ again steps to charlie, and ⌘← steps back to bravo.
+        core.displayed_item = Some(2);
+        core.open_sibling_cmd(1);
+        assert_eq!(core.target_item, Some(3), "→ charlie/4.png");
+        core.displayed_item = Some(3);
+        core.open_sibling_cmd(-1);
+        assert_eq!(core.target_item, Some(2), "⌘← back to bravo");
+        assert!(core.tree_io.is_none());
+    }
+
+    #[test]
+    fn cmd_folder_traverses_by_boundaries_entering_subfolders() {
+        let mut core = test_core();
+        let base = std::env::temp_dir().join("pb_folder_traverse");
+        // Deck order (case-insensitive path sort): a/1, a/2, a/sub/3, b/4.
+        let paths = vec![
+            base.join("a/1.png"),
+            base.join("a/2.png"),
+            base.join("a/sub/3.png"),
+            base.join("b/4.png"),
+        ];
+        let source: Arc<dyn ItemSource> = Arc::new(FsSource::new(paths));
+        core.rebuild_playlist(source, base.clone(), Some(base.clone()), true, 0);
+        // From a (index 0), ⌘→ enters the subfolder a/sub — the next different folder.
+        core.open_sibling_cmd(1);
+        assert_eq!(core.target_item, Some(2), "⌘→ enters a/sub");
+        // From a/sub, ⌘→ climbs to b.
+        core.displayed_item = Some(2);
+        core.open_sibling_cmd(1);
+        assert_eq!(core.target_item, Some(3), "⌘→ → b");
+        // ⌘← from b returns to a/sub.
+        core.displayed_item = Some(3);
+        core.open_sibling_cmd(-1);
+        assert_eq!(core.target_item, Some(2), "⌘← → a/sub");
+        // ⌘← from a/sub returns to the *start* of the a run (index 0, not 1).
+        core.displayed_item = Some(2);
+        core.open_sibling_cmd(-1);
+        assert_eq!(core.target_item, Some(0), "⌘← → start of the a run");
+        assert!(core.tree_io.is_none(), "all in-deck — no disk worker");
+    }
+
+    #[test]
+    fn open_parent_climbs_one_level_per_press_without_sticking() {
+        let mut core = test_core();
+        // Photos live deep (/base/a/b/c/*), and a, b, c have no direct photos — so every
+        // re-root re-lands the current photo in c. A current-folder anchor would stick.
+        let base = std::env::temp_dir().join("pb_climb_test");
+        let deep = base.join("a/b/c");
+        let deck = |root: PathBuf| -> (Arc<dyn ItemSource>, PathBuf) {
+            (Arc::new(FsSource::new(vec![deep.join("1.png")])), root)
+        };
+        let (src, root) = deck(deep.clone());
+        core.rebuild_playlist(src, root.clone(), Some(root), true, 0);
+        assert_eq!(core.current_folder_abs(), Some(deep.clone()));
+
+        // The folder the most recent BeginDirScan targets.
+        let scanned = |core: &AppCore| -> Option<PathBuf> {
+            core.effects.iter().rev().find_map(|e| match e {
+                contract::CoreEffect::BeginDirScan {
+                    source: pb_core::open::Source::Scan { roots, .. },
+                    ..
+                } => roots.first().cloned(),
+                _ => None,
+            })
+        };
+
+        // ⌘↑ #1: up from the current folder /base/a/b/c → /base/a/b.
+        core.effects.clear();
+        core.open_parent_cmd();
+        assert_eq!(scanned(&core), Some(base.join("a/b")));
+        assert_eq!(core.climb_anchor, Some(base.join("a/b")));
+
+        // The scan lands: the new deck (rooted at a/b) still lands the photo deep in c.
+        let (src2, root2) = deck(base.join("a/b"));
+        core.rebuild_playlist(src2, root2.clone(), Some(root2), true, 0);
+        assert_eq!(
+            core.current_folder_abs(),
+            Some(deep.clone()),
+            "photo still deep in c"
+        );
+        assert_eq!(
+            core.climb_anchor,
+            Some(base.join("a/b")),
+            "the scan doesn't reset the climb"
+        );
+
+        // ⌘↑ #2: continues up from the climb anchor (a/b) → /base/a — NOT back down to c's parent.
+        core.effects.clear();
+        core.open_parent_cmd();
+        assert_eq!(
+            scanned(&core),
+            Some(base.join("a")),
+            "climbs, never oscillates"
+        );
+        assert_eq!(core.climb_anchor, Some(base.join("a")));
+
+        // In-deck navigation ends the climb too (not just an explicit open): a stale rung
+        // would surprise-jump ⌘↑ to a near-root folder after the user browsed elsewhere.
+        assert_eq!(core.climb_anchor, Some(base.join("a")));
+        core.advance(Nav::Forward);
+        assert_eq!(core.climb_anchor, None, "a photo advance ends the climb");
+
+        // And an explicit open resets it as well — the next ⌘↑ starts from the current folder.
+        core.climb_anchor = Some(base.join("a"));
+        core.open_plan(
+            pb_core::open::Source::Explicit(vec![deep.join("1.png")]),
+            pb_core::open::Cursor::First,
+        );
+        assert_eq!(core.climb_anchor, None, "an explicit open breaks the climb");
+    }
+
 }
