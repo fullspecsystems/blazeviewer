@@ -1,40 +1,49 @@
 # Blaze Viewer — Current Status (session handoff)
 
-_Last updated: 2026-07-21 (rev 29). Windows session; a macOS session worked in parallel earlier.
+_Last updated: 2026-07-21 (rev 30). Windows session; a macOS session worked in parallel earlier.
 Everything below is on `main`, pushed (`git rev-list HEAD...origin/main` = 0/0)._
 
 ---
 
 # ▶️ START HERE
 
-**#130 — de-duplicate the media stacks (audit #5) — is DONE and pushed** (both parts):
+**#131 — the NS0 shell de-dup (audit #1b/#2) — Windows-side DONE and pushed** (five commits). All
+four threads inverted the last cross-shell `ShellFlowAction` orchestration into the core. Plan +
+full ledger: `.taskmaster/plans/131-ns0-shell-dedup.md` → **`## Handoff`** (read it — the exact
+Mac items live there).
 
-- **`c6a5d0e8` Part A** — one `VideoProducerBackend` trait + shared `video_producer_loop::run<B>`;
-  the MF and FFmpeg producers' ~180-line duplicated credit/seek loops collapse into one wrapper
-  each. New deterministic **mock-backend loop test** (10 tests, the primary net) + the ~10 existing
-  MF integration tests pass. Codex-reviewed, no defects.
-- **`daac240d` Part B** — new **`pb-color`** micro-crate owns the YUV `(Kr,Kb)` table + `coeffs()`;
-  pb-render re-exports it, pb-decode delegates. Byte-identical (all YUV tests pass).
-- ⚠ **One cross-machine gap (see `## Handoff` in the #130 plan):** the FFmpeg backend's *runtime*
-  behaviour is **unverified** — Windows has no FFmpeg video decoders, so its integration tests
-  can't run here. **A macOS/Linux session must run the FFmpeg producer tests + real play/seek, and
-  pb-render's golden-image tests** (both expected green; the changes are byte-identical by
-  construction, but that is not a run).
+- **`41c37afe` Thread B** — `archive_loading` mirror flag → `AppCore::archive_loading()` getter;
+  `scanning` doc fixed; `launching`/`dialog_open`/`redraw_pending` documented as intentional signals.
+- **`a5476e28` A.1** — `Recursive`/`ShowArchives` → `AppCore::toggle_recursive`/`toggle_show_archives`
+  (+ shared `current_photo_cursor`/`emit_rescan`/`rescan_current_folder`; emit `BeginDirScan` effect,
+  `persist_prefs`-gated save). winit bodies + flow arms deleted.
+- **`30fd74ea` A.2** — `CancelScan` → core dispatch (cancel + toast, **no dialog effect** — the
+  unscoped-`CloseDialog` was a bug). scan-pill Cancel routed through `dispatch_action`; winit wrapper deleted.
+- **`a4a06fc8` A.3** — `DeletePermanent` → `AppCore::request_delete_confirm` + new
+  `CoreEffect::ShowDeleteConfirm { name }` (name snapshotted, avoids the struct-literal trap); **all three**
+  emission sites converted; **macOS lever live** (`cfg(macos)` keeps the legacy path). winit renders the
+  new effect; `confirm_delete_permanent` deleted.
+- **`74f0fa03` docs** — `ShellFlowAction` seam now carries only `Quit` + `ToggleToolbar`.
 
-**The next task is the NS0 shell de-dup (audit #1b/#2) — THE LIVE TASK, plan ready.** Plan written +
-**Codex-reviewed (round 1 folded in)**: `.taskmaster/plans/131-ns0-shell-dedup.md` (rev 2). ⚠ The scope
-is **much smaller than the audit implied** — #126 already did the heavy lifting; what remains is
-inverting the last four *cross-shell* `ShellFlowAction` flow arms (Recursive / ShowArchives / CancelScan
-/ DeletePermanent) into the core, plus collapsing the redundant `archive_loading` mirror flag. It is
-**cross-machine** (touches `pb-mac-ffi`, an empty staticlib on Windows) — but the **plan of record is
-Windows does all four threads** (plan §6a): a target-scoped lever keeps macOS on its working legacy
-delete path, so `main` stays green *and* macOS functional at every push, and **never edit `pb-mac-ffi`
-from Windows**. The Mac's whole job is one additive item (wire `ShowDeleteConfirm` into the Swift sheet
-+ flip the lever + run). Read the plan in full, then start — sequence Thread-B → A.1 → A.2 → A.3.
-Pointers in §*NS0* below.
+**Verified (Windows):** `cargo test -p pb-app-core --lib` = **894 pass** (11 new tests, incl. the
+CancelScan unscoped-close guard + the A.3 `do_delete` fallback); `cargo test -p pb-app` = **80 pass**;
+clippy + fmt clean on new code. **Owner still owes a live winit RUN** of the four flows (Handoff item 1).
+
+**⚠ NEXT — the Mac session owns the A.3 close-out (Handoff items 2-5):** wire
+`CoreEffect::ShowDeleteConfirm { name }` into the macOS `map_effect`/Swift confirm sheet, flip the
+`cfg(target_os="macos")` arm in `request_delete_confirm` (`app_core_impl/delete.rs`) **off** the legacy
+`ShellFlowAction(DeletePermanent)` onto the new effect, and run the macOS `delete_permanent_*` test. Until
+then macOS delete-confirm keeps its **working legacy path** — do NOT delete the `cfg(macos)` arm before
+the handler + a green test exist. Plus non-blocking dead-arm cleanup (A.1/A.2/B macOS arms). **Never edit
+`pb-mac-ffi` from Windows** (empty staticlib here → zero errors on a syntax mistake).
+
+**#130 — media-stack de-dup (audit #5) — DONE + pushed** (`c6a5d0e8` + `daac240d`), below. ⚠ Its one
+open cross-machine gap still stands: the **FFmpeg backend runtime is unverified** (Windows has no FFmpeg
+video decoders) — a macOS/Linux session must run the FFmpeg producer tests + real play/seek + pb-render's
+golden-image tests (byte-identical by construction, but not a run). See the #130 plan `## Handoff`.
 
 Read before writing any code: **`docs/where-code-goes.md`** — an ordered decision procedure for
-where a function belongs. "Put it on `AppCore`" is the *last* answer. This is the doc NS0 leans on.
+where a function belongs. "Put it on `AppCore`" is the *last* answer. This is the doc NS0 leaned on.
 
 ---
 
@@ -66,7 +75,14 @@ that's an argument, not a run). Both expected green.
 
 ---
 
-# 🔜 NS0 shell de-dup (audit #1b/#2) — THE LIVE TASK; plan `#131` ready (Codex-reviewed)
+# ✅ #131 — NS0 shell de-dup (audit #1b/#2) — Windows-side DONE + pushed (Mac owns A.3 close-out)
+
+_Landed this session (see START HERE + the plan `## Handoff`). The design write-up below is kept for
+reference — it is the territory the four inversions followed._
+
+---
+
+# 📐 #131 design reference (as-planned)
 
 **Plan: `.taskmaster/plans/131-ns0-shell-dedup.md` (rev 2, Codex round-1 folded in). Read it in full —
 it is the territory; this is the map.** Investigation-grounded (two shell-mapping agent sweeps
