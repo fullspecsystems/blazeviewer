@@ -346,6 +346,8 @@ impl AppCore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::PbKey;
+    use crate::contract::CoreEvent;
     use crate::app_core_impl::test_support::{DeriveOk, five_photos, make_resident, photos_named, stuck_preview_core, test_core};
 
     #[test]
@@ -616,4 +618,29 @@ mod tests {
         assert!(core.target_pending());
         assert!(!core.target_caught_up());
     }
+    #[test]
+    fn pointer_nav_is_a_second_hold_to_blaze_source() {
+        let mut core = test_core();
+        // A held toolbar nav button makes `held_nav` report a direction, exactly as a held
+        // key would — that's what drives the self-paced advance each tick.
+        assert!(core.held_nav().is_none());
+        core.pointer_nav = Some(Action::Next);
+        assert!(core.held_nav().is_some());
+        // A key held the SAME direction is still that direction (not "two → idle").
+        core.held.insert(PbKey::Space, Action::Next);
+        assert!(core.held_nav().is_some());
+        // The OPPOSITE direction held at the same time is idle (ambiguous) — same rule as two
+        // keys held in opposite directions.
+        core.held.clear();
+        core.held.insert(PbKey::Backspace, Action::Prev);
+        assert!(core.held_nav().is_none());
+        // Release + the focus-loss safety net both clear the pointer hold.
+        core.held.clear();
+        core.end_pointer_nav();
+        assert_eq!(core.pointer_nav, None);
+        core.pointer_nav = Some(Action::Random);
+        core.handle(CoreEvent::FocusLost);
+        assert_eq!(core.pointer_nav, None);
+    }
+
 }
