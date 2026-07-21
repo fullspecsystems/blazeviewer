@@ -395,11 +395,17 @@ Not one test was dropped, renamed, or `#[ignore]`d.
 - A driver bug (`open(cf,"w").write(open(cf).read()…)` truncates before reading) destroyed a file's impl
   once — caught immediately by the compile, restored from git. Read-into-a-var-first.
 
-**Not done / deliberately left:** ~132 tests remain in the parent. The clear majority are charter tests
-that belong there; a handful are MED/LOW-confidence or `AMBIG` ones the conservative classifier left put
-rather than risk misfiling (safe default — the parent is where they already were). If a later pass wants
-zero non-charter tests in the parent, those are the ones to hand-triage, but there is no correctness debt
-in leaving them.
+**Cleanup pass — DONE 2026-07-20:** the ~132 remainder was re-classified and the 17 that still had a
+concern signal (they drive via `handle`/`tick`, so they missed the fixture/method-call first pass) were
+moved: 8 more video, 3 open, 2 panels, 2 item_kind, 1 audio_tracks, 1 nav. A fresh classification then
+confirms **no strong concern-belongers remain** — the **115** parent tests left are all genuine charter
+(residency/present engine, watchdog, selection, dispatch, contract, lifecycle), the test-side mirror of
+the production charter. `app_core_impl.rs` is now **8,286 lines** (from 22,105).
+
+The cleanup used `insert_tests.py` (into each concern's *existing* `mod tests`, since #128 already created
+them) + `cargo fix --tests` for import pruning; the only manual step was adding the shared-fixture/symbol
+imports the new tests needed (cargo fix removes, never adds). One reclassification: `frame_step_on_video`
+went to video, not the animation `frame_step` it happens to call.
 
 **Machinery** (scratchpad, not committed): `migrate_concern.py` (per-concern mover with the verified
 tier maps + a §3b own-fixture guard), `movetests.py`, the classifier (`assign.json`), and the mvc
