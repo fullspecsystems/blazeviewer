@@ -1271,93 +1271,13 @@ impl App {
         self.open_message_ex(&msg, offer_optout);
     }
 
-    /// Toggle recursive scanning of the current folder (`Ctrl+R`), keeping the current photo
-    /// in view. A no-op for an explicit file list (multi-select / dropped photos): there is
-    /// no single root to walk.
-    ///
-    /// The re-scan **streams** like any folder open, so a large tree doesn't freeze the loop.
-    /// Two nice properties fall out: turning recursion **on** streams the subfolders in behind
-    /// the current photo; turning it **off** *mid-scan* is an escape hatch — `begin_dir_scan`
-    /// supersedes the in-flight recursive walk and re-scans just the flat root (fast), i.e.
-    /// "stop, I only wanted this folder". The current photo is preserved by path
-    /// (`Cursor::At`), falling back to the first image if it isn't in the new listing (e.g.
-    /// turning recursion off while viewing a subfolder photo).
-    fn toggle_recursive(&mut self) {
-        let Some(root) = self.core.scan_root.clone() else {
-            return;
-        };
-        let recursive = !self.core.recursive;
-        let cursor = self
-            .core
-            .displayed_item
-            .and_then(|i| self.core.source.path(i))
-            .map(Path::to_path_buf)
-            .map(open::Cursor::At)
-            .unwrap_or(open::Cursor::First);
-        self.begin_dir_scan(
-            Source::Scan {
-                roots: vec![root],
-                recursive,
-            },
-            cursor,
-        );
-        // Acknowledge the toggle now; the new listing streams in via `poll_dir_scan` (and
-        // `self.core.recursive` updates when the first batch bootstraps).
-        let msg = if recursive {
-            "Recursive folders: on"
-        } else {
-            "Recursive folders: off"
-        };
-        self.core.show_toast(msg);
-    }
-
-    /// Re-scan the current folder with the live settings (recursive + Show Archives),
-    /// keeping the current photo in view — the streaming re-open `toggle_recursive` does,
-    /// minus the flag flip. Used when a preference that changes *what the walk admits*
-    /// (Show Archives, task #104) changes. A no-op for an archive/explicit deck (no scan
-    /// root to re-walk).
-    fn rescan_current_folder(&mut self) {
-        let Some(root) = self.core.scan_root.clone() else {
-            return;
-        };
-        let cursor = self
-            .core
-            .displayed_item
-            .and_then(|i| self.core.source.path(i))
-            .map(Path::to_path_buf)
-            .map(open::Cursor::At)
-            .unwrap_or(open::Cursor::First);
-        self.begin_dir_scan(
-            Source::Scan {
-                roots: vec![root],
-                recursive: self.core.recursive,
-            },
-            cursor,
-        );
-    }
-
-    /// Toggle View ▸ Show Archives (task #104): flip whether archives show as browsable
-    /// "doors" while scanning a folder, persist the preference, and re-scan the current
-    /// folder so the doors appear/disappear at once (`begin_dir_scan` reads the new value).
-    /// The checkmark tracks it via the per-tick `MenuState` diff. Also reachable from the
-    /// "no images" dialog's opt-out checkbox (`apply_hide_archives`).
-    fn toggle_show_archives(&mut self) {
-        let on = !self.core.settings.show_archives;
-        self.core.settings.show_archives = on;
-        self.core.settings.save();
-        self.rescan_current_folder();
-        self.core.show_toast(if on {
-            "Show archives: on"
-        } else {
-            "Show archives: off"
-        });
-    }
-
     /// Apply the "Don't show archives" opt-out from the empty-archive dialog's checkbox:
     /// set the preference to `hide` (checked = hide), persist it, and re-scan the current
     /// folder so the change lands immediately behind the dialog. Idempotent — re-applying
     /// the same value just re-scans harmlessly. No toast: the dialog checkbox *is* the
-    /// feedback.
+    /// feedback. (`toggle_recursive` / `toggle_show_archives` / `rescan_current_folder`
+    /// moved into `AppCore` — #131 A.1; the rescan below enqueues a `BeginDirScan` effect
+    /// the shell drains this event turn.)
     fn apply_hide_archives(&mut self, hide: bool) {
         let show = !hide;
         if self.core.settings.show_archives == show {
@@ -1365,7 +1285,7 @@ impl App {
         }
         self.core.settings.show_archives = show;
         self.core.settings.save();
-        self.rescan_current_folder();
+        self.core.rescan_current_folder();
     }
 
     // ── egui rich-panel overlay (task #54 Phase 4) ──────────────────────────────
@@ -2786,8 +2706,8 @@ impl App {
     fn perform_flow_action(&mut self, action: Action) {
         match action {
             Action::DeletePermanent => self.confirm_delete_permanent(),
-            Action::Recursive => self.toggle_recursive(),
-            Action::ShowArchives => self.toggle_show_archives(),
+            // `Recursive` / `ShowArchives` are no longer routed here — the core runs them
+            // directly during dispatch (#131 A.1), so the shell never sees them as flow actions.
             Action::CancelScan => self.cancel_scan_command(),
             Action::Quit => self.begin_exit(),
             // Toggle the docked windowed toolbar (#61): flip + persist the setting, then
@@ -2950,7 +2870,7 @@ impl App {
             // appear/disappear at once — Settings behaves like the View ▸ Show Archives toggle,
             // not like Recursive (whose Settings entry is only a default for future opens).
             if self.core.settings.show_archives != prev_show_archives {
-                self.rescan_current_folder();
+                self.core.rescan_current_folder();
             }
         }
         if let Some(confirmed) = answer {

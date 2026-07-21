@@ -663,8 +663,15 @@ impl AppCore {
                         contract::WindowMode::Fullscreen
                     }));
             }
+            // Recursive-scan + Show-Archives toggles (NS0 5.6 / #131 A.1, inverted): both are pure
+            // core-state logic (re-arm the walk via a `BeginDirScan` effect, flip the pref, toast),
+            // identical across the two shells, so the core runs them directly instead of routing a
+            // `ShellFlowAction` the shells each re-implemented. The macOS handler arms are now dead
+            // code (removed by the Mac session) — no double-run, since the core already did the work.
+            Action::Recursive => self.toggle_recursive(),
+            Action::ShowArchives => self.toggle_show_archives(),
             // Host-side commands — the residue whose execution *is* a platform operation:
-            // the permanent-delete confirm dialog, the off-thread directory-scan spawn / cancel,
+            // the permanent-delete confirm dialog, the off-thread directory-scan cancel,
             // and Quit's window teardown. Routed through the one `ShellFlowAction` seam so the
             // whole action vocabulary still dispatches here; the host runs the native op (see the
             // effect's doc). The core-owned commands were lifted out into their own arms above.
@@ -672,8 +679,6 @@ impl AppCore {
             // concept (macOS has its native toolbar), so the shell owns flipping `show_toolbar`,
             // persisting it, and re-reserving the photo's top inset — the core stays agnostic.
             Action::DeletePermanent
-            | Action::Recursive
-            | Action::ShowArchives
             | Action::CancelScan
             | Action::Quit
             | Action::ToggleToolbar => self
@@ -5444,6 +5449,32 @@ mod tests {
             .effects
             .iter()
             .any(|e| matches!(e, contract::CoreEffect::ShellFlowAction(_))));
+    }
+
+    #[test]
+    fn recursive_and_show_archives_dispatch_in_core_without_a_flow_effect() {
+        // #131 A.1: both toggles are inverted off `ShellFlowAction` — the core runs them during
+        // dispatch and re-arms the walk via a `BeginDirScan` effect. The mirror of the existing
+        // "no ShellFlowAction" assertion, proving the inversion actually happened. (A scan root is
+        // set so `Recursive` isn't a no-op.)
+        for action in [Action::Recursive, Action::ShowArchives] {
+            let mut core = test_core();
+            core.scan_root = Some(std::path::PathBuf::from("/photos"));
+            core.handle(CoreEvent::MenuAction(action));
+            assert!(
+                !core
+                    .effects
+                    .iter()
+                    .any(|e| matches!(e, contract::CoreEffect::ShellFlowAction(_))),
+                "{action:?} must not route a ShellFlowAction"
+            );
+            assert!(
+                core.effects
+                    .iter()
+                    .any(|e| matches!(e, contract::CoreEffect::BeginDirScan { .. })),
+                "{action:?} re-arms the walk directly"
+            );
+        }
     }
 
     #[test]

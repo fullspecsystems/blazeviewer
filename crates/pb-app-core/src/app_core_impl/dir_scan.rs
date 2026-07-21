@@ -66,6 +66,89 @@ impl AppCore {
         self.arm_dir_scan(wire_gen, rx, progress, name)
     }
 
+    /// The cursor that keeps the current photo in view across a re-walk: the displayed item's
+    /// path (`Cursor::At`), falling back to the first image (`Cursor::First`) when there is no
+    /// displayed item or it has no on-disk path (an archive entry, or nothing shown yet). This
+    /// snippet was duplicated verbatim in both shells' `toggle_recursive` / `rescan_current_folder`
+    /// (#131 A.1).
+    fn current_photo_cursor(&self) -> pb_core::open::Cursor {
+        self.displayed_item
+            .and_then(|i| self.source.path(i))
+            .map(std::path::Path::to_path_buf)
+            .map(pb_core::open::Cursor::At)
+            .unwrap_or(pb_core::open::Cursor::First)
+    }
+
+    /// Re-arm a walk of the current scan root with `recursive`, keeping the current photo in
+    /// view. **Enqueues the `BeginDirScan` effect** rather than calling [`Self::begin_dir_scan`]
+    /// directly — the latter is a real thread spawn, and going through the effect preserves the
+    /// worker-start ordering relative to other queued effects and keeps the toggle unit tests
+    /// thread-free (they assert the effect was pushed). A no-op with no scan root (an
+    /// archive/explicit deck has nothing to re-walk). (#131 A.1)
+    fn emit_rescan(&mut self, recursive: bool) {
+        let Some(root) = self.scan_root.clone() else {
+            return;
+        };
+        let cursor = self.current_photo_cursor();
+        self.effects.push(contract::CoreEffect::BeginDirScan {
+            source: pb_core::open::Source::Scan {
+                roots: vec![root],
+                recursive,
+            },
+            cursor,
+        });
+    }
+
+    /// Re-scan the current folder with the live settings (recursive + Show Archives), keeping
+    /// the current photo in view — the streaming re-open [`Self::toggle_recursive`] does, minus
+    /// the flag flip. Called when a preference that changes *what the walk admits* (Show
+    /// Archives, task #104) changes, from both the View ▸ Show Archives toggle and the live
+    /// Settings edit / empty-archive opt-out. A no-op for an archive/explicit deck (no scan root
+    /// to re-walk). (#131 A.1 — was duplicated in each shell.)
+    pub fn rescan_current_folder(&mut self) {
+        self.emit_rescan(self.recursive);
+    }
+
+    /// Toggle recursive folder scanning (`Ctrl+R`). Turning it **on** streams the whole subtree
+    /// in beneath the current photo; turning it **off** mid-scan supersedes the recursive walk
+    /// and re-scans just the flat root ("stop, I only wanted this folder"). The current photo is
+    /// preserved by path, falling back to the first image if it isn't in the new listing.
+    /// A no-op for an archive/explicit deck (no scan root). `recursive` itself updates when the
+    /// first batch bootstraps, so this only re-arms the walk + acknowledges with a toast.
+    /// (#131 A.1 — inverted off `ShellFlowAction`; was duplicated in both shells.)
+    pub fn toggle_recursive(&mut self) {
+        if self.scan_root.is_none() {
+            return; // nothing to re-walk
+        }
+        let recursive = !self.recursive;
+        self.emit_rescan(recursive);
+        self.show_toast(if recursive {
+            "Recursive folders: on"
+        } else {
+            "Recursive folders: off"
+        });
+    }
+
+    /// Toggle View ▸ Show Archives (task #104): flip whether archives show as browsable "doors"
+    /// while scanning a folder, persist the preference (gated on `persist_prefs` so a unit test
+    /// never writes the real settings file), and re-scan the current folder so the doors
+    /// appear/disappear at once (`begin_dir_scan` reads the new value). Unlike Recursive, the
+    /// preference flip happens even for an archive/explicit deck (the rescan then no-ops).
+    /// (#131 A.1 — inverted off `ShellFlowAction`; was duplicated in both shells.)
+    pub fn toggle_show_archives(&mut self) {
+        let on = !self.settings.show_archives;
+        self.settings.show_archives = on;
+        if self.persist_prefs {
+            self.settings.save();
+        }
+        self.rescan_current_folder();
+        self.show_toast(if on {
+            "Show archives: on"
+        } else {
+            "Show archives: off"
+        });
+    }
+
     /// A live view of the walk in flight, for whatever scan chrome a shell draws. `None` when
     /// no walk is running. Cheap and non-mutating, so it is safe to call every frame.
     pub fn scan_status(&self) -> Option<crate::dir_scan::ScanStatus> {
@@ -270,6 +353,99 @@ mod tests {
         let (tx, rx) = std::sync::mpsc::channel();
         core.arm_dir_scan(1, rx, crate::scan::ScanProgress::new(), "Photos".into());
         (core, tx)
+    }
+
+    /// #131 A.1 — `toggle_recursive` re-arms the current folder's walk with the flag flipped,
+    /// preserves the current photo, and toasts — all in the core, off `ShellFlowAction`. It
+    /// **enqueues the `BeginDirScan` effect** rather than calling `begin_dir_scan` synchronously,
+    /// so no worker thread spins in the test and the walk-start ordering is preserved.
+    #[test]
+    fn toggle_recursive_rearms_the_walk_off_the_flow_seam() {
+        let mut core = test_core();
+        core.native_toast = true; // capture the toast as data (no CPU raster in a test)
+        core.scan_root = Some(std::path::PathBuf::from("/photos"));
+        core.recursive = false;
+
+        core.toggle_recursive();
+
+        let recursive = core.effects.iter().find_map(|e| match e {
+            contract::CoreEffect::BeginDirScan {
+                source: pb_core::open::Source::Scan { recursive, roots },
+                ..
+            } => {
+                assert_eq!(roots, &vec![std::path::PathBuf::from("/photos")]);
+                Some(*recursive)
+            }
+            _ => None,
+        });
+        assert_eq!(recursive, Some(true), "re-arms recursive = on");
+        assert!(
+            core.dir_scan.is_none(),
+            "the effect is enqueued, not a synchronous walk spawn"
+        );
+        assert!(
+            !core
+                .effects
+                .iter()
+                .any(|e| matches!(e, contract::CoreEffect::ShellFlowAction(_))),
+            "the whole point of the inversion: no flow round-trip"
+        );
+        assert_eq!(
+            core.toast_native.as_ref().map(|t| t.message.as_str()),
+            Some("Recursive folders: on")
+        );
+    }
+
+    /// A no-op with no scan root — an archive/explicit deck has nothing to re-walk, and (matching
+    /// the old winit body's early return) it doesn't even toast.
+    #[test]
+    fn toggle_recursive_is_a_noop_without_a_scan_root() {
+        let mut core = test_core();
+        core.native_toast = true;
+        core.scan_root = None;
+
+        core.toggle_recursive();
+
+        assert!(core.effects.is_empty(), "no scan root: nothing re-armed");
+        assert!(core.toast_native.is_none(), "and no toast");
+    }
+
+    /// #131 A.1 — `toggle_show_archives` flips the pref, re-scans, and toasts. Unlike the old
+    /// winit body's unconditional `save()`, the persist is **gated on `persist_prefs`**, so a
+    /// unit test (gate false) never writes the real settings file.
+    #[test]
+    fn toggle_show_archives_flips_pref_rescans_and_stays_headless() {
+        let mut core = test_core();
+        core.native_toast = true;
+        core.scan_root = Some(std::path::PathBuf::from("/photos"));
+        assert!(!core.persist_prefs, "a test core never persists");
+        let before = core.settings.show_archives;
+
+        core.toggle_show_archives();
+
+        assert_eq!(core.settings.show_archives, !before, "pref flipped");
+        assert!(
+            core.effects
+                .iter()
+                .any(|e| matches!(e, contract::CoreEffect::BeginDirScan { .. })),
+            "re-scanned the current folder so the doors appear/disappear"
+        );
+        assert!(
+            !core
+                .effects
+                .iter()
+                .any(|e| matches!(e, contract::CoreEffect::ShellFlowAction(_))),
+            "inverted off the flow seam"
+        );
+        let expect = if !before {
+            "Show archives: on"
+        } else {
+            "Show archives: off"
+        };
+        assert_eq!(
+            core.toast_native.as_ref().map(|t| t.message.as_str()),
+            Some(expect)
+        );
     }
 
     /// `begin_dir_scan` must reject a non-scan source **before touching any state**. The shell
