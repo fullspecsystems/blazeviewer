@@ -236,7 +236,7 @@ impl AppCore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app_core_impl::test_support::{core_with_a_native_video, seed_details, test_core, track};
+    use crate::app_core_impl::test_support::{core_with_a_native_video, five_photos, seed_details, test_core, track};
 
     /// A playing video whose catalog carries `n` audio tracks.
     fn core_with_audio_tracks(n: u64) -> AppCore {
@@ -338,4 +338,35 @@ mod tests {
         assert!(selected_audio_rows(&mut core).is_empty());
         assert!(core.toast_native.is_none());
     }
+    /// The flyout must list tracks over the **poster** too (owner, 2026-07-17): the
+    /// catalog belongs to the item, not to a session, so a video that isn't playing
+    /// still offers its tracks — gating on `video_showing()` claimed "No Video" over
+    /// a film sitting at its poster.
+    #[test]
+    fn audio_rows_show_for_a_displayed_video_without_a_session() {
+        let mut core = test_core();
+        core.source = Arc::new(FsSource::new(vec![PathBuf::from("films/movie.mkv")]));
+        core.displayed_item = Some(0);
+        assert!(core.video.is_none(), "no session in this test");
+        let mut a0 = track("AAC", "eng");
+        a0.id.local_id = 1;
+        let mut a1 = track("AC-3", "fra");
+        a1.id.local_id = 2;
+        let catalog = pb_decode::MediaTrackCatalog::new(
+            1,
+            pb_decode::MediaBackend::FFmpeg,
+            pb_decode::TrackSet::complete(vec![a0, a1]),
+            pb_decode::TrackSet::complete(vec![]),
+        );
+        seed_details(&mut core, 0, Some(catalog), Some(true));
+
+        assert!(core.displayed_is_video());
+        assert!(core.audio_tracks_known());
+        assert_eq!(core.audio_picker_rows().len(), 2);
+        // ...and a still keeps offering nothing.
+        core.source = five_photos();
+        assert!(!core.displayed_is_video());
+        assert!(core.audio_picker_rows().is_empty());
+    }
+
 }
