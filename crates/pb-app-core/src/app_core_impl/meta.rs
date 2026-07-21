@@ -86,7 +86,7 @@ impl AppCore {
             if let Some(reason) = &meta.recovered {
                 rows.push(DetailRow::Pair {
                     label: "Recovered".to_string(),
-                    value: format!("damaged file, shown anyway ({reason})"),
+                    value: format!("damaged file ({reason})"),
                 });
             }
         }
