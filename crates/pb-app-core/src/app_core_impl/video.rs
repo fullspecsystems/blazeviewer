@@ -2640,4 +2640,449 @@ mod tests {
             "ring refill re-issued once playback ended"
         );
     }
+    /// The owner's missing-chrome report (2026-07-16): pressing `P` before the
+    /// poster decode lands (an SMB movie's poster takes seconds; `P` always wins)
+    /// left `current` unset for the WHOLE playback — the Session route streams
+    /// frames around `present_item`, and the first frame's `mark_resolved` makes
+    /// the late poster skip its present. With no `current` there is no info line,
+    /// no `i`, no hover reveal, no playback controls. The fix: a presented video
+    /// frame adopts the poster's metadata from `meta_cache` the moment it lands.
+    #[cfg(all(target_os = "macos", feature = "ffvideo"))]
+    #[test]
+    fn a_video_frame_adopts_late_poster_meta_so_the_controls_can_show() {
+        let mut core = test_core();
+        core.native_info = true;
+        core.info_line = false;
+        core.viewport.width = 800;
+        core.viewport.height = 1000;
+        core.source = Arc::new(pb_source::FsSource::new(vec![std::path::PathBuf::from(
+            "/nope/movie.mkv",
+        )]));
+        core.displayed_item = Some(0);
+        core.toggle_play_pause(); // P wins the race: no poster has presented yet
+        assert!(core
+            .video
+            .as_ref()
+            .is_some_and(|v| v.as_session().is_some()));
+        assert!(core.current.is_none(), "the poster hasn't landed");
+
+        let frame = crate::video::VideoFrame {
+            session_id: crate::video::VideoSessionId(core.video_seq),
+            seek_generation: crate::video::SeekGeneration::FIRST,
+            pts: Duration::ZERO,
+            width: 2,
+            height: 2,
+            pixels: vec![0; 16],
+            format: pb_decode::PixelFormat::Rgba8,
+            color: crate::video::VideoColorInfo::srgb(),
+        };
+        // Frames present before the poster lands: nothing to adopt, no controls yet.
+        core.present_video_frame(&frame);
+        assert!(core.current.is_none());
+        core.video_hover_reveal(900.0);
+        assert!(
+            !core.info_line_visible(),
+            "no metadata yet — nothing to show"
+        );
+
+        // The poster decode completes off-thread; drain_results caches its meta.
+        core.meta_cache.insert(
+            0,
+            crate::meta::PhotoMeta {
+                rel: "movie.mkv".into(),
+                w: 1920,
+                h: 1080,
+                size: None,
+                codec: "MKV",
+                animated: None,
+                recovered: None,
+            },
+        );
+        // The very next presented frame adopts it — chrome comes alive mid-play.
+        core.present_video_frame(&frame);
+        assert!(core.current.is_some(), "the late poster's meta is adopted");
+        core.video_hover_reveal(900.0);
+        assert!(
+            core.info_line_visible(),
+            "hover now reveals the playback controls"
+        );
+    }
+
+    /// Chrome parity on the new default route (owner report 2026-07-16): an MKV
+    /// playing on the Session route must still (a) report `video_session_active`
+    /// — the SwiftUI shell's gate for the playback row/scrubber — and (b) reveal
+    /// the controls line on a bottom-zone hover, exactly like the old
+    /// sample-buffer route did.
+    #[cfg(all(target_os = "macos", feature = "ffvideo"))]
+    #[test]
+    fn session_mkv_reports_active_and_reveals_the_controls() {
+        let mut core = test_core();
+        core.native_info = true;
+        core.info_line = false;
+        core.viewport.width = 800;
+        core.viewport.height = 1000;
+        core.source = Arc::new(pb_source::FsSource::new(vec![std::path::PathBuf::from(
+            "/nope/clip.mkv",
+        )]));
+        core.displayed_item = Some(0);
+        core.current = Some(crate::meta::PhotoMeta {
+            rel: "clip.mkv".into(),
+            w: 64,
+            h: 64,
+            size: None,
+            codec: "MKV",
+            animated: None,
+            recovered: None,
+        });
+        core.toggle_play_pause(); // the real routing → Session backend
+        assert!(
+            core.video
+                .as_ref()
+                .is_some_and(|v| v.as_session().is_some()),
+            "MKV plays on the Session route"
+        );
+        assert!(
+            core.video_session_active(),
+            "the SwiftUI chrome gate must see the session"
+        );
+        core.video_hover_reveal(900.0);
+        assert!(
+            core.info_line_visible(),
+            "bottom-zone hover reveals the controls line"
+        );
+    }
+
+    /// macOS §8a level-2 fallback (task #84): a *recoverable* native failure on
+    /// a nominally-native container retries through the FFmpeg session with no
+    /// toast before the attempt; an unrecoverable one surfaces immediately.
+    #[cfg(all(target_os = "macos", feature = "ffvideo"))]
+    #[test]
+    fn recoverable_native_failure_falls_back_to_the_ffmpeg_session() {
+        let mut core = test_core();
+        core.source = Arc::new(pb_source::FsSource::new(vec![std::path::PathBuf::from(
+            "/nope/clip.mp4",
+        )]));
+        core.displayed_item = Some(0);
+        core.native_toast = true;
+        core.toggle_play_pause();
+        assert!(
+            core.video.as_ref().unwrap().as_native().is_some(),
+            "MP4 tries AVPlayer first"
+        );
+        let sid = core.native_video_session_id();
+        assert!(sid > 0);
+        // The shell classifies a demux/codec failure as recoverable.
+        core.native_video_failed(sid, "no codec for this video".into(), true);
+        assert!(
+            core.video
+                .as_ref()
+                .is_some_and(|v| v.as_session().is_some()),
+            "fallback started the FFmpeg session"
+        );
+        assert!(
+            core.toast_native.is_none(),
+            "no error surfaces before the fallback attempt"
+        );
+        // The flag was consumed — it never loops.
+        assert_eq!(core.video_ffmpeg_fallback, None);
+    }
+
+    #[cfg(all(target_os = "macos", feature = "ffvideo"))]
+    #[test]
+    fn unrecoverable_native_failure_surfaces_without_fallback() {
+        let mut core = test_core();
+        core.source = Arc::new(pb_source::FsSource::new(vec![std::path::PathBuf::from(
+            "/nope/clip.mp4",
+        )]));
+        core.displayed_item = Some(0);
+        core.native_toast = true;
+        core.toggle_play_pause();
+        let sid = core.native_video_session_id();
+        core.native_video_failed(sid, "The file couldn't be opened".into(), false);
+        assert!(core.video.is_none(), "no fallback for missing-file/DRM");
+        assert!(core.toast_native.is_some(), "the error surfaces at once");
+    }
+
+    /// Owner-reported: the info line showed no playback row during video playback.
+    /// This drives the real chain — session → update_video_progress →
+    /// show_info_line — and asserts each link.
+    #[test]
+    fn video_playback_grows_the_info_line_row() {
+        use crate::video::{VideoProducerEvent, VideoSessionId};
+        use crate::video_session::{ActiveVideo, VideoSession};
+
+        let mut core = test_core();
+        core.hud = pb_hud::hud::Hud::load();
+        if core.hud.is_none() {
+            eprintln!("no system UI font — skipping");
+            return;
+        }
+        core.source = Arc::new(pb_source::FsSource::new(vec![std::path::PathBuf::from(
+            r"C:\nope\clip.mp4",
+        )]));
+        core.displayed_item = Some(0);
+        core.info_line = true;
+        core.current = Some(crate::meta::PhotoMeta {
+            rel: "clip.mp4".into(),
+            w: 64,
+            h: 64,
+            size: None,
+            codec: "MP4",
+            animated: None,
+            recovered: None,
+        });
+        assert!(core.info_line_visible(), "precondition: the line is on");
+
+        let (session, io) = VideoSession::new(VideoSessionId(1), 1024);
+        core.video = Some(ActiveVideoBackend::Session(ActiveVideo::new(session, 0)));
+        io.events
+            .send(VideoProducerEvent::Opened {
+                session_id: VideoSessionId(1),
+                duration: Some(Duration::from_secs(10)),
+                width: 64,
+                height: 64,
+                has_audio: false,
+                frame_bytes: 64 * 64 * 4,
+            })
+            .unwrap();
+        core.poll_video();
+        assert!(
+            core.video_progress_row().is_some(),
+            "a live session on the displayed item must yield a progress row"
+        );
+        core.update_video_progress();
+        assert!(
+            core.video_pill_text.is_some(),
+            "the row text must be computed"
+        );
+        assert!(
+            core.info_line_shown,
+            "update_video_progress must re-raster the info line"
+        );
+    }
+
+    /// `,`/`.` on a playing video (task #79 follow-up): stepping pauses the
+    /// session, serves the next queued frame, keeps the paused audio player in
+    /// step, and — with the `i` toggle off on a native-info shell — flashes the
+    /// info line as the position OSD instead of toasting. A backward step then
+    /// launches a paused seek.
+    #[test]
+    fn frame_step_on_video_pauses_steps_and_flashes_the_info_line() {
+        use crate::video::{VideoProducerEvent, VideoSessionId, VideoSessionState};
+        use crate::video_session::{ActiveVideo, VideoSession};
+        use pb_decode::video::VideoColorInfo;
+
+        let mut core = test_core();
+        core.native_info = true;
+        core.info_line = false; // the toggle is OFF — feedback must flash the line
+        core.source = Arc::new(pb_source::FsSource::new(vec![std::path::PathBuf::from(
+            r"C:\nope\clip.mp4",
+        )]));
+        core.displayed_item = Some(0);
+        core.current = Some(crate::meta::PhotoMeta {
+            rel: "clip.mp4".into(),
+            w: 64,
+            h: 64,
+            size: None,
+            codec: "MP4",
+            animated: None,
+            recovered: None,
+        });
+
+        let sid = VideoSessionId(1);
+        let (session, io) = VideoSession::new(sid, 4);
+        core.video = Some(ActiveVideoBackend::Session(ActiveVideo::new(session, 0)));
+        io.events
+            .send(VideoProducerEvent::Opened {
+                session_id: sid,
+                duration: Some(Duration::from_secs(10)),
+                width: 1,
+                height: 1,
+                has_audio: false,
+                frame_bytes: 4,
+            })
+            .unwrap();
+        let frame = |pts_ms: u64| pb_decode::VideoFrame {
+            session_id: sid,
+            seek_generation: crate::video::SeekGeneration::FIRST,
+            pts: Duration::from_millis(pts_ms),
+            width: 1,
+            height: 1,
+            format: pb_decode::PixelFormat::Rgba8,
+            pixels: vec![0; 4],
+            color: VideoColorInfo::srgb(),
+        };
+        io.events.send(VideoProducerEvent::Frame(frame(0))).unwrap();
+        io.events
+            .send(VideoProducerEvent::Frame(frame(33)))
+            .unwrap();
+        core.poll_video(); // → Playing, presents pts 0
+        assert_eq!(
+            core.video.as_ref().unwrap().state(),
+            VideoSessionState::Playing
+        );
+
+        core.effects.clear();
+        core.frame_step(1);
+        let v = core.video.as_ref().unwrap().as_session().unwrap();
+        assert_eq!(
+            v.session.state(),
+            VideoSessionState::Paused,
+            "stepping pauses playback, like animations"
+        );
+        assert_eq!(v.session.current_pts, Some(Duration::from_millis(33)));
+        assert!(
+            core.effects
+                .iter()
+                .any(|e| matches!(e, contract::CoreEffect::PauseVideoAudio)),
+            "the shell audio player pauses with the session"
+        );
+        assert!(
+            core.effects.iter().any(|e| matches!(
+                e,
+                contract::CoreEffect::SeekVideoAudio { position } if *position == Duration::from_millis(33)
+            )),
+            "the paused audio player follows the stepped position"
+        );
+        assert!(
+            core.video_osd_until.is_some() && core.info_line_visible(),
+            "with `i` off, the position feedback flashes the info line"
+        );
+        assert!(
+            core.toast_native.is_none() && core.toast.is_none(),
+            "no `m:ss / m:ss` toast when the line is the readout"
+        );
+
+        // A backward step launches a paused one-frame seek.
+        core.frame_step(-1);
+        assert_eq!(
+            core.video.as_ref().unwrap().state(),
+            VideoSessionState::Seeking
+        );
+
+        // The flash lapses at its deadline (tick clears it + notifies the shell).
+        core.video_osd_until = Some(core.now - Duration::from_millis(1));
+        core.handle(contract::CoreEvent::Tick(Instant::now()));
+        assert!(core.video_osd_until.is_none(), "the OSD flash expires");
+        assert!(!core.info_line_visible(), "the flashed line drops");
+    }
+
+    /// Hovering the bottom controls zone reveals the playback controls while a
+    /// video is active (owner request — the video-player convention); the top of
+    /// the window doesn't, and the persistent `i` line needs no flash.
+    #[test]
+    fn hovering_the_controls_zone_reveals_the_playback_line() {
+        use crate::video::{VideoProducerEvent, VideoSessionId};
+        use crate::video_native::ActiveVideoBackend;
+        use crate::video_session::{ActiveVideo, VideoSession};
+
+        let mut core = test_core();
+        core.native_info = true;
+        core.info_line = false;
+        core.viewport.width = 800;
+        core.viewport.height = 1000;
+        core.source = Arc::new(pb_source::FsSource::new(vec![std::path::PathBuf::from(
+            r"C:\nope\clip.mp4",
+        )]));
+        core.displayed_item = Some(0);
+        core.current = Some(crate::meta::PhotoMeta {
+            rel: "clip.mp4".into(),
+            w: 64,
+            h: 64,
+            size: None,
+            codec: "MP4",
+            animated: None,
+            recovered: None,
+        });
+        let (session, io) = VideoSession::new(VideoSessionId(1), 16);
+        core.video = Some(ActiveVideoBackend::Session(ActiveVideo::new(session, 0)));
+        io.events
+            .send(VideoProducerEvent::Opened {
+                session_id: VideoSessionId(1),
+                duration: Some(Duration::from_secs(10)),
+                width: 2,
+                height: 2,
+                has_audio: false,
+                frame_bytes: 16,
+            })
+            .unwrap();
+        core.poll_video();
+
+        // Above the zone: nothing.
+        core.video_hover_reveal(100.0);
+        assert!(core.video_osd_until.is_none(), "top hover reveals nothing");
+        // Inside the bottom quarter: the line flashes on.
+        core.video_hover_reveal(900.0);
+        assert!(core.video_osd_until.is_some() && core.info_line_visible());
+
+        // With the persistent line on, hover never arms the flash.
+        core.video_osd_until = None;
+        core.info_line = true;
+        core.video_hover_reveal(900.0);
+        assert!(
+            core.video_osd_until.is_none(),
+            "persistent line needs no flash"
+        );
+        drop(io);
+    }
+
+    /// `flash_video_controls` (the scrubber-release re-arm) reveals the line for an active
+    /// video regardless of pointer position, but never for a still or when `i` is already on.
+    #[test]
+    fn flash_video_controls_re_arms_the_reveal() {
+        use crate::video::{VideoProducerEvent, VideoSessionId};
+        use crate::video_native::ActiveVideoBackend;
+        use crate::video_session::{ActiveVideo, VideoSession};
+
+        let mut core = test_core();
+        core.native_info = true;
+        core.info_line = false;
+        core.source = Arc::new(pb_source::FsSource::new(vec![std::path::PathBuf::from(
+            r"C:\nope\clip.mp4",
+        )]));
+        core.displayed_item = Some(0);
+        core.current = Some(crate::meta::PhotoMeta {
+            rel: "clip.mp4".into(),
+            w: 64,
+            h: 64,
+            size: None,
+            codec: "MP4",
+            animated: None,
+            recovered: None,
+        });
+        let (session, io) = VideoSession::new(VideoSessionId(1), 16);
+        core.video = Some(ActiveVideoBackend::Session(ActiveVideo::new(session, 0)));
+        io.events
+            .send(VideoProducerEvent::Opened {
+                session_id: VideoSessionId(1),
+                duration: Some(Duration::from_secs(10)),
+                width: 2,
+                height: 2,
+                has_audio: false,
+                frame_bytes: 16,
+            })
+            .unwrap();
+        core.poll_video();
+
+        // Active video: the flash arms with no geometry (a mid-drag re-arm).
+        core.flash_video_controls();
+        assert!(core.video_osd_until.is_some() && core.info_line_visible());
+
+        // Persistent `i` line up: nothing to re-arm.
+        core.video_osd_until = None;
+        core.info_line = true;
+        core.flash_video_controls();
+        assert!(
+            core.video_osd_until.is_none(),
+            "persistent line needs no flash"
+        );
+
+        // No active video: never arms (can't flash a still's line).
+        core.info_line = false;
+        core.video = None;
+        core.flash_video_controls();
+        assert!(core.video_osd_until.is_none(), "no video → no flash");
+        drop(io);
+    }
+
 }
