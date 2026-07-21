@@ -32,25 +32,26 @@ struct FolderBreadcrumbView: View {
 
     /// Font used for both measurement and display, kept in lockstep so the fit is exact.
     private static let font = NSFont.systemFont(ofSize: 11)
-    private let sepWidth: CGFloat = 13 // a `chevron.compact.right` at this size
-    private let overflowWidth: CGFloat = 24 // the leading "…" menu button
-    private let sidePad: CGFloat = 10
-    private let rowHeight: CGFloat = 22
+    private let sepWidth: CGFloat = 15 // a `chevron.right` + its spacing
+    private let overflowWidth: CGFloat = 26 // the leading "…" menu button
+    private let sidePad: CGFloat = 12
+    /// Roomier than the 22pt first cut — the owner found it cramped. Leaves ~7pt of air above and
+    /// below the ~18pt icon+label content, balancing the 36pt tab-bar header above.
+    private let rowHeight: CGFloat = 32
 
     var body: some View {
         let crumbs = FolderBreadcrumbModel.crumbs(for: model.breadcrumbPath)
         let split = fit(crumbs, into: max(0, width - 2 * sidePad))
-        HStack(spacing: 4) {
+        HStack(spacing: 3) {
             if !split.overflow.isEmpty {
                 overflowMenu(split.overflow)
+                separator
             }
             ForEach(split.visible, id: \.path) { crumb in
-                // A separator before every crumb except the very first *when nothing precedes it*
-                // (no overflow menu). The current folder is always the last visible crumb.
-                if crumb.path != split.visible.first?.path || !split.overflow.isEmpty {
-                    Image(systemName: "chevron.compact.right")
-                        .font(.system(size: 10))
-                        .foregroundStyle(Color.panelSecondary.opacity(0.7))
+                // A `›` before every visible crumb except the first (the overflow menu, when
+                // present, supplies its own trailing separator above). Current is always last.
+                if crumb.path != split.visible.first?.path {
+                    separator
                 }
                 crumbLabel(crumb, isCurrent: crumb.path == crumbs.last?.path)
             }
@@ -62,44 +63,66 @@ struct FolderBreadcrumbView: View {
         .accessibilityLabel("Current folder: \(crumbs.last?.name ?? "")")
     }
 
+    // The macOS path-bar separator: a light `›` chevron between crumbs.
+    private var separator: some View {
+        Image(systemName: "chevron.right")
+            .font(.system(size: 9, weight: .semibold))
+            .foregroundStyle(Color.panelSecondary.opacity(0.55))
+    }
+
     // A single crumb: the current folder is bold and inert (clicking it would only re-open/narrow
-    // the deck — deliberately prevented, not a silent no-op); interactive ancestors open on click;
-    // broad roots render as dim, inert context.
+    // the deck — deliberately prevented, not a silent no-op); interactive ancestors open on click
+    // and light up when pressed; broad roots render as dim, inert context.
     @ViewBuilder
     private func crumbLabel(_ crumb: Crumb, isCurrent: Bool) -> some View {
         let interactive = !isCurrent && FolderBreadcrumbModel.isInteractive(crumb.path)
         if interactive {
             Button(action: { model.openFolderPath(crumb.path) }) {
-                Text(crumb.name)
-                    .font(.caption)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                    .foregroundStyle(Color.panelSecondary)
+                crumbContent(crumb, isCurrent: false)
             }
-            .buttonStyle(.plain)
+            .buttonStyle(CrumbButtonStyle())
             .help("Open “\(crumb.name)”")
         } else {
+            crumbContent(crumb, isCurrent: isCurrent)
+                .padding(.horizontal, 5)
+                .padding(.vertical, 3)
+        }
+    }
+
+    // Folder icon + name — the SAME `folder`/`folder.fill` iconography (and accent tint for the
+    // current folder) the folder tree uses (`FolderTreePanel.icon`), for internal consistency.
+    private func crumbContent(_ crumb: Crumb, isCurrent: Bool) -> some View {
+        HStack(spacing: 4) {
+            Image(systemName: isCurrent ? "folder.fill" : "folder")
+                .font(.system(size: 11))
+                .foregroundStyle(isCurrent ? Color.accentColor : Color.panelSecondary)
             Text(crumb.name)
                 .font(.caption)
                 .fontWeight(isCurrent ? .semibold : .regular)
                 .lineLimit(1)
                 .truncationMode(.middle)
-                .foregroundStyle(isCurrent ? Color.primary : Color.panelSecondary.opacity(0.7))
+                .foregroundStyle(isCurrent ? Color.primary : Color.panelSecondary)
         }
+        .fixedSize()
     }
 
-    // The leading overflow: nearest ancestor first, down toward the root. Non-interactive roots
-    // stay listed (as disabled context) so the menu always shows the full ancestry.
+    // The leading overflow: nearest ancestor first, down toward the root — each with its folder
+    // icon. Non-interactive roots stay listed (disabled context) so the menu shows the full
+    // ancestry.
     @ViewBuilder
     private func overflowMenu(_ overflow: [Crumb]) -> some View {
         Menu {
             ForEach(overflow.reversed(), id: \.path) { crumb in
-                Button(crumb.name) { model.openFolderPath(crumb.path) }
-                    .disabled(!FolderBreadcrumbModel.isInteractive(crumb.path))
+                Button {
+                    model.openFolderPath(crumb.path)
+                } label: {
+                    Label(crumb.name, systemImage: "folder")
+                }
+                .disabled(!FolderBreadcrumbModel.isInteractive(crumb.path))
             }
         } label: {
             Image(systemName: "ellipsis")
-                .font(.system(size: 11, weight: .semibold))
+                .font(.system(size: 12, weight: .semibold))
                 .foregroundStyle(Color.panelSecondary)
         }
         .menuStyle(.borderlessButton)
@@ -132,7 +155,41 @@ struct FolderBreadcrumbView: View {
         return (overflow, visible)
     }
 
+    // A crumb's width: label text + the folder icon (~15) + its spacing (4) + the button's own
+    // horizontal padding (~10). Kept a slight over-estimate so the strip never overflows the pane.
     private func measure(_ s: String) -> CGFloat {
-        (s as NSString).size(withAttributes: [.font: FolderBreadcrumbView.font]).width + 6
+        (s as NSString).size(withAttributes: [.font: FolderBreadcrumbView.font]).width + 30
+    }
+}
+
+// A path-bar crumb button: transparent at rest, an accent-tinted pill while pressed ("lights up
+// when you click it" — the macOS path-control behavior the owner asked for), plus a whisper of a
+// hover tint (used sparingly, per house style).
+private struct CrumbButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        CrumbButtonBody(configuration: configuration)
+    }
+
+    private struct CrumbButtonBody: View {
+        let configuration: ButtonStyleConfiguration
+        @State private var hovering = false
+
+        var body: some View {
+            configuration.label
+                .padding(.horizontal, 5)
+                .padding(.vertical, 3)
+                .background(
+                    RoundedRectangle(cornerRadius: 5, style: .continuous)
+                        .fill(background)
+                )
+                .contentShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
+                .onHover { hovering = $0 }
+                .animation(.easeOut(duration: 0.12), value: hovering)
+        }
+
+        private var background: Color {
+            if configuration.isPressed { return Color.accentColor.opacity(0.35) }
+            return hovering ? Color.primary.opacity(0.07) : Color.clear
+        }
     }
 }

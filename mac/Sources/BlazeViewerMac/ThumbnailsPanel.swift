@@ -100,7 +100,7 @@ struct ThumbnailsPanelView: View {
     /// The breadcrumb strip's height (task #129): a path-bar row + its divider. Folded into the
     /// chrome height only when a folder path is present (an fs deck), so the grid row math stays
     /// exact whether the bar shows or not.
-    private let breadcrumbHeight: CGFloat = 23
+    private let breadcrumbHeight: CGFloat = 33
     private var showBreadcrumb: Bool { !model.breadcrumbPath.isEmpty }
     private var chromeHeight: CGFloat {
         PanelMetrics.headerHeight + 2 + (showBreadcrumb ? breadcrumbHeight : 0)
