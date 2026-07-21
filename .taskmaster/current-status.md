@@ -21,11 +21,14 @@ the day. Everything below is on `main`, pushed (`git rev-list HEAD...origin/main
   pb-render's golden-image tests** (both expected green; the changes are byte-identical by
   construction, but that is not a run).
 
-**The next task is the NS0 shell de-dup (audit #1b/#2) — THE LIVE TASK.** Its plan is being written
-**this session** at `.taskmaster/plans/131-ns0-shell-dedup.md` (Codex review pending). It is the
-**cross-machine** refactor (touches `pb-mac-ffi`, an empty staticlib on Windows), so it is genuinely
-riskier than #130 and needs the Mac available to close the loop. Read the plan in full, then start.
-Pointers in §*NS0* below.
+**The next task is the NS0 shell de-dup (audit #1b/#2) — THE LIVE TASK, plan ready.** Plan written +
+**Codex-reviewed (round 1 folded in)**: `.taskmaster/plans/131-ns0-shell-dedup.md` (rev 2). ⚠ The scope
+is **much smaller than the audit implied** — #126 already did the heavy lifting; what remains is
+inverting the last four *cross-shell* `ShellFlowAction` flow arms (Recursive / ShowArchives / CancelScan
+/ DeletePermanent) into the core, plus collapsing the redundant `archive_loading` mirror flag. It is the
+**cross-machine** refactor (touches `pb-mac-ffi`, an empty staticlib on Windows) — genuinely riskier
+than #130; only `DeletePermanent` (A.3) can break macOS silently and it needs the Mac to close the loop.
+Read the plan in full, then start (plan §5 sequences Thread-B → A.1 → A.2 → A.3). Pointers in §*NS0*.
 
 Read before writing any code: **`docs/where-code-goes.md`** — an ordered decision procedure for
 where a function belongs. "Put it on `AppCore`" is the *last* answer. This is the doc NS0 leans on.
@@ -60,10 +63,11 @@ that's an argument, not a run). Both expected green.
 
 ---
 
-# 🔜 NS0 shell de-dup (audit #1b/#2) — THE LIVE TASK; plan `#131` being written this session
+# 🔜 NS0 shell de-dup (audit #1b/#2) — THE LIVE TASK; plan `#131` ready (Codex-reviewed)
 
-**Plan: `.taskmaster/plans/131-ns0-shell-dedup.md` — authored this session (Codex review in
-progress). Read it in full before implementing.** Grounding sources (read both):
+**Plan: `.taskmaster/plans/131-ns0-shell-dedup.md` (rev 2, Codex round-1 folded in). Read it in full
+before implementing — it is investigation-grounded (two shell-mapping agent sweeps 2026-07-21) and the
+scope is much smaller than the pointers below imply (#126 already did most of it).** Grounding sources:
 
 - **`technical-debt-audit.md`** — finding **#1(b)** ("finish the NS0 inversion so `AppCore` owns
   orchestration and the mirror flags have a single owner") and finding **#2** ("the two parallel
