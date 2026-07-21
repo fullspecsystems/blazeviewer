@@ -350,4 +350,97 @@ mod tests {
             "climbing out of an archive lands on its folder"
         );
     }
+    /// Task #79 phase 4: `P` on a video item starts a `VideoSession` — never the
+    /// animation decode machinery (which would read the file into RAM). A producer
+    /// that can't open the file fails the session cleanly through `poll_video`,
+    /// which surfaces a toast and clears the session.
+    #[test]
+    fn p_on_a_video_item_starts_a_session_never_the_animation_machinery() {
+        let mut core = test_core();
+        core.source = Arc::new(pb_source::FsSource::new(vec![std::path::PathBuf::from(
+            r"C:\nope\clip.mp4",
+        )]));
+        core.displayed_item = Some(0);
+        core.native_toast = true; // headless has no HUD raster; the native path retains text
+        assert!(core.item_is_video(0));
+        assert_eq!(core.play_hint_kind(), 2, "video badge is the play glyph");
+
+        core.toggle_play_pause();
+        assert!(
+            core.playback.is_none(),
+            "video never uses the animation playback"
+        );
+        assert!(core.anim_decode.is_none(), "no batch decode kicked");
+        assert!(core.anim_stream.is_none(), "no stream kicked");
+        // Session platforms: Windows (MF) and Linux with the FFmpeg producer
+        // (task #84) — same protocol, same failure contract.
+        #[cfg(any(windows, all(unix, not(target_os = "macos"), feature = "ffvideo")))]
+        {
+            assert!(core.video.is_some(), "P starts the video session");
+            // The missing file fails the producer; the session surfaces it via
+            // poll (bounded wait — the producer thread races this assert).
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while core.video.is_some() && Instant::now() < deadline {
+                core.now = Instant::now();
+                core.poll_video();
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            assert!(core.video.is_none(), "failure clears the session");
+            assert!(
+                core.toast_native.is_some(),
+                "the failure surfaces to the user"
+            );
+        }
+        // macOS (task 79.9): `P` starts a `Native` backend and commands the shell's
+        // AVPlayer via `PlayVideo` — no Rust producer/session.
+        #[cfg(target_os = "macos")]
+        {
+            assert!(core.video.is_some(), "P starts a native video session");
+            assert!(
+                core.video.as_ref().unwrap().as_native().is_some(),
+                "macOS uses the Native backend, not a VideoSession"
+            );
+            assert!(
+                core.effects
+                    .iter()
+                    .any(|e| matches!(e, contract::CoreEffect::PlayVideo { .. })),
+                "the native player is commanded to open the clip"
+            );
+        }
+        #[cfg(not(any(windows, target_os = "macos", all(unix, feature = "ffvideo"))))]
+        assert!(core.video.is_none(), "no producer on this platform yet");
+    }
+
+    /// Regression: the door card must NOT flash over a still-held previous frame during a deck
+    /// rebuild. `rebuild_playlist` names the current item (a door) but leaves `presented_epoch`
+    /// None — the renderer still holds the old photo — so `door_presented`/`door_card` must be
+    /// false/None until the door's own (transparent) frame is actually presented. The
+    /// owner-reported "card on top of a photo" (and the archive-open card-with-no-image).
+    #[test]
+    fn door_card_waits_until_the_door_frame_is_presented() {
+        let dir = std::env::temp_dir().join("pb_door_card_wait");
+        let mut core = test_core();
+        let src: Arc<dyn ItemSource> = Arc::new(FsSource::new(vec![
+            dir.join("photo.jpg"),
+            dir.join("album.zip"),
+        ]));
+        // Rebuild with the cursor on the door (start index 1): it is the current item, but nothing
+        // is presented yet (the old frame is still held).
+        core.rebuild_playlist(src, dir.to_path_buf(), Some(dir.to_path_buf()), false, 1);
+        assert_eq!(core.displayed_item, Some(1), "the door is the current item");
+        assert!(
+            core.presented_epoch.is_none(),
+            "a rebuild presents nothing yet"
+        );
+        assert!(
+            !core.door_presented(),
+            "no card while the previous frame is still held"
+        );
+        assert!(core.door_card().is_none());
+        // Once the door's own frame is presented (its epoch resolves), the card appears.
+        core.presented_epoch = Some(core.epoch);
+        assert!(core.door_presented());
+        assert!(core.door_card().is_some());
+    }
+
 }
