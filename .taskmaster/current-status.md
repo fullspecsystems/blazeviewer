@@ -1,6 +1,7 @@
 # Blaze Viewer — Current Status (session handoff)
 
-_Last updated: 2026-07-21 (rev 30). Windows session; a macOS session worked in parallel earlier.
+_Last updated: 2026-07-21 (rev 30). **This is a handoff TO the next macOS session** — #131's
+Windows side is done + pushed; the Mac owns the A.3 close-out (checklist in START HERE).
 Everything below is on `main`, pushed (`git rev-list HEAD...origin/main` = 0/0)._
 
 ---
@@ -29,13 +30,52 @@ Mac items live there).
 CancelScan unscoped-close guard + the A.3 `do_delete` fallback); `cargo test -p pb-app` = **80 pass**;
 clippy + fmt clean on new code. **Owner still owes a live winit RUN** of the four flows (Handoff item 1).
 
-**⚠ NEXT — the Mac session owns the A.3 close-out (Handoff items 2-5):** wire
-`CoreEffect::ShowDeleteConfirm { name }` into the macOS `map_effect`/Swift confirm sheet, flip the
-`cfg(target_os="macos")` arm in `request_delete_confirm` (`app_core_impl/delete.rs`) **off** the legacy
-`ShellFlowAction(DeletePermanent)` onto the new effect, and run the macOS `delete_permanent_*` test. Until
-then macOS delete-confirm keeps its **working legacy path** — do NOT delete the `cfg(macos)` arm before
-the handler + a green test exist. Plus non-blocking dead-arm cleanup (A.1/A.2/B macOS arms). **Never edit
-`pb-mac-ffi` from Windows** (empty staticlib here → zero errors on a syntax mistake).
+## ⚠ NEXT — the macOS session's checklist (the A.3 close-out)
+
+The core work is done and green on both platforms *by construction*; the Mac's job is to wire the
+one new effect into the native shell and then retire the safety lever. **Fetch first** (both machines
+commit to `main`). Anchors below verified against `pb-mac-ffi/src/lib.rs` on 2026-07-21 — re-grep if
+they've drifted. Full rationale: the #131 plan `## Handoff` (items 2-5) + §6a.
+
+**Nothing here is owed on A.1/A.2/Thread B core logic** — that's done, green, and macOS-functional
+right now (the dead macOS arms just fire nothing). A.3 is the only load-bearing item because its new
+effect must be *rendered*, and macOS's `next_effect` has a catch-all (`other => map_effect(other)`,
+lib.rs:2640) that **silently no-ops an unhandled effect** — so a missing arm = a nameless/absent
+delete sheet, invisible from Windows. That's exactly why the lever exists.
+
+1. **⚠ A.3 (load-bearing) — render `CoreEffect::ShowDeleteConfirm { name }` on macOS.** Add a
+   `C::ShowDeleteConfirm { name } => …` arm to `next_effect` (put it by the delete arm at
+   **lib.rs:2545** / the `ShowDialog` arm at 2549). The **core already did flush + guard + arm
+   `pending_confirm_delete`** before emitting the effect, so this arm only *renders*: compose
+   "Permanently delete '{name}'?", stash it, set `shown_dialog = Some(Confirm)` + `dialog_open = true`,
+   and return the FFI Confirm effect. Copy that tail verbatim from the existing macOS
+   `confirm_delete_permanent` (**lib.rs ~2200**) — it already does exactly this today. Yes still routes
+   back as `ConfirmAnswered(true)` → core `do_delete(.., true)`, unchanged.
+2. **Flip the lever** (only after step 1 renders correctly). In
+   `crates/pb-app-core/src/app_core_impl/delete.rs`, `request_delete_confirm`: delete the
+   `#[cfg(target_os = "macos")]` arm (it emits the legacy `ShellFlowAction(DeletePermanent)`) so both
+   platforms take the `ShowDeleteConfirm` path. Then remove the now-dead macOS
+   `ShellFlowAction(Action::DeletePermanent) => self.confirm_delete_permanent()` arm (**lib.rs:2545**)
+   and the macOS `confirm_delete_permanent` body (**~2200**). **Do NOT do this before step 1** — until
+   then macOS delete-confirm rides the working legacy path.
+3. **Update + run the macOS delete test** `delete_permanent_confirms_then_deletes` (**lib.rs:5687**)
+   against the new `ShowDeleteConfirm` path — a real run, not just a compile.
+4. **Dead-arm cleanup for A.1/A.2/Thread B (non-blocking, dead not broken).** Delete the
+   `ShellFlowAction(Action::Recursive|ShowArchives|CancelScan)` arms (**lib.rs:2540-2542**) and the
+   `toggle_recursive` / `toggle_show_archives` / `cancel_scan_command` bodies
+   (**lib.rs:2649 / 2678 / 2713**) — the core runs all three now, so these are unreachable.
+5. **Verify (no code change).** (a) A.2 — the macOS Scanning-sheet Cancel still closes via its own
+   `DialogResult::ScanningCancelled` route (the `CancelScan` action arm now emits **no** dialog effect,
+   §3 A.2). (b) Thread B — `archive_loading` is now a getter reporting the true value; per plan §1b this
+   is redundancy cleanup (`work_pending` already read `archive_load`), just confirm nothing relied on the
+   old always-`false` macOS value.
+6. **On finish:** strike the Handoff "cross-platform debt" line, and — if the winit shell wasn't run on
+   Windows yet (owner item 1) — leave that open. **Fetch again before pushing.**
+
+**Notes.** No new `AppCore` field was added (A.3 snapshots the name *into the effect*), so the
+struct-literal trap is not in play here. The Mac can compile-check winit via
+`cargo clippy -p pb-app --target x86_64-pc-windows-msvc` if it edits shared code, but steps 1-4 above
+only touch `pb-mac-ffi` (mac-only) + one `cfg`-guarded line in `delete.rs`.
 
 **#130 — media-stack de-dup (audit #5) — DONE + pushed** (`c6a5d0e8` + `daac240d`), below. ⚠ Its one
 open cross-machine gap still stands: the **FFmpeg backend runtime is unverified** (Windows has no FFmpeg
