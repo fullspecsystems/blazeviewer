@@ -14,6 +14,47 @@
 use super::*;
 
 impl AppCore {
+    /// Request the permanent-delete confirmation for the displayed photo (`Shift+Del`, or the
+    /// trash-fallback paths in [`delete_to_trash`](Self::delete_to_trash) / [`do_delete`](Self::do_delete)).
+    /// Irreversible, so it never deletes here: it settles any pending delete-advance, refuses an
+    /// archive entry (no file on disk → toast), **arms `pending_confirm_delete`**, and asks the
+    /// shell to render the confirm dialog. The Yes answer routes back through
+    /// `ConfirmAnswered(true)` → `do_delete(.., true)` (unchanged). The guard + arm were
+    /// duplicated in both shells' `confirm_delete_permanent` (#131 A.3 — inverted off
+    /// `ShellFlowAction`).
+    ///
+    /// ⚠ **Cross-machine lever (#131 A.3 / §6a):** on macOS this still emits the legacy
+    /// `ShellFlowAction(DeletePermanent)` so the native shell's existing, working delete-confirm
+    /// path (its own guard/arm/sheet) runs unchanged until the Mac session wires the new
+    /// `ShowDeleteConfirm` effect into `map_effect`/Swift and flips this `cfg` arm off. Everywhere
+    /// else the core arms and emits `ShowDeleteConfirm { name }` directly. Delete the macOS arm
+    /// once the Mac has the `ShowDeleteConfirm` handler + a green `delete_permanent_*` test.
+    pub fn request_delete_confirm(&mut self) {
+        #[cfg(target_os = "macos")]
+        {
+            // Lever: macOS keeps its legacy path (its shell does flush/guard/arm/ShowDialog).
+            self.effects.push(contract::CoreEffect::ShellFlowAction(
+                Action::DeletePermanent,
+            ));
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            // Settle any still-pending delete-advance first (e.g. a rapid second Del).
+            self.flush_pending_delete();
+            let Some(item) = self.displayed_item else {
+                return;
+            };
+            if self.source.path(item).is_none() {
+                self.show_toast("Can't delete this"); // archive entry — no file
+                return;
+            }
+            let name = crate::engine::file_name_of(self.source.name(item));
+            self.pending_confirm_delete = Some(item);
+            self.effects
+                .push(contract::CoreEffect::ShowDeleteConfirm { name });
+        }
+    }
+
     /// **Delete to Trash** (`Del`): send the displayed photo to the OS Recycle Bin / Trash
     /// (recoverable, no prompt). Archive entries have no file on disk → a toast, no-op. The
     /// playlist advance is deferred a beat by [`do_delete`](Self::do_delete).
@@ -32,9 +73,7 @@ impl AppCore {
         // trash crate's FOF_NO_UI) no warning. Route Del through the permanent-delete confirmation
         // instead: the shell opens the themed confirm dialog, whose Yes calls do_delete(.., true).
         if !crate::delete::will_recycle(&path) {
-            self.effects.push(contract::CoreEffect::ShellFlowAction(
-                Action::DeletePermanent,
-            ));
+            self.request_delete_confirm(); // #131 A.3 (re-derives the displayed item, same as before)
             return;
         }
         self.do_delete(item, &path, false);
@@ -87,9 +126,7 @@ impl AppCore {
                         "trash refused, offering permanent delete: {}: {e}",
                         path.display()
                     );
-                    self.effects.push(contract::CoreEffect::ShellFlowAction(
-                        Action::DeletePermanent,
-                    ));
+                    self.request_delete_confirm(); // #131 A.3
                     return;
                 }
                 eprintln!("delete failed: {}: {e}", path.display());
@@ -205,5 +242,124 @@ impl AppCore {
                 self.rebuild_playlist(src, root, scan_root, recursive, start);
             }
         }
+    }
+}
+
+#[cfg(test)]
+// A.3 asserts the `ShowDeleteConfirm` path; macOS keeps the legacy `ShellFlowAction` lever
+// (#131 §6a), so these non-macOS assertions don't apply there. The Mac verifies its own path.
+#[cfg(not(target_os = "macos"))]
+mod tests {
+    use super::*;
+    use crate::app_core_impl::test_support::{photos_named, test_core, FakeArchive};
+
+    /// #131 A.3 — `request_delete_confirm` on a real file settles, arms `pending_confirm_delete`,
+    /// and emits `ShowDeleteConfirm { name }` with the name **snapshotted** into the effect — never
+    /// a `ShellFlowAction`. The Yes answer routes back through `ConfirmAnswered(true)` (unchanged).
+    #[test]
+    fn request_delete_confirm_arms_and_emits_show_delete_confirm() {
+        let mut core = test_core();
+        core.source = photos_named(&["holiday.jpg"]);
+        core.displayed_item = Some(0);
+
+        core.request_delete_confirm();
+
+        assert_eq!(
+            core.pending_confirm_delete,
+            Some(0),
+            "the item is armed for the Yes answer"
+        );
+        let name = core.effects.iter().find_map(|e| match e {
+            contract::CoreEffect::ShowDeleteConfirm { name } => Some(name.clone()),
+            _ => None,
+        });
+        assert_eq!(
+            name.as_deref(),
+            Some("holiday.jpg"),
+            "the file name is snapshotted into the effect"
+        );
+        assert!(
+            !core
+                .effects
+                .iter()
+                .any(|e| matches!(e, contract::CoreEffect::ShellFlowAction(_))),
+            "no flow round-trip"
+        );
+    }
+
+    /// An archive entry has no file on disk → a toast, nothing armed, no confirm.
+    #[test]
+    fn request_delete_confirm_refuses_an_archive_entry() {
+        let mut core = test_core();
+        core.native_toast = true;
+        core.source = Arc::new(FakeArchive {
+            names: vec!["a/photo.jpg".to_string()],
+            container: std::env::temp_dir().join("deck.zip"),
+        });
+        core.displayed_item = Some(0);
+
+        core.request_delete_confirm();
+
+        assert_eq!(core.pending_confirm_delete, None, "nothing armed");
+        assert_eq!(
+            core.toast_native.as_ref().map(|t| t.message.as_str()),
+            Some("Can't delete this")
+        );
+        assert!(
+            !core
+                .effects
+                .iter()
+                .any(|e| matches!(e, contract::CoreEffect::ShowDeleteConfirm { .. })),
+            "no confirm for a file-less entry"
+        );
+    }
+
+    /// The dispatch arm routes `Action::DeletePermanent` through `request_delete_confirm`.
+    #[test]
+    fn delete_permanent_action_emits_show_delete_confirm() {
+        let mut core = test_core();
+        core.source = photos_named(&["a.jpg"]);
+        core.displayed_item = Some(0);
+
+        core.handle(contract::CoreEvent::MenuAction(
+            crate::action::Action::DeletePermanent,
+        ));
+
+        assert!(core
+            .effects
+            .iter()
+            .any(|e| matches!(e, contract::CoreEffect::ShowDeleteConfirm { .. })));
+        assert!(!core
+            .effects
+            .iter()
+            .any(|e| matches!(e, contract::CoreEffect::ShellFlowAction(_))));
+    }
+
+    /// The `do_delete` trash-refused fallback (delete.rs:90) re-offers permanent delete via
+    /// `request_delete_confirm` → `ShowDeleteConfirm`, not the old `ShellFlowAction(DeletePermanent)`.
+    /// Triggered deterministically by recycling a path that does not exist (the OS refuses, and
+    /// nothing actually reaches the Recycle Bin).
+    #[test]
+    fn do_delete_trash_refused_reoffers_via_show_delete_confirm() {
+        let mut core = test_core();
+        let missing = std::env::temp_dir().join("pb-131-does-not-exist-holiday.jpg");
+        core.source = Arc::new(FsSource::new(vec![missing.clone()]));
+        core.displayed_item = Some(0);
+
+        core.do_delete(0, &missing, false); // recoverable delete of a missing file → OS refuses
+
+        assert!(
+            core.effects
+                .iter()
+                .any(|e| matches!(e, contract::CoreEffect::ShowDeleteConfirm { .. })),
+            "the trash-refused fallback re-offers permanent delete"
+        );
+        assert!(
+            !core
+                .effects
+                .iter()
+                .any(|e| matches!(e, contract::CoreEffect::ShellFlowAction(_))),
+            "via the new effect, not the legacy flow action"
+        );
     }
 }

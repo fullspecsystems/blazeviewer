@@ -1044,26 +1044,6 @@ impl App {
         }
     }
 
-    /// Confirm, then permanently delete the displayed photo (`Shift+Del`). Irreversible, so it
-    /// opens the themed confirm dialog first (dark-aware, cross-platform); the delete runs on Yes
-    /// via `DialogResolved`(ConfirmAnswered) → the core `do_delete(.., true)`. Only real files (not archive
-    /// entries) can be deleted. The recoverable `Del` path is a pure core arm
-    /// ([`AppCore::delete_to_trash`]).
-    fn confirm_delete_permanent(&mut self) {
-        // Settle any still-pending delete-advance first (e.g. a rapid second Del).
-        self.core.flush_pending_delete();
-        let Some(item) = self.core.displayed_item else {
-            return;
-        };
-        if self.core.source.path(item).is_none() {
-            self.core.show_toast("Can't delete this"); // archive entry — no file
-            return;
-        }
-        let name = file_name_of(self.core.source.name(item));
-        self.core.pending_confirm_delete = Some(item);
-        self.open_confirm_delete(&name);
-    }
-
     /// Defer a launch **plan** until the window + engine exist (`resumed` fires it).
     /// Used for an archive *and* a folder scan on the command line / double-click so startup
     /// shows the window first and the open runs behind the spinner / dialog / streaming scan
@@ -2693,10 +2673,9 @@ impl App {
     /// specific effects/`CoreEvent`s + native macOS handling as 5.6 inverts each flow.)
     fn perform_flow_action(&mut self, action: Action) {
         match action {
-            Action::DeletePermanent => self.confirm_delete_permanent(),
-            // `Recursive` / `ShowArchives` / `CancelScan` are no longer routed here — the core
-            // runs them directly during dispatch (#131 A.1/A.2), so the shell never sees them as
-            // flow actions.
+            // `DeletePermanent` / `Recursive` / `ShowArchives` / `CancelScan` are no longer routed
+            // here — the core runs them directly during dispatch (#131 A.1/A.2/A.3). DeletePermanent
+            // now arrives as the `ShowDeleteConfirm { name }` effect (see `drain_effects`).
             Action::Quit => self.begin_exit(),
             // Toggle the docked windowed toolbar (#61): flip + persist the setting, then
             // re-reserve/free the photo's top inset and re-render so it appears/disappears
@@ -3156,6 +3135,12 @@ impl App {
                         if let Some(kind) = shell_dialog_kind(kind) {
                             self.open_dialog(kind);
                         }
+                    }
+                    // Render the permanent-delete confirmation (#131 A.3). The core has already
+                    // armed `pending_confirm_delete`; this just opens the themed "Permanently
+                    // delete '{name}'?" dialog whose Yes routes back as `ConfirmAnswered(true)`.
+                    contract::CoreEffect::ShowDeleteConfirm { name } => {
+                        self.open_confirm_delete(&name);
                     }
                     // Close the open dialog window (NS0 5.6 — the ubiquitous dialog-outcome close).
                     contract::CoreEffect::CloseDialog => self.dialog = None,

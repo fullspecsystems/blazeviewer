@@ -393,6 +393,13 @@ pub enum CoreEffect {
     BeginDirScan { source: Source, cursor: Cursor },
     /// Present a chrome dialog (payload is `NS-later`; see [`DialogKind`]).
     ShowDialog(DialogKind),
+    /// Present the permanent-delete confirmation for `name` (NS0 5.6 / #131 A.3). Unlike the
+    /// generic payload-free [`ShowDialog(Confirm)`](Self::ShowDialog) — whose handler only
+    /// forwards the *kind* — this **snapshots the file name** into the effect, so the shell
+    /// renders "Permanently delete '{name}'?" without an order-sensitive side channel or a stale
+    /// re-read. The core has already armed `pending_confirm_delete`; the shell's Yes answer
+    /// routes back through `ConfirmAnswered(true)` to the core `do_delete(.., true)` as before.
+    ShowDeleteConfirm { name: String },
     /// Close the open dialog.
     CloseDialog,
     /// Put the open password dialog into its "Checking…" state (while the just-entered password is

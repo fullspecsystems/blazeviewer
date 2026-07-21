@@ -682,15 +682,19 @@ impl AppCore {
                     self.show_toast("Scan stopped");
                 }
             }
-            // Host-side commands — the residue whose execution *is* a platform operation:
-            // the permanent-delete confirm dialog and Quit's window teardown. Routed through the
-            // one `ShellFlowAction` seam so the whole action vocabulary still dispatches here; the
-            // host runs the native op (see the effect's doc). The core-owned commands were lifted
-            // out into their own arms above. `ToggleToolbar` (#61) also routes here: the docked
-            // toolbar is a Windows/Linux-shell concept (macOS has its native toolbar), so the
-            // shell owns flipping `show_toolbar`, persisting it, and re-reserving the photo's top
-            // inset — the core stays agnostic.
-            Action::DeletePermanent | Action::Quit | Action::ToggleToolbar => self
+            // Permanent-delete confirm (NS0 5.6 / #131 A.3, inverted): the core settles + guards +
+            // arms `pending_confirm_delete`, then emits `ShowDeleteConfirm { name }` (non-macOS) or
+            // the legacy `ShellFlowAction(DeletePermanent)` (macOS lever) — see
+            // `request_delete_confirm`. The shell only renders the confirm; Yes routes back through
+            // `ConfirmAnswered(true)`.
+            Action::DeletePermanent => self.request_delete_confirm(),
+            // Host-side commands — the residue whose execution *is* a platform operation: Quit's
+            // window teardown. Routed through the one `ShellFlowAction` seam so the whole action
+            // vocabulary still dispatches here; the host runs the native op (see the effect's doc).
+            // `ToggleToolbar` (#61) also routes here: the docked toolbar is a Windows/Linux-shell
+            // concept (macOS has its native toolbar), so the shell owns flipping `show_toolbar`,
+            // persisting it, and re-reserving the photo's top inset — the core stays agnostic.
+            Action::Quit | Action::ToggleToolbar => self
                 .effects
                 .push(contract::CoreEffect::ShellFlowAction(action)),
         }
