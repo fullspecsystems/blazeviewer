@@ -208,6 +208,10 @@ final class CoreModel {
     /// evict: one static asset serves every archive kind, card and strip cell alike.
     @ObservationIgnored private var doorArtLoaded = false
     @ObservationIgnored private var doorArtImage: NSImage?
+    /// The decode-error placeholder artwork (task #127) — the burning Polaroid, built on
+    /// first use and kept for the process, exactly like the door art above.
+    @ObservationIgnored private var fireArtLoaded = false
+    @ObservationIgnored private var fireArtImage: NSImage?
     /// User-resizable panel widths (drag the inner edge). The defaults are the minimums;
     /// session-persistent (survive close/reopen) — disk persistence is a later slice.
     /// ONE width for the whole left pane, whichever tab shows (the Inspector
@@ -1062,6 +1066,35 @@ final class CoreModel {
         else { return nil }
         // Sized in **pixels**: the views cap the drawn size at this asset's native points
         // for the display's scale, so it is never magnified.
+        return NSImage(cgImage: cg, size: NSSize(width: w, height: h))
+    }
+
+    /// The decode-error placeholder artwork (task #127) — the burning Polaroid, built once
+    /// and cached for the process, exactly like `doorArtwork()`. `nil` if the asset can't
+    /// decode, in which case `DecodeErrorView` falls back to its SF-symbol glyph.
+    func fireArtwork() -> NSImage? {
+        if fireArtLoaded { return fireArtImage }
+        fireArtLoaded = true
+        fireArtImage = CoreModel.loadFireArtwork()
+        return fireArtImage
+    }
+
+    static func loadFireArtwork() -> NSImage? {
+        let w = Int(fire_art_width())
+        let h = Int(fire_art_height())
+        guard w > 0, h > 0 else { return nil }
+        let rgba = fire_art_rgba()
+        guard rgba.len() == w * h * 4 else { return nil }
+        let data = Data(bytes: UnsafeRawPointer(rgba.as_ptr()), count: rgba.len())
+        guard let provider = CGDataProvider(data: data as CFData),
+              let cg = CGImage(
+                  width: w, height: h,
+                  bitsPerComponent: 8, bitsPerPixel: 32, bytesPerRow: w * 4,
+                  space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                  bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.last.rawValue),
+                  provider: provider, decode: nil, shouldInterpolate: true,
+                  intent: .defaultIntent)
+        else { return nil }
         return NSImage(cgImage: cg, size: NSSize(width: w, height: h))
     }
 

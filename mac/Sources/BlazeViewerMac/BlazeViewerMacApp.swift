@@ -276,6 +276,7 @@ struct ContentView: View {
                     DecodeErrorView(
                         name: model.decodeErrorName,
                         reason: model.decodeError,
+                        artwork: model.fireArtwork(),
                         opacity: model.panelOpacity
                     )
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)

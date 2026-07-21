@@ -860,6 +860,21 @@ pub fn door_artwork() -> Option<&'static DecodedImage> {
     .as_ref()
 }
 
+/// The "can't display this image" placeholder artwork (task #127): a Polaroid bursting
+/// into flames, for the decode-error card. Same decode-once + straight-alpha convention
+/// as [`door_artwork`] — one WebP decode for the process, handed to every shell as a
+/// cached texture/`NSImage`. `None` if it can't be decoded, in which case the card falls
+/// back to its SF-symbol glyph. Not cropped: the smoke wisp is faint (low-alpha) content
+/// an ink-threshold crop would eat, and the card centres the art in the layout instead.
+const FIRE_ART: &[u8] = include_bytes!("../assets/photo-on-fire.webp");
+
+pub fn decode_error_artwork() -> Option<&'static DecodedImage> {
+    use std::sync::OnceLock;
+    static ART: OnceLock<Option<DecodedImage>> = OnceLock::new();
+    ART.get_or_init(|| decode_named_bytes("photo-on-fire.webp", FIRE_ART, None, false).ok())
+        .as_ref()
+}
+
 /// The alpha a pixel needs before it counts as **ink**.
 ///
 /// 🪤 Not `1`, and this is load-bearing: the asset is **lossy** WebP, and its alpha channel
@@ -1774,6 +1789,21 @@ mod tests {
         assert!(
             a.pixels.chunks_exact(4).any(|p| p[3] == 0),
             "alpha survives"
+        );
+    }
+
+    /// The decode-error placeholder artwork (task #127) decodes through the same pipeline,
+    /// once, with its transparency intact (the burning Polaroid sits on a clear ground).
+    #[test]
+    fn the_fire_artwork_decodes_once_with_alpha() {
+        let a = decode_error_artwork().expect("fire artwork decodes");
+        let b = decode_error_artwork().expect("fire artwork decodes");
+        assert!(std::ptr::eq(a, b), "same cached decode, not a re-decode");
+        assert!(a.width > 0 && a.height > 0);
+        assert_eq!(a.pixels.len(), a.width as usize * a.height as usize * 4);
+        assert!(
+            a.pixels.chunks_exact(4).any(|p| p[3] == 0),
+            "the transparent margin survives"
         );
     }
 

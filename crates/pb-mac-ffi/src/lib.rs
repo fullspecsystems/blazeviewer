@@ -2887,6 +2887,33 @@ fn door_art_rgba() -> Vec<u8> {
         .unwrap_or_default()
 }
 
+// ---- The decode-error placeholder artwork (task #127) --------------------------
+//
+// The burning-Polaroid asset the "can't display this image" card draws. Same
+// decode-once + straight-alpha convention as the door art above; `0`/empty when the
+// asset can't be decoded, in which case the card falls back to its SF-symbol glyph.
+
+/// The fire artwork's width in pixels, `0` if the asset can't be decoded.
+fn fire_art_width() -> u32 {
+    pb_app_core::engine::decode_error_artwork()
+        .map(|a| a.width)
+        .unwrap_or(0)
+}
+
+/// The fire artwork's height in pixels, `0` if it can't be decoded.
+fn fire_art_height() -> u32 {
+    pb_app_core::engine::decode_error_artwork()
+        .map(|a| a.height)
+        .unwrap_or(0)
+}
+
+/// The fire artwork's **straight-alpha** RGBA8 pixels (`.last`, like `door_art_rgba`).
+fn fire_art_rgba() -> Vec<u8> {
+    pb_app_core::engine::decode_error_artwork()
+        .map(|a| a.pixels.clone())
+        .unwrap_or_default()
+}
+
 // ---- The Subtitles tab's form conversions (task #90.4) -------------------------
 //
 // Pure and total in both directions, so they are unit-testable without touching the
@@ -4832,6 +4859,9 @@ mod ffi {
         fn door_art_width() -> u32;
         fn door_art_height() -> u32;
         fn door_art_rgba() -> Vec<u8>;
+        fn fire_art_width() -> u32;
+        fn fire_art_height() -> u32;
+        fn fire_art_rgba() -> Vec<u8>;
         fn settings_form(&self) -> SettingsFormFfi;
         fn settings_edited(&mut self, form: SettingsFormFfi);
 
