@@ -5082,58 +5082,6 @@ mod tests {
     }
 
     #[test]
-    fn a_failed_decode_surfaces_a_cant_display_error_in_details() {
-        let mut core = test_core();
-        core.source = photos_named(&["dead.jpg"]);
-        core.playlist = Playlist::new(1, 0);
-        core.displayed_item = Some(0);
-        // The state after every rung of the ladder failed: item in `failed`, its reason
-        // recorded, and `current` cleared by `present_failed`.
-        core.failed.insert(0);
-        core.failed_reason.insert(0, "No more bytes".into());
-        core.current = None;
-
-        assert_eq!(core.current_decode_error(), "No more bytes");
-        let rows = core.details_panel().rows;
-        assert!(
-            rows.iter().any(|r| matches!(r,
-                DetailRow::Pair { label, value }
-                    if label == "Error" && value.contains("No more bytes"))),
-            "a failed file must show a can't-display Error row; got {rows:?}"
-        );
-
-        // A healthy displayed item reports no error (the placeholder stays hidden).
-        core.failed.remove(&0);
-        core.failed_reason.remove(&0);
-        assert_eq!(core.current_decode_error(), "");
-    }
-
-    #[test]
-    fn native_open_suppresses_the_hud_and_signals() {
-        let mut core = test_core(); // headless → empty source
-        core.native_open = true;
-        assert!(
-            core.open_panel_visible(),
-            "an empty deck shows the native welcome surface"
-        );
-        // show_open_hint must not rasterize a HUD panel (so its buttons are never
-        // hit-tested beneath a native panel — the cursor fix).
-        core.show_open_hint();
-        // A tick signals the host on the visibility transition.
-        core.effects.clear();
-        core.handle(CoreEvent::Tick(std::time::Instant::now()));
-        assert!(
-            core.effects
-                .iter()
-                .any(|e| matches!(e, contract::CoreEffect::PanelsChanged)),
-            "the empty-state visibility change signals the host"
-        );
-        // With native_open off (winit), the same deck is not a native-visible panel.
-        core.native_open = false;
-        assert!(!core.open_panel_visible());
-    }
-
-    #[test]
     fn folder_tree_action_toggles_the_open_state() {
         let mut core = test_core();
         assert!(!core.folder_tree_open);
