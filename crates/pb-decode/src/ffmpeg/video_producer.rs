@@ -32,7 +32,7 @@
 use std::sync::atomic::AtomicBool;
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use ffmpeg_next as ff;
 
@@ -43,6 +43,7 @@ use crate::video::{
     SeekGeneration, VideoColorInfo, VideoFrame, VideoInput, VideoProducerEvent, VideoProducerMsg,
     VideoSessionId,
 };
+use crate::video_producer_loop::{Opened, VideoProducerBackend};
 use crate::{FitBox, PixelFormat};
 
 /// Watchdog budget for one read/decode burst (one credited frame). Local
@@ -70,8 +71,11 @@ const MAX_BAD_PACKETS: usize = 512;
 /// Run the producer to completion on the **current thread** (the app spawns a
 /// dedicated thread for it — never the event loop). Returns when the stream
 /// ends and the session stops it, the session is dropped, or decoding fails.
-/// The FFmpeg mirror of `run_video_producer` (Windows MF) behind the same
-/// protocol; `input` is a filesystem path or an archive entry's in-RAM bytes.
+/// The FFmpeg mirror of `run_video_producer` (Windows MF): both now drive the
+/// **one** shared credit/seek loop ([`crate::video_producer_loop::run`]) behind
+/// the [`VideoProducerBackend`] seam (task #130) — this wrapper only opens the
+/// backend (on this producer thread, since libav handles are `!Send`) and hands
+/// it off. `input` is a filesystem path or an archive entry's in-RAM bytes.
 #[allow(clippy::too_many_arguments)]
 pub fn run_ff_video_producer(
     input: &VideoInput,
@@ -83,264 +87,37 @@ pub fn run_ff_video_producer(
     cancel: Arc<AtomicBool>,
     options: crate::VideoProducerOptions,
 ) {
-    let fail = |error: String| {
-        let _ = events.send(VideoProducerEvent::Failed { session_id, error });
-    };
     // The session sets `cancel` on stop/teardown; the interrupt callback then
     // aborts a blocking read *inside* libav (plan 1F) — so a stuck network read
     // retires this thread promptly instead of lingering on the per-op watchdog.
-    let mut reader = match Reader::open(input, fit, cancel, options) {
-        Ok(r) => r,
-        Err(e) => return fail(e),
-    };
-    // Negotiate the output format (task #91 Phase 2, Codex P0): the planar-vs-RGBA
-    // decision needs the ACTUAL first decoded frame (pixel format after HW
-    // transfer), so — only when the planar path is even a candidate — decode +
-    // convert the first frame now, retain it, and publish it on the first credit.
-    // When planar is off, `output_format` is known at open (RGBA/fp16), so this is
-    // skipped and `Opened` fires immediately, exactly as before (no added latency).
-    let mut pending_first: Option<(i64, Vec<u8>)> = None;
-    let mut primed_empty = false;
-    if options.planar {
-        match reader.next_frame() {
-            Ok(Some((ts, px))) => {
-                reader.origin.get_or_insert(ts);
-                pending_first = Some((ts, px));
-            }
-            Ok(None) => {
-                reader.parked = true;
-                primed_empty = true;
-            }
-            Err(e) => return fail(e),
+    match Reader::open(input, fit, cancel, options) {
+        Ok((backend, opened)) => {
+            crate::video_producer_loop::run(backend, opened, session_id, generation, events, msgs)
+        }
+        Err(error) => {
+            let _ = events.send(VideoProducerEvent::Failed { session_id, error });
         }
     }
-    let (out_w, out_h) = reader.conv.display_dims();
-    if diag() {
-        let fit_desc = match fit {
-            Some(f) => format!("fit {}x{}", f.max_width, f.max_height),
-            None => "NATIVE".to_string(),
-        };
-        eprintln!(
-            "[pb-video] open codec={} coded={}x{} display={}x{} decode={} hwaccel={} out_fmt={:?} rot={}",
-            reader.facts.codec,
-            reader.facts.width,
-            reader.facts.height,
-            out_w,
-            out_h,
-            fit_desc,
-            if reader._hw.is_some() { "VideoToolbox" } else { "SOFTWARE" },
-            reader.conv.output_format(),
-            reader.facts.rotation,
-        );
-    }
-    let _ = events.send(VideoProducerEvent::Opened {
-        session_id,
-        duration: reader.facts.duration,
-        width: out_w,
-        height: out_h,
-        // Honest track presence (plan §7 — the muted interim ended when the
-        // FFmpeg audio decoder + platform sinks landed): the session starts the
-        // shell audio player for real tracks; a shell with no sink reports a
-        // Failed clock immediately and playback degrades to silent.
-        has_audio: reader.facts.has_audio,
-        // Format-aware (task 79.10 / #91): an fp16 HDR clip charges 8 bytes/px, a
-        // P010 clip 3 bytes/px — the negotiated (post-prime) format, so the
-        // session's byte budget matches the frames it will receive.
-        frame_bytes: reader.conv.output_format().frame_bytes(out_w, out_h) as u64,
-    });
-    if primed_empty {
-        // The negotiation prime hit end-of-stream before any frame: report it now
-        // (after Opened) so the session leaves the opening state cleanly.
-        let _ = events.send(VideoProducerEvent::EndOfStream {
-            session_id,
-            seek_generation: generation,
-        });
-    }
+}
 
-    // The credit/command/seek loop — the same shape as the MF producer (the
-    // protocol tests hold both to it). Blocking recv IS the select.
-    let mut gen = generation;
-    let mut credits: usize = 0;
-    let mut pending: Option<(Duration, SeekGeneration)> = None;
-
-    'outer: loop {
-        // 1. Absorb messages; block only when there is nothing to do.
-        loop {
-            let msg = if credits == 0 && pending.is_none() {
-                match msgs.recv() {
-                    Ok(m) => m,
-                    Err(_) => break 'outer,
-                }
-            } else {
-                match msgs.try_recv() {
-                    Ok(m) => m,
-                    Err(std::sync::mpsc::TryRecvError::Empty) => break,
-                    Err(_) => break 'outer,
-                }
-            };
-            match msg {
-                VideoProducerMsg::Stop => break 'outer,
-                VideoProducerMsg::Credit => credits += 1,
-                VideoProducerMsg::SeekTo { target, generation } => {
-                    pending = Some((target, generation));
-                    credits = 0;
-                }
-            }
-        }
-
-        // 2. Land a pending seek: keyframe ≤ target, flush, decode forward to
-        // the first frame ≥ it. A newer SeekTo supersedes every stage; a
-        // superseded landing never publishes a frame.
-        if let Some((target, g)) = pending.take() {
-            gen = g;
-            // A seek supersedes the negotiation-primed first frame — never flash it.
-            pending_first = None;
-            let seek_t0 = Instant::now();
-            let target_units = reader.target_units(target);
-            // Short forward hop → decode forward from here (no keyframe seek/flush,
-            // far less run-up). Backward/far → seek to the keyframe ≤ target.
-            let forward = reader.can_decode_forward(target_units);
-            if !forward {
-                if let Err(e) = reader.seek_to_keyframe(target_units) {
-                    fail(e);
-                    break 'outer;
-                }
-            }
-            let demux = seek_t0.elapsed();
-            let mut runup = 0u32; // frames decoded then discarded en route to target
-            let mut landed: Option<(i64, Vec<u8>)> = None;
-            loop {
-                // Watch for supersede/stop between decodes (latest-value).
-                match msgs.try_recv() {
-                    Ok(VideoProducerMsg::Stop) => break 'outer,
-                    Ok(VideoProducerMsg::Credit) => credits += 1,
-                    Ok(VideoProducerMsg::SeekTo { target, generation }) => {
-                        pending = Some((target, generation));
-                        credits = 0;
-                        break;
-                    }
-                    Err(std::sync::mpsc::TryRecvError::Empty) => {}
-                    Err(_) => break 'outer,
-                }
-                // Decode WITHOUT converting: run-up frames are discarded, so we
-                // never pay their readback + downscale + tone-map (the seek stall).
-                // Only the landing frame is converted.
-                match reader.decode_next_raw() {
-                    Ok(Some((ts, frame))) => {
-                        if ts >= target_units {
-                            let rgba = match reader.convert_frame(&frame) {
-                                Ok(r) => r,
-                                Err(e) => {
-                                    fail(e);
-                                    break 'outer;
-                                }
-                            };
-                            if diag() {
-                                eprintln!(
-                                    "[pb-video] seek target={:.2}s mode={} demux={}ms runup={} frames total={}ms",
-                                    target.as_secs_f64(),
-                                    if forward { "forward" } else { "keyframe" },
-                                    demux.as_millis(),
-                                    runup,
-                                    seek_t0.elapsed().as_millis(),
-                                );
-                            }
-                            landed = Some((ts, rgba));
-                            break;
-                        }
-                        // Keyframe→target run-up: drop the raw frame (no convert).
-                        runup += 1;
-                    }
-                    Ok(None) => {
-                        // Sought at/near the end: the stream is over under the
-                        // new generation; park for the next seek.
-                        let _ = events.send(VideoProducerEvent::EndOfStream {
-                            session_id,
-                            seek_generation: gen,
-                        });
-                        reader.parked = true;
-                        break;
-                    }
-                    Err(e) => {
-                        fail(e);
-                        break 'outer;
-                    }
-                }
-            }
-            if let Some((ts, rgba)) = landed {
-                // The landing frame consumes a credit like any other (the
-                // session granted fresh ones right behind the SeekTo). Block
-                // for one if needed — Stop/SeekTo still interrupt.
-                while credits == 0 && pending.is_none() {
-                    match msgs.recv() {
-                        Ok(VideoProducerMsg::Credit) => credits += 1,
-                        Ok(VideoProducerMsg::SeekTo { target, generation }) => {
-                            pending = Some((target, generation));
-                            credits = 0;
-                        }
-                        Ok(VideoProducerMsg::Stop) | Err(_) => break 'outer,
-                    }
-                }
-                if pending.is_some() {
-                    continue 'outer; // superseded before publish — never flash it
-                }
-                // Seek before any normal frame: anchor the origin so the
-                // landing stamps exactly `target` (the MF fallback, mirrored).
-                reader
-                    .origin
-                    .get_or_insert(target_units - reader.facts.duration_to_pts(target));
-                let frame = reader.make_frame(session_id, gen, ts, rgba);
-                if events.send(VideoProducerEvent::Frame(frame)).is_err() {
-                    break 'outer;
-                }
-                credits -= 1;
-            }
-            continue 'outer;
-        }
-
-        // 3. Spend one credit on the next sequential frame.
-        if credits > 0 {
-            // The negotiation-primed first frame (task #91 Phase 2) is published
-            // on the first credit, ahead of any fresh decode.
-            if let Some((ts, px)) = pending_first.take() {
-                let frame = reader.make_frame(session_id, gen, ts, px);
-                if events.send(VideoProducerEvent::Frame(frame)).is_err() {
-                    break 'outer;
-                }
-                credits -= 1;
-                continue;
-            }
-            if reader.parked {
-                // Parked after EOS: these credits are stale — a seek resets.
-                credits = 0;
-                continue;
-            }
-            match reader.next_frame() {
-                Ok(Some((ts, rgba))) => {
-                    reader.origin.get_or_insert(ts);
-                    let frame = reader.make_frame(session_id, gen, ts, rgba);
-                    if events.send(VideoProducerEvent::Frame(frame)).is_err() {
-                        break 'outer;
-                    }
-                    credits -= 1;
-                }
-                Ok(None) => {
-                    let _ = events.send(VideoProducerEvent::EndOfStream {
-                        session_id,
-                        seek_generation: gen,
-                    });
-                    // Park (don't exit): a later SeekTo replays/rewinds in
-                    // place; Stop/disconnect ends the thread.
-                    reader.parked = true;
-                }
-                Err(e) => {
-                    fail(e);
-                    break 'outer;
-                }
-            }
-        }
-    }
-    // Everything (decoder, demuxer, AVIO, bytes refcount) drops with `reader`.
+/// The FFmpeg planar-prime state ([`Reader::initial`]). FFmpeg must decode the
+/// first frame *before* it can pick NV12/P010/fp16 (the format isn't reliably
+/// known until the actual decoded pixel format after HW transfer — Codex P0), so
+/// when the planar path is a candidate `open` primes that frame and stashes it
+/// here to serve on the first credit. This keeps the shared loop unaware of
+/// pixel-format probing: `read_frame` serves the primed frame first, then decodes
+/// normally (task #130, plan §5.1). A seek before the first credit invalidates it
+/// (`invalidate_primed` / `seek` reset to `NeedRead`).
+enum InitialState {
+    /// No primed frame — decode normally. The state for a non-planar clip and for
+    /// every read after the primed frame is served or invalidated.
+    NeedRead,
+    /// The negotiation-primed first frame, served on the first credit.
+    Ready { ts: i64, pixels: Vec<u8> },
+    /// The prime hit end-of-stream before any frame (a zero-frame clip): the first
+    /// `read_frame` reports EOS. Deferred to the first credit rather than emitted
+    /// eagerly after `Opened`, so the shared loop needs no empty-clip special case.
+    Eos,
 }
 
 /// The open demuxer + decoder + converter and the state a session's worth of
@@ -365,6 +142,9 @@ struct Reader {
     last_ts: i64,
     /// Per-frame color, cached once the first frame resolves it.
     color: Option<VideoColorInfo>,
+    /// The negotiation-primed first frame, if any (task #91 Phase 2 / #130 §5.1) —
+    /// served on the first credit, invalidated by a seek. See [`InitialState`].
+    initial: InitialState,
     /// Hardware decode device (VideoToolbox/VAAPI), kept alive for the decoder's
     /// lifetime; `None` when decoding in software. Declared after `decoder` so
     /// it drops after it (both hold refcounted device refs — order-independent —
@@ -378,7 +158,7 @@ impl Reader {
         fit: Option<FitBox>,
         cancel: Arc<AtomicBool>,
         options: crate::VideoProducerOptions,
-    ) -> Result<Reader, String> {
+    ) -> Result<(Reader, Opened), String> {
         let mut opened = FfInput::open(input, None)?;
         // Arm the interrupt cancel flag (plan 1F): the session flips this shared
         // `Arc` on stop/teardown, and the interrupt callback aborts a blocking read
@@ -457,7 +237,7 @@ impl Reader {
                 .unwrap_or((None, None));
             super::color::resolve_hdr_peak(cll, mastering)
         };
-        Ok(Reader {
+        let mut reader = Reader {
             input: opened,
             facts,
             decoder,
@@ -469,8 +249,63 @@ impl Reader {
             origin: None,
             last_ts: 0,
             color: None,
+            initial: InitialState::NeedRead,
             _hw: hw,
-        })
+        };
+        // Negotiate the output format (task #91 Phase 2, Codex P0): the planar-vs-RGBA
+        // decision needs the ACTUAL first decoded frame (pixel format after HW
+        // transfer), so — only when the planar path is even a candidate — decode +
+        // convert the first frame now, retain it in `initial`, and serve it on the
+        // first credit. When planar is off, `output_format` is known at open
+        // (RGBA/fp16), so this is skipped and `Opened` reports it directly (no added
+        // latency). Runs here, on the producer thread, so the shared loop never sees
+        // pixel-format probing (task #130, plan §5.1).
+        if options.planar {
+            match reader.next_frame() {
+                Ok(Some((ts, px))) => {
+                    reader.origin.get_or_insert(ts);
+                    reader.initial = InitialState::Ready { ts, pixels: px };
+                }
+                // A zero-frame clip: report EOS on the first `read_frame` rather than
+                // eagerly (deferred so the shared loop needs no empty-clip case).
+                Ok(None) => reader.initial = InitialState::Eos,
+                Err(e) => return Err(e),
+            }
+        }
+        let (out_w, out_h) = reader.conv.display_dims();
+        if diag() {
+            let fit_desc = match fit {
+                Some(f) => format!("fit {}x{}", f.max_width, f.max_height),
+                None => "NATIVE".to_string(),
+            };
+            eprintln!(
+                "[pb-video] open codec={} coded={}x{} display={}x{} decode={} hwaccel={} out_fmt={:?} rot={}",
+                reader.facts.codec,
+                reader.facts.width,
+                reader.facts.height,
+                out_w,
+                out_h,
+                fit_desc,
+                if reader._hw.is_some() { "VideoToolbox" } else { "SOFTWARE" },
+                reader.conv.output_format(),
+                reader.facts.rotation,
+            );
+        }
+        let opened_info = Opened {
+            duration: reader.facts.duration,
+            width: out_w,
+            height: out_h,
+            // Honest track presence (plan §7 — the muted interim ended when the
+            // FFmpeg audio decoder + platform sinks landed): the session starts the
+            // shell audio player for real tracks; a shell with no sink reports a
+            // Failed clock immediately and playback degrades to silent.
+            has_audio: reader.facts.has_audio,
+            // Format-aware (task 79.10 / #91): an fp16 HDR clip charges 8 bytes/px, a
+            // P010 clip 3 bytes/px — the negotiated (post-prime) format, so the
+            // session's byte budget matches the frames it will receive.
+            frame_bytes: reader.conv.output_format().frame_bytes(out_w, out_h) as u64,
+        };
+        Ok((reader, opened_info))
     }
 
     /// Decode the next frame: `Ok(Some((pts_units, rgba)))`, `Ok(None)` at
@@ -573,28 +408,9 @@ impl Reader {
         v
     }
 
-    /// A seek target `Duration` in this stream's PTS units (the landing bar),
-    /// relative to the same origin/start-time base `last_ts` uses — so the two are
-    /// directly comparable for the forward-hop decision.
-    fn target_units(&self, target: Duration) -> i64 {
-        let base = self.origin.or(self.facts.start_time).unwrap_or(0);
-        base.saturating_add(self.facts.duration_to_pts(target))
-    }
-
     /// The forward-decode budget ([`FORWARD_DECODE_MAX`]) in stream units.
     fn forward_decode_max_units(&self) -> i64 {
         self.facts.duration_to_pts(FORWARD_DECODE_MAX)
-    }
-
-    /// Whether a seek to `target_units` should **decode forward** from the current
-    /// position instead of seeking to a keyframe: only a *forward* hop within the
-    /// budget, and not while parked/drained (where there's nothing to decode
-    /// forward from). Backward and far seeks return `false` → keyframe seek.
-    fn can_decode_forward(&self, target_units: i64) -> bool {
-        !self.parked
-            && !self.eof_sent
-            && target_units > self.last_ts
-            && target_units - self.last_ts <= self.forward_decode_max_units()
     }
 
     /// In-place keyframe seek to `target_units`: demuxer to a keyframe ≤ target,
@@ -635,6 +451,93 @@ impl Reader {
         self.eof_sent = false;
         self.parked = false;
         Ok(())
+    }
+}
+
+/// The FFmpeg backend on the shared credit/seek loop (task #130, plan §4). The
+/// `Reader`'s free functions and fields become the trait's ~9-operation seam; the
+/// loop machinery lives once in [`crate::video_producer_loop`].
+impl VideoProducerBackend for Reader {
+    /// An owned libav frame — a hardware surface when hwaccel is on, pulled to CPU
+    /// in [`convert`](Self::convert).
+    type Raw = ff::frame::Video;
+
+    fn read_frame(&mut self) -> Result<Option<(i64, Vec<u8>)>, String> {
+        // Serve the negotiation-primed first frame ahead of any fresh decode (task
+        // #91 Phase 2); a seek already reset this to `NeedRead`.
+        match std::mem::replace(&mut self.initial, InitialState::NeedRead) {
+            InitialState::Ready { ts, pixels } => return Ok(Some((ts, pixels))),
+            InitialState::Eos => {
+                self.parked = true;
+                return Ok(None);
+            }
+            InitialState::NeedRead => {}
+        }
+        match self.next_frame()? {
+            Some(frame) => Ok(Some(frame)),
+            None => {
+                // Park (don't exit): a later SeekTo replays/rewinds in place.
+                self.parked = true;
+                Ok(None)
+            }
+        }
+    }
+
+    fn decode_raw(&mut self) -> Result<Option<(i64, ff::frame::Video)>, String> {
+        match self.decode_next_raw()? {
+            Some(frame) => Ok(Some(frame)),
+            None => {
+                self.parked = true;
+                Ok(None)
+            }
+        }
+    }
+
+    fn convert(&mut self, raw: ff::frame::Video) -> Result<Vec<u8>, String> {
+        self.convert_frame(&raw)
+    }
+
+    /// A seek target `Duration` in this stream's PTS units (the landing bar),
+    /// relative to the same origin/start-time base `last_ts` uses — so the two are
+    /// directly comparable for the forward-hop decision.
+    fn target_units(&self, target: Duration) -> i64 {
+        let base = self.origin.or(self.facts.start_time).unwrap_or(0);
+        base.saturating_add(self.facts.duration_to_pts(target))
+    }
+
+    /// Whether a seek to `target_units` should **decode forward** from the current
+    /// position instead of seeking to a keyframe: only a *forward* hop within the
+    /// budget, and not while parked/drained (where there's nothing to decode
+    /// forward from). Backward and far seeks return `false` → keyframe seek.
+    fn can_decode_forward(&self, target_units: i64) -> bool {
+        !self.parked
+            && !self.eof_sent
+            && target_units > self.last_ts
+            && target_units - self.last_ts <= self.forward_decode_max_units()
+    }
+
+    fn seek(&mut self, target_units: i64) -> Result<(), String> {
+        // `seek_to_keyframe` clears EOS/parked; also drop any primed frame (a seek
+        // before the first credit invalidates it — plan §5.1).
+        self.initial = InitialState::NeedRead;
+        self.seek_to_keyframe(target_units)
+    }
+
+    fn invalidate_primed(&mut self) {
+        self.initial = InitialState::NeedRead;
+    }
+
+    fn is_parked(&self) -> bool {
+        self.parked
+    }
+
+    fn anchor_origin_seek(&mut self, target_units: i64, target: Duration) {
+        self.origin
+            .get_or_insert(target_units - self.facts.duration_to_pts(target));
+    }
+
+    fn anchor_origin_seq(&mut self, ts: i64) {
+        self.origin.get_or_insert(ts);
     }
 
     /// Assemble the protocol frame for a converted pixel buffer at `ts`.
@@ -687,6 +590,26 @@ impl Reader {
             format,
             pixels,
             color,
+        }
+    }
+
+    fn seek_diag(
+        &self,
+        forward: bool,
+        runup: u32,
+        demux: Duration,
+        total: Duration,
+        target: Duration,
+    ) {
+        if diag() {
+            eprintln!(
+                "[pb-video] seek target={:.2}s mode={} demux={}ms runup={} frames total={}ms",
+                target.as_secs_f64(),
+                if forward { "forward" } else { "keyframe" },
+                demux.as_millis(),
+                runup,
+                total.as_millis(),
+            );
         }
     }
 }

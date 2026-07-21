@@ -131,6 +131,14 @@ pub mod text_cue;
 // description every backend produces. Pure data + pure maps.
 pub mod tracks;
 pub mod video;
+// The shared credit/seek/select loop behind the `VideoProducerBackend` seam
+// (task #130): one `run<B>` both the Media Foundation (`mf_video_producer`) and
+// FFmpeg (`ffmpeg::video_producer`) producers drive, so the ~180-line
+// credit/generation/seek machinery lives once instead of twice. Cfg-neutral (the
+// protocol types are); compiled wherever a backend exists, plus under `test` so
+// the deterministic mock-backend loop test runs on every platform.
+#[cfg(any(windows, feature = "ffmpeg", test))]
+mod video_producer_loop;
 #[cfg(windows)]
 mod wic;
 mod zune;

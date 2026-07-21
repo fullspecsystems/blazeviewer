@@ -30,6 +30,7 @@ use crate::video::{
     SeekGeneration, VideoColorInfo, VideoFrame, VideoInput, VideoProducerEvent, VideoProducerMsg,
     VideoProducerOptions, VideoSessionId,
 };
+use crate::video_producer_loop::{Opened, VideoProducerBackend};
 use crate::{FitBox, PixelFormat};
 
 /// HDR tone-map peak in scene-linear scRGB (1.0 = 203-nit BT.2408 graphics white).
@@ -69,7 +70,11 @@ fn video_diag() -> bool {
 /// Run the producer to completion on the **current thread** (the app spawns a
 /// dedicated thread for it — never the event loop). Returns when the stream ends,
 /// the session says stop, the session is dropped, or decoding fails; every exit
-/// path retires the reader off-thread (HEVC teardown blocks ~1 s).
+/// path retires the reader off-thread (HEVC teardown blocks ~1 s). Both platform
+/// producers now drive the one shared credit/seek loop
+/// ([`crate::video_producer_loop::run`]) behind the [`VideoProducerBackend`] seam
+/// (task #130); this wrapper opens the backend on the producer thread (MF readers
+/// are `!Send`) and hands it off.
 ///
 /// `input` is the container: a filesystem path, or an archive entry's in-RAM
 /// bytes (`Arc`-shared, so the seek reopens below cost a refcount, not a copy).
@@ -83,395 +88,393 @@ pub fn run_video_producer(
     options: VideoProducerOptions,
 ) {
     ensure_mf();
-    let fail = |error: String| {
-        let _ = events.send(VideoProducerEvent::Failed { session_id, error });
-    };
-
-    let reader = match unsafe { open_video_reader(input) } {
-        Ok(r) => r,
-        Err(e) => return fail(e.to_string()),
-    };
-    let info = match unsafe { stream_info(&reader) } {
-        Ok(i) => i,
-        Err(e) => {
-            retire_reader(reader);
-            return fail(e.to_string());
+    match MfBackend::open(input, fit, options) {
+        Ok((backend, opened)) => {
+            crate::video_producer_loop::run(backend, opened, session_id, generation, events, msgs)
         }
-    };
-    let (disp_w, disp_h) = info.display_dims();
-    let fitted = fit.map(|f| fit_dims(disp_w, disp_h, f));
-
-    // Pick the output format from the source colorimetry and the decode-load
-    // policy (79.10 + Track B):
-    //   HDR (PQ/HLG) + a 10-bit-capable renderer → P010 — hardware when the clip is
-    //     heavy enough for NVDEC, else software (the video processor emits P010
-    //     without a D3D device). The shader applies the EOTF, so HDR survives
-    //     instead of being SDR-clamped.
-    //   heavy SDR → NV12 via NVDEC (unchanged).
-    //   everything else (light SDR, or HDR with no 10-bit renderer / planar off) →
-    //     software RGB32, byte-for-byte unchanged (MF SDR-clamps HDR here).
-    // `PB_VIDEO_FORCE_HW` overrides the decode-load policy; `PB_VIDEO_NO_PLANAR`
-    // (via `options.planar`) forces HDR back to the RGB32 path.
-    let nc = unsafe { crate::mf_hw::native_color(&reader, info.height) };
-    let is_hdr = matches!(
-        nc.transfer,
-        crate::VideoTransfer::Pq | crate::VideoTransfer::Hlg
-    );
-    let want_hw = crate::mf_hw::hw_override()
-        .unwrap_or_else(|| crate::mf_hw::pixel_rate_wants_hw(info.width, info.height, info.fps));
-    let use_p010 = is_hdr && options.planar && options.supports_p010;
-
-    // NV12/P010 subsample chroma 2×2 — odd output dims fall back to software.
-    let even = |w: u32, h: u32| w > 0 && h > 0 && w.is_multiple_of(2) && h.is_multiple_of(2);
-
-    // Hardware attempts open a NEW reader (retiring the probe reader); a software
-    // path reuses the probe reader below.
-    let mut manager = None;
-    let mut hw_opened: Option<(IMFSourceReader, OutKind, u32, u32)> = None;
-    if want_hw {
-        if let Some(mgr) = unsafe { crate::mf_hw::dxgi_manager() } {
-            let opened = if use_p010 {
-                unsafe { crate::mf_hw::open_p010_reader(input, &mgr, fitted) }
-                    .ok()
-                    .map(|(r, w, h)| (r, OutKind::P010, w, h))
-            } else {
-                unsafe { crate::mf_hw::open_nv12_reader(input, &mgr, fitted) }
-                    .ok()
-                    .map(|(r, w, h)| (r, OutKind::Nv12, w, h))
-            };
-            match opened {
-                Some((r, k, w, h)) if even(w, h) => {
-                    hw_opened = Some((r, k, w, h));
-                    manager = Some(mgr);
-                }
-                Some((r, _, _, _)) => retire_reader(r), // odd/zero dims → software
-                None => {}
-            }
+        Err(error) => {
+            let _ = events.send(VideoProducerEvent::Failed { session_id, error });
         }
     }
+}
 
-    let (active_reader, mut kind, w, h) = match hw_opened {
-        Some((hw_reader, k, hw_w, hw_h)) => {
-            retire_reader(reader); // the plain probe reader is done
-            (hw_reader, k, hw_w, hw_h)
-        }
-        None => {
-            // Software path — reuse the probe reader. Prefer P010 for an HDR source
-            // (so it isn't SDR-clamped); fall back to RGB32 if P010 won't negotiate.
-            let p010 = if use_p010 {
-                unsafe {
-                    match fitted {
-                        Some(dims) => crate::mf_hw::negotiate_p010(&reader, Some(dims))
-                            .or_else(|_| crate::mf_hw::negotiate_p010(&reader, None)),
-                        None => crate::mf_hw::negotiate_p010(&reader, None),
-                    }
-                }
-                .ok()
-                .filter(|&(w, h)| even(w, h))
-            } else {
-                None
-            };
-            match p010 {
-                Some((w, h)) => (reader, OutKind::P010, w, h),
-                None => {
-                    let negotiated = unsafe {
-                        match fitted {
-                            Some(dims) => negotiate_rgb32(&reader, Some(dims))
-                                .or_else(|_| negotiate_rgb32(&reader, None)),
-                            None => negotiate_rgb32(&reader, None),
-                        }
-                    };
-                    match negotiated {
-                        Ok((w, h, stride)) => (reader, OutKind::Rgb32 { stride }, w, h),
-                        Err(e) => {
-                            retire_reader(reader);
-                            return fail(mf_open_msg(e));
-                        }
-                    }
-                }
-            }
-        }
-    };
-    if w == 0 || h == 0 {
-        retire_reader(active_reader);
-        return fail("video has no frames".into());
-    }
-    let format = kind.format();
-    let _ = events.send(VideoProducerEvent::Opened {
-        session_id,
-        duration: info.duration,
-        width: w,
-        height: h,
-        has_audio: info.has_audio,
-        frame_bytes: format.frame_bytes(w, h) as u64,
-    });
-    // The single-application contract, per output kind.
-    let color = match kind {
-        // P010: pixels arrive raw (PQ/HLG-encoded BT.2020 10-bit YUV) — the renderer
-        // applies matrix + range + EOTF + primaries in-shader exactly once (mirrors
-        // the FFmpeg planar path's `video_color_info_planar`).
-        OutKind::P010 => VideoColorInfo {
-            transform: crate::ColorTransform::from_cicp(nc.primaries, 8, 0, true),
-            cicp: None,
-            full_range: nc.full_range,
-            yuv_matrix: nc.yuv_matrix,
-            transfer: nc.transfer,
-            peak: HDR_DEFAULT_PEAK,
-        },
-        // NV12: raw YUV, the renderer applies matrix + range once (SDR).
-        OutKind::Nv12 => VideoColorInfo {
-            transform: info.color,
-            cicp: None,
-            full_range: nc.full_range,
-            yuv_matrix: nc.yuv_matrix,
-            transfer: crate::VideoTransfer::SrgbLike,
-            peak: 1.0,
-        },
-        // RGB32: MF already applied matrix + range (fields inert); SDR-clamped.
-        OutKind::Rgb32 { .. } => VideoColorInfo {
-            transform: info.color,
-            cicp: None,
-            full_range: true,
-            yuv_matrix: nc.yuv_matrix,
-            transfer: crate::VideoTransfer::SrgbLike,
-            peak: 1.0,
-        },
-    };
+/// The Windows Media Foundation backend on the shared credit/seek loop (task #130).
+/// One live reader (`active`) — recreated on a keyframe seek, retired off-thread at
+/// EOS and on teardown — plus the negotiated output kind/geometry/color and the DXGI
+/// manager for the hardware planar path. "Parked after EOS" is `active == None`:
+/// there is no `parked` flag because the live reader *is* the liveness (the MF
+/// producer retires the reader at EOS, where the FFmpeg backend only sets a bool).
+struct MfBackend {
+    /// The container, owned so a seek can reopen over the same shared bytes.
+    input: VideoInput,
+    /// The live reader, or `None` when parked after EOS (a seek recreates it).
+    active: Option<IMFSourceReader>,
+    /// The negotiated output; a mid-stream media-type change can move its stride,
+    /// so the read functions take `&mut` to it.
+    kind: OutKind,
+    w: u32,
+    h: u32,
+    format: PixelFormat,
+    color: VideoColorInfo,
+    /// The DXGI device manager for a hardware planar session (`None` = software).
+    manager: Option<windows::Win32::Media::MediaFoundation::IMFDXGIDeviceManager>,
+    /// First-published-frame ts (container units) — the session-relative zero.
+    origin: Option<i64>,
+    /// The live reader's position (abs ts of its last read frame), driving the
+    /// short-forward-hop; `None` whenever there is no live reader.
+    reader_pos: Option<i64>,
+}
 
-    // The credit/command/seek loop. Blocking recv IS the select: a Stop or a
-    // SeekTo (or the session dropping its sender) wakes us regardless of credit
-    // starvation. A SeekTo zeroes the credit balance — only credits received
-    // after it (which the session sends after flushing) count.
-    let mut origin: Option<i64> = None;
-    let mut gen = generation;
-    let mut credits: usize = 0;
-    let mut pending: Option<(Duration, crate::video::SeekGeneration)> = None;
-    let mut active: Option<IMFSourceReader> = Some(active_reader);
-    // Where the live reader is positioned — the abs ts (container time base) of the
-    // last frame read from it. Drives the short-forward-hop (task #4): a forward seek
-    // within reach of this decodes forward rather than recreating the reader. `None`
-    // whenever there is no live reader (start before the first frame; parked at EOS).
-    let mut reader_pos: Option<i64> = None;
+impl MfBackend {
+    /// Open + negotiate on the **producer thread** (MF readers are `!Send`). Returns
+    /// the backend and the [`Opened`] facts the shared loop publishes; every error
+    /// path retires any reader it opened before returning.
+    fn open(
+        input: &VideoInput,
+        fit: Option<FitBox>,
+        options: VideoProducerOptions,
+    ) -> Result<(MfBackend, Opened), String> {
+        let reader = match unsafe { open_video_reader(input) } {
+            Ok(r) => r,
+            Err(e) => return Err(e.to_string()),
+        };
+        let info = match unsafe { stream_info(&reader) } {
+            Ok(i) => i,
+            Err(e) => {
+                retire_reader(reader);
+                return Err(e.to_string());
+            }
+        };
+        let (disp_w, disp_h) = info.display_dims();
+        let fitted = fit.map(|f| fit_dims(disp_w, disp_h, f));
 
-    'outer: loop {
-        // 1. Absorb messages; block only when there is nothing to do.
-        loop {
-            let msg = if credits == 0 && pending.is_none() {
-                match msgs.recv() {
-                    Ok(m) => m,
-                    Err(_) => break 'outer,
-                }
-            } else {
-                match msgs.try_recv() {
-                    Ok(m) => m,
-                    Err(std::sync::mpsc::TryRecvError::Empty) => break,
-                    Err(_) => break 'outer,
-                }
-            };
-            match msg {
-                VideoProducerMsg::Stop => break 'outer,
-                VideoProducerMsg::Credit => credits += 1,
-                VideoProducerMsg::SeekTo { target, generation } => {
-                    pending = Some((target, generation));
-                    credits = 0;
-                }
-            }
-        }
+        // Pick the output format from the source colorimetry and the decode-load
+        // policy (79.10 + Track B):
+        //   HDR (PQ/HLG) + a 10-bit-capable renderer → P010 — hardware when the clip is
+        //     heavy enough for NVDEC, else software (the video processor emits P010
+        //     without a D3D device). The shader applies the EOTF, so HDR survives
+        //     instead of being SDR-clamped.
+        //   heavy SDR → NV12 via NVDEC (unchanged).
+        //   everything else (light SDR, or HDR with no 10-bit renderer / planar off) →
+        //     software RGB32, byte-for-byte unchanged (MF SDR-clamps HDR here).
+        // `PB_VIDEO_FORCE_HW` overrides the decode-load policy; `PB_VIDEO_NO_PLANAR`
+        // (via `options.planar`) forces HDR back to the RGB32 path.
+        let nc = unsafe { crate::mf_hw::native_color(&reader, info.height) };
+        let is_hdr = matches!(
+            nc.transfer,
+            crate::VideoTransfer::Pq | crate::VideoTransfer::Hlg
+        );
+        let want_hw = crate::mf_hw::hw_override().unwrap_or_else(|| {
+            crate::mf_hw::pixel_rate_wants_hw(info.width, info.height, info.fps)
+        });
+        let use_p010 = is_hdr && options.planar && options.supports_p010;
 
-        // 2. Land a pending seek: retire the old reader (repositioning a warm
-        // HEVC reader blocks ~1 s; a fresh one positions before its first read in
-        // ~0 ms — spike E), open at the target, decode forward to the first frame
-        // ≥ it. A newer SeekTo supersedes every stage; a superseded landing never
-        // publishes a frame.
-        if let Some((target, g)) = pending.take() {
-            gen = g;
-            let abs_target = origin
-                .unwrap_or(0)
-                .saturating_add((target.as_nanos() / 100) as i64);
-            // Short-forward-hop (task #4): a small FORWARD seek from a live reader
-            // decodes forward in place — the decode-forward loop below reads from the
-            // reader wherever it sits, so a reader already at `reader_pos` just before
-            // the target needs no reopen and no keyframe backtrack. Anything else
-            // (backward, large forward, no live reader, or parked at EOS) recreates.
-            let hop = active.is_some() && should_hop(reader_pos, abs_target);
-            let seek_started = video_diag().then(std::time::Instant::now);
-            let mut run_up_frames = 0u32;
-            if !hop {
-                if let Some(r) = active.take() {
-                    retire_reader(r);
-                }
-                let reader =
-                    match unsafe { reopen_at(input, (w, h), abs_target, manager.as_ref(), kind) } {
-                        Ok((r, k)) => {
-                            kind = k;
-                            r
-                        }
-                        Err(e) => {
-                            fail(e);
-                            break 'outer;
-                        }
-                    };
-                active = Some(reader);
-                // The fresh reader sits on a keyframe ≤ abs_target; its exact ts isn't
-                // known until the first read, so a subsequent hop must not trust a
-                // stale position. The run-up's first frame re-establishes it.
-                reader_pos = None;
-            }
-            let mut landed: Option<(i64, Vec<u8>)> = None;
-            loop {
-                // Watch for supersede/stop between reads (latest-value).
-                match msgs.try_recv() {
-                    Ok(VideoProducerMsg::Stop) => break 'outer,
-                    Ok(VideoProducerMsg::Credit) => credits += 1,
-                    Ok(VideoProducerMsg::SeekTo { target, generation }) => {
-                        pending = Some((target, generation));
-                        credits = 0;
-                        break;
-                    }
-                    Err(std::sync::mpsc::TryRecvError::Empty) => {}
-                    Err(_) => break 'outer,
-                }
-                let reader = active.as_ref().expect("reader set above");
-                match unsafe { read_raw(reader, w, h, &mut kind) } {
-                    Ok(Read1Raw::Eos) => {
-                        // Sought at/near the end: the stream is over under the
-                        // new generation; the reader is spent.
-                        let _ = events.send(VideoProducerEvent::EndOfStream {
-                            session_id,
-                            seek_generation: gen,
-                        });
-                        if let Some(r) = active.take() {
-                            retire_reader(r);
-                        }
-                        reader_pos = None;
-                        break;
-                    }
-                    Ok(Read1Raw::Gap) => {}
-                    Ok(Read1Raw::Frame { ts, sample }) => {
-                        // Every read advances the reader — track it even for discarded
-                        // run-up frames, so a supersede mid-run-up leaves `reader_pos`
-                        // truthful for the next hop decision.
-                        reader_pos = Some(ts);
-                        if ts >= abs_target {
-                            // The landing frame is the ONLY one read back/converted;
-                            // the run-up frames above dropped their samples unconverted
-                            // (task #4 — the recreate-seek stall was 30× this copy).
-                            let pixels = match unsafe { convert_sample(&sample, w, h, kind) } {
-                                Ok(p) => p,
-                                Err(e) => {
-                                    fail(e);
-                                    break 'outer;
-                                }
-                            };
-                            landed = Some((ts, pixels));
-                            break;
-                        }
-                        // Keyframe→target run-up: drop the raw sample (no readback, no
-                        // swizzle), keep decoding forward.
-                        run_up_frames += 1;
-                    }
-                    Err(e) => {
-                        fail(e);
-                        break 'outer;
-                    }
-                }
-            }
-            if let Some((ts, pixels)) = landed {
-                if let Some(t0) = seek_started {
-                    eprintln!(
-                        "[pb-video] seek {} to {:.1}s: {} run-up frames in {:?}",
-                        if hop { "HOP" } else { "recreate" },
-                        (abs_target - origin.unwrap_or(0)).max(0) as f64 / 1e7,
-                        run_up_frames,
-                        t0.elapsed(),
-                    );
-                }
-                // The landing frame consumes a credit like any other (the session
-                // granted fresh ones right behind the SeekTo). Block for one if
-                // needed — Stop/SeekTo still interrupt.
-                while credits == 0 && pending.is_none() {
-                    match msgs.recv() {
-                        Ok(VideoProducerMsg::Credit) => credits += 1,
-                        Ok(VideoProducerMsg::SeekTo { target, generation }) => {
-                            pending = Some((target, generation));
-                            credits = 0;
-                        }
-                        Ok(VideoProducerMsg::Stop) | Err(_) => break 'outer,
-                    }
-                }
-                if pending.is_some() {
-                    continue 'outer; // superseded before publish — never flash it
-                }
-                origin.get_or_insert(abs_target - (target.as_nanos() / 100) as i64);
-                let pts_hns = (ts - origin.unwrap_or(0)).max(0) as u64;
-                let frame = VideoFrame {
-                    session_id,
-                    seek_generation: gen,
-                    pts: Duration::from_nanos(pts_hns * 100),
-                    width: w,
-                    height: h,
-                    format,
-                    pixels,
-                    color: color.clone(),
+        // NV12/P010 subsample chroma 2×2 — odd output dims fall back to software.
+        let even = |w: u32, h: u32| w > 0 && h > 0 && w.is_multiple_of(2) && h.is_multiple_of(2);
+
+        // Hardware attempts open a NEW reader (retiring the probe reader); a software
+        // path reuses the probe reader below.
+        let mut manager = None;
+        let mut hw_opened: Option<(IMFSourceReader, OutKind, u32, u32)> = None;
+        if want_hw {
+            if let Some(mgr) = unsafe { crate::mf_hw::dxgi_manager() } {
+                let opened = if use_p010 {
+                    unsafe { crate::mf_hw::open_p010_reader(input, &mgr, fitted) }
+                        .ok()
+                        .map(|(r, w, h)| (r, OutKind::P010, w, h))
+                } else {
+                    unsafe { crate::mf_hw::open_nv12_reader(input, &mgr, fitted) }
+                        .ok()
+                        .map(|(r, w, h)| (r, OutKind::Nv12, w, h))
                 };
-                if events.send(VideoProducerEvent::Frame(frame)).is_err() {
-                    break 'outer;
+                match opened {
+                    Some((r, k, w, h)) if even(w, h) => {
+                        hw_opened = Some((r, k, w, h));
+                        manager = Some(mgr);
+                    }
+                    Some((r, _, _, _)) => retire_reader(r), // odd/zero dims → software
+                    None => {}
                 }
-                credits -= 1;
             }
-            continue 'outer;
         }
 
-        // 3. Spend one credit on the next sequential frame.
-        if credits > 0 {
-            let Some(reader) = active.as_ref() else {
-                // No reader (parked after EOS): these credits are stale — a seek
-                // recreates the reader and resets the balance.
-                credits = 0;
-                continue;
+        let (active_reader, kind, w, h) = match hw_opened {
+            Some((hw_reader, k, hw_w, hw_h)) => {
+                retire_reader(reader); // the plain probe reader is done
+                (hw_reader, k, hw_w, hw_h)
+            }
+            None => {
+                // Software path — reuse the probe reader. Prefer P010 for an HDR source
+                // (so it isn't SDR-clamped); fall back to RGB32 if P010 won't negotiate.
+                let p010 = if use_p010 {
+                    unsafe {
+                        match fitted {
+                            Some(dims) => crate::mf_hw::negotiate_p010(&reader, Some(dims))
+                                .or_else(|_| crate::mf_hw::negotiate_p010(&reader, None)),
+                            None => crate::mf_hw::negotiate_p010(&reader, None),
+                        }
+                    }
+                    .ok()
+                    .filter(|&(w, h)| even(w, h))
+                } else {
+                    None
+                };
+                match p010 {
+                    Some((w, h)) => (reader, OutKind::P010, w, h),
+                    None => {
+                        let negotiated = unsafe {
+                            match fitted {
+                                Some(dims) => negotiate_rgb32(&reader, Some(dims))
+                                    .or_else(|_| negotiate_rgb32(&reader, None)),
+                                None => negotiate_rgb32(&reader, None),
+                            }
+                        };
+                        match negotiated {
+                            Ok((w, h, stride)) => (reader, OutKind::Rgb32 { stride }, w, h),
+                            Err(e) => {
+                                retire_reader(reader);
+                                return Err(mf_open_msg(e));
+                            }
+                        }
+                    }
+                }
+            }
+        };
+        if w == 0 || h == 0 {
+            retire_reader(active_reader);
+            return Err("video has no frames".into());
+        }
+        let format = kind.format();
+        // The single-application contract, per output kind.
+        let color = match kind {
+            // P010: pixels arrive raw (PQ/HLG-encoded BT.2020 10-bit YUV) — the renderer
+            // applies matrix + range + EOTF + primaries in-shader exactly once (mirrors
+            // the FFmpeg planar path's `video_color_info_planar`).
+            OutKind::P010 => VideoColorInfo {
+                transform: crate::ColorTransform::from_cicp(nc.primaries, 8, 0, true),
+                cicp: None,
+                full_range: nc.full_range,
+                yuv_matrix: nc.yuv_matrix,
+                transfer: nc.transfer,
+                peak: HDR_DEFAULT_PEAK,
+            },
+            // NV12: raw YUV, the renderer applies matrix + range once (SDR).
+            OutKind::Nv12 => VideoColorInfo {
+                transform: info.color,
+                cicp: None,
+                full_range: nc.full_range,
+                yuv_matrix: nc.yuv_matrix,
+                transfer: crate::VideoTransfer::SrgbLike,
+                peak: 1.0,
+            },
+            // RGB32: MF already applied matrix + range (fields inert); SDR-clamped.
+            OutKind::Rgb32 { .. } => VideoColorInfo {
+                transform: info.color,
+                cicp: None,
+                full_range: true,
+                yuv_matrix: nc.yuv_matrix,
+                transfer: crate::VideoTransfer::SrgbLike,
+                peak: 1.0,
+            },
+        };
+        let opened = Opened {
+            duration: info.duration,
+            width: w,
+            height: h,
+            has_audio: info.has_audio,
+            frame_bytes: format.frame_bytes(w, h) as u64,
+        };
+        let backend = MfBackend {
+            input: input.clone(),
+            active: Some(active_reader),
+            kind,
+            w,
+            h,
+            format,
+            color,
+            manager,
+            origin: None,
+            reader_pos: None,
+        };
+        Ok((backend, opened))
+    }
+}
+
+/// The Windows Media Foundation backend on the shared credit/seek loop (task #130).
+/// The old free functions (`read_one`/`read_raw`/`reopen_at`/`convert_sample`) and
+/// the loop-locals (`active`/`kind`/`reader_pos`/`origin`) become the ~9-operation
+/// seam; the credit/generation/seek machinery lives once in
+/// [`crate::video_producer_loop`]. The MF warts the loop used to see — the `Gap`
+/// tick and the `&mut kind` stride threading — are absorbed **inside** the backend
+/// here, so the trait only ever surfaces Frame/EOS (plan §5.2/§5.3).
+impl VideoProducerBackend for MfBackend {
+    /// An owned MF sample — the run-up discards most without the readback/swizzle
+    /// [`convert`](Self::convert) pays.
+    type Raw = IMFSample;
+
+    fn read_frame(&mut self) -> Result<Option<(i64, Vec<u8>)>, String> {
+        // Gap ticks are retried internally now (the old loop re-looped on them); the
+        // shared loop guards `is_parked`, so `active` is Some on entry.
+        loop {
+            let reader = match self.active.as_ref() {
+                Some(r) => r,
+                None => return Ok(None), // defensive: a parked read is EOS
             };
-            match unsafe { read_one(reader, w, h, &mut kind) } {
-                Ok(Read1::Eos) => {
-                    let _ = events.send(VideoProducerEvent::EndOfStream {
-                        session_id,
-                        seek_generation: gen,
-                    });
-                    // Park (don't exit): a later SeekTo replays/rewinds by
-                    // recreating the reader; Stop/disconnect ends the thread.
-                    if let Some(r) = active.take() {
+            match unsafe { read_one(reader, self.w, self.h, &mut self.kind) }? {
+                Read1::Frame { ts, pixels } => {
+                    self.reader_pos = Some(ts); // the live reader advanced (hop reference)
+                    return Ok(Some((ts, pixels)));
+                }
+                Read1::Gap => continue,
+                Read1::Eos => {
+                    // Park (don't exit): retire the spent reader off-thread; a later
+                    // SeekTo recreates it. `is_parked` is now true (`active` is None).
+                    if let Some(r) = self.active.take() {
                         retire_reader(r);
                     }
-                    reader_pos = None;
-                }
-                Ok(Read1::Gap) => {}
-                Ok(Read1::Frame { ts, pixels }) => {
-                    reader_pos = Some(ts); // the live reader advanced (hop reference)
-                    let o = *origin.get_or_insert(ts);
-                    let pts_hns = (ts - o).max(0) as u64;
-                    let frame = VideoFrame {
-                        session_id,
-                        seek_generation: gen,
-                        pts: Duration::from_nanos(pts_hns * 100),
-                        width: w,
-                        height: h,
-                        format,
-                        pixels,
-                        color: color.clone(),
-                    };
-                    if events.send(VideoProducerEvent::Frame(frame)).is_err() {
-                        break 'outer;
-                    }
-                    credits -= 1;
-                }
-                Err(e) => {
-                    fail(e);
-                    break 'outer;
+                    self.reader_pos = None;
+                    return Ok(None);
                 }
             }
         }
     }
-    if let Some(r) = active {
-        retire_reader(r);
+
+    fn decode_raw(&mut self) -> Result<Option<(i64, IMFSample)>, String> {
+        // The run-up: the shared loop only calls this with a live reader (a forward
+        // hop needs `active`, a keyframe seek just set it), so `expect` holds.
+        loop {
+            let reader = self
+                .active
+                .as_ref()
+                .expect("a live reader during the run-up");
+            match unsafe { read_raw(reader, self.w, self.h, &mut self.kind) }? {
+                Read1Raw::Frame { ts, sample } => {
+                    // Track position even for discarded run-up frames, so a supersede
+                    // mid-run-up leaves `reader_pos` truthful for the next hop.
+                    self.reader_pos = Some(ts);
+                    return Ok(Some((ts, sample)));
+                }
+                Read1Raw::Gap => continue,
+                Read1Raw::Eos => {
+                    // Sought at/near the end: the reader is spent; park.
+                    if let Some(r) = self.active.take() {
+                        retire_reader(r);
+                    }
+                    self.reader_pos = None;
+                    return Ok(None);
+                }
+            }
+        }
+    }
+
+    fn convert(&mut self, raw: IMFSample) -> Result<Vec<u8>, String> {
+        unsafe { convert_sample(&raw, self.w, self.h, self.kind) }
+    }
+
+    fn target_units(&self, target: Duration) -> i64 {
+        self.origin
+            .unwrap_or(0)
+            .saturating_add((target.as_nanos() / 100) as i64)
+    }
+
+    fn can_decode_forward(&self, target_units: i64) -> bool {
+        // A small forward move from a KNOWN live position hops; everything else
+        // (backward, too far, no live reader, parked at EOS) recreates.
+        self.active.is_some() && should_hop(self.reader_pos, target_units)
+    }
+
+    fn seek(&mut self, target_units: i64) -> Result<(), String> {
+        // Recreate: retire the old reader (repositioning a warm HEVC reader blocks
+        // ~1 s; a fresh one positions before its first read in ~0 ms — spike E), open
+        // at the target in the SAME output kind.
+        if let Some(r) = self.active.take() {
+            retire_reader(r);
+        }
+        let (reader, k) = unsafe {
+            reopen_at(
+                &self.input,
+                (self.w, self.h),
+                target_units,
+                self.manager.as_ref(),
+                self.kind,
+            )
+        }?;
+        self.kind = k;
+        self.active = Some(reader);
+        // The fresh reader sits on a keyframe ≤ target; its exact ts isn't known until
+        // the first read, so a subsequent hop must not trust a stale position.
+        self.reader_pos = None;
+        Ok(())
+    }
+
+    fn invalidate_primed(&mut self) {
+        // MF negotiates its output from the media type and never primes a frame, so
+        // there is nothing to invalidate (the FFmpeg planar prime is the only case).
+    }
+
+    fn is_parked(&self) -> bool {
+        self.active.is_none()
+    }
+
+    fn anchor_origin_seek(&mut self, target_units: i64, target: Duration) {
+        self.origin
+            .get_or_insert(target_units - (target.as_nanos() / 100) as i64);
+    }
+
+    fn anchor_origin_seq(&mut self, ts: i64) {
+        self.origin.get_or_insert(ts);
+    }
+
+    fn make_frame(
+        &mut self,
+        session_id: VideoSessionId,
+        gen: SeekGeneration,
+        ts: i64,
+        pixels: Vec<u8>,
+    ) -> VideoFrame {
+        let origin = self.origin.unwrap_or(0);
+        let pts_hns = (ts - origin).max(0) as u64;
+        VideoFrame {
+            session_id,
+            seek_generation: gen,
+            pts: Duration::from_nanos(pts_hns * 100),
+            width: self.w,
+            height: self.h,
+            format: self.format,
+            pixels,
+            color: self.color.clone(),
+        }
+    }
+
+    fn seek_diag(
+        &self,
+        forward: bool,
+        runup: u32,
+        _demux: Duration,
+        total: Duration,
+        target: Duration,
+    ) {
+        if video_diag() {
+            eprintln!(
+                "[pb-video] seek {} to {:.1}s: {} run-up frames in {:?}",
+                if forward { "HOP" } else { "recreate" },
+                target.as_secs_f64(),
+                runup,
+                total,
+            );
+        }
+    }
+}
+
+impl Drop for MfBackend {
+    /// Mandatory teardown: the final live reader retires off-thread (HEVC teardown
+    /// blocks ~1 s). In `Drop` (not a `close(self)` the loop must remember to call)
+    /// so no early return / superseded landing / error path can skip it — this is
+    /// where the old loop's tail retire lived (task #130, plan §4).
+    fn drop(&mut self) {
+        if let Some(r) = self.active.take() {
+            retire_reader(r);
+        }
     }
 }
 
