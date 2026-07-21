@@ -448,6 +448,62 @@ mod tests {
         );
     }
 
+    /// #131 A.2 — `Action::CancelScan` is inverted off `ShellFlowAction`: the core runs
+    /// cancel-keeps-partial + the "Scan stopped" toast directly, and — critically — emits **no
+    /// dialog effect**. An unconditional `CloseDialog` (the rev-1 bug) would close whatever
+    /// unrelated dialog happened to be up; winit has no Scanning dialog now (the pill replaced
+    /// it) and the macOS Scanning-sheet Cancel closes itself via `DialogResult::ScanningCancelled`.
+    #[test]
+    fn cancel_scan_action_cancels_and_toasts_without_touching_dialogs() {
+        let (mut core, _tx) = armed_scan_core();
+        core.native_toast = true;
+        assert!(core.dir_scan.is_some(), "a walk is armed");
+
+        core.handle(contract::CoreEvent::MenuAction(
+            crate::action::Action::CancelScan,
+        ));
+
+        assert!(core.dir_scan.is_none(), "the walk was cancelled");
+        assert_eq!(
+            core.toast_native.as_ref().map(|t| t.message.as_str()),
+            Some("Scan stopped")
+        );
+        assert!(
+            !core
+                .effects
+                .iter()
+                .any(|e| matches!(e, contract::CoreEffect::ShellFlowAction(_))),
+            "inverted off the flow seam"
+        );
+        assert!(
+            !core
+                .effects
+                .iter()
+                .any(|e| matches!(e, contract::CoreEffect::CloseDialog)),
+            "must NOT close an unrelated dialog (the A.2 unscoped-CloseDialog guard)"
+        );
+    }
+
+    /// No scan running → a silent no-op: no toast, and still no dialog effect.
+    #[test]
+    fn cancel_scan_action_is_a_silent_noop_when_no_walk_runs() {
+        let mut core = test_core();
+        core.native_toast = true;
+
+        core.handle(contract::CoreEvent::MenuAction(
+            crate::action::Action::CancelScan,
+        ));
+
+        assert!(core.toast_native.is_none(), "nothing to cancel: no toast");
+        assert!(
+            !core
+                .effects
+                .iter()
+                .any(|e| matches!(e, contract::CoreEffect::CloseDialog)),
+            "no dialog effect on the no-op path either"
+        );
+    }
+
     /// `begin_dir_scan` must reject a non-scan source **before touching any state**. The shell
     /// copies bumped the generation and cleared tombstones first and returned late — harmless
     /// with exactly one caller, a latent bug in a generally callable core transition (§5a).

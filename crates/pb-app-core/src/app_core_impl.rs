@@ -670,18 +670,27 @@ impl AppCore {
             // code (removed by the Mac session) — no double-run, since the core already did the work.
             Action::Recursive => self.toggle_recursive(),
             Action::ShowArchives => self.toggle_show_archives(),
+            // Stop Scanning (NS0 5.6 / #131 A.2, inverted): the core owns the whole policy —
+            // cancel-keeps-partial, resume normal prefetch, restore the welcome hint on an empty
+            // deck (`cancel_scan_command`) — plus the confirmation toast (its "tail", which each
+            // shell used to add). It emits **no dialog effect**: winit no longer presents a
+            // Scanning dialog (the ambient pill replaced it), and the macOS Scanning-sheet Cancel
+            // closes itself via `DialogResult::ScanningCancelled` — an unconditional `CloseDialog`
+            // here would close whatever *unrelated* dialog happened to be up (the rev-1 bug).
+            Action::CancelScan => {
+                if self.cancel_scan_command() {
+                    self.show_toast("Scan stopped");
+                }
+            }
             // Host-side commands — the residue whose execution *is* a platform operation:
-            // the permanent-delete confirm dialog, the off-thread directory-scan cancel,
-            // and Quit's window teardown. Routed through the one `ShellFlowAction` seam so the
-            // whole action vocabulary still dispatches here; the host runs the native op (see the
-            // effect's doc). The core-owned commands were lifted out into their own arms above.
-            // `ToggleToolbar` (#61) also routes here: the docked toolbar is a Windows/Linux-shell
-            // concept (macOS has its native toolbar), so the shell owns flipping `show_toolbar`,
-            // persisting it, and re-reserving the photo's top inset — the core stays agnostic.
-            Action::DeletePermanent
-            | Action::CancelScan
-            | Action::Quit
-            | Action::ToggleToolbar => self
+            // the permanent-delete confirm dialog and Quit's window teardown. Routed through the
+            // one `ShellFlowAction` seam so the whole action vocabulary still dispatches here; the
+            // host runs the native op (see the effect's doc). The core-owned commands were lifted
+            // out into their own arms above. `ToggleToolbar` (#61) also routes here: the docked
+            // toolbar is a Windows/Linux-shell concept (macOS has its native toolbar), so the
+            // shell owns flipping `show_toolbar`, persisting it, and re-reserving the photo's top
+            // inset — the core stays agnostic.
+            Action::DeletePermanent | Action::Quit | Action::ToggleToolbar => self
                 .effects
                 .push(contract::CoreEffect::ShellFlowAction(action)),
         }

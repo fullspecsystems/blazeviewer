@@ -1198,20 +1198,6 @@ impl App {
         self.core.cancel_dir_scan();
     }
 
-    /// User command (File ▸ Stop Scanning, or a bound key): stop an in-flight folder scan,
-    /// **keeping whatever has streamed in so far** (cancel-keeps-partial — the partial
-    /// playlist is already live). Resumes normal prefetch (the deck is final now) and flashes
-    /// a confirmation. A no-op when no scan is running (the menu item is disabled then).
-    fn cancel_scan_command(&mut self) {
-        // The core owns the policy now (task #126): cancel, keep the partial deck, resume
-        // normal prefetch, and — the 2026-07-20 fix — restore the welcome hint when the
-        // cancel leaves nothing on screen. Both shells share it, so both get the fix.
-        if !self.core.cancel_scan_command() {
-            return; // nothing was running
-        }
-        self.core.show_toast("Scan stopped");
-    }
-
     /// Close the egui dialog window (if any). Dropping it scrubs an entered password.
     fn close_dialog(&mut self) {
         self.dialog = None;
@@ -1956,7 +1942,9 @@ impl App {
             A::TreeExtendUp => self.core.fs_tree_extend_up(),
             // An archive folder row: re-scope the deck / open the container folder (task #66).
             A::TreeActivate(i) => self.core.tree_activate(i),
-            A::CancelScan => self.cancel_scan_command(),
+            // The scan pill's Cancel button — same core path as File ▸ Stop Scanning (#131 A.2):
+            // dispatch the action so the core runs cancel-keeps-partial + the "Scan stopped" toast.
+            A::CancelScan => self.core.dispatch_action(Action::CancelScan),
             A::OpenFile => self.core.dispatch_action(Action::OpenFile),
             A::OpenFolder => self.core.dispatch_action(Action::OpenFolder),
             A::PlayPause => {
@@ -2706,9 +2694,9 @@ impl App {
     fn perform_flow_action(&mut self, action: Action) {
         match action {
             Action::DeletePermanent => self.confirm_delete_permanent(),
-            // `Recursive` / `ShowArchives` are no longer routed here — the core runs them
-            // directly during dispatch (#131 A.1), so the shell never sees them as flow actions.
-            Action::CancelScan => self.cancel_scan_command(),
+            // `Recursive` / `ShowArchives` / `CancelScan` are no longer routed here — the core
+            // runs them directly during dispatch (#131 A.1/A.2), so the shell never sees them as
+            // flow actions.
             Action::Quit => self.begin_exit(),
             // Toggle the docked windowed toolbar (#61): flip + persist the setting, then
             // re-reserve/free the photo's top inset and re-render so it appears/disappears
