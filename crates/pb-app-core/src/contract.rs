@@ -597,16 +597,18 @@ pub enum CoreEffect {
         request_id: u64,
     },
     /// Perform a genuinely **host-side command** — one whose execution *is* a platform
-    /// operation, not core orchestration. After NS0 5.6 this carries the residue that can't be
-    /// pure core: **DeletePermanent** (opens the themed confirm dialog; the Yes then calls the
-    /// core `do_delete`), **Recursive** / **CancelScan** (spawn / cancel the off-thread directory
-    /// walk + its progress dialog), and **Quit** (hide-window teardown, also reached from the
-    /// window-close / Esc paths). `AppCore::dispatch_action` routes these here so the *whole*
-    /// action vocabulary still dispatches through one core entry point; the host matches on the
-    /// `Action` and runs the native operation. The core-owned commands (nav / zoom / scale /
-    /// rotate / copy / info / slideshow / play / **mute** / **save-rotation** / **undo** /
-    /// **delete-to-trash** / **fullscreen**) and the dialog opens (**About** / **Settings** →
-    /// `ShowDialog`) have been lifted OUT of this seam into their own core arms / effects.
+    /// operation, not core orchestration. After the #131 inversions the residue is just two:
+    /// **Quit** (hide-window teardown, also reached from the window-close / Esc paths) and
+    /// **ToggleToolbar** (the docked toolbar is a Windows/Linux-shell concept; macOS has its
+    /// native toolbar, so the shell owns flipping/persisting `show_toolbar` + re-reserving the
+    /// photo's top inset). `AppCore::dispatch_action` routes these here so the *whole* action
+    /// vocabulary still dispatches through one core entry point; the host matches on the `Action`
+    /// and runs the native operation. Everything else has been lifted OUT into its own core arm /
+    /// effect: nav / zoom / scale / rotate / copy / info / slideshow / play / **mute** /
+    /// **save-rotation** / **undo** / **delete-to-trash** / **fullscreen** run in the core; the
+    /// **Recursive** / **ShowArchives** toggles and **CancelScan** run in the core (#131 A.1/A.2);
+    /// **DeletePermanent** emits the dedicated `ShowDeleteConfirm { name }` effect (#131 A.3); and
+    /// the dialog opens (**About** / **Settings**) go through `ShowDialog`.
     ShellFlowAction(Action),
     // NS-later (payload types still in the shell or other crates):
     //   UpdateDialog(DialogUpdate)        — progress ticks into an open dialog

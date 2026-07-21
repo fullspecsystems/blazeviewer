@@ -475,12 +475,13 @@ impl AppCore {
     }
 
     /// Dispatch a one-shot [`Action`] — the single entry point shared by the keyboard
-    /// (one-shot keys, via the keymap) and the menu (`MenuAction::to_action`). The pure
-    /// view/nav/HUD/animation arms run here in the core; the **flow** arms (dialogs, window
-    /// mode, scan, file edits, quit) are routed to the shell/host via
-    /// [`CoreEffect::ShellFlowAction`] until 5.6 inverts them into specific effects/events.
-    /// Navigation here is a single step (what the menu wants); the keyboard's held-to-blaze nav
-    /// and continuous pan/zoom are driven by the hold loop, not this path.
+    /// (one-shot keys, via the keymap) and the menu (`MenuAction::to_action`). Nearly every arm
+    /// now runs here in the core (view/nav/HUD/animation, plus the scan toggles, cancel, and the
+    /// delete-confirm request — #131); the only arms still routed to the shell/host via
+    /// [`CoreEffect::ShellFlowAction`] are **Quit** (window teardown) and **ToggleToolbar** (a
+    /// winit-shell-only concept). Navigation here is a single step (what the menu wants); the
+    /// keyboard's held-to-blaze nav and continuous pan/zoom are driven by the hold loop, not this
+    /// path.
     pub fn dispatch_action(&mut self, action: Action) {
         match action {
             Action::Next => self.advance(Nav::Forward),

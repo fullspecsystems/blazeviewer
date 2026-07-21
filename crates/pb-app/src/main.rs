@@ -2665,12 +2665,11 @@ impl App {
         self.core.dispatch_action(action.to_action());
     }
 
-    /// Execute a [`contract::CoreEffect::ShellFlowAction`] — the **flow** arms of the action
-    /// vocabulary the core routes to the shell (the dialogs / window mode / scan / file-edit /
-    /// quit commands `AppCore::dispatch_action` doesn't own end-to-end yet). The result-mirror
-    /// of that core method's flow branch; `_ =>` is unreachable (the core only routes the flow
-    /// subset here) but keeps the match total. Runs from `drain_effects`. (NS0: replaced by
-    /// specific effects/`CoreEvent`s + native macOS handling as 5.6 inverts each flow.)
+    /// Execute a [`contract::CoreEffect::ShellFlowAction`] — after the #131 inversions the core
+    /// routes only **Quit** (window teardown) and **ToggleToolbar** (a winit-shell-only concept)
+    /// here; every other flow now runs in the core or arrives as a specific effect. `_ =>` is
+    /// unreachable (the core only routes that pair here) but keeps the match total. Runs from
+    /// `drain_effects`.
     fn perform_flow_action(&mut self, action: Action) {
         match action {
             // `DeletePermanent` / `Recursive` / `ShowArchives` / `CancelScan` are no longer routed
