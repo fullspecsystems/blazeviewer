@@ -268,11 +268,14 @@ scan/archive worker lifecycle" is wrong post-#126 — fix it where the inversion
    `rescan_current_folder()` helpers + tests; switch the core dispatch to run them directly and stop
    emitting `ShellFlowAction(Recursive|ShowArchives)`; delete the winit bodies + handler arms. Verify:
    core tests + winit run. macOS dead-handler removal is deferred to the Mac (harmless until then).
-3. **Thread A.2 (`CancelScan`):** core runs `cancel_scan_command` + toast + `CloseDialog`; slim the
-   winit copy. Verify.
-4. **Thread A.3 (`DeletePermanent`):** the coordinated arm — implement `request_delete_confirm()` + the
-   name-getter (option i), switch the core to emit `ShowDialog(Confirm)`, slim the winit copy, verify
-   the winit confirm still shows the file name. **Leave the macOS side to the Handoff.**
+3. **Thread A.2 (`CancelScan`):** core runs `cancel_scan_command` + toast, **emitting no dialog effect**
+   (§3 A.2 — the unconditional `CloseDialog` was a bug); slim the winit copy. Verify.
+4. **Thread A.3 (`DeletePermanent`) — Windows does core + winit behind the lever (see §6a):** add the
+   `CoreEffect::ShowDeleteConfirm { name }` variant + the winit arm; implement `request_delete_confirm()`;
+   convert **all three** emission sites (`app_core_impl` dispatch + `delete.rs:35`/`:90`); emit the new
+   effect on non-macOS and keep the legacy `ShellFlowAction(DeletePermanent)` on `cfg(target_os="macos")`
+   (the lever); slim the winit `confirm_delete_permanent`; verify the winit confirm still shows the name.
+   **The macOS `ShowDeleteConfirm` wiring + lever removal is the one Handoff item (§6).**
 5. **`is_archive`** (optional): if trivial, hoist to a shared `pb_source`/core helper; else skip.
 
 One commit per thread/arm, so the cross-machine bisect stays clean and the Mac can cherry-pick the
@@ -282,8 +285,36 @@ verification per arm.
 
 **#130 was Windows-verifiable end to end. This is not.** `pb-mac-ffi` is `#![cfg(target_os = "macos")]`
 — on Windows it compiles to an **empty staticlib, so a syntax error in it produces zero errors**
-(`CLAUDE.md` → *Working across two machines*). The Windows session does the core + winit; the Mac must
-finish and verify its shell. Leave a live `## Handoff` in this plan with:
+(`CLAUDE.md` → *Working across two machines*).
+
+### 6a. The effect-match asymmetry — why Windows can do ALL FOUR threads, and the Mac's job is tiny
+
+Verified 2026-07-21: **winit's `CoreEffect` match is exhaustive** (no `_ =>`; it ends at `ReportError`),
+so adding `ShowDeleteConfirm` **breaks the winit compile until winit handles it — Windows catches that.**
+But **macOS's `next_effect` match has a catch-all** (`other => map_effect(other)`, `lib.rs:2640`), so the
+same new variant **compiles on macOS and silently forwards to Swift, doing nothing** until `map_effect`
++ the Swift host render it. That silent no-op is the whole macOS risk — and the **target-scoped lever**
+(§5 step 4: legacy `ShellFlowAction(DeletePermanent)` on `cfg(target_os="macos")`) sidesteps it: macOS
+keeps its existing, working delete-confirm path the entire time.
+
+**Consequence — the recommended plan of record:** the **Windows session does all four threads** (B, A.1,
+A.2, A.3 behind the lever) and **never edits `pb-mac-ffi`**. At every Windows push the tree is green *and*
+macOS is functional (dead `Recursive`/`ShowArchives` arms fire nothing; delete uses the legacy macOS
+path). **Each machine only edits the shell it can run.** The Mac's entire job is then additive and
+fully Mac-verifiable:
+
+- **The one real Handoff item:** wire `CoreEffect::ShowDeleteConfirm { name }` into the macOS
+  `map_effect`/Swift confirm sheet, then flip the `cfg(target_os="macos")` emission off the legacy path
+  onto the new effect, and run the delete flow + the macOS `delete_permanent_confirms_then_deletes` test.
+- Cleanup (non-urgent, non-blocking): delete the dead macOS `Recursive`/`ShowArchives` `ShellFlowAction`
+  arms + the `toggle_recursive`/`toggle_show_archives` bodies (`lib.rs:2540-2541`/`2649`/`2678`).
+
+*(Alternative, if the Mac is the more-available machine: do the whole task on the Mac — it can
+compile-check winit via `--target x86_64-pc-windows-msvc` — and hand Windows a pure "pull-and-run-the-winit-flows"
+verification. Strictly worse on the "only edit the shell you can run" axis, since the Mac can't RUN winit,
+but viable. The plan of record above is Windows-first.)*
+
+Leave a live `## Handoff` in this plan (Windows fills it in) with:
 
 - **Verified (Windows):** core unit tests, winit build + owner run of each flow (list which).
 - **NOT verified — the Mac must do:**

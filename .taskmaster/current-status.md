@@ -1,7 +1,7 @@
 # Blaze Viewer — Current Status (session handoff)
 
-_Last updated: 2026-07-20 (rev 28). Windows session; a macOS session worked in parallel through
-the day. Everything below is on `main`, pushed (`git rev-list HEAD...origin/main` = 0/0)._
+_Last updated: 2026-07-21 (rev 29). Windows session; a macOS session worked in parallel earlier.
+Everything below is on `main`, pushed (`git rev-list HEAD...origin/main` = 0/0)._
 
 ---
 
@@ -25,10 +25,13 @@ the day. Everything below is on `main`, pushed (`git rev-list HEAD...origin/main
 **Codex-reviewed (round 1 folded in)**: `.taskmaster/plans/131-ns0-shell-dedup.md` (rev 2). ⚠ The scope
 is **much smaller than the audit implied** — #126 already did the heavy lifting; what remains is
 inverting the last four *cross-shell* `ShellFlowAction` flow arms (Recursive / ShowArchives / CancelScan
-/ DeletePermanent) into the core, plus collapsing the redundant `archive_loading` mirror flag. It is the
-**cross-machine** refactor (touches `pb-mac-ffi`, an empty staticlib on Windows) — genuinely riskier
-than #130; only `DeletePermanent` (A.3) can break macOS silently and it needs the Mac to close the loop.
-Read the plan in full, then start (plan §5 sequences Thread-B → A.1 → A.2 → A.3). Pointers in §*NS0*.
+/ DeletePermanent) into the core, plus collapsing the redundant `archive_loading` mirror flag. It is
+**cross-machine** (touches `pb-mac-ffi`, an empty staticlib on Windows) — but the **plan of record is
+Windows does all four threads** (plan §6a): a target-scoped lever keeps macOS on its working legacy
+delete path, so `main` stays green *and* macOS functional at every push, and **never edit `pb-mac-ffi`
+from Windows**. The Mac's whole job is one additive item (wire `ShowDeleteConfirm` into the Swift sheet
++ flip the lever + run). Read the plan in full, then start — sequence Thread-B → A.1 → A.2 → A.3.
+Pointers in §*NS0* below.
 
 Read before writing any code: **`docs/where-code-goes.md`** — an ordered decision procedure for
 where a function belongs. "Put it on `AppCore`" is the *last* answer. This is the doc NS0 leans on.
@@ -65,28 +68,36 @@ that's an argument, not a run). Both expected green.
 
 # 🔜 NS0 shell de-dup (audit #1b/#2) — THE LIVE TASK; plan `#131` ready (Codex-reviewed)
 
-**Plan: `.taskmaster/plans/131-ns0-shell-dedup.md` (rev 2, Codex round-1 folded in). Read it in full
-before implementing — it is investigation-grounded (two shell-mapping agent sweeps 2026-07-21) and the
-scope is much smaller than the pointers below imply (#126 already did most of it).** Grounding sources:
+**Plan: `.taskmaster/plans/131-ns0-shell-dedup.md` (rev 2, Codex round-1 folded in). Read it in full —
+it is the territory; this is the map.** Investigation-grounded (two shell-mapping agent sweeps
+2026-07-21, cited in the plan).
 
-- **`technical-debt-audit.md`** — finding **#1(b)** ("finish the NS0 inversion so `AppCore` owns
-  orchestration and the mirror flags have a single owner") and finding **#2** ("the two parallel
-  platform shells").
-- **`125-split-app-core-impl.md` §2 and §2a** — the scope-gate table (this is remediation *(b)*,
-  deliberately separated from the *(a)* file-split we just finished) and the **exact residue**:
-  **16 orchestration functions duplicated across the two shells** + `struct DirScan`/`struct
-  ArchiveLoad` defined in both. §2a lists them verbatim (begin_dir_scan, poll_dir_scan,
-  cancel_dir_scan, cancel_scan_command, scan_pill_visible, begin_archive_open, poll_archive_load,
-  finish_archive_open, fail_archive_open, cancel_archive_load, prompt_archive_password,
-  is_archive, apply_menu_state, confirm_delete_permanent, toggle_recursive, toggle_show_archives).
-  The last four are the "strays" #126 deliberately deferred.
+⚠ **The audit's "16 duplicated functions + `struct DirScan`/`ArchiveLoad` in both shells" framing is
+STALE — do not plan against it.** Re-verified against current code: **`DirScan`/`ArchiveLoad` are already
+gone from both shells** (#126); **8 of the 16 are already thin core-delegating adapters**; 2 are
+legitimately per-shell. **The real, small residue** (plan §1):
 
-⚠ **This is the CROSS-MACHINE one.** It touches `pb-mac-ffi`, which compiles to an **empty
-staticlib on Windows** — a Windows session cannot verify the Mac shell (see *Load-bearing
-knowledge*). Plan for: do the core+winit side on Windows, leave a `## Handoff` for the Mac to
-compile/verify. This is genuinely riskier than #130 and needs the Mac available to close the loop.
-Confirmed still duplicated as of 2026-07-20: the 16 mirror fns exist in both `crates/pb-app/src/`
-and `crates/pb-mac-ffi/src/` (the four strays live in both shells and *not* the core).
+- **Thread A — invert the four *cross-shell* `ShellFlowAction` flow arms** into the core:
+  - **A.1 `Recursive` / `ShowArchives`** → `AppCore::toggle_recursive` / `toggle_show_archives` (pure;
+    the biggest win). Core runs them directly + stops emitting the effect; mac arms go dead (harmless).
+  - **A.2 `CancelScan`** → core runs `cancel_scan_command` + toast, **no dialog effect** (unconditional
+    `CloseDialog` was a bug — winit has no scanning dialog now, the pill replaced it).
+  - **A.3 `DeletePermanent`** → `AppCore::request_delete_confirm` + a new `CoreEffect::ShowDeleteConfirm
+    { name }`; convert **all three** emission sites (dispatch + `delete.rs:35`/`:90`).
+- **Thread B — collapse the redundant `archive_loading` mirror flag** to a core getter (`archive_load.
+  is_some()`); fix the stale `scanning` doc (leave it a field). (`launching`/`dialog_open`/`redraw_pending`
+  stay — legitimate one-way shell signals. `Quit` + winit-only `ToggleToolbar` stay on the seam.)
+
+**Sequencing (plan §5): Thread-B → A.1 → A.2 → A.3.** One commit per arm.
+
+⚠ **Cross-machine — but Windows can do ALL FOUR (plan §6a).** `pb-mac-ffi` is an empty staticlib on
+Windows. Key finding: macOS's `next_effect` has a catch-all (`other => map_effect(other)`), so adding
+`ShowDeleteConfirm` **compiles on macOS but silently no-ops** until the Swift side renders it. The **plan
+of record: Windows does all four threads and never edits `pb-mac-ffi`**, using a **target-scoped lever**
+for A.3 (emit legacy `ShellFlowAction(DeletePermanent)` on `cfg(target_os="macos")`, the new effect
+elsewhere) so macOS stays green *and functional* at every push. **The Mac's entire job is one additive
+Handoff item:** wire `ShowDeleteConfirm` into `map_effect`/Swift, flip the `cfg(macos)` lever onto it,
+run the delete flow + the macOS delete test. (Dead-arm cleanup is non-blocking.)
 
 ---
 
@@ -172,5 +183,5 @@ Corpus: `\\beenas\Media\Movies` (video — the #130 seek/play corpus),
 ## ⚠️ Task-ID collisions — re-fetch before filing
 
 Happened once already (#115 filed twice; the poster refactor became #121). Highest plan id in use
-is **#130** (`.taskmaster/plans/`); highest in `tasks.json` is #127 — plans run ahead of task
-entries, so check `ls .taskmaster/plans/` too before filing. NS0 will need the next free id.
+is now **#131** (NS0 = `131-ns0-shell-dedup.md`); highest in `tasks.json` is #127 — plans run ahead
+of task entries, so check `ls .taskmaster/plans/` too before filing the next one.
