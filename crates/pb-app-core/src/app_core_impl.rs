@@ -253,7 +253,6 @@ impl AppCore {
             scanning: false,
             launching: false,
             dialog_open: false,
-            archive_loading: false,
             redraw_pending: false,
             resize_hold: None,
             fit_stash: [None, None],
@@ -392,6 +391,15 @@ impl AppCore {
         core
     }
 
+    /// Whether a background archive open is still decompressing. Derived directly from
+    /// `archive_load` (#131 B) — this replaced a hand-synced `archive_loading: bool` mirror
+    /// field that the winit shell wrote each tick and macOS never wrote (so it was stale on
+    /// macOS by construction). It is a pure redundancy cleanup: `work_pending` already reads
+    /// `archive_load.is_some()` independently, so nothing ever depended on the old flag.
+    pub fn archive_loading(&self) -> bool {
+        self.archive_load.is_some()
+    }
+
     /// Whether prefetch/upload work is still outstanding (keep polling if so).
     pub fn work_pending(&self) -> bool {
         // A dropped frame (surface Lost/Outdated/Timeout) keeps the pump awake so the
@@ -407,7 +415,6 @@ impl AppCore {
             // Staged outcomes awaiting the next drain must keep the pump awake for
             // the same reason (they hold pool byte-budget until uploaded, too).
             || !self.pending_uploads.is_empty()
-            || self.archive_loading
             // A streaming dir scan keeps the loop polling too, so `poll_dir_scan` picks up
             // batches (and the delayed Scanning-dialog reveal) even when the event queue is
             // quiet — without this, a slow walk on an idle app waits for the next OS event.

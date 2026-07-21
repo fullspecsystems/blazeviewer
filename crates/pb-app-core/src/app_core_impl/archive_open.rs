@@ -475,6 +475,25 @@ mod tests {
         (core, tx)
     }
 
+    /// #131 B — `archive_loading()` is a pure getter derived from `archive_load`, replacing the
+    /// old hand-synced `archive_loading: bool` mirror field (the winit shell wrote it each tick;
+    /// macOS never wrote it, so it was stale on macOS by construction). No shell involvement: it
+    /// flips true the instant an open is armed and false the instant it clears.
+    #[test]
+    fn archive_loading_tracks_archive_load_with_no_shell_sync() {
+        let idle = test_core();
+        assert!(!idle.archive_loading(), "idle core: no archive open in flight");
+
+        let (mut core, _tx) = armed_archive_core(None);
+        assert!(
+            core.archive_loading(),
+            "armed open: the getter reports true with no tick/sync step"
+        );
+
+        core.archive_load = None;
+        assert!(!core.archive_loading(), "cleared: the getter reports false");
+    }
+
     /// The symmetric half: a folder scan displaces an in-flight open, through the same gate.
     #[test]
     fn a_walk_cancels_the_displaced_archive_open_inside_the_core() {

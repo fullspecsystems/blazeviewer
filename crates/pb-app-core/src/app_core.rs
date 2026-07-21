@@ -543,28 +543,35 @@ pub struct AppCore {
     pub scan_root: Option<PathBuf>,
     /// Whether the current scan-based playlist is recursive (`Ctrl+R` toggles).
     pub recursive: bool,
-    /// Whether a directory scan is streaming the playlist in (the core-owned mirror of the
-    /// shell's `dir_scan.is_some()`; the shell keeps it in sync at every `dir_scan` mutation).
-    /// While set, `request_prefetch` uses the sequential-only, no-wrap prefetch so the random
-    /// look-ahead doesn't thrash against the deck regenerating on each batch (NS0 5.5 Phase B).
+    /// Whether a directory scan is streaming the playlist in. **Core-owned since #126** — every
+    /// production write is in the core (`dir_scan`/`background`/`finish_scan`); the shells only
+    /// *read* it. (The doc used to claim "the shell keeps it in sync at every `dir_scan`
+    /// mutation" — false since #126 moved the walk lifecycle into the core.) While set,
+    /// `request_prefetch` uses the sequential-only, no-wrap prefetch so the random look-ahead
+    /// doesn't thrash against the deck regenerating on each batch (NS0 5.5 Phase B). Kept a field
+    /// (not a `dir_scan.is_some()` getter) because the two aren't type-enforced-equal: the
+    /// `CoreEvent::ScanDone → finish_scan` path clears `scanning` but not `dir_scan` (#131 B).
     pub scanning: bool,
     /// Whether a launch input (an archive) is still deferred, waiting for the window to exist
     /// (the core-owned mirror of the shell's `pending_launch.is_some()`, kept in sync at its
     /// mutations). Suppresses the "Press O to open" empty-state hint until the launch resolves.
+    /// **Intentional one-way shell→core signal** (single writer per shell, winit-only source);
+    /// it mirrors genuinely shell-owned state and cannot be derived from core state — not
+    /// mirror-desync debt, do not "fix" it into a getter (#131 B).
     pub launching: bool,
     /// Whether a chrome dialog (Settings / About / a progress card) is open — the core-owned
     /// mirror of the shell's `dialog.is_some()`, synced at each tick. The slideshow pauses while
     /// a dialog is up (host's own modal picker pauses itself). NS0 5.5 Phase C2 (the Tick loop).
+    /// **Intentional one-way shell→core signal** (mirrors the shell's dialog *window*, single
+    /// writer) — not derivable from core state, not mirror-desync debt (#131 B).
     pub dialog_open: bool,
-    /// Whether a background archive open is still decompressing (the mirror of the shell's
-    /// `archive_load.is_some()`, synced at each tick) — keeps `work_pending` true so the loop
-    /// keeps polling for the finished open. NS0 5.5 Phase C2.
-    pub archive_loading: bool,
     /// The last `draw()` was **dropped** by the surface (Lost/Outdated/Timeout — routine
     /// during window-resize/fullscreen churn): nothing reached the screen, so the stale
     /// frame is still composited. Keeps `work_pending` true so the host pump stays awake,
     /// and `tick` retries the draw next frame (2026-07-04, the Mac "unfilled background
     /// after a fullscreen toggle" bug — a one-shot render with no retry).
+    /// **Intentional one-way shell→core signal** (a dropped surface present is shell-observed,
+    /// single writer per shell) — not derivable from core state, not mirror-desync debt (#131 B).
     pub redraw_pending: bool,
     /// The item currently shown via its retained full-res `Original` across a window resize /
     /// fullscreen toggle (#106.7 §6). Set when [`resize`](Self::resize) rebinds the Original for an

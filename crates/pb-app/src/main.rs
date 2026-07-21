@@ -862,7 +862,6 @@ impl App {
             scanning: false,
             launching: false,
             dialog_open: false,
-            archive_loading: false,
             redraw_pending: false,
             resize_hold: None,
             fit_stash: [None, None],
@@ -4318,12 +4317,12 @@ impl ApplicationHandler for App {
         self.poll_archive_load();
         self.poll_dir_scan();
 
-        // Sync the core-owned mirrors of the shell flow state this tick reads: whether a chrome
-        // dialog is up (the slideshow pauses under one) and whether an archive is still loading
-        // (keeps `work_pending` polling). Synced after the polls so a just-finished archive/scan
-        // is reflected; a dialog opened later this tick (in the drain) applies next tick.
+        // Sync the core-owned mirror of the shell dialog state this tick reads: whether a chrome
+        // dialog is up (the slideshow pauses under one). Synced after the polls. A dialog opened
+        // later this tick (in the drain) applies next tick.
+        // (`archive_loading` used to be hand-synced here too; it is now a core getter derived from
+        // `archive_load` — #131 B.)
         self.core.dialog_open = self.dialog.is_some();
-        self.core.archive_loading = self.core.archive_load.is_some();
 
         // The ambient scan-count chip (below the loading pie) while a folder scan streams in.
         // A host-side overlay update, independent of the core photo tick.
