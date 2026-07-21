@@ -846,6 +846,18 @@ impl AppCoreHandle {
         }
     }
 
+    /// Open a folder by absolute path — the **Thumbnails breadcrumb** path bar (task #129).
+    /// This is the SAME folder-open the Folders tree performs (`fs_tree_open` → `open_dir`), so
+    /// the two surfaces can't drift. ASYNC: it only *queues* a recursive dir scan; the deck and
+    /// root change when scan batches return. Ignored on a non-fs deck (archive/empty) — the bar
+    /// isn't shown there anyway, so a stale click is a safe no-op.
+    fn open_tree_folder(&mut self, path: &str) {
+        self.core.now = Instant::now();
+        if self.core.tree_is_fs() {
+            self.core.fs_tree_open(std::path::PathBuf::from(path));
+        }
+    }
+
     /// Toggle a row's expansion (the chevron) — Finder tree only; browsing, no load.
     fn tree_toggle(&mut self, i: usize) {
         self.core.now = Instant::now();
@@ -4744,6 +4756,9 @@ mod ffi {
         fn tree_row_has_target(&self, i: usize) -> bool;
         fn tree_current_path(&self) -> String;
         fn tree_activate(&mut self, i: usize);
+        // Open a folder by absolute path — the Thumbnails breadcrumb (task #129). Same
+        // folder-open as the tree; async (queues a scan). No-op on a non-fs deck.
+        fn open_tree_folder(&mut self, path: &str);
         fn tree_toggle(&mut self, i: usize);
 
         // The NS2 dialog seam: payload pulls (after a ShowDialog marker), the
@@ -5128,6 +5143,61 @@ mod tests {
         let card = h.door_card();
         assert!(!card.visible);
         assert!(card.name.is_empty() && card.format.is_empty());
+    }
+
+    /// The breadcrumb FFI (task #129) queues the SAME recursive folder-scan the Folders tree
+    /// does, and is a safe no-op on a non-fs deck. Async by design: `open_plan` pushes
+    /// `BeginDirScan` (the walker runs only on drain), so we assert the *queued* scan of the
+    /// clicked ancestor — not a synchronous deck/root change.
+    #[test]
+    fn open_tree_folder_queues_a_recursive_scan_and_no_ops_off_fs() {
+        let mut h = test_handle(800, 600, 1.0);
+        // A disk deck with a current folder `/A/B` → `tree_is_fs()` holds (native tree is on).
+        let src: std::sync::Arc<dyn pb_source::ItemSource> = std::sync::Arc::new(
+            pb_source::FsSource::new(vec![std::path::PathBuf::from("/A/B/one.jpg")]),
+        );
+        h.core.rebuild_playlist(
+            src,
+            std::path::PathBuf::from("/A/B"),
+            Some(std::path::PathBuf::from("/A/B")),
+            true,
+            0,
+        );
+        h.core.displayed_item = Some(0);
+        assert!(h.core.tree_is_fs(), "native tree + a disk current folder");
+
+        h.core.effects.clear();
+        h.open_tree_folder("/A");
+        let source = h.core.effects.iter().find_map(|e| match e {
+            contract::CoreEffect::BeginDirScan { source, .. } => Some(source.clone()),
+            _ => None,
+        });
+        match source {
+            Some(Source::Scan { roots, recursive }) => {
+                assert_eq!(
+                    roots,
+                    vec![std::path::PathBuf::from("/A")],
+                    "scans the clicked ancestor"
+                );
+                assert!(recursive, "a folder opens recursively (the launch policy)");
+            }
+            other => panic!("expected a recursive BeginDirScan of /A, got {other:?}"),
+        }
+
+        // A non-fs deck (no current folder) → the click is a safe no-op, nothing queued.
+        let mut off = test_handle(800, 600, 1.0);
+        off.core.displayed_item = None;
+        assert!(!off.core.tree_is_fs());
+        off.core.effects.clear();
+        off.open_tree_folder("/A");
+        assert!(
+            !off
+                .core
+                .effects
+                .iter()
+                .any(|e| matches!(e, contract::CoreEffect::BeginDirScan { .. })),
+            "no scan on a non-fs deck"
+        );
     }
 
     /// The artwork the card and the strip's archive cells draw. It is the **only** thing

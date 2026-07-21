@@ -18,6 +18,10 @@ let package = Package(
         // nested SwiftPM package so `cd mac/PbSeek && swift test` runs the seek unit tests
         // with zero native deps — including on a hosted CI runner without the xcframework.
         .package(path: "PbSeek"),
+        // PbBreadcrumb: the pure folder-breadcrumb model (task #129) — path → ancestry crumbs +
+        // the boundary rule. A nested SwiftPM package so `cd mac/PbBreadcrumb && swift test` runs
+        // its unit tests with zero native deps (the PbSeek pattern).
+        .package(path: "PbBreadcrumb"),
         // Sparkle: the Mac-native auto-updater (task #65). Binary-target XCFramework — a
         // *link* dependency only; `swift build` produces a bare executable and does NOT
         // embed Sparkle.framework into the .app (no Xcode "Embed Frameworks" phase), so
@@ -36,6 +40,7 @@ let package = Package(
                 "PBCatch",
                 .product(name: "PbMacFfi", package: "PbMacFfi"),
                 .product(name: "PbSeek", package: "PbSeek"),
+                .product(name: "PbBreadcrumb", package: "PbBreadcrumb"),
                 .product(name: "Sparkle", package: "Sparkle"),
             ],
             // A staticlib carries no framework references, so the frameworks the Rust

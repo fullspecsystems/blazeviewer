@@ -7,6 +7,14 @@ with any pre-release suffix carried only by the tag.
 
 ## [Unreleased]
 
+### Added
+
+- The Thumbnails panel now shows the current photo's folder as a path bar across the top, and it
+  keeps up as you move between photos in different subfolders — so you always know where you are.
+  Click any parent folder in it to jump straight up the tree, without switching to the Folders
+  tab. In a narrow pane the beginning of the path collapses into a menu so the current folder
+  stays visible. (macOS.)
+
 ### Fixed
 
 - Malformed-but-viewable images now display instead of getting stuck on the loading spinner

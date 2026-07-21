@@ -97,7 +97,14 @@ struct ThumbnailsPanelView: View {
     /// The item our last follow scroll centered — the smooth-vs-snap distance rule.
     @State private var lastCentered = -1
 
-    private let chromeHeight = PanelMetrics.headerHeight + 2
+    /// The breadcrumb strip's height (task #129): a path-bar row + its divider. Folded into the
+    /// chrome height only when a folder path is present (an fs deck), so the grid row math stays
+    /// exact whether the bar shows or not.
+    private let breadcrumbHeight: CGFloat = 23
+    private var showBreadcrumb: Bool { !model.breadcrumbPath.isEmpty }
+    private var chromeHeight: CGFloat {
+        PanelMetrics.headerHeight + 2 + (showBreadcrumb ? breadcrumbHeight : 0)
+    }
     /// Strip side inset + the cell's own inner padding around the photo
     /// (owner polish #1: ONE cell background, photo breathing room inside it).
     private let stripPad: CGFloat = 8
@@ -129,6 +136,13 @@ struct ThumbnailsPanelView: View {
                 closeHelp: "Close (⇧T)"
             ) { model.closeThumbs() }
             PanelDivider()
+
+            // The folder path bar (task #129): where the current photo lives + one-click up the
+            // tree. Only on an fs deck (empty path ⇒ hidden), so archives/empty decks are unchanged.
+            if showBreadcrumb {
+                FolderBreadcrumbView(model: model, width: paneWidth)
+                PanelDivider()
+            }
 
             ScrollViewReader { proxy in
                 scrollBody

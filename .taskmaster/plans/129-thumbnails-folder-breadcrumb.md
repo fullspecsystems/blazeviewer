@@ -241,14 +241,46 @@ invalid UTF-8 can't round-trip through this string action (rare on macOS, but re
 
 ## Handoff
 
-**Verified:** _(nothing yet — plan only)_
+**Implemented end-to-end on macOS (2026-07-20 session), all six steps:**
+- **Step 1 — above-root rebuild fix** (`ensure_fs_tree`, `app_core_impl/tree.rs`): rebuild also
+  fires when the *deck root* leaves the tree root. Regression test
+  `opening_an_ancestor_above_the_tree_root_rebuilds_the_tree`. ✅
+- **Step 2 — breadcrumb-context signal** (`app_core.rs` field `last_breadcrumb_snap` + a per-tick
+  snapshot block in `app_core_impl.rs`): the current folder re-signals `PanelsChanged` on a folder
+  change even with only Thumbnails open, incl. the async `mark_resolved` path. Test
+  `the_breadcrumb_re_signals_on_a_folder_change_with_only_thumbnails_open`. ✅
+- **Step 3 — FFI** `open_tree_folder(&str)` (impl + `extern "Rust"` decl, `//` comments): delegates
+  to `fs_tree_open`, guarded on `tree_is_fs()`. Async-aware test
+  `open_tree_folder_queues_a_recursive_scan_and_no_ops_off_fs`. ✅
+- **Step 4 — Swift**: `FolderBreadcrumbView` (`mac/…/FolderBreadcrumb.swift`) — custom path bar,
+  AppKit text-measured greedy right-to-left fit, overflow `Menu`, disabled current crumb, boundary
+  guard. The **pure model + boundary rule live in a new `mac/PbBreadcrumb` package** (the PbSeek
+  pattern) with 6 passing unit tests (`swift test`, zero native deps). `CoreModel.openFolderPath`
+  + `breadcrumbPath` pulled in `refreshThumbs`. ✅
+- **Step 5 — mount**: shown in `ThumbnailsPanelView` only on an fs deck (`!breadcrumbPath.isEmpty`),
+  `chromeHeight` folds in the strip so the grid math stays exact. ✅
+- **Step 6 — changelog** (`### Added`) + this Handoff. ✅
 
-**Not verified — needs a run:** everything below step 1 is behaviour-unverified until owner-smoke.
+**Verified (this Mac):**
+- `pb-app-core` + `pb-mac-ffi` Rust tests green (the three new tests above; full suites TBD in the
+  commit run). `PbBreadcrumb` `swift test` = 6/6.
+- Full `swift build` (debug, `--no-ffvideo`): _pending at write time — the generated bridge must
+  accept `open_tree_folder` and all Swift must compile._
 
-**Cross-platform debt:** winit/egui Thumbnails breadcrumb parity is owed (seams shared, presentation
-per-shell).
+**Not verified — needs owner-smoke (behaviour-unverified):** the matrix in *Tests* — live tracking
+while blazing across subfolders; ancestor click re-roots + tree browsable after (Step 1); 120pt
+overflow menu; `/`, `/Volumes/<share>`, deep path, archive transition, slow SMB ancestor; light +
+dark. Tune the boundary rule (`FolderBreadcrumbModel.isInteractive`) and the single-crumb question
+(Open decision 4) on smoke.
 
-**Claimed:** macOS session holds #129 (plan authored 2026-07-20).
+**Cross-platform debt:** winit/egui Thumbnails breadcrumb parity is owed (seams shared —
+`current_folder_abs`/`fs_tree_open` are in the core; the per-tick signal is gated on `native_tree`,
+off for winit — presentation per-shell). The `last_breadcrumb_snap` `AppCore` field was added to all
+three literals incl. the winit `pb-app/src/main.rs` (blind from the Mac — the struct-literal trap);
+a Windows `cargo clippy -p pb-app` should confirm it compiles (low risk, mechanical `field: None`).
+
+**Claimed:** macOS session holds #129 (implemented 2026-07-20). Coexists with in-flight #127
+(burning-Polaroid) WIP in the same tree — #129 committed as isolated hunks, #127 left untouched.
 
 ---
 

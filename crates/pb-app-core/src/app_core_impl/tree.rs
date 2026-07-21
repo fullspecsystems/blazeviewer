@@ -349,7 +349,17 @@ impl AppCore {
         // refreshes the rows (its already-loaded children were read under the old setting).
         let show_archives = self.settings.show_archives;
         let rebuild = self.fs_tree.as_ref().is_none_or(|t| {
-            current.strip_prefix(t.root()).is_err() || t.show_archives() != show_archives
+            // Rebuild when the current image folder left the tree root, when the Show Archives
+            // setting no longer matches (task #108), OR when the *deck root* itself moved outside
+            // the tree root (task #129). That last case is subtle: the breadcrumb can open an
+            // ANCESTOR of the current deck (e.g. deck `/A/B/C`, tree rooted `/A/B`, open `/A`)
+            // while the recursive scan's first/current image still sits under the old root — so
+            // the current-folder check alone stays satisfied and Folders would keep a tree that
+            // can't browse the newly-opened deck's siblings. `FsTree::set_current` refuses to
+            // reveal an out-of-root folder, so the invariant "deck root ⊆ tree root" must hold.
+            current.strip_prefix(t.root()).is_err()
+                || self.root.strip_prefix(t.root()).is_err()
+                || t.show_archives() != show_archives
         });
         if rebuild {
             let root = self
@@ -613,5 +623,83 @@ mod tests {
         // Winit (native_tree off) is never native-visible.
         core.native_tree = false;
         assert!(!core.tree_panel_visible());
+    }
+
+    /// Regression (task #129): opening an ancestor ABOVE the resident tree root must re-root the
+    /// tree even when the current image still sits under the old root — otherwise Folders shows a
+    /// tree that can't browse the newly-opened deck. The breadcrumb path bar makes this reachable.
+    #[test]
+    fn opening_an_ancestor_above_the_tree_root_rebuilds_the_tree() {
+        let mut core = test_core();
+        core.native_tree = true;
+        // Deck at `/A/B/C`, current image `/A/B/C/one.jpg`.
+        core.source = Arc::new(FsSource::new(vec![PathBuf::from("/A/B/C/one.jpg")]));
+        core.playlist = Playlist::new(1, 0).with_cursor(0);
+        core.displayed_item = Some(0);
+        core.root = PathBuf::from("/A/B/C");
+
+        core.ensure_fs_tree();
+        let tree_root = core.fs_tree.as_ref().unwrap().root().to_path_buf();
+        // A fresh tree roots one level above the deck root so the deck shows among its siblings.
+        assert_eq!(tree_root, PathBuf::from("/A/B"));
+        assert!(core.root.starts_with(&tree_root), "deck root under tree root");
+
+        // The breadcrumb opens ancestor `/A`: the recursive scan makes `/A` the deck root, but
+        // the first/current image is still under the old tree root `/A/B`. The current-folder-only
+        // check would keep the stale tree; the deck-root check forces a rebuild.
+        core.root = PathBuf::from("/A");
+        core.ensure_fs_tree();
+        let tree_root = core.fs_tree.as_ref().unwrap().root().to_path_buf();
+        assert!(
+            core.root.starts_with(&tree_root),
+            "tree re-rooted so the new deck root {:?} is browsable under {:?}",
+            core.root,
+            tree_root
+        );
+    }
+
+    /// Regression (task #129): the breadcrumb path bar must track the displayed photo's folder
+    /// even with only the Thumbnails tab open (Folders hidden) — including the async cache-miss
+    /// path where `displayed_item` moves with no `advance`/`drive_fs_tree` marker. The per-tick
+    /// snapshot diff re-signals the host on a folder change.
+    #[test]
+    fn the_breadcrumb_re_signals_on_a_folder_change_with_only_thumbnails_open() {
+        let mut core = test_core();
+        core.native_tree = true;
+        // Two photos in DIFFERENT folders.
+        core.source = Arc::new(FsSource::new(vec![
+            PathBuf::from("/A/one.jpg"),
+            PathBuf::from("/B/two.jpg"),
+        ]));
+        core.playlist = Playlist::new(2, 0).with_cursor(0);
+        core.displayed_item = Some(0);
+        core.root = PathBuf::from("/A");
+        // The Thumbnails tab is open; Folders is NOT the visible tab, so `drive_fs_tree` is idle.
+        core.folder_tree_open = true;
+        core.left_tab = crate::overlay::LeftTab::Thumbnails;
+        assert!(core.thumbs_visible());
+        assert!(!core.tree_panel_visible(), "Folders is not the visible tab");
+
+        // First tick establishes the snapshot at folder `/A`.
+        core.handle(CoreEvent::Tick(std::time::Instant::now()));
+        assert_eq!(core.last_breadcrumb_snap, Some(PathBuf::from("/A")));
+
+        // Move the displayed item to a photo in `/B` WITHOUT any nav marker — the async
+        // present path. The tick's snapshot diff must catch the folder cross and re-signal.
+        core.displayed_item = Some(1);
+        core.effects.clear();
+        core.handle(CoreEvent::Tick(std::time::Instant::now()));
+        assert_eq!(core.last_breadcrumb_snap, Some(PathBuf::from("/B")));
+        assert!(
+            core.effects
+                .iter()
+                .any(|e| matches!(e, contract::CoreEffect::PanelsChanged)),
+            "a folder change re-signals the host even with only Thumbnails open"
+        );
+
+        // Closing the strip forgets the snapshot so re-showing re-signals a fresh pull.
+        core.folder_tree_open = false;
+        core.handle(CoreEvent::Tick(std::time::Instant::now()));
+        assert_eq!(core.last_breadcrumb_snap, None);
     }
 }

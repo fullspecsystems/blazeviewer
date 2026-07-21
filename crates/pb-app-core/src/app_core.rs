@@ -671,6 +671,12 @@ pub struct AppCore {
     pub native_tree: bool,
     /// The last folder-tree visibility the tick emitted a marker for.
     pub last_tree_visible: bool,
+    /// The last current-folder path the tick emitted a marker for on behalf of the **Thumbnails
+    /// breadcrumb** (task #129) — the folder path bar tracks the *displayed* photo's folder even
+    /// when the Folders tab is hidden, so it can't ride `drive_fs_tree` (Folders-only). Snapshot-
+    /// diffed like the info line so an async cache-miss folder change re-signals too. `None` = the
+    /// breadcrumb is absent (strip hidden, or a non-fs/empty deck).
+    pub last_breadcrumb_snap: Option<PathBuf>,
     /// Whether the info panel is currently drawn.
     pub overlay_shown: bool,
     /// Which item the drawn panel was built for; when it differs from `displayed_item` the

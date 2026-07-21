@@ -894,6 +894,7 @@ impl App {
             native_thumbs: true,
             native_tree: true,
             last_tree_visible: false,
+            last_breadcrumb_snap: None,
             overlay_shown: false,
             overlay_item: None,
             toast: None,

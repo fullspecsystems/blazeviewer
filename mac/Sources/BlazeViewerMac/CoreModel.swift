@@ -193,6 +193,12 @@ final class CoreModel {
     private(set) var thumbScrollItem = -1
     private(set) var thumbScrollGen: UInt64 = 0
     private(set) var thumbScrollSeq: UInt64 = 0
+    /// The current photo's folder (absolute), driving the Thumbnails breadcrumb (task #129).
+    /// Empty on a non-fs/empty deck (the bar hides). Pulled in `refreshThumbs` from the core's
+    /// `tree_current_path()` — which is unconditional, so it stays fresh even while the Folders
+    /// tab is hidden (the core re-signals a `PanelsChanged` on a folder change via its per-tick
+    /// breadcrumb snapshot). See `FolderBreadcrumbView`.
+    private(set) var breadcrumbPath = ""
     /// Per-cell NSImage cache keyed by playlist index; entries carry the store
     /// generation they were built from (pull-once, plan §8). Bounded: pruned
     /// around the most recent pull; emptied when the tab closes.
@@ -933,6 +939,14 @@ final class CoreModel {
         kick()
     }
 
+    /// Open a folder by absolute path from the Thumbnails breadcrumb (task #129) — the SAME
+    /// folder-open the tree performs (`open_tree_folder` → `fs_tree_open`), so the surfaces
+    /// can't drift. Async: it queues a recursive scan; `kick()` pumps the drain like a nav.
+    func openFolderPath(_ path: String) {
+        core.open_tree_folder(path)
+        kick()
+    }
+
     /// Toggle a Finder-tree row's expansion (the chevron) — browsing only, no photo load.
     func toggleTreeRow(_ i: Int) {
         core.tree_toggle(UInt(i))
@@ -961,6 +975,9 @@ final class CoreModel {
         thumbCount = Int(core.thumb_count())
         thumbCurrent = Int(core.thumb_current())
         thumbDirty = core.thumb_dirty()
+        // The breadcrumb (task #129): the current folder, only on a filesystem deck. Empty
+        // otherwise so `ThumbnailsPanelView` hides the bar (archive/empty decks have no ancestry).
+        breadcrumbPath = core.tree_uses_fs() ? core.tree_current_path().toString() : ""
         let item = Int(core.thumb_scroll_item())
         if item >= 0 {
             thumbScrollItem = item

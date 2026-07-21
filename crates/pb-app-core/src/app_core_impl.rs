@@ -277,6 +277,7 @@ impl AppCore {
             native_thumbs: false,
             native_tree: false,
             last_tree_visible: false,
+            last_breadcrumb_snap: None,
             overlay_shown: false,
             overlay_item: None,
             toast: None,
@@ -1455,6 +1456,25 @@ impl AppCore {
                 self.last_tree_visible = vis;
                 self.emit_panels_changed();
             }
+        }
+        // The Thumbnails breadcrumb (task #129) tracks the *displayed* photo's folder even when
+        // the Folders tab is hidden, so it can't ride `drive_fs_tree` (Folders-only). Snapshot-
+        // diff the current folder — like the info line below — so a folder change re-signals the
+        // host to re-pull, which crucially catches the async cache-miss path: `mark_resolved`
+        // updates `displayed_item` with no marker of its own, and `advance` only signalled the
+        // *target*. Gated on the strip being visible so a parked, panel-closed session pays
+        // nothing; cleared when hidden/non-fs so re-showing re-signals a fresh pull.
+        if self.native_tree && self.thumbs_visible() {
+            let snap = self
+                .tree_is_fs()
+                .then(|| self.current_folder_abs())
+                .flatten();
+            if snap != self.last_breadcrumb_snap {
+                self.last_breadcrumb_snap = snap;
+                self.emit_panels_changed();
+            }
+        } else if self.last_breadcrumb_snap.is_some() {
+            self.last_breadcrumb_snap = None;
         }
         if self.native_info {
             // The natively-drawn info readout re-pulls only on a real content change (a photo
