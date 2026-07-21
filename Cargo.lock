@@ -4131,6 +4131,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "pb-color"
+version = "0.1.0"
+
+[[package]]
 name = "pb-core"
 version = "0.1.0"
 dependencies = [
@@ -4152,6 +4156,7 @@ dependencies = [
  "jxl-oxide",
  "kamadak-exif",
  "moxcms",
+ "pb-color",
  "rawloader",
  "resvg",
  "windows 0.62.2",
@@ -4190,6 +4195,7 @@ dependencies = [
  "half",
  "nv-flip",
  "objc2 0.6.4",
+ "pb-color",
  "pb-core",
  "pollster",
  "wgpu",

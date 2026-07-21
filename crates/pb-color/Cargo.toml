@@ -1,0 +1,12 @@
+[package]
+name = "pb-color"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+description = "Shared YUV→RGB matrix constants + convert-coefficient derivation for Blaze Viewer (pb-decode + pb-render)."
+
+# Intentionally ZERO runtime dependencies — pure math (a matrix-family table and
+# its derivation), so both the decode path (pb-decode) and the render path
+# (pb-render) can depend on it without pulling anything, and the one definition
+# can't drift between them (task #130 Part B).
+[dependencies]

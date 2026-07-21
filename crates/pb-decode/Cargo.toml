@@ -11,6 +11,10 @@ description = "Image-decode abstraction for PhotoBlaze: decode-to-fit + preview-
 [dependencies]
 zune-jpeg = "0.4"
 kamadak-exif = "0.6"
+# The shared YUV matrix luma coefficients (task #130 Part B): the AVIF/dav1d `yuv.rs`
+# decode path sources `(Kr, Kb)` from here so it can't drift from pb-render's copy.
+# Pure math, zero deps; only pulled in when the `yuv` module compiles (dav1d/test).
+pb-color = { path = "../pb-color" }
 # Decode-to-fit: high-quality SIMD downscale to the display size, so large photos
 # aren't minified (grainy/aliased) on the GPU. (zune-jpeg has no scaled decode.)
 fast_image_resize = "5"

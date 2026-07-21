@@ -15,6 +15,9 @@ pollster = "0.3"
 # item-6: `SlotRemap` — the ring-compaction move instructions `Renderer::remap_ring` executes.
 # pb-core is pure (no I/O/GPU), so no dependency cycle.
 pb-core = { path = "../pb-core" }
+# The shared YUV matrix constants + convert-coefficient derivation (task #130 Part B):
+# `YuvMatrix` (re-exported below) lives here so pb-render and pb-decode can't drift.
+pb-color = { path = "../pb-color" }
 
 # Query the display's HDR/wide-gamut state via DXGI (`display::primary_hdr`) to
 # choose the output path: an fp16 scRGB surface (wide gamut + HDR) vs SDR 8-bit.

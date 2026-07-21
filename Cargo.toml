@@ -13,6 +13,7 @@
 resolver = "2"
 members = [
     "crates/pb-core",
+    "crates/pb-color",
     "crates/pb-decode",
     "crates/pb-source",
     "crates/pb-render",
@@ -45,6 +46,7 @@ repository = ""
 [workspace.dependencies]
 # Internal crates.
 pb-core = { path = "crates/pb-core" }
+pb-color = { path = "crates/pb-color" }
 pb-decode = { path = "crates/pb-decode" }
 pb-source = { path = "crates/pb-source" }
 pb-render = { path = "crates/pb-render" }

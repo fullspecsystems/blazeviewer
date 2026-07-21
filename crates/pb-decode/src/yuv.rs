@@ -50,12 +50,14 @@ pub(crate) enum Matrix {
 }
 
 impl Matrix {
-    /// (Kr, Kb) luma coefficients.
+    /// (Kr, Kb) luma coefficients — sourced from `pb-color` (task #130 Part B) so the
+    /// decode and render paths share one table. `Identity` is RGB-coded (no matrix)
+    /// and stays local; the three real families map to the shared `pb_color::YuvMatrix`.
     fn kr_kb(self) -> (f32, f32) {
         match self {
-            Matrix::Bt601 => (0.299, 0.114),
-            Matrix::Bt709 => (0.2126, 0.0722),
-            Matrix::Bt2020 => (0.2627, 0.0593),
+            Matrix::Bt601 => pb_color::YuvMatrix::Bt601.kr_kb(),
+            Matrix::Bt709 => pb_color::YuvMatrix::Bt709.kr_kb(),
+            Matrix::Bt2020 => pb_color::YuvMatrix::Bt2020.kr_kb(),
             Matrix::Identity => unreachable!("identity has no matrix"),
         }
     }

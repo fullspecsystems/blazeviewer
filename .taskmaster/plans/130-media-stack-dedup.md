@@ -232,6 +232,8 @@ pb-core. Options:
   crate in the tree.
 - **Recommendation:** (ii) `pb-color` if the owner is fine adding a crate; else (i). Decide before writing code —
   this is the kind of "where does it live" call `docs/where-code-goes.md` exists for, one level up (cross-crate).
+- **DECIDED (owner, 2026-07-20): (ii) a new `pb-color` micro-crate.** Both `pb-decode` and `pb-render` depend on
+  it; the WGSL shader math stays separate, cross-checked by pb-render's existing independent-from-spec golden test.
 
 **The WGSL stays separate.** The shader can't import a Rust `const`. Leave the matrix in the shader, and keep
 pb-render's existing **independent-from-spec golden test** as the cross-check (it already exists and is the

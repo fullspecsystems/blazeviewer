@@ -6,13 +6,11 @@
 //! use an independent from-spec reference**, not these helpers, so a bug in the
 //! shared math can't hide by matching itself.
 
-/// YUV→RGB matrix coefficients (H.273 families) for planar video frames.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum YuvMatrix {
-    Bt601,
-    Bt709,
-    Bt2020,
-}
+/// YUV→RGB matrix coefficients (H.273 families) for planar video frames — the
+/// `(Kr, Kb)` table and the `coeffs()` derivation now live in `pb-color` so this
+/// crate and `pb-decode` can't drift (task #130 Part B). Re-exported so
+/// `pb_render::YuvMatrix` (and `crate::YuvMatrix`) stay the public spelling.
+pub use pb_color::YuvMatrix;
 
 /// Storage precision of a planar 4:2:0 frame the renderer uploads: 8-bit
 /// (`R8Unorm`/`Rg8Unorm`) or 10/12-bit high-aligned (`R16Unorm`/`Rg16Unorm`).
@@ -134,31 +132,6 @@ pub fn hlg_eotf(e: f32) -> f32 {
 pub struct YuvParams {
     pub matrix: YuvMatrix,
     pub full_range: bool,
-}
-
-impl YuvMatrix {
-    /// The (Kr, Kb) luma coefficients this family is defined by.
-    pub fn kr_kb(self) -> (f32, f32) {
-        match self {
-            YuvMatrix::Bt601 => (0.299, 0.114),
-            YuvMatrix::Bt709 => (0.2126, 0.0722),
-            YuvMatrix::Bt2020 => (0.2627, 0.0593),
-        }
-    }
-
-    /// The four derived convert coefficients `(a, b, c, d)` for
-    /// `r = y + a·v; g = y − b·u − c·v; b = y + d·u` — computed once here so the
-    /// CPU reference and the shader uniform can never drift apart.
-    pub(crate) fn coeffs(self) -> (f32, f32, f32, f32) {
-        let (kr, kb) = self.kr_kb();
-        let kg = 1.0 - kr - kb;
-        (
-            2.0 * (1.0 - kr),
-            2.0 * kb * (1.0 - kb) / kg,
-            2.0 * kr * (1.0 - kr) / kg,
-            2.0 * (1.0 - kb),
-        )
-    }
 }
 
 /// Convert a tightly packed NV12 frame (full-res Y plane, then the interleaved
