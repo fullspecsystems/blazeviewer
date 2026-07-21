@@ -1,103 +1,69 @@
 # Blaze Viewer — Current Status (session handoff)
 
-_Last updated: 2026-07-20 (rev 27). Windows session; a macOS session worked in parallel through
+_Last updated: 2026-07-20 (rev 28). Windows session; a macOS session worked in parallel through
 the day. Everything below is on `main`, pushed (`git rev-list HEAD...origin/main` = 0/0)._
 
 ---
 
 # ▶️ START HERE
 
-The god-object refactor arc is **DONE**: #124, #125, #126, #128 all complete. `app_core_impl.rs`
-went **22,105 → 8,286 lines** and its `mod tests` is now charter-only. See *Completed arc* below.
+**#130 — de-duplicate the media stacks (audit #5) — is DONE and pushed** (both parts):
 
-**The next task is #130 — de-duplicate the media stacks (audit #5).** The plan is written,
-Codex-reviewed, and folded (`.taskmaster/plans/130-media-stack-dedup.md`). It is **ready to
-implement**; the owner was reviewing before giving the final go. **A fresh session should read
-that plan in full, then start Part A step 1.** Everything you need to begin is in §*#130* below.
+- **`c6a5d0e8` Part A** — one `VideoProducerBackend` trait + shared `video_producer_loop::run<B>`;
+  the MF and FFmpeg producers' ~180-line duplicated credit/seek loops collapse into one wrapper
+  each. New deterministic **mock-backend loop test** (10 tests, the primary net) + the ~10 existing
+  MF integration tests pass. Codex-reviewed, no defects.
+- **`daac240d` Part B** — new **`pb-color`** micro-crate owns the YUV `(Kr,Kb)` table + `coeffs()`;
+  pb-render re-exports it, pb-decode delegates. Byte-identical (all YUV tests pass).
+- ⚠ **One cross-machine gap (see `## Handoff` in the #130 plan):** the FFmpeg backend's *runtime*
+  behaviour is **unverified** — Windows has no FFmpeg video decoders, so its integration tests
+  can't run here. **A macOS/Linux session must run the FFmpeg producer tests + real play/seek, and
+  pb-render's golden-image tests** (both expected green; the changes are byte-identical by
+  construction, but that is not a run).
 
-**Tomorrow, probably: the NS0 shell de-dup** (audit #1b/#2) — the cross-machine one. **It has no
-plan yet**; it must be written first. Pointers in §*NS0* below.
+**The next task is the NS0 shell de-dup (audit #1b/#2) — THE LIVE TASK.** Its plan is being written
+**this session** at `.taskmaster/plans/131-ns0-shell-dedup.md` (Codex review pending). It is the
+**cross-machine** refactor (touches `pb-mac-ffi`, an empty staticlib on Windows), so it is genuinely
+riskier than #130 and needs the Mac available to close the loop. Read the plan in full, then start.
+Pointers in §*NS0* below.
 
-New this arc, read before writing any code: **`docs/where-code-goes.md`** — an ordered decision
-procedure for where a function belongs. "Put it on `AppCore`" is the *last* answer. Linked from
-`CLAUDE.md` → *Working norms*.
-
----
-
-# 🎯 #130 — media-stack de-dup (audit #5) — THE LIVE TASK, plan ready
-
-**Plan: `.taskmaster/plans/130-media-stack-dedup.md` (rev 2, Codex-reviewed). Read it in full
-before starting — this summary is the map, not the territory.**
-
-### What it is, honestly scoped (from a full read of the code, not the audit)
-
-The audit lumps two things under finding #5; they are **very** different in size:
-
-- **Part A — a `VideoProducerBackend` trait (the real prize).** The two ~1,300-line producers
-  (`crates/pb-decode/src/mf_video_producer.rs` = Media Foundation; `crates/pb-decode/src/ffmpeg/
-  video_producer.rs` = FFmpeg) each carry a ~180-line credit/seek loop that is **near-verbatim
-  duplicated**. An agent mapped it precisely (in the plan §4): the select (S1) and *all* the
-  credit / generation / seek-epoch machinery are character-for-character identical; the only
-  divergence is a **~9-operation reader seam** that becomes the trait. **FFmpeg's existing
-  `Reader` struct is already ~90% of that trait.** Win: ~350 duplicated lines collapse into one
-  `fn run<B: VideoProducerBackend>`.
-- **Part B — a shared YUV color primitive (small, ~30 lines).** The audit calls YUV
-  "triplicated, correctness-critical" — but `pb-decode/src/yuv.rs` and `pb-render/src/yuv.rs` are
-  **different converters** (AVIF-decode→RGBA8 vs video-render NV12/P010 with HDR) that overlap
-  **only** in ~6 luma constants (`Bt601 (0.299,0.114)`, `Bt709 (0.2126,0.0722)`, `Bt2020
-  (0.2627,0.0593)`) + the `coeffs()` derivation. And pb-render *already* guards drift with an
-  independent-from-spec golden test. So Part B is a cheap constants-consolidation, **not** a
-  correctness rescue. One open design call: where the shared constants live — a new `pb-color`
-  micro-crate (the plan's lean) vs a `color` module in pure-but-nav-themed `pb-core`. Decide
-  before writing code.
-- **Part C — posters (3 extractors) + audio decoders (2) — DEFERRED.** Noted in the plan §7,
-  not committed; needs its own mapping after A+B land.
-
-### ⚠ The two things that make this different from #125/#128
-
-1. **This is NOT a pure move — no byte-hash safety.** It's a behavioural refactor (extract a
-   trait, fold two loops into one). `verify-pure-move.py` does **not** apply. The **primary
-   safety net is a NEW mock-backend unit test** the trait makes possible: the loop becomes
-   drivable by a fake backend with no MF/FFmpeg and no video file, so the seek/credit/generation/
-   park logic is tested deterministically and cross-platform. Plan §3 — write it **before**
-   porting the second backend, assert backend **call-order** (not just events), use timing hooks
-   for the generation race, and script reordered/keyframe timestamps (Codex's #1 hole is a
-   one-frame-wrong seek landing that a clean CFR mock misses).
-2. Secondary net: the **~10 existing MF integration tests** (`mf_video_producer.rs`, they
-   `spawn()` the real producer against a fixture video) must pass **unchanged**. Tertiary:
-   manual play/seek on `\\beenas\Media\Movies`. ⚠ The real-video probe tests are **known-flaky**
-   (see *Known-red* below) — never call the refactor "verified" off a green `cargo test` alone;
-   layer 1 (the mock test) is what makes a green run mean something.
-
-### Sequencing (Part A — plan §4a)
-
-1. Lift the FFmpeg loop **verbatim** into `fn run<B>` (its `reader.*` calls become `backend.*`
-   trait calls); FFmpeg's `Reader` gets `impl VideoProducerBackend` (near-trivial bodies);
-   `run_ff_video_producer` becomes a 3-line wrapper. Verify: FFmpeg path + app unchanged.
-2. Write the mock-backend loop test against the now-existing trait (pins the contract).
-3. Port MF to `impl VideoProducerBackend` — its free fns + loop-locals become a backend struct;
-   absorb the `Gap` retry and `&mut kind` stride threading *inside* it. Verify: the ~10 MF spawn
-   tests pass unchanged + seek-heavy app run.
-4. Delete the two dead loop copies.
-
-One backend per commit. This whole task is **Windows-verifiable** (both backends compile here) —
-no cross-machine blind spot, unlike NS0.
-
-### Codex-review design decisions already folded in (plan §7a)
-
-- Teardown → `impl Drop`, **not** `close(self)` (MF's mandatory off-thread retire can't be skippable).
-- `open()` runs **on the producer thread** (`!Send` backends never cross `thread::spawn`).
-- The FFmpeg planar-prime (must-decode-first-frame-to-pick-format) stays **inside the backend** as
-  an `InitialState { NeedRead, Ready{ts,pixels}, Eos }` enum, **not** exposed from `open()` — this
-  keeps the shared loop unaware of pixel-format probing (the biggest design win of the review).
-- Trait shape, the exact differing-op table, and the ranked "biggest holes" are all in the plan.
+Read before writing any code: **`docs/where-code-goes.md`** — an ordered decision procedure for
+where a function belongs. "Put it on `AppCore`" is the *last* answer. This is the doc NS0 leans on.
 
 ---
 
-# 🔜 NS0 shell de-dup (audit #1b/#2) — TOMORROW, needs a plan first
+# ✅ #130 — media-stack de-dup (audit #5) — DONE, pushed (`c6a5d0e8` + `daac240d`)
 
-**There is NO plan file yet — one must be written before implementing.** The refactor is
-described in two places (read both):
+Plan `.taskmaster/plans/130-media-stack-dedup.md` (has the full design + Codex round-1 fold-ins).
+Both parts landed this session, verified on Windows (clippy + fmt clean, consumers compile):
+
+- **Part A** (`c6a5d0e8`) — `crates/pb-decode/src/video_producer_loop.rs`: the `VideoProducerBackend`
+  trait + shared `run<B>` credit/seek loop. FFmpeg `Reader` and a new `MfBackend` both `impl` it;
+  each `run_*` is a thin open-then-delegate wrapper. **10 deterministic mock-backend tests**
+  (call-order + the ranked seek/supersede/park/prime holes) + the **10 real-MF integration tests**
+  pass. Two deliberate, plan-sanctioned nuances: FFmpeg zero-frame-planar EOS defers to the first
+  credit (`InitialState`, §5.1); MF `Gap` retried inside the backend (§5.2). **Codex round-2
+  reviewed → no defects** (confirmed behaviour-equivalence, `invalidate_primed`/`is_parked`
+  correctness, MF no-double-retire/leak).
+- **Part B** (`daac240d`) — new **`crates/pb-color`** micro-crate (owner-chosen home): `YuvMatrix` +
+  `kr_kb()` + `coeffs()`. pb-render re-exports it (coeffs moved verbatim); pb-decode's `Matrix::kr_kb`
+  delegates. **Byte-identical** — pb-decode's 12 AVIF YUV tests + pb-render's coeffs round-trip pass.
+  WGSL shader keeps its own copy, still golden-test-guarded (no codegen, per plan).
+- **Part C** (posters ×3 + audio decoders ×2) — still **DEFERRED** (plan §7); its own future task.
+
+⚠ **`## Handoff` (the one cross-machine debt):** the **FFmpeg backend runtime is unverified** —
+Windows has no FFmpeg video decoders (the pre-existing "Decoder not found"), so
+`ffmpeg::video_producer::tests` can't run here (they compile clean). **A macOS/Linux session must**:
+(1) run those FFmpeg producer integration tests + a real play/seek/EOS/replay pass on a corpus clip;
+(2) run **pb-render's golden-image tests** (the YUV change is byte-identical by construction, but
+that's an argument, not a run). Both expected green.
+
+---
+
+# 🔜 NS0 shell de-dup (audit #1b/#2) — THE LIVE TASK; plan `#131` being written this session
+
+**Plan: `.taskmaster/plans/131-ns0-shell-dedup.md` — authored this session (Codex review in
+progress). Read it in full before implementing.** Grounding sources (read both):
 
 - **`technical-debt-audit.md`** — finding **#1(b)** ("finish the NS0 inversion so `AppCore` owns
   orchestration and the mirror flags have a single owner") and finding **#2** ("the two parallel
