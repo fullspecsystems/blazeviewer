@@ -136,13 +136,24 @@ drain triggers **exactly one** coalesced repair, no `content_gen`/`epoch` bump. 
 recovery** — after a refusal + a fresh correctly-stamped decode lands, the correct item presents and
 `target_caught_up()` becomes true (proves no permanent hold).
 
-### C. Mode-B hole — provenance-gate the scan batch (correctness-critical, NOT belt-and-suspenders)
+### C. Mode-B hole — provenance-gate the scan batch  ✅ **ALREADY CLOSED (verified 2026-07-21)**
 
-⚠ **Codex r1 (§9.3) corrected my "A makes this moot" claim — it does not.** A refuses a *stamp
-mismatch*, but a stale `BOOTSTRAP` **rebuilds both rings, bumps `content_gen`, and uploads the folder
-deck** — so every stamp is **internally consistent** while the archive deck was wrongly superseded. The
-stamp check sees nothing wrong; the user is silently thrown out of the archive. So C is a real
-correctness fix that A does not cover.
+⚠ **Re-verified against the live tree: C is DONE — the audit's "mode B known-open hole" is STALE (it
+predates #126).** The provenance gate C describes already exists: `BackgroundOps` (`background.rs`) is
+the single shared generation space (`is_current` = `active.id == id`, monotonic latest-wins); both
+`begin_archive_open` (`archive_open.rs:114`) and `begin_dir_scan` (`dir_scan.rs:191`) call
+`supersede`; and `poll_dir_scan` (`dir_scan.rs`) **drops any batch failing `bg.is_current(id)` before
+it reaches `apply_scan_batch`** — whose only production caller is that gated path (the other callers
+are `#[cfg(test)]`). So a stale scan's batch (mode B, or any cross-type variant) can never touch the
+deck: a `BOOTSTRAP` over an archive can't happen because the superseded scan's batch is dropped
+upstream. **No code to write; this is verification-only.**
+
+Codex r1 (§9.3) reasoned about `apply_scan_batch` *in isolation* (it wasn't given `poll_dir_scan`);
+with the upstream gate inlined, its "stale BOOTSTRAP rebuilds both rings" scenario cannot occur. The
+one remaining value would be an **`OpId`-stamped `Resolved`** so `apply_scan_batch` is self-defending
+even if a future caller bypasses the gate — a belt-and-suspenders follow-up, not this task.
+
+_Original (now-moot) design, kept for the record:_
 
 - **The naive `archive_scope.is_some()` guard is UNSAFE** (Codex r1): a *legitimate* user-initiated
   folder scan started from within an archive still has `archive_scope` set until its own first batch
@@ -168,13 +179,21 @@ it refuses the wrong-occupant bind but, without B's recovery contract, leaves th
 held frame. Land them as one reviewed unit (a two-commit sequence is fine, but **do not push A without
 B**; if split, keep A behind the recovery path so no intermediate state is shippable).
 
-1. **A + B together** — the identity stamp + verified `present_slot` **and** the atomic-present +
-   refusal-recovery contract. Test-first: the refuse test *and* the eventual-recovery test are the
-   gate.
-2. **C** (provenance-gate the scan batch) — closes the mode-B / cross-deck hole A cannot see. Can land
-   as its own commit after A+B, but it is **not** optional — it is a distinct correctness gap.
+Implementation order (revised 2026-07-21 after verifying C is already closed):
 
-One commit per landing unit so a bisect stays clean; A+B is one unit.
+1. **B first** — `present_item` atomic (commit **only** on a verified bind) + returns `bool` +
+   refusal-recovery. This fixes a **live** bug on its own: today `present_item` pushes `SetTitle` /
+   `set_displayed` / `mark_resolved` **even when `present_slot` returns `false`** — the "title advances
+   but the view is frozen" corruption, independent of any race. Safe alone (post-#109.4 a `present_slot`
+   miss is already rare), and it installs the recovery contract A needs. **Commit.**
+2. **A** — identity stamp + verified `present_slot` (`present_slot` now also refuses a *wrong-occupant*,
+   not just a not-yet-uploaded slot). Safe **because B's recovery already handles a refusal.** The
+   refuse + recovery tests are the gate. **Commit.**
+3. **C** — ✅ already closed (§2C); verification-only, no commit.
+
+Rationale for B-before-A (vs the rev-1 "A+B together"): doing B first means A never introduces an
+*unhandled* refusal — the exact hazard Codex r1 (§9.2) warned about — and each step is independently
+testable and shippable.
 
 ## 4. Test-first + hot-path discipline (this is the 120 Hz path)
 

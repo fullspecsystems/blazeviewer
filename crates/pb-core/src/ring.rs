@@ -709,6 +709,29 @@ impl ResidentRing {
             _ => false,
         }
     }
+
+    /// Evict `slot` back to `Empty` regardless of its state (`Pending` or `Resident`), freeing
+    /// its bytes and key mapping — the **#109 B present-refusal recovery**. When the renderer
+    /// refuses a bind (a core↔renderer identity divergence — the slot doesn't hold what the core
+    /// believes), the core drops its stale residency belief here so `request_prefetch` schedules
+    /// a fresh, correctly-stamped decode; the target then presents on a later tick (no permanent
+    /// hold). Distinct from [`release_pending`] (which only rolls back the caller's OWN pending
+    /// reservation) and [`clear`] (whole-ring content invalidation): this is a targeted,
+    /// generation-agnostic drop of one diverged slot. Clears the `displayed` pin if it named this
+    /// slot. Returns the evicted occupant, or `None` if the slot was already `Empty`.
+    pub fn evict_slot(&mut self, slot: usize) -> Option<(usize, RepKind)> {
+        if slot >= self.slots.len() {
+            return None;
+        }
+        let occ = self.slots[slot].occupant();
+        if occ.is_some() {
+            self.free_slot(slot);
+            if self.displayed == Some(slot) {
+                self.displayed = None;
+            }
+        }
+        occ
+    }
 }
 
 #[cfg(test)]
@@ -934,6 +957,40 @@ mod tests {
         assert!(r.is_tracked(7));
         assert!(r.mark_resident(res.item, res.slot, res.content_gen, res.representation));
         assert_eq!(r.slot_for(7), Some(res.slot));
+    }
+
+    /// #109 B — the present-refusal recovery: `evict_slot` drops a diverged slot's residency
+    /// (its bytes, key mapping, and the `displayed` pin) so `request_prefetch` can re-decode a
+    /// correctly-stamped texture. Idempotent on an already-empty / out-of-bounds slot.
+    #[test]
+    fn evict_slot_frees_a_resident_slot_for_recovery() {
+        let mut r = ResidentRing::new(4);
+        let res = r.reserve(7, CG, fit(1), &[7]).expect("a slot");
+        assert!(r.mark_resident(res.item, res.slot, res.content_gen, res.representation));
+        r.set_displayed(res.slot);
+        assert_eq!(r.slot_for(7), Some(res.slot));
+
+        let evicted = r.evict_slot(res.slot);
+
+        assert_eq!(
+            evicted,
+            Some((7, RepKind::Fit)),
+            "reports the evicted occupant"
+        );
+        assert_eq!(
+            r.slot_for(7),
+            None,
+            "no longer resident — prefetch can re-decode it"
+        );
+        assert!(!r.is_tracked_rep(7, RepKind::Fit));
+        assert_eq!(occupied_count(&r), 0, "the slot returned to Empty");
+        assert_eq!(
+            r.displayed, None,
+            "the displayed pin naming this slot is cleared"
+        );
+        // Idempotent: an already-empty slot and an out-of-bounds slot are harmless no-ops.
+        assert_eq!(r.evict_slot(res.slot), None);
+        assert_eq!(r.evict_slot(999), None);
     }
 
     #[test]

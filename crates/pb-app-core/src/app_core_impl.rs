@@ -3509,24 +3509,26 @@ impl AppCore {
 
     /// Show ring `slot` (holding `item`): the keypress fast path — a rebind, no
     /// decode or upload. Updates the pin, title, and info panel.
-    pub fn present_item(&mut self, item: usize, slot: usize) {
+    pub fn present_item(&mut self, item: usize, slot: usize) -> bool {
         // `present` = the whole event-loop-thread cost of one advance (rebind + title +
         // GPU-submit), the keypress fast path. It's the metric to watch for a hold-to-blaze
         // regression: the NS0 inversion (renderer behind `Box<dyn Renderer>`, window ops as
         // effects) must leave this flat. `--metrics` only; a no-op branch otherwise.
         let t0 = Instant::now();
         let view = self.view_for(item);
-        let title = title_for(self.source.name(item), item, self.source.len());
-        // Ask the renderer to rebind the slot. It returns `false` when that slot isn't uploaded
-        // in its ring (it keeps the previous frame): a core↔renderer ring desync. That is NOT the
-        // "archive card over a photo" bug — that one is a cross-deck open race where `present_slot`
-        // returns *true* with the wrong occupant (see `apply_scan_batch`). So this is a loud
-        // diagnostic only, never a control-flow branch: the earlier invalidate-on-miss repair
-        // (cff70ca0 / c383107a) was unsafe — it bumped the epoch mid `drain_results` loop and
-        // purged the retained full-res tier (regressing instant fullscreen to a preview flash) —
-        // and is deliberately reverted here. Headless (`renderer = None`, unit tests) counts as
-        // presented so the pure-core assertions hold; the follow-up to propagate this result
-        // properly (abort the drain, resync once after the loop) is tracked, not done inline.
+        // Ask the renderer to rebind the slot. `present_slot` returns `false` when the slot
+        // doesn't hold what the core believes — either it isn't uploaded yet (a core↔renderer
+        // ring desync), or (once #109 A lands) its identity stamp mismatches (the wrong
+        // occupant, the "archive card over a photo" corruption). **#109 B — atomic present:**
+        // a refused bind commits **NO** core-visible state below (no title, no `displayed_item`,
+        // no `mark_resolved`) — the renderer keeps the correct held frame — so the title can
+        // never "advance over a frozen/wrong view", which is what this method used to do
+        // unconditionally. On a refusal we RECOVER instead of self-healing mid-loop (the reverted
+        // cff70ca0/c383107a epoch-bump repair): drop the diverged slot's residency belief so
+        // `request_prefetch` re-decodes a correctly-stamped texture, keep the target unresolved
+        // (so `target_pending` holds the pump awake), and retry on a later tick until a verified
+        // bind or a terminal decode failure. Headless (`renderer = None`, unit tests) counts as
+        // presented so the pure-core assertions hold.
         let presented = match self.renderer.as_mut() {
             Some(r) => {
                 r.set_view(view);
@@ -3534,16 +3536,25 @@ impl AppCore {
             }
             None => true,
         };
-        if !presented && door_diag() {
-            eprintln!(
-                "[door-diag] present_slot({slot}) missed for item {item} (archive_kind={:?})",
-                self.item_archive_kind(item),
-            );
+        if !presented {
+            if door_diag() {
+                eprintln!(
+                    "[door-diag] present_slot({slot}) REFUSED for item {item} (archive_kind={:?}) — recovering",
+                    self.item_archive_kind(item),
+                );
+            }
+            // Recovery (no epoch/content_gen bump): evict the diverged slot so its stale
+            // residency stops satisfying the prefetch planner, then re-request. The target is
+            // deliberately left unresolved.
+            self.ring.evict_slot(slot);
+            self.request_prefetch();
+            return false;
         }
+        let title = title_for(self.source.name(item), item, self.source.len());
         // #123 fix 2: the stash is current-photo-scoped — a DIFFERENT photo successfully
         // on screen retires it. Present-success, not mere target churn (a failed present
         // must not orphan pixels we may still return to).
-        if presented && self.fit_stash.iter().flatten().any(|s| s.item != item) {
+        if self.fit_stash.iter().flatten().any(|s| s.item != item) {
             self.clear_fit_stash();
         }
         self.effects.push(contract::CoreEffect::SetTitle(title));
@@ -3589,6 +3600,7 @@ impl AppCore {
         self.last_present = Some(self.now);
         self.draw();
         self.metrics.record("present", t0.elapsed());
+        true
     }
 
     /// A target that failed to decode (corrupt/unreadable): count it as "shown"
@@ -3712,8 +3724,10 @@ impl AppCore {
             return true;
         }
         if let Some(slot) = self.display_slot(item) {
-            self.present_item(item, slot);
-            true
+            // #109 B: propagate the present result — a refused bind (wrong occupant / not
+            // uploaded) means the target is NOT on screen, so readiness stays pending and the
+            // pump retries after the recovery re-decodes. Never report a refusal as "shown".
+            self.present_item(item, slot)
         } else if self.try_gpu_derive_fit() {
             // item-6 6b: no Fit resident, but the target's Original survived the last geometry
             // change (retain-and-remap) — the GPU derives + presents its exact-size Fit in a
@@ -6573,6 +6587,118 @@ mod tests {
         assert!(
             !core.ring.is_tracked_rep(0, pb_core::RepKind::Fit),
             "the reservation must roll back — a stuck Pending would block this item's next decode"
+        );
+    }
+
+    // ── #109 B: atomic present — a refused bind commits no state, and recovers ──
+
+    /// A `Renderer` double whose `present_slot` REFUSES every bind — the answer a real renderer
+    /// gives once #109 A's identity stamp catches a wrong occupant (and today, a not-yet-uploaded
+    /// slot). `upload_slot` succeeds so a slot can be marked resident before the refusal.
+    struct RefusingPresent;
+
+    impl pb_render::Renderer for RefusingPresent {
+        fn resize(&mut self, _: u32, _: u32) {}
+        fn set_image(
+            &mut self,
+            _: &[u8],
+            _: u32,
+            _: u32,
+            _: pb_render::ColorTransform,
+            _: bool,
+            _: f32,
+        ) {
+        }
+        fn clear_image(&mut self) {}
+        fn set_view(&mut self, _: pb_render::ViewTransform) {}
+        fn set_overlay(&mut self, _: Option<(&[u8], u32, u32)>, _: u32, _: u32) {}
+        fn set_info_line(&mut self, _: Option<(&[u8], u32, u32)>, _: u32, _: pb_render::HAlign) {}
+        fn reserve_ring(&mut self, _: usize, _: u32, _: u32) {}
+        #[allow(clippy::too_many_arguments)]
+        fn upload_slot(
+            &mut self,
+            _: usize,
+            _: &[u8],
+            _: u32,
+            _: u32,
+            _: pb_render::ColorTransform,
+            _: bool,
+            _: f32,
+            _: bool,
+        ) -> bool {
+            true
+        }
+        fn present_slot(&mut self, _: usize) -> bool {
+            false
+        }
+        fn surface_size(&self) -> (u32, u32) {
+            (0, 0)
+        }
+        fn set_letterbox(&mut self, _: [u8; 3]) {}
+        fn set_toast(&mut self, _: Option<(&[u8], u32, u32)>, _: u32) {}
+        fn set_pie(&mut self, _: Option<(&[u8], u32, u32)>, _: u32) {}
+        fn set_tree(&mut self, _: Option<(&[u8], u32, u32)>, _: u32) {}
+        fn set_subtitle_overlay(&mut self, _: Option<(&[u8], u32, u32)>, _: f32, _: f32) {}
+        fn device(&self) -> &pb_render::wgpu::Device {
+            unreachable!("headless test double")
+        }
+        fn queue(&self) -> &pb_render::wgpu::Queue {
+            unreachable!("headless test double")
+        }
+        fn set_egui_overlay(&mut self, _: Option<&pb_render::wgpu::Texture>) {}
+        fn image_size(&self) -> (u32, u32) {
+            (0, 0)
+        }
+        fn set_edr_headroom(&mut self, _: f32) {}
+        fn hdr_surface_wants_edr(&self) -> Option<bool> {
+            None
+        }
+        fn poll(&self) {}
+        fn render(&mut self) -> Result<bool, pb_render::RenderError> {
+            Ok(true)
+        }
+    }
+
+    /// #109 B — a refused present commits **no** core-visible state: no title, no
+    /// `displayed_item`, no `mark_resolved` (`presented_epoch`). Before this, `present_item`
+    /// advanced all three unconditionally — the "title advances but the view is frozen"
+    /// corruption. It must also report not-shown so readiness stays pending and the pump retries
+    /// after the recovery re-decodes.
+    #[test]
+    fn a_refused_present_commits_no_state_and_reports_not_shown() {
+        let mut core = test_core();
+        core.source = photos_named(&["a.jpg"]);
+        core.playlist = Playlist::new(1, 0).with_cursor(0);
+        core.ring = ResidentRing::new(4);
+        core.fit = Some(FitBox {
+            max_width: 100,
+            max_height: 100,
+        });
+        core.view.mode = ScaleMode::Fit;
+        core.targets = vec![0];
+        core.target_item = Some(0);
+        core.renderer = Some(Box::new(RefusingPresent));
+        core.displayed_item = None;
+        core.presented_epoch = None;
+        core.effects.clear();
+
+        let shown = core.present_item(0, 0);
+
+        assert!(!shown, "a refused present reports not-shown");
+        assert_eq!(
+            core.displayed_item, None,
+            "no displayed_item commit on a refusal"
+        );
+        assert_eq!(
+            core.presented_epoch, None,
+            "no mark_resolved (presented_epoch) on a refusal"
+        );
+        assert!(
+            !core
+                .effects
+                .iter()
+                .any(|e| matches!(e, contract::CoreEffect::SetTitle(_))),
+            "no title advance over a frozen view (#109 B atomic present)"
         );
     }
 
