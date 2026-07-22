@@ -1,9 +1,39 @@
 # Blaze Viewer — Current Status (session handoff)
 
-_Last updated: 2026-07-21 (rev 31). **#131 is now DONE on both platforms** — the macOS session
-wired `ShowDeleteConfirm`, removed the lever, and cleaned up every dead arm (Codex round-2 reviewed).
-The only remaining items are two owner GUI smoke-runs. Everything below is on `main`, pushed
+_Last updated: 2026-07-21 (rev 32). **#131 DONE both platforms** (macOS `ShowDeleteConfirm` wired,
+lever removed). **#109 ring-bridge close-out IMPLEMENTED** (B + A, Codex-reviewed plan) — the durable
+fail-at-divergence fix for the door-card race (#132). Everything on `main`, pushed
 (`git rev-list HEAD...origin/main` = 0/0)._
+
+---
+
+# ▶️ #109 — ring-bridge close-out: IMPLEMENTED (status `review`, 2026-07-21)
+
+Finished the audit's finding #3 (core↔renderer ring fragility) + the durable fix for **#132** (the
+door-card wrong-occupant race). Plan + full ledger: `.taskmaster/plans/109-ring-bridge-closeout.md`
+→ `## Handoff`. Three pieces:
+
+- **C — verified already closed** (no code): #126's shared `BackgroundOps` generation + `poll_dir_scan`'s
+  `is_current` gate already drop any stale/cross-type scan batch before `apply_scan_batch`; the audit's
+  "mode B" hole is stale.
+- **B (`3bc3d027`)** — `present_item` **atomic** (commits state only on a verified bind), returns `bool`,
+  and **recovers** on a refusal (`ResidentRing::evict_slot` + `request_prefetch`, no epoch/gen bump).
+  This fixes a **live** bug: `present_item` used to advance the title / `displayed_item` / `mark_resolved`
+  even when the renderer refused — the "title advances but the view is frozen" corruption.
+- **A (`d51bb3b5`)** — `pb_core::SlotIdentity` stamps every renderer `RingSlot` (from the decode
+  outcome's key, never a live `content_gen`); `present_slot(slot, expected)` **refuses a wrong occupant**
+  → fail-at-divergence instead of silent stale pixels.
+
+**Verified (macOS):** pb-core + pb-app-core suites green (bar the 2 documented-flaky video-probe timing
+tests — confirmed flaky-not-regression); clippy + fmt clean; `pb-mac-ffi` builds clean. **The ONE open
+gate:** the winit `pb-app` build/run on **Windows** — safe by construction (pb-app has **zero**
+references to the changed `Renderer` methods; no `AppCore` field added), but a real build is the gate
+(the Mac can't compile `pb-app`). See the plan `## Handoff`.
+
+**#132** is now `review` — A+B are its durable fix; re-check against a big-still-scanning-folder repro
+if one can be captured (the invariant/recovery tests are the proof either way).
+
+---
 
 ---
 
