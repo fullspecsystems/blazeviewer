@@ -7,6 +7,25 @@ with any pre-release suffix carried only by the tag.
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-07-22
+
+### Highlights
+
+**Zooming in now shows real detail.** Zoom used to enlarge the screen-sized picture, so the more
+you zoomed the blurrier it got. It now uses the full-resolution image the app already keeps ready —
+every pixel the file has, up to 100%, and just as instant as the 1:1 key.
+
+**Damaged photos that other viewers open now open here too.** Some JPEGs — often from scanners or
+government software — are technically malformed but display fine in Preview; Blaze used to refuse
+them outright and spin forever. It now salvages them, and the details panel notes what it recovered.
+A truly unopenable file gets a clear "can't display this" card instead of an endless spinner.
+
+**Smoother archives, and a folder path in the Thumbnails panel.** Opening an archive no longer
+flashes a spinner for a split second, the password box behaves when you retype a wrong password, and
+a password you've already entered is kept for the next archive. The Thumbnails panel now shows the
+current photo's folder path across the top, so you always know where you are. (Windows and Linux
+also get the same quiet scanning pill macOS already had.)
+
 ### Added
 
 - The Thumbnails panel now shows the current photo's folder as a path bar across the top — each
@@ -1380,7 +1399,8 @@ Initial beta — a fast, keyboard-driven Windows photo viewer.
 - Signed WiX/MSI installer with file associations and an "Open with PhotoBlaze"
   folder verb.
 
-[Unreleased]: https://github.com/fullspecsystems/blazeviewer/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/fullspecsystems/blazeviewer/compare/v0.3.1...HEAD
+[0.3.1]: https://github.com/fullspecsystems/blazeviewer/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/fullspecsystems/blazeviewer/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/fullspecsystems/blazeviewer/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/fullspecsystems/blazeviewer/compare/v0.1.1...v0.2.0
