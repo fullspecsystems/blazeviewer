@@ -644,8 +644,9 @@ impl AppCore {
             Action::Undo => self.undo(),
             // Delete-to-trash (`Del`) is a pure core arm now (recoverable, no prompt; the
             // cross-platform trash I/O moved into pb-app-core). `DeletePermanent` (`Shift+Del`)
-            // stays a flow action — it opens the shell confirm dialog first, then the shell's
-            // dialog-outcome handler calls the core `do_delete(.., true)`.
+            // is inverted too (#131 A.3): `request_delete_confirm` arms the pending item and
+            // emits `ShowDeleteConfirm { name }`; the shell only renders the confirm, whose Yes
+            // routes back through `ConfirmAnswered(true)` → the core `do_delete(.., true)`.
             Action::Delete => self.delete_to_trash(),
             // Toggle borderless fullscreen ⇄ windowed (NS0 5.6): flip the live mode + the
             // persistent preference; the shell applies the window ops (and snapshots/persists the

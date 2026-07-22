@@ -1538,7 +1538,12 @@ impl AppCoreHandle {
     /// path: cancel, resume prefetch, "Scan stopped" toast). Never blanks the current view.
     fn scan_pill_cancel(&mut self) {
         self.core.now = Instant::now();
-        self.cancel_scan_command();
+        // Same core path as File ▸ Stop Scanning (#131 A.2): the core runs cancel-keeps-partial
+        // + the "Scan stopped" toast, and emits no dialog effect. The old shell path also closed
+        // any Scanning sheet, but this host never reveals one — the ambient pill replaced the
+        // modal Scanning dialog entirely (#126), so `poll_dir_scan` only ever *closes* it and
+        // `shown_dialog == Scanning` never occurs in production. Matches the winit pill Cancel.
+        self.core.dispatch_action(Action::CancelScan);
     }
 
     /// The Settings window closed. Edits were already applied live (`settings_edited` /
@@ -2193,33 +2198,6 @@ impl AppCoreHandle {
         ));
     }
 
-    /// `ShellFlowAction(DeletePermanent)` intercepted — the winit shell's
-    /// `confirm_delete_permanent` mirrored: settle any pending delete-advance, refuse an
-    /// archive entry with a toast, else arm `pending_confirm_delete` and open the native
-    /// confirm dialog with the file name in the question.
-    fn confirm_delete_permanent(&mut self) {
-        self.core.flush_pending_delete();
-        let Some(item) = self.core.displayed_item else {
-            return;
-        };
-        if self.core.source.path(item).is_none() {
-            self.core.show_toast("Can't delete this"); // archive entry — no file
-            return;
-        }
-        let name = engine::file_name_of(self.core.source.name(item));
-        self.core.pending_confirm_delete = Some(item);
-        // Finder's exact delete-immediately wording (owner request): headline on the
-        // first line, the informative sentence after the newline — the host splits
-        // them into NSAlert's messageText/informativeText.
-        self.dialog_message = format!(
-            "Are you sure you want to delete \u{201c}{name}\u{201d}?\n\
-             This item will be deleted immediately. You can\u{2019}t undo this action."
-        );
-        self.core.effects.push(contract::CoreEffect::ShowDialog(
-            contract::DialogKind::Confirm,
-        ));
-    }
-
     /// Prompt for an archive's password (or re-prompt after a wrong one) — the winit
     /// shell's `prompt_archive_password` mirrored. Remembers `path` so a submitted entry
     /// re-opens it; a retry sets the inline error (the host re-shows the same sheet in
@@ -2535,14 +2513,25 @@ impl AppCoreHandle {
                 C::BeginArchiveOpen { path, password } => self.begin_archive_open(path, password),
                 C::CancelScan => self.cancel_dir_scan(),
                 C::CancelArchiveLoad => self.cancel_archive_load(),
-                // Flow commands whose execution is shell-*Rust* (the scan worker lives in
-                // this crate) — run here; only the genuinely Swift-native flows surface.
-                C::ShellFlowAction(Action::Recursive) => self.toggle_recursive(),
-                C::ShellFlowAction(Action::ShowArchives) => self.toggle_show_archives(),
-                C::ShellFlowAction(Action::CancelScan) => self.cancel_scan_command(),
-                // NS2: the permanent-delete confirm opens Rust-side (arms the pending item
-                // + composes the question), surfacing as ShowDialog("confirm").
-                C::ShellFlowAction(Action::DeletePermanent) => self.confirm_delete_permanent(),
+                // #131 A.3: the permanent-delete confirm. The core has already flushed any
+                // pending delete-advance, refused an archive entry, and armed
+                // `pending_confirm_delete` before emitting this — so this arm only *renders*
+                // the native sheet (composes the question, tracks shown state) and surfaces
+                // ShowDialog("confirm"). Yes routes back through `ConfirmAnswered(true)`.
+                // (A.1/A.2 — Recursive/ShowArchives/CancelScan — now run entirely inside the
+                // core dispatch; they no longer round-trip through a ShellFlowAction here.)
+                C::ShowDeleteConfirm { name } => {
+                    // Finder's exact delete-immediately wording (owner request): headline on
+                    // the first line, the informative sentence after the newline — the host
+                    // splits them into NSAlert's messageText/informativeText.
+                    self.dialog_message = format!(
+                        "Are you sure you want to delete \u{201c}{name}\u{201d}?\n\
+                         This item will be deleted immediately. You can\u{2019}t undo this action."
+                    );
+                    self.shown_dialog = Some(contract::DialogKind::Confirm);
+                    self.core.dialog_open = true;
+                    return Some(map_effect(C::ShowDialog(contract::DialogKind::Confirm)));
+                }
                 // Track what's shown (the winit shell's `self.dialog.kind()` mirror) and
                 // keep the core's `dialog_open` in sync — it pauses the slideshow while a
                 // dialog is up. About is the standalone NSApp panel, not tracked.
@@ -2641,89 +2630,6 @@ impl AppCoreHandle {
             }
         }
         None
-    }
-
-    /// Toggle recursive scanning of the current folder — the winit shell's
-    /// `toggle_recursive` mirrored: re-stream the walk with the flag flipped, preserving
-    /// the current photo by path. A no-op for an explicit list / archive (no scan root).
-    fn toggle_recursive(&mut self) {
-        let Some(root) = self.core.scan_root.clone() else {
-            return;
-        };
-        let recursive = !self.core.recursive;
-        let cursor = self
-            .core
-            .displayed_item
-            .and_then(|i| self.core.source.path(i))
-            .map(Path::to_path_buf)
-            .map(Cursor::At)
-            .unwrap_or(Cursor::First);
-        self.begin_dir_scan(
-            Source::Scan {
-                roots: vec![root],
-                recursive,
-            },
-            cursor,
-        );
-        self.core.show_toast(if recursive {
-            "Recursive folders: on"
-        } else {
-            "Recursive folders: off"
-        });
-    }
-
-    /// Toggle View ▸ Show Archives (task #104) — the winit shell's `toggle_show_archives`
-    /// mirrored: flip whether archives show as folder doors, persist it, and re-stream the
-    /// current folder (preserving the current photo). A no-op for a non-folder deck.
-    fn toggle_show_archives(&mut self) {
-        let on = !self.core.settings.show_archives;
-        self.core.settings.show_archives = on;
-        self.core.settings.save();
-        let Some(root) = self.core.scan_root.clone() else {
-            self.core.show_toast(if on {
-                "Show archives: on"
-            } else {
-                "Show archives: off"
-            });
-            return;
-        };
-        let cursor = self
-            .core
-            .displayed_item
-            .and_then(|i| self.core.source.path(i))
-            .map(Path::to_path_buf)
-            .map(Cursor::At)
-            .unwrap_or(Cursor::First);
-        self.begin_dir_scan(
-            Source::Scan {
-                roots: vec![root],
-                recursive: self.core.recursive,
-            },
-            cursor,
-        );
-        self.core.show_toast(if on {
-            "Show archives: on"
-        } else {
-            "Show archives: off"
-        });
-    }
-
-    /// File ▸ Stop Scanning — stop the in-flight walk, **keeping what streamed in**
-    /// (the winit `cancel_scan_command` mirrored). No-op when no scan is running.
-    fn cancel_scan_command(&mut self) {
-        // The core owns the policy (task #126): cancel, keep the partial deck, resume normal
-        // prefetch, and restore the welcome hint when the cancel leaves nothing on screen.
-        //
-        // That last part is the 2026-07-20 fix for ledger item 3, and this shell was still
-        // running its own copy calling the bare `cancel_dir_scan`, so macOS was NOT getting it
-        // — the Windows session fixed the hole "in the core so both shells get it" and pointed
-        // winit at it, but could not compile this crate to finish the job. Exactly the
-        // half-verified-by-construction case the cross-machine handoff exists for.
-        if !self.core.cancel_scan_command() {
-            return; // nothing was running
-        }
-        self.close_dialog_kinds(&[contract::DialogKind::Scanning]);
-        self.core.show_toast("Scan stopped");
     }
 
     // ---- The shell's Rust half: the scan/archive worker flow (mirrors the winit shell's
@@ -3265,10 +3171,11 @@ fn map_effect(e: contract::CoreEffect) -> ffi::CoreEffectFfi {
         C::SetWake(Some(at)) => {
             E::SetWake(at.saturating_duration_since(Instant::now()).as_secs_f64())
         }
-        // A genuinely host-side command (DeletePermanent confirm / Recursive / CancelScan /
-        // Quit teardown — see `CoreEffect::ShellFlowAction`), carried by its stable snake_case
-        // action id. Esc quits through THIS (the keymap resolves Escape → Action::Quit → a
-        // host-side flow action), not through `CoreEffect::Quit` — the host matches "quit".
+        // A genuinely host-side command — now just Quit's window teardown (Recursive /
+        // ShowArchives / CancelScan / DeletePermanent were all inverted into the core, #131).
+        // Carried by its stable snake_case action id. Esc quits through THIS (the keymap resolves
+        // Escape → Action::Quit → a host-side flow action), not through `CoreEffect::Quit` — the
+        // host matches "quit".
         C::ShellFlowAction(action) => E::ShellFlowAction(action.id().to_string()),
         // A user-facing error (bad open, refused archive, …) — an NSAlert once the NS2
         // dialogs land; the host logs it until then.
@@ -5683,6 +5590,11 @@ mod tests {
         std::fs::remove_dir_all(file.parent().unwrap()).ok();
     }
 
+    /// #131 A.3 — the confirm now renders from the core's `ShowDeleteConfirm { name }` effect
+    /// (the macOS `ShellFlowAction(DeletePermanent)` lever + shell `confirm_delete_permanent`
+    /// were removed): `delete_permanent` → core `request_delete_confirm` → `ShowDeleteConfirm`
+    /// → the `next_effect` render arm composes the question + surfaces `ShowDialog("confirm")`.
+    /// Yes still routes back through `ConfirmAnswered(true)` → `do_delete(.., true)`.
     #[test]
     fn delete_permanent_confirms_then_deletes() {
         let (mut h, file) = handle_with_photo("delete");
@@ -5695,10 +5607,15 @@ mod tests {
             "the question names the file: {:?}",
             h.dialog_message()
         );
+        // The `ShowDeleteConfirm` render arm must track the shown dialog + pause the slideshow.
+        assert_eq!(h.shown_dialog, Some(contract::DialogKind::Confirm));
+        assert!(h.core.dialog_open, "the confirm marks a dialog open");
 
         h.dialog_confirm_answered(false);
         let effects = drain(&mut h);
         assert!(has_close(&effects), "No closes the dialog");
+        assert!(h.shown_dialog.is_none(), "No clears the shown dialog");
+        assert!(!h.core.dialog_open, "No clears the dialog-open flag");
         assert!(file.exists(), "No leaves the file alone");
 
         h.menu_action("delete_permanent");

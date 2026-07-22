@@ -1,8 +1,9 @@
 # Task 131 — Finish the NS0 inversion: de-duplicate the last shell orchestration (audit #1b / #2)
 
-**Status:** **Windows-side DONE + pushed — 2026-07-21** (all four threads B/A.1/A.2/A.3 landed; see
-`## Handoff`). macOS owns the A.3 `ShowDeleteConfirm` wiring + lever flip + dead-arm cleanup (Handoff
-items 2-5). Rev 2, Codex-reviewed — round 1 folded in; see §7a. Remediation for
+**Status:** **DONE on both platforms + pushed — 2026-07-21.** Windows landed all four threads
+(B/A.1/A.2/A.3); the macOS session then wired `ShowDeleteConfirm` into the native shell, removed the
+`cfg(macos)` lever, and cleaned up every dead arm/body (Handoff items 2-5, all struck below). Rev 2,
+Codex-reviewed — round 1 folded in (see §7a); the macOS close-out got a Codex round-2 pass (§7b). Remediation for
 **technical-debt audit finding #1(b)** ("finish the NS0 inversion so `AppCore` owns orchestration and
 the mirror flags have a single owner") and **finding #2** ("the two parallel platform shells"). This is
 the deliberately-separated *(b)* half of finding #1 — *(a)*, the `app_core_impl.rs` file-split, shipped
@@ -384,6 +385,28 @@ appropriately scoped and low-regression **with corrections**, all folded above:
    CancelScan-doesn't-close-unrelated test, update+run the macOS delete test, fix stale worker-lifecycle
    prose, and preserve `ToggleToolbar`/`Quit` when slimming the flow handler (§4).
 
+## 7b. Codex review (2026-07-21, round 2 — the macOS close-out)
+
+Reviewed the macOS diff (render arm + lever removal + dead-body deletion + `scan_pill_cancel` re-route)
+with the full diff + context inlined; three focused questions. Verdicts:
+
+1. **Render arm — no defect.** It reproduces the old generic `ShowDialog(Confirm)` state transition
+   (message set, `shown_dialog = Confirm`, `dialog_open = true`, same FFI effect) and correctly does
+   **not** re-duplicate the core's flush/guard/arm. The No/Yes answer path is unchanged.
+2. **`scan_pill_cancel` dropping the `close_dialog_kinds([Scanning])` — not a real bug, now documented.**
+   Codex flagged that `scan_pill_visible` gates only on `slow` (not `bootstrapped`), so *in principle* a
+   pill could coexist with a `Scanning` sheet. Verified against the tree: macOS **never reveals** a
+   Scanning sheet (`poll_dir_scan` acts only on `Close`; the two `DialogKind::Scanning` production refs are
+   the close-guard + test-only synthesis), so `shown_dialog == Scanning` cannot occur in production and the
+   dropped close is inert. Encoded the reasoning in the `scan_pill_cancel` comment rather than re-adding
+   dead defensive code (matches the winit pill Cancel). Deliberately did **not** gate the pill on
+   `bootstrapped` — the pill is *designed* to show pre-bootstrap (non-blocking, unlike the sheet).
+3. **No stray `ShellFlowAction(DeletePermanent)` producer remains**; all delete paths reach
+   `request_delete_confirm`. **Folded in:** fixed two stale comments Codex caught (the core dispatch's
+   "`DeletePermanent` stays a flow action" and `map_effect`'s ShellFlowAction example list), and
+   strengthened the delete FFI test to assert `shown_dialog`/`dialog_open` across the answer. **Skipped:**
+   a "slow pre-bootstrap pill/sheet" test — it would assert a state that can't occur on macOS (see #2).
+
 ## 8. What this does NOT do
 
 - It does not touch the wire/contract semantics beyond inverting four `ShellFlowAction` arms into
@@ -433,46 +456,50 @@ end). Five commits, one per thread + a docs pass:_
 - **fmt:** all new code is fmt-clean (the repo has pre-existing `{single_import}` brace drift in many
   `mod tests` headers — left untouched, not swept into these commits).
 
-### NOT verified — a human / the Mac must do
+### NOT verified — a human must do
 
-1. **⚠ Owner winit RUN (behaviour-unverified until launched):** `pwsh scripts/build-windows.ps1 -Run`
-   on a corpus folder, then exercise **Ctrl+R recursive on/off**, **View ▸ Show Archives on/off**,
-   **File ▸ Stop Scanning** (menu + the scan-pill Cancel button — both should toast "Scan stopped"),
-   and **Shift+Del** (the confirm dialog must still show the file name). These are byte-behaviour-preserving
-   by construction + pinned by unit tests, but a real launch is the gate.
-2. **⚠ macOS — the one load-bearing item (A.3):** wire `CoreEffect::ShowDeleteConfirm { name }` into the
-   macOS `map_effect`/Swift confirm sheet and confirm it renders the sheet **with that name**, then flip
-   the `cfg(target_os="macos")` arm in `request_delete_confirm` (`app_core_impl/delete.rs`) **off** the
-   legacy `ShellFlowAction(DeletePermanent)` onto the new effect. Update + run the macOS
-   `delete_permanent_confirms_then_deletes` test. **Until that lands, macOS delete-confirm uses the
-   legacy path (working); do not delete the `cfg(macos)` arm before the handler + a green test exist.**
-3. **macOS cleanup (non-blocking, dead not broken):** delete the dead `ShellFlowAction(Recursive|
-   ShowArchives|CancelScan)` handler arms (`lib.rs:2540-2542`) and the `toggle_recursive`/
-   `toggle_show_archives`/`cancel_scan_command` shell bodies (`lib.rs:2649`/`2678`/`2713`) — the core runs
-   all three now, no double-run.
-4. **macOS CancelScan (A.2):** confirm the Scanning-sheet Cancel still closes via its own
-   `DialogResult::ScanningCancelled` route (the action arm now emits **no** dialog effect).
-5. **macOS archive_loading (B):** now reports the true value via the getter; per §1b this is redundancy
-   cleanup, not a live-bug fix (`work_pending` already reads `archive_load`) — just confirm nothing relied
-   on the old always-`false` value.
+1. **⚠ Owner winit RUN (behaviour-unverified until launched — STILL OPEN):** `pwsh
+   scripts/build-windows.ps1 -Run` on a corpus folder, then exercise **Ctrl+R recursive on/off**,
+   **View ▸ Show Archives on/off**, **File ▸ Stop Scanning** (menu + the scan-pill Cancel button — both
+   should toast "Scan stopped"), and **Shift+Del** (the confirm dialog must still show the file name).
+   Byte-behaviour-preserving by construction + pinned by unit tests, but a real launch is the gate.
+2. **⚠ Owner macOS RUN (behaviour-unverified until launched — the macOS twin of item 1):** launch
+   `Blaze Viewer.app` on a corpus folder and exercise the same four: **⌘/Ctrl recursive toggle**,
+   **Show Archives toggle**, **Stop Scanning** (the scan-pill Cancel toasts "Scan stopped"), and
+   **Shift+Del** → the native confirm sheet must show the file name and Yes must delete. The
+   `ShowDeleteConfirm` render arm + the whole pipeline compile/link/test green, but the sheet's visual
+   render is the gate.
+
+### ✅ DONE by the macOS session (2026-07-21) — Handoff items 2-5 closed
+
+- **A.3 (was item 2) — DONE.** `CoreEffect::ShowDeleteConfirm { name }` now renders in the macOS
+  `next_effect` (composes Finder's wording, sets `shown_dialog`/`dialog_open`, returns `ShowDialog(Confirm)`);
+  the `cfg(macos)` lever in `request_delete_confirm` was removed so both platforms take the new effect;
+  the macOS `delete_permanent_confirms_then_deletes` test (now asserting `shown_dialog`/`dialog_open` too)
+  passes; the un-gated core delete tests pass on macOS. Swift host builds + links clean.
+- **Cleanup (was item 3) — DONE.** Deleted the dead macOS `ShellFlowAction(Recursive|ShowArchives|
+  CancelScan|DeletePermanent)` arms and the `toggle_recursive`/`toggle_show_archives`/`cancel_scan_command`/
+  `confirm_delete_permanent` shell bodies (−119 lines). `scan_pill_cancel` re-routed through
+  `core.dispatch_action(Action::CancelScan)` (its one live caller), matching winit.
+- **CancelScan A.2 (was item 4) — VERIFIED.** The Scanning-sheet Cancel still routes through
+  `DialogResult::ScanningCancelled`; the action arm emits no dialog effect. Note (Codex round-2): macOS
+  never *reveals* a Scanning sheet (`poll_dir_scan` only ever closes one; the pill replaced it per #126),
+  so `shown_dialog == Scanning` is production-unreachable and dropping the old kind-scoped close is inert.
+- **archive_loading B (was item 5) — VERIFIED.** Getter reports the true value; nothing relied on the old
+  always-`false` macOS value (`work_pending` reads `archive_load` directly).
 
 ### Cross-platform debt (the dangerous green category)
 
-- **A.3 macOS `ShowDeleteConfirm` wiring + lever flip** is owed on macOS (item 2). The Windows session
-  could not compile `pb-mac-ffi` (empty staticlib on Windows), so the macOS branch of
-  `request_delete_confirm` is **compile-unverified** — though it only references `Action::DeletePermanent`
-  + `ShellFlowAction`, both used identically elsewhere. Only the Mac strikes this line.
+- **Struck.** The A.3 macOS `ShowDeleteConfirm` wiring landed + compiled + tested on the Mac; no
+  compile-unverified shared-dispatch code remains. (The only open items are the two owner GUI runs above,
+  which are behaviour gates, not debt.)
 
-### Revert lever (exact)
+### Revert lever
 
-- `crates/pb-app-core/src/app_core_impl/delete.rs`, `request_delete_confirm`: the
-  `#[cfg(target_os = "macos")]` block emits `ShellFlowAction(DeletePermanent)`; the
-  `#[cfg(not(target_os = "macos"))]` block emits `ShowDeleteConfirm { name }`. **Removal condition:** once
-  the Mac has the `ShowDeleteConfirm` handler + a green `delete_permanent_*` test, delete the
-  `cfg(macos)` arm so both platforms take the `ShowDeleteConfirm` path. A.1/A.2/Thread B need no lever
-  (their old macOS arms are inert dead code, not a fork).
+- **Removed.** `request_delete_confirm` (`delete.rs`) is now single-path on every platform (arm + emit
+  `ShowDeleteConfirm { name }`); the `cfg(macos)` legacy-`ShellFlowAction` arm is gone.
 
 ### Claimed
 
-- Nothing held open. All five commits pushed to `main`; the Windows shell-side work is complete. The Mac
-  session owns items 2-5 above.
+- Nothing held open. Both platforms' code is complete and pushed to `main`. Only the two owner GUI
+  smoke-runs (winit on Windows, native on macOS) remain — behaviour gates, not code.

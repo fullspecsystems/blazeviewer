@@ -23,36 +23,26 @@ impl AppCore {
     /// duplicated in both shells' `confirm_delete_permanent` (#131 A.3 — inverted off
     /// `ShellFlowAction`).
     ///
-    /// ⚠ **Cross-machine lever (#131 A.3 / §6a):** on macOS this still emits the legacy
-    /// `ShellFlowAction(DeletePermanent)` so the native shell's existing, working delete-confirm
-    /// path (its own guard/arm/sheet) runs unchanged until the Mac session wires the new
-    /// `ShowDeleteConfirm` effect into `map_effect`/Swift and flips this `cfg` arm off. Everywhere
-    /// else the core arms and emits `ShowDeleteConfirm { name }` directly. Delete the macOS arm
-    /// once the Mac has the `ShowDeleteConfirm` handler + a green `delete_permanent_*` test.
+    /// Both shells render the confirm from the snapshotted-name effect (#131 A.3): the core
+    /// arms `pending_confirm_delete` and emits `ShowDeleteConfirm { name }`; each shell composes
+    /// its own wording (winit's `open_confirm_delete`, the macOS `ShowDeleteConfirm` render arm)
+    /// and answers back through `ConfirmAnswered(true)`. The macOS cross-machine lever (which
+    /// emitted the legacy `ShellFlowAction(DeletePermanent)` until the native `ShowDeleteConfirm`
+    /// handler landed) was removed once the Mac wired the effect + a green delete test.
     pub fn request_delete_confirm(&mut self) {
-        #[cfg(target_os = "macos")]
-        {
-            // Lever: macOS keeps its legacy path (its shell does flush/guard/arm/ShowDialog).
-            self.effects.push(contract::CoreEffect::ShellFlowAction(
-                Action::DeletePermanent,
-            ));
+        // Settle any still-pending delete-advance first (e.g. a rapid second Del).
+        self.flush_pending_delete();
+        let Some(item) = self.displayed_item else {
+            return;
+        };
+        if self.source.path(item).is_none() {
+            self.show_toast("Can't delete this"); // archive entry — no file
+            return;
         }
-        #[cfg(not(target_os = "macos"))]
-        {
-            // Settle any still-pending delete-advance first (e.g. a rapid second Del).
-            self.flush_pending_delete();
-            let Some(item) = self.displayed_item else {
-                return;
-            };
-            if self.source.path(item).is_none() {
-                self.show_toast("Can't delete this"); // archive entry — no file
-                return;
-            }
-            let name = crate::engine::file_name_of(self.source.name(item));
-            self.pending_confirm_delete = Some(item);
-            self.effects
-                .push(contract::CoreEffect::ShowDeleteConfirm { name });
-        }
+        let name = crate::engine::file_name_of(self.source.name(item));
+        self.pending_confirm_delete = Some(item);
+        self.effects
+            .push(contract::CoreEffect::ShowDeleteConfirm { name });
     }
 
     /// **Delete to Trash** (`Del`): send the displayed photo to the OS Recycle Bin / Trash
@@ -246,9 +236,9 @@ impl AppCore {
 }
 
 #[cfg(test)]
-// A.3 asserts the `ShowDeleteConfirm` path; macOS keeps the legacy `ShellFlowAction` lever
-// (#131 §6a), so these non-macOS assertions don't apply there. The Mac verifies its own path.
-#[cfg(not(target_os = "macos"))]
+// A.3 asserts the shared `ShowDeleteConfirm` path — now taken on every platform (the macOS
+// `ShellFlowAction` lever was removed once the native shell wired the effect), so these run
+// everywhere.
 mod tests {
     use super::*;
     use crate::app_core_impl::test_support::{photos_named, test_core, FakeArchive};
