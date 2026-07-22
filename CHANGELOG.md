@@ -17,6 +17,11 @@ with any pre-release suffix carried only by the tag.
 
 ### Fixed
 
+- Fixed a rare glitch where moving to the next photo could advance the window title — and, in a
+  folder of archives, leave the "door" card for a ZIP/7z — over the *previous* image, which stayed
+  frozen on screen. Blaze now switches a photo only once its new frame is genuinely on screen, and
+  re-loads automatically if the display and the decoder ever briefly fall out of step, so you never
+  see a stale or mismatched picture under a newer title.
 - Malformed-but-viewable images now display instead of getting stuck on the loading spinner
   forever. Some files — for example JPEGs exported by government or scanner software — are
   technically damaged (stray bytes between headers, a cut-off tail) yet decode fine in Preview
