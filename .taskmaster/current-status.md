@@ -1,20 +1,32 @@
 # Blaze Viewer — Current Status (session handoff)
 
-_Last updated: 2026-07-22 (rev 34). **#131 DONE both platforms** (macOS `ShowDeleteConfirm` wired,
-lever removed). **#109 ring-bridge close-out IMPLEMENTED** (B + A, Codex-reviewed plan) — the durable
-fail-at-divergence fix for the door-card race (#132). **CHANGELOG `[Unreleased]` tidied for 0.3.1.**
-**Windows build + full test suite verified this session (see 🚦 below).** Everything on `main`, pushed
+_Last updated: 2026-07-22 (rev 35). **0.3.1 SHIPPED on macOS + Linux** (tagged `v0.3.1`, notarized DMG +
+both AppImages published, feeds live) — **Windows is the owner's to cut** (see 🚦 below). Contents:
+#131 NS0 de-dup (both platforms), #109 ring-bridge close-out (B+A), the door-card/#132 fix, with the
+zoom-quality fix as the headline user-facing win. Everything on `main`, pushed
 (`git rev-list HEAD...origin/main` = 0/0)._
 
 ---
 
-# 🚦 0.3.1 patch release — blockers
+# 🚦 0.3.1 release — macOS + Linux SHIPPED (2026-07-22); Windows is the owner's to cut
 
-Last tag `v0.3.0` → next is **`0.3.1`**. The `[Unreleased]` CHANGELOG is current and tidied (one
-Added / Changed / Fixed; the zoom-quality fix leads). **This cycle is heavily tech-debt** (NS0 finish,
-god-object split, DRY, media de-dup, ring bridge) with a modest user-facing delta — so the pre-release
-pass must be a **general regression shakedown**, not just the new-feature flows, because a refactor
-regression won't look like "new behaviour", it'll just look broken.
+**Tagged `v0.3.1` (commit `50775079`), pushed.** CHANGELOG rolled into `## [0.3.1] - 2026-07-22` with a
+Highlights block (zoom / damaged-image recovery / archive+thumbnails polish); fresh `[Unreleased]`.
+
+- **✅ macOS — RELEASED.** `release-macos.sh --release` → signed + **notarized** (Accepted/stapled,
+  `source=Notarized Developer ID`); **LGPL gate PASSED** (shipped DMG binary has zero `/opt/homebrew`
+  refs; FFmpeg all `@rpath/libav*` from bundled LGPL dylibs). Published to `downloads.blazeviewer.app/mac`
+  + Sparkle appcast (EdDSA) + `latest` symlink; download page bumped. Auto-update live.
+- **✅ Linux — RELEASED.** `release-linux-docker.sh both --upload` → both AppImages (x86_64 77.8 MB,
+  aarch64 74.8 MB) + sha256 + `latest.json`; `/latest/linux` + `/latest/linux-arm64` HTTP 200.
+- **🪟 Windows — OWNER'S to cut** (native boxes; no cross toolchain). `git fetch --tags && git checkout
+  v0.3.1` on each, then `pwsh scripts/release-windows.ps1 -Upload` (x64) / `-Arch arm64` (ARM64 VM).
+  Automated gates already green; do the interactive GUI shakedown first (below), then cut.
+
+The Windows **automated** gates are already green (below); the CHANGELOG is rolled and `v0.3.1` is
+tagged, so Windows just needs `git checkout v0.3.1` → build → the interactive GUI shakedown → cut. The
+churn was heavy tech-debt (NS0, god-object split, DRY, media de-dup, ring bridge), so a regression reads
+as "broken", not "new" — do the shakedown, don't skip it.
 
 **✅ Windows automated gates — VERIFIED 2026-07-22 (this session):**
 - **Everything builds.** `cargo clippy --workspace --all-targets -- -D warnings` clean; the **ship-feature
@@ -43,10 +55,12 @@ scripts/build-windows.ps1 -Run`):**
 **Not blockers:** the two flaky `pb-app-core` video-probe timing tests (environmental off-thread
 ffprobe timing, documented — passed this session anyway).
 
-**When green → cut it:** load the **`cutting-a-release` skill** (`.claude/skills/cutting-a-release/
-SKILL.md`) — full local build/sign/publish for all three platforms + every known trap (clean-tree gate,
-vpk re-runs, EdDSA key). Move `[Unreleased]` under a `## [0.3.1] - <date>` heading + leave a fresh empty
-`[Unreleased]`.
+**When green → cut Windows:** the CHANGELOG + version bump + `v0.3.1` tag are already done (this session
+shipped mac+Linux from them), so Windows is just build+sign+publish. Load the **`cutting-a-release`
+skill** for the exact `release-windows.ps1` invocation + the traps (⚠ **a re-run is NOT upload-only** —
+`vpk pack` hard-fails on a second run; and `dist\feed` is cumulative — check it holds only this product
+before packing). x64 on the desktop, `-Arch arm64` on the ARM64 VM; both land in the same `win`/`win-arm64`
+feed.
 
 ---
 
