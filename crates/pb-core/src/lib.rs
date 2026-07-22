@@ -26,7 +26,7 @@ pub use cache::{plan_residency, ResidencyPlan};
 pub use open::{plan, resolve_cursor, Cursor, LaunchInput, OpenPlan, Source};
 pub use playlist::{Direction, Playlist};
 pub use prefetch::{full_ring, prefetch_targets, prefetch_targets_scanning};
-pub use ring::{RepKind, Representation, Reservation, ResidentRing, SlotRemap};
+pub use ring::{RepKind, Representation, Reservation, ResidentRing, SlotIdentity, SlotRemap};
 pub use rng::SplitMix64;
 pub use shuffle::ShuffleOrder;
 pub use thumbs::{InsertOutcome, ThumbCache, ThumbDemand, ThumbEntry, ThumbTier};

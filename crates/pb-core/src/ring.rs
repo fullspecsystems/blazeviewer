@@ -52,6 +52,21 @@ pub enum RepKind {
     Original,
 }
 
+/// The identity a renderer ring slot is **stamped** with (#109 A): the core's occupant
+/// identity — `item`, `content_gen`, `rep`. The renderer verifies a slot still holds this
+/// before binding it ([`crate`]-external `Renderer::present_slot`), so a core↔renderer
+/// divergence **fails at the bind** — a loud refusal the core recovers from — instead of
+/// silently presenting the wrong occupant (the "archive card over a photo" corruption). It
+/// mirrors exactly what [`ResidentRing`] validates a decode completion against, and is stamped
+/// from the accepted decode outcome's key (never a live re-read of `content_gen` at upload
+/// time), so a swap-without-bump can't mint a matching stamp for stale pixels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SlotIdentity {
+    pub item: usize,
+    pub content_gen: u64,
+    pub rep: RepKind,
+}
+
 impl Representation {
     pub fn kind(self) -> RepKind {
         match self {

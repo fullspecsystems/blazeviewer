@@ -2162,8 +2162,21 @@ impl AppCore {
         let Some(res) = self.ring.reserve_bytes(item, cg, rep, est, &self.targets) else {
             return false;
         };
+        let identity = pb_core::SlotIdentity {
+            item,
+            content_gen: cg,
+            rep: pb_core::RepKind::Fit,
+        };
         let derived = self.renderer.as_mut().and_then(|r| {
-            r.derive_fit(source, res.slot, fw, fh, derive_kernel(), derive_mip_bias())
+            r.derive_fit(
+                source,
+                res.slot,
+                fw,
+                fh,
+                derive_kernel(),
+                derive_mip_bias(),
+                identity,
+            )
         });
         let Some(d) = derived else {
             // Ineligible (headless / no held Original / clamped / mode 1): roll back so the
@@ -2288,6 +2301,7 @@ impl AppCore {
             fw as u64 * fh as u64 * 8,
             &self.targets,
         );
+        let identity = self.slot_identity(item, pb_core::RepKind::Fit);
         let derived = self.renderer.as_mut().and_then(|r| {
             r.derive_fit(
                 pb_render::DeriveSource::Ring(src),
@@ -2296,6 +2310,7 @@ impl AppCore {
                 fh,
                 derive_kernel(),
                 derive_mip_bias(),
+                identity,
             )
         });
         let Some(d) = derived else {
@@ -2331,8 +2346,9 @@ impl AppCore {
         if self.displayed_item == Some(item)
             && self.presented_kind != Some(pb_core::RepKind::Original)
         {
+            let expected = self.slot_identity(item, pb_core::RepKind::Fit);
             if let Some(a) = self.renderer.as_mut() {
-                a.present_slot(dst);
+                a.present_slot(dst, expected);
             }
             self.presented_kind = Some(pb_core::RepKind::Fit);
             self.draw();
@@ -3136,10 +3152,11 @@ impl AppCore {
     /// would make the §3.6 guards lie about what is on screen.
     fn rebind_same_item(&mut self, item: usize, slot: usize, kind: pb_core::RepKind) -> bool {
         let view = self.view; // the CURRENT view — never `view_for`
+        let expected = self.slot_identity(item, kind);
         let bound = match self.renderer.as_mut() {
             Some(r) => {
                 r.set_view(view);
-                r.present_slot(slot)
+                r.present_slot(slot, expected)
             }
             // Headless (unit tests) counts as bound, matching `present_item`.
             None => true,
@@ -3509,6 +3526,19 @@ impl AppCore {
 
     /// Show ring `slot` (holding `item`): the keypress fast path — a rebind, no
     /// decode or upload. Updates the pin, title, and info panel.
+    /// #109 A — the identity to STAMP a slot with (at upload/derive) or VERIFY a bind against
+    /// (at present): the current deck generation plus `item` and its representation. The renderer
+    /// refuses a `present_slot` whose slot doesn't carry this, so a core↔renderer divergence fails
+    /// loud. A resident slot's `content_gen` always equals `self.content_gen` (stale ones are
+    /// dropped), so reading it live here matches the stamp written from the outcome's key.
+    fn slot_identity(&self, item: usize, rep: pb_core::RepKind) -> pb_core::SlotIdentity {
+        pb_core::SlotIdentity {
+            item,
+            content_gen: self.content_gen,
+            rep,
+        }
+    }
+
     pub fn present_item(&mut self, item: usize, slot: usize) -> bool {
         // `present` = the whole event-loop-thread cost of one advance (rebind + title +
         // GPU-submit), the keypress fast path. It's the metric to watch for a hold-to-blaze
@@ -3529,10 +3559,11 @@ impl AppCore {
         // (so `target_pending` holds the pump awake), and retry on a later tick until a verified
         // bind or a terminal decode failure. Headless (`renderer = None`, unit tests) counts as
         // presented so the pure-core assertions hold.
+        let expected = self.slot_identity(item, self.present_kind(item));
         let presented = match self.renderer.as_mut() {
             Some(r) => {
                 r.set_view(view);
-                r.present_slot(slot)
+                r.present_slot(slot, expected)
             }
             None => true,
         };
@@ -4205,6 +4236,11 @@ impl AppCore {
                         is_hdr(img),
                         img.peak,
                         rk == pb_core::RepKind::Original,
+                        pb_core::SlotIdentity {
+                            item,
+                            content_gen: cg,
+                            rep: rk,
+                        },
                     );
                     self.metrics.record("upload", t0.elapsed());
                 }
@@ -4263,8 +4299,13 @@ impl AppCore {
                 if self.displayed_item == Some(item)
                     && self.presented_kind != Some(pb_core::RepKind::Original)
                 {
+                    let expected = pb_core::SlotIdentity {
+                        item,
+                        content_gen: cg,
+                        rep: rk,
+                    };
                     if let Some(a) = self.renderer.as_mut() {
-                        a.present_slot(slot);
+                        a.present_slot(slot, expected);
                     }
                     self.presented_kind = Some(pb_core::RepKind::Fit);
                     self.draw();
@@ -4288,6 +4329,11 @@ impl AppCore {
                         is_hdr(img),
                         img.peak,
                         rk == pb_core::RepKind::Original,
+                        pb_core::SlotIdentity {
+                            item,
+                            content_gen: cg,
+                            rep: rk,
+                        },
                     );
                     self.metrics.record("upload", t0.elapsed());
                 }
@@ -6518,10 +6564,11 @@ mod tests {
             _: bool,
             _: f32,
             _: bool,
+            _: pb_core::SlotIdentity,
         ) -> bool {
             false
         }
-        fn present_slot(&mut self, _: usize) -> bool {
+        fn present_slot(&mut self, _: usize, _: pb_core::SlotIdentity) -> bool {
             true
         }
         fn surface_size(&self) -> (u32, u32) {
@@ -6625,10 +6672,11 @@ mod tests {
             _: bool,
             _: f32,
             _: bool,
+            _: pb_core::SlotIdentity,
         ) -> bool {
             true
         }
-        fn present_slot(&mut self, _: usize) -> bool {
+        fn present_slot(&mut self, _: usize, _: pb_core::SlotIdentity) -> bool {
             false
         }
         fn surface_size(&self) -> (u32, u32) {
@@ -6699,6 +6747,148 @@ mod tests {
                 .iter()
                 .any(|e| matches!(e, contract::CoreEffect::SetTitle(_))),
             "no title advance over a frozen view (#109 B atomic present)"
+        );
+    }
+
+    // ── #109 A: identity stamp — verify the bind, refuse a wrong occupant ──
+
+    /// A `Renderer` double that faithfully mirrors the real `WgpuRenderer`'s #109 A contract:
+    /// `upload_slot` STAMPS the slot with its identity; `present_slot` REFUSES a bind whose
+    /// `expected` doesn't match the stamp (keeps the held frame). Proves the core↔renderer
+    /// identity handshake + the refusal recovery end-to-end, with no GPU.
+    struct StampingRenderer {
+        stamps: Vec<Option<pb_core::SlotIdentity>>,
+    }
+    impl StampingRenderer {
+        fn new(cap: usize) -> Self {
+            Self {
+                stamps: vec![None; cap],
+            }
+        }
+    }
+    impl pb_render::Renderer for StampingRenderer {
+        fn resize(&mut self, _: u32, _: u32) {}
+        fn set_image(
+            &mut self,
+            _: &[u8],
+            _: u32,
+            _: u32,
+            _: pb_render::ColorTransform,
+            _: bool,
+            _: f32,
+        ) {
+        }
+        fn clear_image(&mut self) {}
+        fn set_view(&mut self, _: pb_render::ViewTransform) {}
+        fn set_overlay(&mut self, _: Option<(&[u8], u32, u32)>, _: u32, _: u32) {}
+        fn set_info_line(&mut self, _: Option<(&[u8], u32, u32)>, _: u32, _: pb_render::HAlign) {}
+        fn reserve_ring(&mut self, _: usize, _: u32, _: u32) {}
+        #[allow(clippy::too_many_arguments)]
+        fn upload_slot(
+            &mut self,
+            slot: usize,
+            _: &[u8],
+            _: u32,
+            _: u32,
+            _: pb_render::ColorTransform,
+            _: bool,
+            _: f32,
+            _: bool,
+            identity: pb_core::SlotIdentity,
+        ) -> bool {
+            if slot >= self.stamps.len() {
+                return false;
+            }
+            self.stamps[slot] = Some(identity);
+            true
+        }
+        fn present_slot(&mut self, slot: usize, expected: pb_core::SlotIdentity) -> bool {
+            self.stamps.get(slot).copied().flatten() == Some(expected)
+        }
+        fn surface_size(&self) -> (u32, u32) {
+            (0, 0)
+        }
+        fn set_letterbox(&mut self, _: [u8; 3]) {}
+        fn set_toast(&mut self, _: Option<(&[u8], u32, u32)>, _: u32) {}
+        fn set_pie(&mut self, _: Option<(&[u8], u32, u32)>, _: u32) {}
+        fn set_tree(&mut self, _: Option<(&[u8], u32, u32)>, _: u32) {}
+        fn set_subtitle_overlay(&mut self, _: Option<(&[u8], u32, u32)>, _: f32, _: f32) {}
+        fn device(&self) -> &pb_render::wgpu::Device {
+            unreachable!("headless test double")
+        }
+        fn queue(&self) -> &pb_render::wgpu::Queue {
+            unreachable!("headless test double")
+        }
+        fn set_egui_overlay(&mut self, _: Option<&pb_render::wgpu::Texture>) {}
+        fn image_size(&self) -> (u32, u32) {
+            (0, 0)
+        }
+        fn set_edr_headroom(&mut self, _: f32) {}
+        fn hdr_surface_wants_edr(&self) -> Option<bool> {
+            None
+        }
+        fn poll(&self) {}
+        fn render(&mut self) -> Result<bool, pb_render::RenderError> {
+            Ok(true)
+        }
+    }
+
+    /// #109 A — the wrong-occupant guard, end-to-end: a slot stamped for one identity refuses a
+    /// present that expects another, and the core recovers (evicts the diverged slot so it
+    /// re-decodes) instead of showing stale pixels — the "archive card over a photo" corruption.
+    /// A matching identity still binds (the happy path is preserved).
+    #[test]
+    fn present_refuses_a_diverged_slot_stamp_and_recovers() {
+        let mut core = test_core();
+        core.source = photos_named(&["a.jpg"]);
+        core.playlist = Playlist::new(1, 0).with_cursor(0);
+        core.ring = ResidentRing::new(4);
+        core.fit = Some(FitBox {
+            max_width: 100,
+            max_height: 100,
+        });
+        core.view.mode = ScaleMode::Fit;
+        core.targets = vec![0];
+        core.target_item = Some(0);
+        core.renderer = Some(Box::new(StampingRenderer::new(4)));
+
+        // The drain uploads item 0's Fit AND stamps its slot with (0, content_gen, Fit).
+        core.pending_uploads.push(Outcome::synthetic(
+            0,
+            core.epoch,
+            core.content_gen,
+            pb_core::RepKind::Fit,
+            Ok(rgba_full(100, 67, 6000, 4000)),
+        ));
+        core.drain_results();
+        let slot = core
+            .ring
+            .slot_for_rep(0, pb_core::RepKind::Fit)
+            .expect("item 0 Fit is resident + stamped");
+
+        // Happy path: a correctly-stamped slot binds.
+        assert!(core.present_item(0, slot), "a matching identity binds");
+
+        // Divergence: the deck's content generation advances but the ring wasn't cleared, so the
+        // slot's stamp is now stale — the shape of a core↔renderer wrong-occupant desync.
+        core.content_gen = core.content_gen.wrapping_add(1);
+        core.effects.clear();
+        let shown = core.present_item(0, slot);
+
+        assert!(
+            !shown,
+            "a stale-generation stamp is REFUSED (the wrong-occupant guard)"
+        );
+        assert!(
+            core.ring.slot_for_rep(0, pb_core::RepKind::Fit).is_none(),
+            "the diverged slot is evicted so a fresh, correctly-stamped decode is requested"
+        );
+        assert!(
+            !core
+                .effects
+                .iter()
+                .any(|e| matches!(e, contract::CoreEffect::SetTitle(_))),
+            "no state committed on the refusal"
         );
     }
 

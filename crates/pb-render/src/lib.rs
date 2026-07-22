@@ -288,6 +288,9 @@ pub trait Renderer {
         hdr: bool,
         peak: f32,
         mip: bool,
+        // #109 A: the identity to STAMP this slot with — the accepted decode outcome's
+        // `(item, content_gen, rep)`. `present_slot` later verifies a bind against it.
+        identity: pb_core::SlotIdentity,
     ) -> bool;
     /// #110 (Phase 110b) + item-6: derive an exact-size Fit from a retained Original on the GPU
     /// — no decode, no upload — and install it in ring slot `dst_slot`. The source is either a
@@ -299,6 +302,7 @@ pub trait Renderer {
     /// in the derive's colour chain) — in which case the caller releases its slot reservation
     /// and falls back to the CPU Fit decode. `kernel` = Lanczos lobes (2 or 3); `mip_bias` = 0
     /// (last eligible mip) or −1 (one level finer — the 110c A/B).
+    #[allow(clippy::too_many_arguments)]
     fn derive_fit(
         &mut self,
         _source: DeriveSource,
@@ -307,17 +311,23 @@ pub trait Renderer {
         _fit_h: u32,
         _kernel: u32,
         _mip_bias: i32,
+        // #109 A: the derived Fit's identity to stamp `dst_slot` with (same item + content_gen,
+        // `rep = Fit`), so a later `present_slot` verifies it like any uploaded slot.
+        _identity: pb_core::SlotIdentity,
     ) -> Option<DerivedFit> {
         None
     }
 
     /// Select ring slot `slot` as the displayed image (the keypress fast path: a
-    /// rebind, no decode or upload). Returns `true` when the slot was live and is now
-    /// on screen; `false` when the slot isn't uploaded yet (the previous frame is kept),
-    /// so a caller can tell "actually presented" from "held the old frame" — the core
-    /// gates `mark_resolved` on this, or a door/photo would be marked on-screen while the
-    /// renderer still shows the prior photo (the "card over a photo" defect).
-    fn present_slot(&mut self, slot: usize) -> bool;
+    /// rebind, no decode or upload). Returns `true` when the slot was live, **its stamped
+    /// identity matches `expected`**, and it is now on screen; `false` when the slot isn't
+    /// uploaded yet OR holds a **different** `(item, content_gen, rep)` than the core believes
+    /// (#109 A — the wrong-occupant guard). A caller tells "actually presented" from "held the
+    /// old frame / refused" by this bool — the core gates `mark_resolved` on it (a refused bind
+    /// commits no state and recovers), or a door/photo would be marked on-screen while the
+    /// renderer still shows the prior/wrong photo (the "card over a photo" defect). A refusal
+    /// mutates no renderer state — the held frame stays — so it is safe to retry after recovery.
+    fn present_slot(&mut self, slot: usize, expected: pb_core::SlotIdentity) -> bool;
 
     /// #123 fix 2 (the geometry-pair Fit stash): alias ring slot `ring_slot`'s texture
     /// into stash slot `stash_idx` (0|1), so a later [`present_stash`](Self::present_stash)

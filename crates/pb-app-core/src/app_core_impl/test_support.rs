@@ -264,6 +264,7 @@ impl pb_render::Renderer for DeriveOk {
         _: bool,
         _: f32,
         _: bool,
+        _: pb_core::SlotIdentity,
     ) -> bool {
         true
     }
@@ -275,6 +276,7 @@ impl pb_render::Renderer for DeriveOk {
         fit_h: u32,
         _kernel: u32,
         _mip_bias: i32,
+        _identity: pb_core::SlotIdentity,
     ) -> Option<pb_render::DerivedFit> {
         Some(pb_render::DerivedFit {
             w: fit_w,
@@ -282,7 +284,7 @@ impl pb_render::Renderer for DeriveOk {
             bytes: fit_w as u64 * fit_h as u64 * 8,
         })
     }
-    fn present_slot(&mut self, _: usize) -> bool {
+    fn present_slot(&mut self, _: usize, _: pb_core::SlotIdentity) -> bool {
         true
     }
     fn surface_size(&self) -> (u32, u32) {
@@ -349,10 +351,11 @@ impl pb_render::Renderer for StashOk {
         _: bool,
         _: f32,
         _: bool,
+        _: pb_core::SlotIdentity,
     ) -> bool {
         true
     }
-    fn present_slot(&mut self, slot: usize) -> bool {
+    fn present_slot(&mut self, slot: usize, _: pb_core::SlotIdentity) -> bool {
         self.presented = Some(slot);
         true
     }

@@ -2473,6 +2473,10 @@ struct RingSlot {
     bind_group: wgpu::BindGroup,
     w: u32,
     h: u32,
+    /// #109 A: the core identity this texture was uploaded/derived for — verified against the
+    /// caller's `expected` in `present_slot` so a wrong-occupant bind fails loud instead of
+    /// showing stale pixels. A `remap_ring` move carries it for free (it moves the `Arc`).
+    identity: pb_core::SlotIdentity,
     /// Scene-linear peak (SDR tone-map white point on an SDR display); 1.0 for SDR.
     peak: f32,
     /// #110: the owned image texture (mip chain included for the `Original` rep), so the GPU Lanczos
@@ -3685,6 +3689,7 @@ impl Renderer for WgpuRenderer {
         hdr: bool,
         peak: f32,
         mip: bool,
+        identity: pb_core::SlotIdentity,
     ) -> bool {
         if slot >= self.ring.len() {
             // A slot this ring doesn't have is a core↔renderer capacity desync (caller bug).
@@ -3718,6 +3723,7 @@ impl Renderer for WgpuRenderer {
             bind_group: uploaded.bind_group,
             w,
             h,
+            identity,
             peak,
             texture: uploaded.texture,
             was_clamped: uploaded.was_clamped,
@@ -3759,6 +3765,7 @@ impl Renderer for WgpuRenderer {
         moved
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn derive_fit(
         &mut self,
         source: DeriveSource,
@@ -3767,6 +3774,7 @@ impl Renderer for WgpuRenderer {
         fit_h: u32,
         kernel: u32,
         mip_bias: i32,
+        identity: pb_core::SlotIdentity,
     ) -> Option<DerivedFit> {
         if dst_slot >= self.ring.len() || fit_w == 0 || fit_h == 0 {
             return None;
@@ -3832,6 +3840,7 @@ impl Renderer for WgpuRenderer {
             bind_group,
             w: dw,
             h: dh,
+            identity,
             peak,
             texture: out,
             was_clamped: false,
@@ -3845,15 +3854,25 @@ impl Renderer for WgpuRenderer {
         })
     }
 
-    fn present_slot(&mut self, slot: usize) -> bool {
-        let Some((w, h, peak)) = self
+    fn present_slot(&mut self, slot: usize, expected: pb_core::SlotIdentity) -> bool {
+        let Some((w, h, peak, identity)) = self
             .ring
             .get(slot)
             .and_then(|s| s.as_ref())
-            .map(|s| (s.w, s.h, s.peak))
+            .map(|s| (s.w, s.h, s.peak, s.identity))
         else {
             return false; // unknown / not-yet-uploaded slot: keep the current frame (and its hold)
         };
+        // #109 A — the wrong-occupant guard: the slot IS uploaded, but does it hold what the
+        // core believes? A mismatch is a core↔renderer divergence (a bug elsewhere); refuse the
+        // bind and keep the correct held frame rather than presenting stale pixels ("card over a
+        // photo"). Loud, so the divergence surfaces here; the core recovers (evict + re-decode).
+        if identity != expected {
+            eprintln!(
+                "[pb-render] present_slot({slot}) REFUSED — wrong occupant: slot holds {identity:?}, core expected {expected:?}"
+            );
+            return false;
+        }
         self.blank = false; // a photo is showing again
         self.message = None; // hide the empty-state hint
         self.held = None; // a real frame supersedes the held one — free its texture

@@ -256,6 +256,54 @@ half-verified by construction on whichever machine lands it:
 | **Mode-B silent archive-eviction** (stamps stay consistent) | high | §2C: provenance-gate by `OpId`, not the unsafe `archive_scope` guard |
 | A renderer writer forgets to stamp (`derive_fit`, remap) | medium | §2A: audit every `RingSlot` constructor + remap; dedicated tests |
 
+## Handoff
+
+_Implemented 2026-07-21 on macOS. **C verified already-closed** (§2C — #126's shared generation +
+`poll_dir_scan`'s `is_current` gate); **B then A** landed as two commits._
+
+- **Piece B** (`3bc3d027`) — `present_item` atomic (commit only on a verified bind) + returns `bool` +
+  refusal recovery (`ResidentRing::evict_slot` + `request_prefetch`, no epoch/gen bump);
+  `try_present_target` propagates. Tests: `evict_slot_frees_a_resident_slot_for_recovery` (pb-core),
+  `a_refused_present_commits_no_state_and_reports_not_shown` (pb-app-core).
+- **Piece A** (this commit) — `pb_core::SlotIdentity { item, content_gen, rep }`; `RingSlot` stamped;
+  `upload_slot`/`derive_fit` gain the identity (stamped from the outcome's key, never live
+  `content_gen`); `present_slot(slot, expected)` refuses a wrong occupant; every core bind/upload/derive
+  site threads the identity (via the `slot_identity` helper). `remap_ring` preserves stamps for free
+  (moves the `Arc`). Test: `present_refuses_a_diverged_slot_stamp_and_recovers` (a faithful
+  `StampingRenderer` double — stamp-on-upload, verify-on-present — proves the handshake + recovery
+  end-to-end, no GPU).
+
+### Verified (macOS)
+
+- `cargo test -p pb-core` ring tests green; `cargo test -p pb-app-core --lib` green **except the two
+  documented-flaky video-probe timing tests** (`a_real_video_probes_off_thread…`,
+  `copy_details_mid_probe…`) — confirmed flaky-not-regression: they flake at the committed B state too
+  and pass 2/3 in isolation with A; my ring/present changes can't affect an off-thread ffprobe.
+- clippy `-D warnings` clean on pb-core / pb-render / pb-app-core; fmt-clean on all new code (only the
+  repo's pre-existing brace/whitespace drift remains, left untouched).
+- **The mac shell (`pb-mac-ffi`) builds clean** — the on-machine consumer of all three changed crates.
+
+### NOT verified — the Mac could not run
+
+- **winit shell (`pb-app`) build on Windows** — `pb-app` **cannot** compile on macOS (its `build.rs`
+  hard-errors). **Safe by construction:** `pb-app` has **zero** references to the changed API (grep:
+  no `present_slot`/`upload_slot`/`derive_fit`/`impl Renderer`/`RingSlot`/`SlotIdentity`) — it only
+  holds a `Box<dyn Renderer>` and calls *unchanged* methods (`render`/`resize`/`set_view`). No `AppCore`
+  field was added (no struct-literal trap). A Windows session should still run `pwsh
+  scripts/build-windows.ps1 -Run` (or the `x86_64-pc-windows-msvc` cross-check) + a real
+  nav/zoom/fullscreen pass to confirm the present path stays flat — expected green.
+- **`present` hot-path timing** (`--metrics`) — the added `SlotIdentity` compare is two scalar
+  equalities on the keypress path; measure p50/p95 before/after on the corpus to confirm flat (design
+  intent, not yet run — no corpus on this Mac).
+- **`pb-render` golden-image tests** — `cargo test -p pb-render` reports 0 tests here (the WARP/golden
+  harness isn't wired in this checkout); a CI/Windows run exercises `present_slot` against references.
+
+### Cross-platform debt
+
+- The winit `pb-app` compile of these shared-crate changes is unverified from macOS (empty-references +
+  no-field-add make it safe by construction, but a real build is the gate). Only a Windows session
+  strikes this line.
+
 ## 9. Codex review (2026-07-21, round 1 — folded in)
 
 Reviewed the rev-1 plan with the plan + ground-truth code inlined (`RingSlot`, `present_slot`,
