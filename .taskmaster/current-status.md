@@ -1,13 +1,14 @@
 # Blaze Viewer — Current Status (session handoff)
 
-_Last updated: 2026-07-21 (rev 33). **#131 DONE both platforms** (macOS `ShowDeleteConfirm` wired,
+_Last updated: 2026-07-22 (rev 34). **#131 DONE both platforms** (macOS `ShowDeleteConfirm` wired,
 lever removed). **#109 ring-bridge close-out IMPLEMENTED** (B + A, Codex-reviewed plan) — the durable
 fail-at-divergence fix for the door-card race (#132). **CHANGELOG `[Unreleased]` tidied for 0.3.1.**
-Everything on `main`, pushed (`git rev-list HEAD...origin/main` = 0/0)._
+**Windows build + full test suite verified this session (see 🚦 below).** Everything on `main`, pushed
+(`git rev-list HEAD...origin/main` = 0/0)._
 
 ---
 
-# 🚦 0.3.1 patch release — blockers (all Windows)
+# 🚦 0.3.1 patch release — blockers
 
 Last tag `v0.3.0` → next is **`0.3.1`**. The `[Unreleased]` CHANGELOG is current and tidied (one
 Added / Changed / Fixed; the zoom-quality fix leads). **This cycle is heavily tech-debt** (NS0 finish,
@@ -15,14 +16,23 @@ god-object split, DRY, media de-dup, ring bridge) with a modest user-facing delt
 pass must be a **general regression shakedown**, not just the new-feature flows, because a refactor
 regression won't look like "new behaviour", it'll just look broken.
 
-**Do NOT cut until a Windows session confirms (the Mac can't build `pb-app`):**
+**✅ Windows automated gates — VERIFIED 2026-07-22 (this session):**
+- **Everything builds.** `cargo clippy --workspace --all-targets -- -D warnings` clean; the **ship-feature
+  build** `pwsh scripts/build-windows.ps1` (libheif,dav1d,ffprobe) links `blazeviewer.exe` clean —
+  FFmpeg linkage (the release-critical gate) confirmed.
+- **All tests pass.** `cargo test --workspace`: pb-app-core **896**, pb-core **104**, pb-render **70**
+  (incl. the golden-image + `present_slot` refuse tests — the #109 net the Mac couldn't run), pb-decode
+  **282**, pb-source **91**, pb-app **80**, pb-hud 43, pb-cli 13, pb-ui 9, pb-color 2 — **0 failures**.
+  The two flaky video-probe timing tests passed on this idle box.
+- **#109 cross-platform-debt line STRUCK** — the winit `pb-app` compile of the shared ring/present
+  changes is now verified on Windows (built + 80 shell tests + golden images green).
 
-1. **#109 present path — the one open cross-platform-debt line.** Build the winit shell (`pwsh
-   scripts/build-windows.ps1 -Run`) and do a real pass: **nav, zoom in/out (must sharpen, not blur —
-   the headline fix), 1:1, fullscreen toggle, resize.** The identity-stamp/atomic-present change is
-   shared-core + hot-path; safe by construction (pb-app has zero references to the changed `Renderer`
-   methods, no `AppCore` field) but a real run is the gate. Ideally `--metrics` to confirm the `present`
-   p50/p95 stayed flat.
+**⚠ Remaining blockers = interactive Windows runs only (need a human at the GUI — `pwsh
+scripts/build-windows.ps1 -Run`):**
+
+1. **#109 present path — a real nav pass:** **nav, zoom in/out (must sharpen, not blur — the headline
+   fix), 1:1, fullscreen toggle, resize.** Build + unit/golden tests are green; this is the eyes-on
+   confirmation the hot path stays correct + flat. Ideally `--metrics` to confirm `present` p50/p95 flat.
 2. **#131 four flows** (behaviour-preserving + unit-tested, never launched on Windows): **Ctrl+R**
    recursive on/off, **View ▸ Show Archives** on/off, **File ▸ Stop Scanning** (menu **and** the
    scan-pill Cancel → "Scan stopped" toast), **Shift+Del** (confirm names the file, Yes deletes).
@@ -31,8 +41,7 @@ regression won't look like "new behaviour", it'll just look broken.
    **Thumbnails** strip, delete + undo. Nothing should have regressed vs 0.3.0.
 
 **Not blockers:** the two flaky `pb-app-core` video-probe timing tests (environmental off-thread
-ffprobe timing, documented). The winit compile is unverified from macOS but safe by construction (see
-the #109 plan `## Handoff`).
+ffprobe timing, documented — passed this session anyway).
 
 **When green → cut it:** load the **`cutting-a-release` skill** (`.claude/skills/cutting-a-release/
 SKILL.md`) — full local build/sign/publish for all three platforms + every known trap (clean-tree gate,

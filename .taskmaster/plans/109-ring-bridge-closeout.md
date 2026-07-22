@@ -300,9 +300,12 @@ _Implemented 2026-07-21 on macOS. **C verified already-closed** (§2C — #126's
 
 ### Cross-platform debt
 
-- The winit `pb-app` compile of these shared-crate changes is unverified from macOS (empty-references +
-  no-field-add make it safe by construction, but a real build is the gate). Only a Windows session
-  strikes this line.
+- ~~The winit `pb-app` compile of these shared-crate changes is unverified from macOS.~~ **STRUCK
+  2026-07-22 (Windows session):** `cargo clippy --workspace -D warnings` clean, the ship-feature
+  `pb-app` build links clean, `cargo test -p pb-app` = 80 green, and **`pb-render` = 70 green incl. the
+  golden-image + `present_slot` refuse tests** (the renderer net the Mac's checkout couldn't run). The
+  interactive nav/zoom/fullscreen run + `--metrics` p50/p95 flatness check remain as a pre-release
+  gate (0.3.1 blocker 1), not a compile-debt line.
 
 ## 9. Codex review (2026-07-21, round 1 — folded in)
 
