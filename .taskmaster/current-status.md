@@ -26,6 +26,13 @@ now-dead arm/body. Plan + full ledger: `.taskmaster/plans/131-ns0-shell-dedup.md
 comments fixed + the delete test strengthened (Codex round-2). All `pb-mac-ffi` (39) + core delete
 tests pass; Swift host builds/links clean; clippy + fmt clean on new code.
 
+**Filed during smoke-testing → #132 (pending):** an **intermittent door-card present/ring race** —
+opening a no-images archive door then advancing leaves the door card stuck over the next photo; and
+backward-nav onto a door sometimes fails to show the card. Diagnosed as a pre-existing present-timing
+bug (the "cross-deck open race" family, `app_core_impl.rs:962`), **not** from #131. Could not get a
+reliable repro this session (timing-dependent; likely needs a big, still-scanning folder). Full
+diagnosis + `PB_DOOR_DIAG` capture recipe: `.taskmaster/plans/132-door-card-present-race.md`.
+
 ---
 
 ## 📌 Historical: the Windows-side ledger (kept for reference)

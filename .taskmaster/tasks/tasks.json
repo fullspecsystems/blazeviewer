@@ -1596,6 +1596,15 @@
             "status": "pending"
           }
         ]
+      },
+      {
+        "id": 132,
+        "title": "Door card lands over the wrong item (intermittent present/ring race)",
+        "description": "Owner-reported during #131 macOS smoke-testing. Two symptoms in the door-frame presentation-timing area: (1) opening a no-images archive door then advancing leaves the door card stuck over the next photo (title shows the photo); (2) navigating backwards onto a door sometimes fails to show the card. Diagnosis + evidence + capture recipe in .taskmaster/plans/132-door-card-present-race.md. Core door_card/door_presented gate is self-consistent; the defect is displayed_item landing on the wrong item via a late present or the cross-deck race (app_core_impl.rs:962). Intermittent/timing-dependent; NOT caused by #131. Needs a reliable repro (likely a big, still-scanning folder) before any hot-path fix.",
+        "status": "pending",
+        "priority": "medium",
+        "dependencies": [],
+        "subtasks": []
       }
     ],
     "metadata": {
