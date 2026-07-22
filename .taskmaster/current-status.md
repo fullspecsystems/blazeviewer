@@ -1,9 +1,43 @@
 # Blaze Viewer — Current Status (session handoff)
 
-_Last updated: 2026-07-21 (rev 32). **#131 DONE both platforms** (macOS `ShowDeleteConfirm` wired,
+_Last updated: 2026-07-21 (rev 33). **#131 DONE both platforms** (macOS `ShowDeleteConfirm` wired,
 lever removed). **#109 ring-bridge close-out IMPLEMENTED** (B + A, Codex-reviewed plan) — the durable
-fail-at-divergence fix for the door-card race (#132). Everything on `main`, pushed
-(`git rev-list HEAD...origin/main` = 0/0)._
+fail-at-divergence fix for the door-card race (#132). **CHANGELOG `[Unreleased]` tidied for 0.3.1.**
+Everything on `main`, pushed (`git rev-list HEAD...origin/main` = 0/0)._
+
+---
+
+# 🚦 0.3.1 patch release — blockers (all Windows)
+
+Last tag `v0.3.0` → next is **`0.3.1`**. The `[Unreleased]` CHANGELOG is current and tidied (one
+Added / Changed / Fixed; the zoom-quality fix leads). **This cycle is heavily tech-debt** (NS0 finish,
+god-object split, DRY, media de-dup, ring bridge) with a modest user-facing delta — so the pre-release
+pass must be a **general regression shakedown**, not just the new-feature flows, because a refactor
+regression won't look like "new behaviour", it'll just look broken.
+
+**Do NOT cut until a Windows session confirms (the Mac can't build `pb-app`):**
+
+1. **#109 present path — the one open cross-platform-debt line.** Build the winit shell (`pwsh
+   scripts/build-windows.ps1 -Run`) and do a real pass: **nav, zoom in/out (must sharpen, not blur —
+   the headline fix), 1:1, fullscreen toggle, resize.** The identity-stamp/atomic-present change is
+   shared-core + hot-path; safe by construction (pb-app has zero references to the changed `Renderer`
+   methods, no `AppCore` field) but a real run is the gate. Ideally `--metrics` to confirm the `present`
+   p50/p95 stayed flat.
+2. **#131 four flows** (behaviour-preserving + unit-tested, never launched on Windows): **Ctrl+R**
+   recursive on/off, **View ▸ Show Archives** on/off, **File ▸ Stop Scanning** (menu **and** the
+   scan-pill Cancel → "Scan stopped" toast), **Shift+Del** (confirm names the file, Yes deletes).
+3. **General regression sweep** (the churn was large): open a folder, browse/blaze, enter/exit an
+   **archive** (incl. a password one), play a **video** (audio track `A`, subtitles `C`), the
+   **Thumbnails** strip, delete + undo. Nothing should have regressed vs 0.3.0.
+
+**Not blockers:** the two flaky `pb-app-core` video-probe timing tests (environmental off-thread
+ffprobe timing, documented). The winit compile is unverified from macOS but safe by construction (see
+the #109 plan `## Handoff`).
+
+**When green → cut it:** load the **`cutting-a-release` skill** (`.claude/skills/cutting-a-release/
+SKILL.md`) — full local build/sign/publish for all three platforms + every known trap (clean-tree gate,
+vpk re-runs, EdDSA key). Move `[Unreleased]` under a `## [0.3.1] - <date>` heading + leave a fresh empty
+`[Unreleased]`.
 
 ---
 

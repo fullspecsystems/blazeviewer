@@ -15,8 +15,21 @@ with any pre-release suffix carried only by the tag.
   up the tree without switching to the Folders tab. In a narrow pane the beginning of the path
   collapses into a menu so the current folder stays visible. (macOS.)
 
+### Changed
+
+- Scanning a big folder on Windows and Linux now shows the same unobtrusive progress pill as
+  the rest of the walk, instead of a separate "Scanning Folder" window that appeared first and
+  then handed over to the pill. It shows the folder being walked, a live count and a Cancel
+  button, and it no longer takes over the screen before your first photo arrives. macOS already
+  worked this way.
+
 ### Fixed
 
+- Zooming in now shows real detail instead of magnifying the screen-sized picture. Blaze
+  already keeps the full-resolution photo ready, which is why the 1:1 key is instant.
+  Zooming with `=`/`-`, a pinch, or the scroll wheel now uses it too, so you see every pixel
+  the file has, up to 100%. It is instant for the same reason 1:1 is: the picture was
+  already loaded.
 - Fixed a rare glitch where moving to the next photo could advance the window title — and, in a
   folder of archives, leave the "door" card for a ZIP/7z — over the *previous* image, which stayed
   frozen on screen. Blaze now switches a photo only once its new frame is genuinely on screen, and
@@ -36,36 +49,20 @@ with any pre-release suffix carried only by the tag.
   window now appears only if the archive actually takes a moment to open, the way folder
   scanning has always worked. It also waits a little longer than the folder pill does before
   appearing, since it is a window rather than a quiet corner badge.
+- Opening a password-protected archive no longer blows the toolbar and panels up to a huge,
+  stretched size. They stayed that way until you resized the window; now they don't.
 - The password box no longer draws its "Checking…" spinner underneath the buttons when you
   retry after a wrong password.
 - Cancelling a slow archive part-way through no longer forgets the password you already
   entered. Open a smaller archive with the same password next and it just opens.
-- Cancelling a folder scan before any photo has appeared now returns you to the welcome
-  screen instead of leaving a blank window.
-- After a wrong password, the cursor stays in the password box on macOS, so you can just type
-  the next attempt instead of clicking back into the field first.
 - Entering the wrong password for an encrypted archive now tells you so, instead of silently
   clearing the box and leaving you guessing. This only ever worked for plain `.zip` files; for
   `.7z` and the tar family — and any archive unlocked by a remembered password — the message
   was suppressed.
-
-### Changed
-
-- Scanning a big folder on Windows and Linux now shows the same unobtrusive progress pill as
-  the rest of the walk, instead of a separate "Scanning Folder" window that appeared first and
-  then handed over to the pill. It shows the folder being walked, a live count and a Cancel
-  button, and it no longer takes over the screen before your first photo arrives. macOS already
-  worked this way.
-
-### Fixed
-
-- Zooming in now shows real detail instead of magnifying the screen-sized picture. Blaze
-  already keeps the full-resolution photo ready, which is why the 1:1 key is instant.
-  Zooming with `=`/`-`, a pinch, or the scroll wheel now uses it too, so you see every pixel
-  the file has, up to 100%. It is instant for the same reason 1:1 is: the picture was
-  already loaded.
-- Opening a password-protected archive no longer blows the toolbar and panels up to a huge,
-  stretched size. They stayed that way until you resized the window; now they don't.
+- After a wrong password, the cursor stays in the password box on macOS, so you can just type
+  the next attempt instead of clicking back into the field first.
+- Cancelling a folder scan before any photo has appeared now returns you to the welcome
+  screen instead of leaving a blank window.
 - The About box's tagline now mentions video, not just images, and the FFmpeg license line no
   longer wraps awkwardly mid-parenthetical on macOS.
 
