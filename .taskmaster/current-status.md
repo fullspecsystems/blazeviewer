@@ -1,14 +1,13 @@
 # Blaze Viewer — Current Status (session handoff)
 
-_Last updated: 2026-07-22 (rev 35). **0.3.1 SHIPPED on macOS + Linux** (tagged `v0.3.1`, notarized DMG +
-both AppImages published, feeds live) — **Windows is the owner's to cut** (see 🚦 below). Contents:
-#131 NS0 de-dup (both platforms), #109 ring-bridge close-out (B+A), the door-card/#132 fix, with the
-zoom-quality fix as the headline user-facing win. Everything on `main`, pushed
-(`git rev-list HEAD...origin/main` = 0/0)._
+_Last updated: 2026-07-23 (rev 36). **0.3.1 SHIPPED on macOS + Linux + Windows x64** (tagged `v0.3.1`) —
+**only Windows ARM64 remains** (owner cutting it on a separate box). Contents: #131 NS0 de-dup (both
+platforms), #109 ring-bridge close-out (B+A), the door-card/#132 fix, with the zoom-quality fix as the
+headline user-facing win. Everything on `main`, pushed (`git rev-list HEAD...origin/main` = 0/0)._
 
 ---
 
-# 🚦 0.3.1 release — macOS + Linux SHIPPED (2026-07-22); Windows is the owner's to cut
+# 🚦 0.3.1 release — macOS + Linux + Windows x64 SHIPPED; only Windows ARM64 remains
 
 **Tagged `v0.3.1` (commit `50775079`), pushed.** CHANGELOG rolled into `## [0.3.1] - 2026-07-22` with a
 Highlights block (zoom / damaged-image recovery / archive+thumbnails polish); fresh `[Unreleased]`.
@@ -19,14 +18,21 @@ Highlights block (zoom / damaged-image recovery / archive+thumbnails polish); fr
   + Sparkle appcast (EdDSA) + `latest` symlink; download page bumped. Auto-update live.
 - **✅ Linux — RELEASED.** `release-linux-docker.sh both --upload` → both AppImages (x86_64 77.8 MB,
   aarch64 74.8 MB) + sha256 + `latest.json`; `/latest/linux` + `/latest/linux-arm64` HTTP 200.
-- **🪟 Windows — OWNER'S to cut** (native boxes; no cross toolchain). `git fetch --tags && git checkout
-  v0.3.1` on each, then `pwsh scripts/release-windows.ps1 -Upload` (x64) / `-Arch arm64` (ARM64 VM).
-  Automated gates already green; do the interactive GUI shakedown first (below), then cut.
+- **✅ Windows x64 (`win` channel) — RELEASED 2026-07-23.** Built from `git checkout v0.3.1` (commit
+  `50775079`) via `pwsh scripts/release-windows.ps1 -Upload` on the x64 desktop: release build clean,
+  **clean-tree gate passed after build** (not `-dirty`), signed via Azure Trusted Signing, 7 LGPL native
+  DLLs staged, `vpk pack 0.3.1` built the full + **delta 0.3.0→0.3.1** + Setup. Upload: rsync dropped the
+  connection (exit 12) but the script's **scp fallback** uploaded all 10 files. **Verified live:**
+  `releases.win.json` (HTTP 200) lists 0.3.1 Full+Delta; `BlazeViewer-0.3.1-full.nupkg` + `…-Setup.exe`
+  both HTTP 200 with matching sizes. Auto-update feed live at `downloads.blazeviewer.app/win`.
+- **🪟 Windows ARM64 (`win-arm64`) — OWNER cutting on a separate box.** `git fetch --tags && git checkout
+  v0.3.1`, then `pwsh scripts/release-windows.ps1 -Arch arm64 -Upload` on the ARM64 VM (needs the
+  `arm64-windows` vcpkg DLL triplet). Lands in the same flat feed under `win-arm64`; installs only
+  auto-update within their own channel, so it won't cross the x64 push.
 
-The Windows **automated** gates are already green (below); the CHANGELOG is rolled and `v0.3.1` is
-tagged, so Windows just needs `git checkout v0.3.1` → build → the interactive GUI shakedown → cut. The
-churn was heavy tech-debt (NS0, god-object split, DRY, media de-dup, ring bridge), so a regression reads
-as "broken", not "new" — do the shakedown, don't skip it.
+The Windows **automated** gates were verified green (below) before the x64 cut. The heavy tech-debt churn
+(NS0, god-object split, DRY, media de-dup, ring bridge) means a regression reads as "broken", not "new" —
+the interactive GUI shakedown still applies to the ARM64 box before its cut.
 
 **✅ Windows automated gates — VERIFIED 2026-07-22 (this session):**
 - **Everything builds.** `cargo clippy --workspace --all-targets -- -D warnings` clean; the **ship-feature
