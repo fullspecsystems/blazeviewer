@@ -275,9 +275,9 @@ impl AppCore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app_core_impl::test_support::{ARCHIVE, FakeArchive, test_core};
-    
-    use crate::archive_open::{ArchiveOutcome};
+    use crate::app_core_impl::test_support::{test_core, FakeArchive, ARCHIVE};
+
+    use crate::archive_open::ArchiveOutcome;
 
     /// A headless core over a fake archive deck, installed the way a real
     /// archive open lands ([`AppCore::apply_archive`]).
@@ -482,7 +482,10 @@ mod tests {
     #[test]
     fn archive_loading_tracks_archive_load_with_no_shell_sync() {
         let idle = test_core();
-        assert!(!idle.archive_loading(), "idle core: no archive open in flight");
+        assert!(
+            !idle.archive_loading(),
+            "idle core: no archive open in flight"
+        );
 
         let (mut core, _tx) = armed_archive_core(None);
         assert!(

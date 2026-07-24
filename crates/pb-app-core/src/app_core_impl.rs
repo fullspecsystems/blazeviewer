@@ -4787,9 +4787,13 @@ fn run_platform_video_producer(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use test_support::{DeriveOk, FakeArchive, clipboard_text_effects, five_photos, make_resident, photos_named, poster_payload, rgba_full, seed_details, stuck_preview_core, test_core, text_result, track};
     use crate::contract::{CoreEvent, Modifiers};
     use crate::PbKey;
+    use test_support::{
+        clipboard_text_effects, five_photos, make_resident, photos_named, poster_payload,
+        rgba_full, seed_details, stuck_preview_core, test_core, text_result, track, DeriveOk,
+        FakeArchive,
+    };
 
     /// A minimal `AppCore` for driving `handle` in tests — the public [`AppCore::headless`]
     /// constructor at a 1×1 viewport (one construction literal, shared with the NS1 FFI bridge).
@@ -4820,7 +4824,6 @@ mod tests {
             "the engine must follow the settings that were actually loaded"
         );
     }
-
 
     /// `C` / View ▸ Subtitles flips the engine's mode, records the preference, and says
     /// which way it went — the whole switch, replacing the old dev env flag.
@@ -5153,8 +5156,6 @@ mod tests {
 
     // --- "Text in image" state machine (task #45): drive `poll_text_scan` with a
     // hand-fed channel — the worker/OCR backend stays out of these tests entirely.
-
-
 
     #[test]
     fn info_line_and_inspector_are_independent() {
@@ -5615,7 +5616,6 @@ mod tests {
     // everywhere: they inject an `AnimStream` by hand — exactly what `start_live_stream`
     // builds — and drive `poll_anim_stream` through install / extend / finish / failure.
 
-
     /// The honest-UX DoVi warning (macos-video-smoothness §2): a Session-route
     /// video whose probe flagged a non-backward-compatible Dolby Vision stream
     /// (Profile 5 / compat-id 0) toasts once — and only once per item.
@@ -5678,8 +5678,6 @@ mod tests {
     }
 
     // -- media-track Details rows (task #98) --------------------------------
-
-
 
     // -- the off-thread Details probe (task 98.6) ---------------------------
 
@@ -5988,7 +5986,6 @@ mod tests {
     }
 
     // --- Poster selection (task #114, phase 1) ------------------------------
-
 
     #[cfg(windows)]
     #[test]
@@ -7476,8 +7473,6 @@ mod tests {
 
     // -- #126 step 2: the archive-open lifecycle, now core-owned -----------------------------
 
-    
-
     /// §12.6's whole point, now provable: the core cancels the displaced walk ITSELF, because
     /// both flows share one generation space. The shells used to do this by hand, and the
     /// interim step-1 code had to do it unconditionally because the open was not registered.
@@ -7511,7 +7506,6 @@ mod tests {
     }
 
     // -- #126 step 1: the directory-scan lifecycle, now core-owned --------------------------
-
 
     // -- #124: smooth zoom binds the resident Original ----------------------------------
 
@@ -7671,7 +7665,6 @@ mod tests {
         core.upgrade_done.insert(0);
         assert_eq!(core.sharpen_now(), None, "sharp now — the pie stops");
     }
-
 
     /// A real blaze must never trip the watchdog: every advance re-arms the stamp for the new
     /// displayed item, so cumulative hold time is irrelevant — only *lingering on one photo*
@@ -8651,5 +8644,4 @@ mod tests {
             "the last full landing must record open->all-cached"
         );
     }
-
 }

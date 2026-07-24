@@ -415,4 +415,3 @@ pub(super) const ARCHIVE: &[&str] = &[
     "a/four.jpg",
     "top.jpg",
 ];
-

@@ -868,8 +868,8 @@ impl AppCore {
 mod tests {
     use super::*;
     use crate::animation::AnimStream;
+    use crate::app_core_impl::test_support::test_core;
     use std::sync::mpsc;
-    use crate::app_core_impl::test_support::{test_core};
 
     /// Wire a synthetic streaming decode for `item`, exactly like `start_live_stream` does,
     /// returning the producer's sender and the shared cancel flag.

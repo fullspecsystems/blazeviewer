@@ -1642,8 +1642,9 @@ impl AppCore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app_core_impl::test_support::{core_with_a_native_video, seed_details, test_core, track};
-    
+    use crate::app_core_impl::test_support::{
+        core_with_a_native_video, seed_details, test_core, track,
+    };
 
     /// **Regression.** Subtitles gated on `video_session_active()`, which is false for the
     /// Native backend. When the macOS sample-buffer route became the default for MKV/WebM,
@@ -3084,5 +3085,4 @@ mod tests {
         assert!(core.video_osd_until.is_none(), "no video → no flash");
         drop(io);
     }
-
 }

@@ -193,8 +193,8 @@ impl AppCore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app_core_impl::test_support::{test_core};
-    use crate::contract::{CoreEvent};
+    use crate::app_core_impl::test_support::test_core;
+    use crate::contract::CoreEvent;
 
     #[test]
     fn os_theme_resolves_through_the_appearance_preference() {

@@ -42,7 +42,7 @@ impl AppCore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app_core_impl::test_support::{test_core};
+    use crate::app_core_impl::test_support::test_core;
 
     /// The session password cache (session-archive-password-cache): harvest/promote via
     /// `remember_archive_password` is MRU-ordered, deduped, empty-ignoring, capped, and

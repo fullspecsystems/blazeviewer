@@ -407,7 +407,7 @@ impl AppCore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app_core_impl::test_support::{StashOk, make_resident, photos_named, test_core};
+    use crate::app_core_impl::test_support::{make_resident, photos_named, test_core, StashOk};
 
     #[test]
     fn scale_mode_change_is_geometry_only_not_content() {

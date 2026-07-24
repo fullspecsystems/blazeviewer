@@ -246,7 +246,9 @@ impl AppCore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app_core_impl::test_support::{core_with_a_native_video, seed_details, test_core, track};
+    use crate::app_core_impl::test_support::{
+        core_with_a_native_video, seed_details, test_core, track,
+    };
 
     /// The same rule for the other way out: a video that stops must not leave its last cue
     /// hanging over whatever is on screen next.

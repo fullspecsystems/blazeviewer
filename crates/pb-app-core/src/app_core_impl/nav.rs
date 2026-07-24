@@ -346,9 +346,11 @@ impl AppCore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::PbKey;
+    use crate::app_core_impl::test_support::{
+        five_photos, make_resident, photos_named, stuck_preview_core, test_core, DeriveOk,
+    };
     use crate::contract::CoreEvent;
-    use crate::app_core_impl::test_support::{DeriveOk, five_photos, make_resident, photos_named, stuck_preview_core, test_core};
+    use crate::PbKey;
 
     #[test]
     fn rebuild_playlist_records_last_folder_but_only_for_folder_backed_opens() {
@@ -642,5 +644,4 @@ mod tests {
         core.handle(CoreEvent::FocusLost);
         assert_eq!(core.pointer_nav, None);
     }
-
 }

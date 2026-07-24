@@ -339,8 +339,8 @@ impl AppCore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app_core_impl::test_support::{test_core};
-    use crate::dir_scan::{ScanDialogRequest};
+    use crate::app_core_impl::test_support::test_core;
+    use crate::dir_scan::ScanDialogRequest;
 
     /// Arm a scan on a core with a channel the TEST drives - no thread, no sleeps. This is
     /// the deterministic completion point Codex asked an injectable runtime for; the mpsc

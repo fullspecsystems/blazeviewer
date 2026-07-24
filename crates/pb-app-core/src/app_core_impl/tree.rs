@@ -595,8 +595,8 @@ impl AppCore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app_core_impl::test_support::{test_core};
-    use crate::contract::{CoreEvent};
+    use crate::app_core_impl::test_support::test_core;
+    use crate::contract::CoreEvent;
 
     #[test]
     fn native_tree_visibility_and_safe_activate() {
@@ -642,7 +642,10 @@ mod tests {
         let tree_root = core.fs_tree.as_ref().unwrap().root().to_path_buf();
         // A fresh tree roots one level above the deck root so the deck shows among its siblings.
         assert_eq!(tree_root, PathBuf::from("/A/B"));
-        assert!(core.root.starts_with(&tree_root), "deck root under tree root");
+        assert!(
+            core.root.starts_with(&tree_root),
+            "deck root under tree root"
+        );
 
         // The breadcrumb opens ancestor `/A`: the recursive scan makes `/A` the deck root, but
         // the first/current image is still under the old tree root `/A/B`. The current-folder-only

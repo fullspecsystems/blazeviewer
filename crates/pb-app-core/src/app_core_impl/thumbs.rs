@@ -165,7 +165,9 @@ impl AppCore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app_core_impl::test_support::{five_photos, photos_named, poster_payload, test_core};
+    use crate::app_core_impl::test_support::{
+        five_photos, photos_named, poster_payload, test_core,
+    };
 
     /// A poster walk cuts its thumb whether or not the strip was ever opened, and
     /// that tile must be KEPT. Discarding it was the "open the thumbnail panel late

@@ -123,7 +123,7 @@ impl AppCore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app_core_impl::test_support::{FakeArchive, test_core};
+    use crate::app_core_impl::test_support::{test_core, FakeArchive};
 
     /// pool-decoded poster lands at the launch epoch, MUST become resident AND be
     /// presented — exactly as a photo does. Reproduces the launch state
@@ -442,5 +442,4 @@ mod tests {
         assert!(core.door_presented());
         assert!(core.door_card().is_some());
     }
-
 }

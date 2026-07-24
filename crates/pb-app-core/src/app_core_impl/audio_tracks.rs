@@ -236,7 +236,9 @@ impl AppCore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app_core_impl::test_support::{core_with_a_native_video, five_photos, seed_details, test_core, track};
+    use crate::app_core_impl::test_support::{
+        core_with_a_native_video, five_photos, seed_details, test_core, track,
+    };
 
     /// A playing video whose catalog carries `n` audio tracks.
     fn core_with_audio_tracks(n: u64) -> AppCore {
@@ -368,5 +370,4 @@ mod tests {
         assert!(!core.displayed_is_video());
         assert!(core.audio_picker_rows().is_empty());
     }
-
 }

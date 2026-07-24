@@ -781,9 +781,9 @@ impl AppCore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::Viewport;
     use crate::app_core_impl::test_support::{photos_named, test_core};
-    use crate::contract::{CoreEvent};
+    use crate::contract::CoreEvent;
+    use crate::Viewport;
 
     #[test]
     fn info_line_fields_respect_the_settings_toggles() {
@@ -1268,5 +1268,4 @@ mod tests {
         core.native_open = false;
         assert!(!core.open_panel_visible());
     }
-
 }

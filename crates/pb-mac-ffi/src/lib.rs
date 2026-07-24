@@ -5128,8 +5128,7 @@ mod tests {
         off.core.effects.clear();
         off.open_tree_folder("/A");
         assert!(
-            !off
-                .core
+            !off.core
                 .effects
                 .iter()
                 .any(|e| matches!(e, contract::CoreEffect::BeginDirScan { .. })),
