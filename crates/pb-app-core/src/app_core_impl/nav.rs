@@ -237,6 +237,18 @@ impl AppCore {
     /// previous target, so the press can't be serviced yet — flashes the loading
     /// pie (brighten-on-keypress) so the input never feels dead.
     pub fn nav_press(&mut self, key: PbKey, action: Action) {
+        // Space over a live video pauses/resumes instead of skipping away (task
+        // #94, the arrows-become-seek precedent). Keyboard-only — the menu's
+        // "Next image" dispatches through `dispatch_action` and still navigates
+        // — and deliberately BEFORE the held-key insert, so holding space can't
+        // hold-to-blaze off a video it just paused. `Ended`/`Failed` clips fall
+        // through to plain navigation (space never replays a finished film).
+        if action == Action::Next && self.space_toggles_video() {
+            if let Some(item) = self.displayed_item {
+                self.video_play_pause(item);
+            }
+            return;
+        }
         self.held.insert(key, action);
         self.hold_start = Some(self.now);
         let Some(nav) = nav_of(action) else {

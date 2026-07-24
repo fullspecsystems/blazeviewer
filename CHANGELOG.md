@@ -7,6 +7,13 @@ with any pre-release suffix carried only by the tag.
 
 ## [Unreleased]
 
+### Changed
+
+- Pressing Space while a video is playing now pauses it (and resumes when
+  paused) instead of skipping to the next item — the same contextual override
+  the arrow keys already do for seeking. Once the clip ends, Space goes back to
+  being "next". The menu's "Next image" and the `P` key are unchanged.
+
 ### Fixed
 
 - **Watching a long video no longer eats all your memory.** Every FFmpeg-backed

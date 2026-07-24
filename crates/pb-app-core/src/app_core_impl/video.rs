@@ -312,6 +312,22 @@ impl AppCore {
     /// resume/replay of a live native player are wired with input parity (79.9
     /// phase 3) via the `PauseVideo`/`ResumeVideo`/`SeekVideoFraction` commands;
     /// the "start fresh" default still opens playback through `start_video_session`.
+    /// Whether a **space** press should pause/resume the current video instead of
+    /// navigating (task #94, the arrows-become-seek precedent): true while the
+    /// displayed item has a live, non-terminal playback — begun (`Opening`/
+    /// `Buffering`/`Seeking`), running (`Playing`), or held (`Paused`). An
+    /// `Ended`/`Failed`/`Stopped` clip — and anything that isn't a video — leaves
+    /// space as plain navigation, so it never replays a finished film. Only
+    /// `nav_press` (the keyboard) consults this; the menu's "Next image" always
+    /// navigates.
+    pub(crate) fn space_toggles_video(&self) -> bool {
+        use crate::video::VideoSessionState::*;
+        self.video.as_ref().is_some_and(|v| {
+            Some(v.item()) == self.displayed_item
+                && matches!(v.state(), Opening | Buffering | Playing | Paused | Seeking)
+        })
+    }
+
     pub fn video_play_pause(&mut self, item: usize) {
         use crate::video::VideoSessionState::*;
         let existing = self.video.as_ref().map(|v| (v.item(), v.state()));
@@ -2341,6 +2357,84 @@ mod tests {
         core.effects.clear();
         core.video_seek(false);
         assert_eq!(seek_of(&core), Some((7, 3, 10_000)));
+    }
+
+    /// #94: a space press over a **live** video pauses (Playing) or resumes
+    /// (Paused) instead of navigating away — and is deliberately NOT tracked as
+    /// a held nav key, so holding space can't blaze off a video it just paused.
+    #[test]
+    fn space_pauses_a_playing_video_and_resumes_a_paused_one() {
+        use crate::pb_key::PbKey;
+        let mut core = core_with_a_native_video(); // Playing, item 0 displayed
+        core.effects.clear();
+        core.nav_press(PbKey::Space, Action::Next);
+        assert!(
+            core.effects
+                .iter()
+                .any(|e| matches!(e, contract::CoreEffect::PauseVideo { .. })),
+            "space on a playing video pauses it"
+        );
+        assert!(core.held.is_empty(), "the press must not arm hold-to-blaze");
+
+        // The shell confirms the pause; the next space resumes.
+        if let Some(crate::video_native::ActiveVideoBackend::Native(p)) = core.video.as_mut() {
+            p.on_state_changed(
+                pb_decode::VideoSessionId(7),
+                crate::video::VideoSessionState::Paused,
+            );
+        }
+        core.effects.clear();
+        core.nav_press(PbKey::Space, Action::Next);
+        assert!(
+            core.effects
+                .iter()
+                .any(|e| matches!(e, contract::CoreEffect::ResumeVideo { .. })),
+            "space on a paused video resumes it"
+        );
+    }
+
+    /// #94: once the clip has ENDED (or the session is gone), space is plain
+    /// navigation again — it must not replay the video, and it arms
+    /// hold-to-blaze exactly like before.
+    #[test]
+    fn space_navigates_normally_past_an_ended_video() {
+        use crate::pb_key::PbKey;
+        let mut core = core_with_a_native_video();
+        if let Some(crate::video_native::ActiveVideoBackend::Native(p)) = core.video.as_mut() {
+            p.on_state_changed(
+                pb_decode::VideoSessionId(7),
+                crate::video::VideoSessionState::Ended,
+            );
+        }
+        core.effects.clear();
+        core.nav_press(PbKey::Space, Action::Next);
+        assert!(
+            !core.effects.iter().any(|e| matches!(
+                e,
+                contract::CoreEffect::PauseVideo { .. } | contract::CoreEffect::ResumeVideo { .. }
+            )),
+            "an ended clip must not be replayed by space"
+        );
+        assert!(
+            core.held.contains_key(&PbKey::Space),
+            "space is a nav key again (hold-to-blaze arms)"
+        );
+    }
+
+    /// #94 guard: only the KEYBOARD press is overridden — the menu's "Next image"
+    /// (`dispatch_action`) still navigates over a playing video.
+    #[test]
+    fn menu_next_still_navigates_over_a_playing_video() {
+        let mut core = core_with_a_native_video();
+        core.effects.clear();
+        core.dispatch_action(Action::Next);
+        assert!(
+            !core.effects.iter().any(|e| matches!(
+                e,
+                contract::CoreEffect::PauseVideo { .. } | contract::CoreEffect::ResumeVideo { .. }
+            )),
+            "the menu's Next must never toggle playback"
+        );
     }
 
     /// The macOS archive-video byte stash is pulled exactly once — a second pull (a stale
