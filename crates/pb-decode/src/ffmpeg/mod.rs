@@ -34,6 +34,25 @@
 // the alternative was cfg-gating ~20 items one by one, which would rot.
 #![cfg_attr(not(feature = "ffvideo"), allow(dead_code))]
 
+use ffmpeg_next as ff;
+
+/// `av_read_frame` into a **reused** packet without leaking the previous
+/// payload (the 2026-07-24 OOM, task #135). FFmpeg's contract: the destination
+/// "must not contain data that needs to be freed" — the caller unrefs between
+/// reads. `ffmpeg_next::Packet::read` is a bare `av_read_frame`, so every
+/// hand-rolled loop here that reuses one `ff::Packet` leaked every packet's
+/// buffer — ~the container bitrate, per open input (a 4K film leaked ~10+ MB/s
+/// until the machine OOMed). Every packet-read loop in this tree MUST use this,
+/// never `Packet::read` directly.
+pub(crate) fn read_into_reused(
+    packet: &mut ff::Packet,
+    ctx: &mut ff::format::context::Input,
+) -> Result<(), ff::Error> {
+    use ff::packet::Mut;
+    unsafe { ff::ffi::av_packet_unref(packet.as_mut_ptr()) };
+    packet.read(ctx)
+}
+
 pub mod color;
 pub mod convert;
 pub mod cues;

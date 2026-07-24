@@ -380,7 +380,7 @@ impl Reader {
             }
             let read_result = if let Some(stats) = self.stall_stats.as_mut() {
                 let t0 = Instant::now();
-                let r = self.packet.read(self.input.ctx());
+                let r = super::read_into_reused(&mut self.packet, self.input.ctx());
                 let now = Instant::now();
                 if let Some(w) = stats.fold(now - t0, now) {
                     eprintln!(
@@ -390,7 +390,7 @@ impl Reader {
                 }
                 r
             } else {
-                self.packet.read(self.input.ctx())
+                super::read_into_reused(&mut self.packet, self.input.ctx())
             };
             match read_result {
                 Ok(()) => {
@@ -733,6 +733,109 @@ mod tests {
         );
         let _ = msgs.send(VideoProducerMsg::Stop);
         (rt, fmt)
+    }
+
+    /// #133 leak probe: play `PB_LEAK_CLIP` at REALTIME pacing (credits granted
+    /// on a media-clock schedule, like the session) with the audio decoder
+    /// reading alongside — the shape of a real long watch — and print this
+    /// process's RSS every 10 s. A leak proportional to playback shows as a
+    /// monotonic climb; the two 64 MiB rings + decode pipeline should plateau.
+    /// `PB_LEAK_CLIP=/path PB_LEAK_SECS=90 cargo test -p pb-decode --features \
+    ///   ffvideo leak_probe -- --nocapture --ignored`
+    #[test]
+    #[ignore = "diagnostic — needs PB_LEAK_CLIP"]
+    fn leak_probe_realtime_play_holds_rss_flat() {
+        let Ok(clip) = std::env::var("PB_LEAK_CLIP") else {
+            eprintln!("skipping: set PB_LEAK_CLIP to a long local/network clip");
+            return;
+        };
+        let secs: u64 = std::env::var("PB_LEAK_SECS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(90);
+        let rss_mb = || -> f64 {
+            let out = std::process::Command::new("ps")
+                .args(["-o", "rss=", "-p", &std::process::id().to_string()])
+                .output()
+                .expect("ps");
+            String::from_utf8_lossy(&out.stdout)
+                .trim()
+                .parse::<f64>()
+                .unwrap_or(0.0)
+                / 1024.0
+        };
+        let input = VideoInput::Path(clip.clone().into());
+        // Audio alongside, reading 4096-frame chunks at its own realtime pace.
+        let audio_stop = Arc::new(AtomicBool::new(false));
+        let audio_flag = audio_stop.clone();
+        let audio_input = input.clone();
+        let audio = std::thread::spawn(move || {
+            let Ok(mut d) =
+                super::super::audio_decoder::FfAudioDecoder::open_capped(&audio_input, 2)
+            else {
+                eprintln!("[leak] no audio track — video only");
+                return;
+            };
+            let rate = d.rate().max(1) as u64;
+            while !audio_flag.load(std::sync::atomic::Ordering::Relaxed) {
+                match d.read(4096) {
+                    Ok(chunk) if chunk.is_empty() => break,
+                    Ok(_) => std::thread::sleep(Duration::from_millis(4096 * 1000 / rate / 2)),
+                    Err(_) => break,
+                }
+            }
+        });
+        let (msgs, events) = spawn_input_opts(input, crate::VideoProducerOptions::default());
+        match events
+            .recv_timeout(Duration::from_secs(30))
+            .expect("opened")
+        {
+            VideoProducerEvent::Opened { width, height, .. } => {
+                eprintln!("[leak] opened {width}x{height}; RSS {:.0} MB", rss_mb());
+            }
+            other => panic!("expected Opened, got {other:?}"),
+        }
+        const PIPELINE: usize = 6;
+        for _ in 0..PIPELINE {
+            msgs.send(VideoProducerMsg::Credit).unwrap();
+        }
+        let t0 = Instant::now();
+        let mut last_report = Instant::now();
+        let mut frames = 0u64;
+        let mut baseline: Option<f64> = None;
+        while t0.elapsed() < Duration::from_secs(secs) {
+            match events.recv_timeout(Duration::from_secs(20)) {
+                Ok(VideoProducerEvent::Frame(f)) => {
+                    frames += 1;
+                    // Realtime pacing: don't out-run the media clock (the
+                    // session's credits are demand-driven the same way).
+                    let ahead = f.pts.saturating_sub(t0.elapsed());
+                    if ahead > Duration::from_millis(250) {
+                        std::thread::sleep(ahead - Duration::from_millis(200));
+                    }
+                    let _ = msgs.send(VideoProducerMsg::Credit);
+                }
+                Ok(VideoProducerEvent::EndOfStream { .. }) => break,
+                Ok(_) => {}
+                Err(_) => panic!("producer stalled after {frames} frames"),
+            }
+            if last_report.elapsed() >= Duration::from_secs(10) {
+                last_report = Instant::now();
+                let rss = rss_mb();
+                let base = *baseline.get_or_insert(rss);
+                eprintln!(
+                    "[leak] t={:.0}s frames={frames} RSS {:.0} MB (Δ{:+.0} MB)",
+                    t0.elapsed().as_secs_f64(),
+                    rss,
+                    rss - base
+                );
+            }
+        }
+        audio_stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        let _ = msgs.send(VideoProducerMsg::Stop);
+        let _ = audio.join();
+        let rss = rss_mb();
+        eprintln!("[leak] END frames={frames} RSS {:.0} MB", rss);
     }
 
     /// 0D headless margin trace (plan §6.0D / task #91 Phase 2), **A/B**: the

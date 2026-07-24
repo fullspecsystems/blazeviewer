@@ -162,7 +162,7 @@ pub fn ff_stream_subtitle_cues(
 
     loop {
         opened.set_op_deadline(Some(READ_DEADLINE));
-        let r = packet.read(opened.ctx());
+        let r = super::read_into_reused(&mut packet, opened.ctx());
         opened.set_op_deadline(None);
         match r {
             Ok(()) => {}

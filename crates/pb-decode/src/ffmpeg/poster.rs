@@ -247,7 +247,7 @@ impl PosterBackend for PosterWalk<'_> {
             if self.eof_sent {
                 break; // decoder fully drained
             }
-            match self.packet.read(self.opened.ctx()) {
+            match super::read_into_reused(&mut self.packet, self.opened.ctx()) {
                 Ok(()) => {
                     if self.packet.stream() == self.facts.index {
                         // A corrupt packet is skipped, not fatal.

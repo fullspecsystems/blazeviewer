@@ -385,7 +385,7 @@ impl FfAudioDecoder {
                     "audio stream produced no frame (corrupt input?)".into(),
                 ));
             }
-            match self.packet.read(self.input.ctx()) {
+            match super::read_into_reused(&mut self.packet, self.input.ctx()) {
                 Ok(()) => {
                     if self.packet.stream() == self.index {
                         stuck += 1;

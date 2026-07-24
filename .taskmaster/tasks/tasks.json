@@ -1650,6 +1650,15 @@
         "priority": "medium",
         "dependencies": [],
         "subtasks": []
+      },
+      {
+        "id": 135,
+        "title": "FFmpeg packet leak in every hand-rolled read loop (the 2026-07-24 OOM)",
+        "description": "Root cause of the M5 Air OOM (Blaze at 44.89 GB): av_read_frame requires the destination packet to be unreffed by the caller between reads, but ffmpeg_next Packet::read is a bare av_read_frame — every loop reusing one ff::Packet (video producer, audio decoder incl. its skip-all-video-packets loop, VideoDemuxer, cues scan, poster walk) leaked every packet buffer, ~the container bitrate per open input. Confirmed with `leaks` (1.08 GB in 587k av_malloc/av_buffer_realloc blocks after 80 s of realtime play) and fixed with ffmpeg::read_into_reused (av_packet_unref before read) at all 6 sites; the leak_probe ignored test (PB_LEAK_CLIP) shows RSS dead-flat at 1128 MB for 2 min vs +139 MB/10s before. Pre-dates #133 — the read-ahead ring merely made long smooth playback possible, letting the leak run to OOM; it also retroactively explains the ORIGINAL Air report (choppy after minutes even from local SSD = leak -> swap on 16 GB). Owner long-play validation pending.",
+        "status": "review",
+        "priority": "high",
+        "dependencies": [],
+        "subtasks": []
       }
     ],
     "metadata": {

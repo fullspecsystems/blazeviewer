@@ -9,6 +9,13 @@ with any pre-release suffix carried only by the tag.
 
 ### Fixed
 
+- **Watching a long video no longer eats all your memory.** Every FFmpeg-backed
+  playback path (video, audio, posters, subtitles) leaked each compressed
+  packet it read — roughly the file's bitrate per open stream, gigabytes over a
+  feature film — which on smaller-RAM machines ended in the whole system
+  swapping and the app (or the OS) dying. Memory now stays flat for the length
+  of the film. This also explains earlier "playback gets choppy after several
+  minutes" reports on laptops: the machine was quietly drowning in swap.
 - Playing a video from a network share (SMB/NAS) no longer turns choppy in
   high-bitrate scenes: playback now buffers a bounded amount of the stream
   ahead in RAM (nothing is written to disk), so network hiccups are absorbed

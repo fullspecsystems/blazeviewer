@@ -186,7 +186,7 @@ impl VideoDemuxer {
         let index = self.info.facts.index;
         loop {
             self.input.set_op_deadline(Some(READ_DEADLINE));
-            let r = self.packet.read(self.input.ctx());
+            let r = super::read_into_reused(&mut self.packet, self.input.ctx());
             self.input.set_op_deadline(None);
             match r {
                 Ok(()) => {
