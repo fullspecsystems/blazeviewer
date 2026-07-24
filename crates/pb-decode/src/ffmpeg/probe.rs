@@ -225,6 +225,30 @@ pub fn dovi_summary(stream: &ff::format::stream::Stream) -> Option<crate::video:
 
 /// Codec display names for the inspector panel — the same vocabulary the
 /// Windows (MF subtype) and macOS (AVFoundation) probes use.
+/// Mark every stream except `keep` as `AVDISCARD_ALL` (task #133 slice 3).
+///
+/// Scope guard: call this **only where the kept stream is the video stream**
+/// (the producer, `VideoDemuxer`) — setting it around a kept *audio* stream
+/// would risk the audio decoder's deliberate `stream_index = -1` seek (Matroska
+/// Cues index the video track; see `audio_decoder.rs::seek`). Honest yield:
+/// this saves demux-side parse/alloc/queue work everywhere, and skips unread
+/// sample bytes on mov-family containers — on Matroska the payload bytes are
+/// read before the discard check, so it is hygiene there, not traffic.
+pub fn discard_all_except(ctx: &mut ff::format::context::Input, keep: usize) {
+    unsafe {
+        let fmt = ctx.as_mut_ptr();
+        for i in 0..(*fmt).nb_streams as usize {
+            if i == keep {
+                continue;
+            }
+            let st = *(*fmt).streams.add(i);
+            if !st.is_null() {
+                (*st).discard = ff::ffi::AVDiscard::AVDISCARD_ALL;
+            }
+        }
+    }
+}
+
 pub fn codec_display_name(id: ff::codec::Id) -> &'static str {
     use ff::codec::Id;
     match id {

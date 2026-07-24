@@ -918,6 +918,17 @@ impl VideoSession {
     }
 }
 
+/// A dropped-without-`stop()` session still cancels the producer promptly
+/// (task #133 hardening, Codex disposition 8): channel disconnect alone is
+/// heard only *after* the producer's current blocking read returns — on a
+/// stalled network read that's a whole op-deadline away, and the read-ahead
+/// filler idles behind the same flag. Idempotent with [`VideoSession::stop`].
+impl Drop for VideoSession {
+    fn drop(&mut self) {
+        self.cancel.store(true, Ordering::Relaxed);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1597,6 +1608,18 @@ mod tests {
             std::iter::from_fn(|| io.msgs.try_recv().ok()).any(|m| m == VideoProducerMsg::Stop);
         assert!(got_stop, "producer must be told to stop");
         assert!(s.poll(t0).present.is_none(), "terminal: polls are inert");
+    }
+
+    /// #133 hardening: dropping the session WITHOUT calling `stop()` still
+    /// flips the shared cancel flag, so a producer blocked in a network read
+    /// (and the read-ahead filler behind the same flag) retires promptly
+    /// instead of waiting out the op-deadline on channel disconnect.
+    #[test]
+    fn dropping_the_session_cancels_the_producer() {
+        let (s, io) = VideoSession::new(SID, FRAME_BYTES);
+        assert!(!io.cancel.load(Ordering::Relaxed));
+        drop(s);
+        assert!(io.cancel.load(Ordering::Relaxed), "drop must cancel");
     }
 
     #[test]

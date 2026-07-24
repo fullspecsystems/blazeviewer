@@ -129,9 +129,28 @@ impl VideoDemuxer {
     /// Open `input` and read the stream facts. `cancel` is the shared teardown
     /// flag (flipped on stop): a blocking read then aborts inside libav.
     pub fn open(input: &VideoInput, cancel: Arc<AtomicBool>) -> Result<Self, String> {
-        let mut ff_in = FfInput::open(input, None)?;
+        Self::open_impl(input, cancel, true)
+    }
+
+    /// The real open. `playback = false` is the tests' control path — no
+    /// read-ahead ring, no stream discard — i.e. the pre-#133 behavior, so the
+    /// parity tests can compare the production path against it byte-for-byte.
+    fn open_impl(
+        input: &VideoInput,
+        cancel: Arc<AtomicBool>,
+        playback: bool,
+    ) -> Result<Self, String> {
+        let mut ff_in = if playback {
+            FfInput::open_playback(input, None)? // task #133: the read-ahead ring
+        } else {
+            FfInput::open(input, None)?
+        };
         ff_in.set_cancel(cancel);
         let facts = video_facts(ff_in.ctx())?;
+        if playback {
+            // Task #133 slice 3 (video-kept only — see the helper's scope guard).
+            super::probe::discard_all_except(ff_in.ctx(), facts.index);
+        }
         // One frame in stream units, for DTS synthesis. Falls back to 1 when fps is
         // unknown (keeps the synthesized ramp strictly increasing).
         let frame_dur = if facts.fps > 0.0 {
@@ -454,6 +473,68 @@ mod tests {
 
     fn cancel() -> Arc<AtomicBool> {
         Arc::new(AtomicBool::new(false))
+    }
+
+    /// #133 parity: the production open (read-ahead ring + stream discard) must
+    /// yield the byte-identical kept-stream packet sequence of the pre-#133
+    /// control path (direct IO, no discard). `multitrack.mkv` is the discard
+    /// case (audio+subs present); `longgop.mkv` the plain one.
+    #[test]
+    fn playback_open_packets_match_the_direct_control() {
+        for name in ["longgop.mkv", "multitrack.mkv"] {
+            let input = fixture(name);
+            let mut prod = VideoDemuxer::open(&input, cancel()).unwrap();
+            let mut ctrl = VideoDemuxer::open_impl(&input, cancel(), false).unwrap();
+            let mut n = 0u32;
+            loop {
+                let a = prod.read_packet().unwrap();
+                let b = ctrl.read_packet().unwrap();
+                match (a, b) {
+                    (None, None) => break,
+                    (Some(a), Some(b)) => {
+                        n += 1;
+                        assert_eq!(
+                            (a.pts, a.dts, a.duration, a.is_key),
+                            (b.pts, b.dts, b.duration, b.is_key),
+                            "{name}: packet {n} timing/key diverged"
+                        );
+                        assert_eq!(a.data, b.data, "{name}: packet {n} payload diverged");
+                    }
+                    (a, b) => panic!(
+                        "{name}: stream lengths diverged after {n} packets (prod={}, ctrl={})",
+                        a.is_some(),
+                        b.is_some()
+                    ),
+                }
+            }
+            assert!(n > 10, "{name}: expected a real packet stream, got {n}");
+        }
+    }
+
+    /// #133 parity: a mid-file seek through the ring lands on the same keyframe
+    /// and replays the same packets as the direct control.
+    #[test]
+    fn playback_open_seek_lands_like_the_direct_control() {
+        let input = fixture("longgop.mkv");
+        let mut prod = VideoDemuxer::open(&input, cancel()).unwrap();
+        let mut ctrl = VideoDemuxer::open_impl(&input, cancel(), false).unwrap();
+        // Read a few packets first so the seek crosses a warm demuxer state.
+        for _ in 0..3 {
+            let _ = prod.read_packet().unwrap();
+            let _ = ctrl.read_packet().unwrap();
+        }
+        prod.seek(Duration::from_secs(6)).unwrap();
+        ctrl.seek(Duration::from_secs(6)).unwrap();
+        for i in 0..10 {
+            let a = prod.read_packet().unwrap().expect("prod packet");
+            let b = ctrl.read_packet().unwrap().expect("ctrl packet");
+            assert_eq!(
+                (a.pts, a.dts, a.is_key),
+                (b.pts, b.dts, b.is_key),
+                "packet {i}"
+            );
+            assert_eq!(a.data, b.data, "packet {i} payload");
+        }
     }
 
     #[test]

@@ -1607,6 +1607,49 @@
           109
         ],
         "subtasks": []
+      },
+      {
+        "id": 133,
+        "title": "Network video playback: read-ahead ring + AVDiscard + read-latency diagnostics",
+        "description": "SMB playback of high-bitrate video is input-starved (owner evidence 2026-07-23: GitS UHD choppy over SMB on the M5 Air, flawless locally, CPU 78% idle — starvation, not compute). Fix (v2, Codex-reviewed — 13 findings folded in): (1) PB_VIDEO_DIAG demux-stall + src-read latency windows; (2) a bounded RAM-only compressed read-ahead ring (64 MiB/ring, PB_READAHEAD_MB, 0=off) behind FfInput::open_playback for BOTH playback inputs — video producer, VideoDemuxer, and the audio decoder (the audio clock is the pacing master and its input reads the full interleaved file too; also the Windows ffprobe audio path); (3) AVDiscard scoped to video-kept opens only — matroskadec reads payloads before the discard check so MKV saves no bytes, and audio-side discard risks the -1 default-stream seek workaround; (4) rider: VideoSession cancels on Drop. Privacy-clean: RAM-only, per-file, dropped on teardown. Plan: .taskmaster/plans/133-network-video-readahead.md",
+        "status": "review",
+        "priority": "high",
+        "dependencies": [],
+        "subtasks": [
+          {
+            "id": 1,
+            "title": "ReadStats window accumulator + producer demux-stall diag (PB_VIDEO_DIAG)",
+            "description": "Pure 2s-window fold (reads/avg/max/>20ms/>40ms, injected now, unit-tested); producer times each packet.read.",
+            "status": "done"
+          },
+          {
+            "id": 2,
+            "title": "Read-ahead ring behind FfInput::open_playback (video + audio inputs)",
+            "description": "readahead.rs: ByteSource seam, ring + epoch-tagged filler, AVIO callbacks honoring InterruptState at entry + waits; cap=min(64MiB,len), keep_behind=min(8MiB,cap/4), PB_READAHEAD_MB clamp [4,1024] / 0=off; spawn-failure falls back to direct; src-read diag; engaged from producer, VideoDemuxer, audio decoder opens.",
+            "status": "done"
+          },
+          {
+            "id": 3,
+            "title": "Scoped AVDiscard (video-kept opens only) + VideoSession Drop-cancel rider",
+            "description": "discard_all_except in producer + VideoDemuxer opens only (NOT audio/cues — dispositions 1+2); parity test incl. payload checksums; impl Drop for VideoSession sets cancel + test.",
+            "status": "done"
+          },
+          {
+            "id": 4,
+            "title": "Validation + docs: SMB A/B on the Air, local-SSD regression A/B, CHANGELOG, handoff",
+            "description": "Owner A/B PB_READAHEAD_MB=0 vs default over the share (src-read/demux-stall/session diags) AND locally on the Studio; CHANGELOG entry; Windows cross-check; handoff ledger.",
+            "status": "pending"
+          }
+        ]
+      },
+      {
+        "id": 134,
+        "title": "Pre-existing macOS test-suite flakes: VT once-gate mass timeouts + probe-deadline races",
+        "description": "Documented during #133 (2026-07-23), reproduced on CLEAN main via stash — not caused by #133. (a) Full pb-decode --features ffvideo runs intermittently mass-fail all video_producer tests with 10s event timeouts: every producer thread stuck in VTDecompressionSessionCreateWithOptions -> VTCopyRenderIDArrayForIORegistryKey -> pthread_once -> _os_once_gate_wait (thread-stack sample captured; no in-process gate holder visible). Never reproduces with PB_NO_HWACCEL=1; producer group alone (20 tests) is green with VT on. Likely thundering-herd VT session creation across ~16 test threads hitting a process-wide once init that stalls (XPC to a media daemon?). Candidate fix: serialize hw-device/session creation behind a process-local lock in ffmpeg/hw.rs (would also protect the app when poster walks + playback create VT sessions concurrently). (b) pb-app-core: a_real_video_probes_off_thread_and_lands_its_catalog + copy_details_mid_probe_defers_and_copies_the_complete_set fail under full parallel load, pass in isolation — probe-deadline timing. Decide: serialize VT init, loosen deadlines, or mark the heavy tests serial.",
+        "status": "pending",
+        "priority": "medium",
+        "dependencies": [],
+        "subtasks": []
       }
     ],
     "metadata": {

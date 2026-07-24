@@ -133,6 +133,18 @@ detection ships — a DoVi Profile-5 file on the Session route toasts an honest
 colors-can't-be-shown warning and the Details panel names every DoVi profile).
 `PB_TRACE=1` prints a per-2s Session dropped-frames diag (the `sb-play diag` analog).
 
+**Network playback (task #133):** both playback inputs (video producer + audio
+decoder — each reads the full interleaved container) get a bounded RAM-only
+compressed **read-ahead ring** (`ffmpeg/readahead.rs`, engaged via
+`FfInput::open_playback`; 64 MiB/ring default, `PB_READAHEAD_MB` overrides,
+`0` = off — the A/B lever). `PB_VIDEO_DIAG=1` adds two per-2s windows: `demux
+stall diag` (per-`packet.read` wall time — what the session feels) and `src
+read diag` (true source-read latency + MB/s + window %, measured at the ring's
+filler). Stream discard (`probe::discard_all_except`) is applied **only** where
+the kept stream is video (producer, `VideoDemuxer`) — never in the audio
+decoder, whose `-1` default-stream seek it could break; on MKV discard saves
+parse work, not bytes (matroskadec reads payloads before the check).
+
 ## Known v1 limitations (deliberate)
 
 Radiance-HDR / OpenEXR (image-crate, not WIC) still clamped to SDR; CMYK JPEG

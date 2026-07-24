@@ -204,7 +204,13 @@ impl FfAudioDecoder {
         max_channels: u16,
         track: Option<usize>,
     ) -> Result<FfAudioDecoder, String> {
-        let mut opened = FfInput::open(input, None)?;
+        // Playback open (task #133): this input reads the full interleaved
+        // container (matroskadec fetches every payload regardless of stream
+        // selection) AND its clock is the session's pacing master — so it gets
+        // the read-ahead ring like the video input. Deliberately NO stream
+        // discard here: it saves no Matroska bytes and would risk the `-1`
+        // default-stream seek below (see `seek`'s comment).
+        let mut opened = FfInput::open_playback(input, None)?;
         let (index, rate, channels, native_mask, time_base, start_time) = {
             let ctx = opened.ctx();
             // The user's pick, but only if it really is an audio stream in *this* container.

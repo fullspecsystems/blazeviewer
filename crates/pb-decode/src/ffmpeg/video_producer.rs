@@ -32,7 +32,7 @@
 use std::sync::atomic::AtomicBool;
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use ffmpeg_next as ff;
 
@@ -150,6 +150,11 @@ struct Reader {
     /// it drops after it (both hold refcounted device refs — order-independent —
     /// this is for tidiness).
     _hw: Option<super::hw::HwSession>,
+    /// `PB_VIDEO_DIAG` demux-stall windows (task #133 slice 1): wall time of each
+    /// `packet.read` — what the session *feels* (one call may hide zero or many
+    /// source reads; the ring's `src read diag` is the true I/O-latency signal).
+    /// `None` (zero cost) when diagnostics are off.
+    stall_stats: Option<super::read_stats::ReadStats>,
 }
 
 impl Reader {
@@ -159,7 +164,9 @@ impl Reader {
         cancel: Arc<AtomicBool>,
         options: crate::VideoProducerOptions,
     ) -> Result<(Reader, Opened), String> {
-        let mut opened = FfInput::open(input, None)?;
+        // Playback open (task #133): a Path input gets the RAM read-ahead ring,
+        // so SMB latency spikes are absorbed instead of starving the session.
+        let mut opened = FfInput::open_playback(input, None)?;
         // Arm the interrupt cancel flag (plan 1F): the session flips this shared
         // `Arc` on stop/teardown, and the interrupt callback aborts a blocking read
         // inside libav — so a stuck network read retires this thread promptly
@@ -169,6 +176,9 @@ impl Reader {
         if facts.width == 0 || facts.height == 0 {
             return Err("video has no frames".into());
         }
+        // Task #133 slice 3 (video-kept only — see the helper's scope guard):
+        // skip demuxing the streams this reader ignores.
+        super::probe::discard_all_except(opened.ctx(), facts.index);
         // Build the decoder context from stream parameters, then try to attach
         // a hardware decode device (VideoToolbox/VAAPI) before opening. The
         // parameters are copied into the context, so no borrow of `opened`
@@ -251,6 +261,7 @@ impl Reader {
             color: None,
             initial: InitialState::NeedRead,
             _hw: hw,
+            stall_stats: diag().then(|| super::read_stats::ReadStats::new(Instant::now())),
         };
         // Negotiate the output format (task #91 Phase 2, Codex P0): the planar-vs-RGBA
         // decision needs the ACTUAL first decoded frame (pixel format after HW
@@ -367,7 +378,21 @@ impl Reader {
             if fed >= MAX_PACKETS_PER_FRAME {
                 return Err("video stream produced no frame (corrupt input?)".into());
             }
-            match self.packet.read(self.input.ctx()) {
+            let read_result = if let Some(stats) = self.stall_stats.as_mut() {
+                let t0 = Instant::now();
+                let r = self.packet.read(self.input.ctx());
+                let now = Instant::now();
+                if let Some(w) = stats.fold(now - t0, now) {
+                    eprintln!(
+                        "[pb-video] demux stall diag: {:.1}s — {} reads, avg {:.1}ms max {:.1}ms, >20ms={} >40ms={}",
+                        w.secs, w.reads, w.avg_ms, w.max_ms, w.over_20, w.over_40
+                    );
+                }
+                r
+            } else {
+                self.packet.read(self.input.ctx())
+            };
+            match read_result {
                 Ok(()) => {
                     if self.packet.stream() == self.facts.index {
                         fed += 1;

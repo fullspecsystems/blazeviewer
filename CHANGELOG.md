@@ -7,6 +7,14 @@ with any pre-release suffix carried only by the tag.
 
 ## [Unreleased]
 
+### Fixed
+
+- Playing a video from a network share (SMB/NAS) no longer turns choppy in
+  high-bitrate scenes: playback now buffers a bounded amount of the stream
+  ahead in RAM (nothing is written to disk), so network hiccups are absorbed
+  instead of freezing the picture. `PB_READAHEAD_MB` tunes the budget
+  (`0` disables).
+
 ## [0.3.1] - 2026-07-22
 
 ### Highlights

@@ -31,6 +31,7 @@ use std::time::{Duration, Instant};
 use ffmpeg_next as ff;
 use ffmpeg_next::ffi;
 
+use super::readahead::{self, ReadOutcome, Ring};
 use crate::video::VideoInput;
 
 /// Size of the AVIO read buffer for in-RAM inputs. FFmpeg's conventional default;
@@ -133,6 +134,62 @@ unsafe extern "C" fn mem_seek(opaque: *mut c_void, offset: i64, whence: c_int) -
     target
 }
 
+/// The read-ahead cursor behind the custom AVIO callbacks for **playback Path**
+/// inputs (task #133): serves demux reads out of the [`Ring`]'s RAM window so an
+/// SMB latency spike is absorbed by buffered depth instead of starving the
+/// session. Holds the pinned [`InterruptState`] pointer so a blocking wait
+/// honors cancel + the watchdog exactly like a blocking libav read would.
+struct RaCursor {
+    ring: Ring,
+    intr: *const InterruptState,
+}
+
+/// AVIO read callback over the read-ahead ring. Blocks (in 25 ms slices) while
+/// the filler catches up; the abort closure re-checks the interrupt state at
+/// entry and every slice, so cancel/watchdog work *through* the ring. Never
+/// panics across the C boundary (`catch_unwind` belt).
+unsafe extern "C" fn ra_read(opaque: *mut c_void, buf: *mut u8, len: c_int) -> c_int {
+    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let c = &mut *(opaque as *mut RaCursor);
+        if buf.is_null() || len <= 0 {
+            return ffi::AVERROR(ffi::EINVAL);
+        }
+        let out = std::slice::from_raw_parts_mut(buf, len as usize);
+        let intr = c.intr as *mut c_void;
+        match c.ring.read(out, &mut || interrupt_cb(intr) != 0) {
+            ReadOutcome::Data(n) => n as c_int,
+            ReadOutcome::Eof => ffi::AVERROR_EOF,
+            ReadOutcome::Cancelled => ffi::AVERROR_EXIT,
+            ReadOutcome::Failed(_) => ffi::AVERROR(ffi::EIO),
+        }
+    }));
+    r.unwrap_or(ffi::AVERROR(ffi::EINVAL))
+}
+
+/// AVIO seek callback over the ring — the [`mem_seek`] contract (SET/CUR/END +
+/// `AVSEEK_SIZE`, checked arithmetic, error codes never panics).
+unsafe extern "C" fn ra_seek(opaque: *mut c_void, offset: i64, whence: c_int) -> i64 {
+    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let c = &mut *(opaque as *mut RaCursor);
+        let len = c.ring.len() as i64;
+        let mode = whence & !(ffi::AVSEEK_FORCE as c_int);
+        if mode == ffi::AVSEEK_SIZE as c_int {
+            return len;
+        }
+        let base = match mode {
+            0 => 0,                   // SEEK_SET
+            1 => c.ring.pos() as i64, // SEEK_CUR
+            2 => len,                 // SEEK_END
+            _ => return ffi::AVERROR(ffi::EINVAL) as i64,
+        };
+        match base.checked_add(offset) {
+            Some(t) if (0..=len).contains(&t) && c.ring.seek(t as u64) => t,
+            _ => ffi::AVERROR(ffi::EINVAL) as i64,
+        }
+    }));
+    r.unwrap_or(ffi::AVERROR(ffi::EINVAL) as i64)
+}
+
 /// An opened FFmpeg input over a [`VideoInput`], owning every C-side resource in
 /// the right teardown order. `'a` is the borrowed cancel flag's lifetime.
 pub struct FfInput<'a> {
@@ -141,6 +198,9 @@ pub struct FfInput<'a> {
     ctx: Option<ff::format::context::Input>,
     avio: *mut ffi::AVIOContext,
     cursor: *mut MemCursor,
+    /// The read-ahead cursor (playback Path inputs only; null otherwise). Its
+    /// Drop signals the filler thread to exit — never joins it.
+    ra: *mut RaCursor,
     intr: *mut InterruptState,
     _cancel: PhantomData<&'a AtomicBool>,
 }
@@ -150,6 +210,29 @@ impl<'a> FfInput<'a> {
     /// (when given) aborts any blocking libav work, and the open itself runs
     /// under a watchdog deadline. Bytes inputs are served entirely from RAM.
     pub fn open(input: &VideoInput, cancel: Option<&'a AtomicBool>) -> Result<Self, String> {
+        Self::open_with(input, cancel, false)
+    }
+
+    /// [`open`](Self::open) for the **playback** inputs (the video producer, the
+    /// sample-buffer demuxer, the session audio decoder — task #133): a `Path`
+    /// input gets the RAM read-ahead ring so network latency spikes are absorbed
+    /// instead of starving the session. `PB_READAHEAD_MB=0` disables (the A/B +
+    /// revert lever); any ring setup failure falls back to the direct open —
+    /// read-ahead is a nicety, never a reason playback fails. Probes, posters,
+    /// details, and cues stay on [`open`](Self::open): short-lived access that a
+    /// 64 MiB eager filler would only waste.
+    pub fn open_playback(
+        input: &VideoInput,
+        cancel: Option<&'a AtomicBool>,
+    ) -> Result<Self, String> {
+        Self::open_with(input, cancel, true)
+    }
+
+    fn open_with(
+        input: &VideoInput,
+        cancel: Option<&'a AtomicBool>,
+        playback: bool,
+    ) -> Result<Self, String> {
         super::init::ff_init();
         let intr = Box::into_raw(Box::new(InterruptState {
             cancel: cancel.map_or(std::ptr::null(), |c| c as *const AtomicBool),
@@ -157,7 +240,7 @@ impl<'a> FfInput<'a> {
             t0: Instant::now(),
             deadline_ms: AtomicU64::new(u64::MAX),
         }));
-        let result = unsafe { Self::open_raw(input, intr) };
+        let result = unsafe { Self::open_raw(input, intr, playback) };
         match result {
             Ok(mut me) => {
                 me.set_op_deadline(Some(OPEN_DEADLINE));
@@ -185,7 +268,11 @@ impl<'a> FfInput<'a> {
 
     /// Allocate + open the format context (no stream-info probe yet). On error,
     /// every C allocation made here is already freed.
-    unsafe fn open_raw(input: &VideoInput, intr: *mut InterruptState) -> Result<Self, String> {
+    unsafe fn open_raw(
+        input: &VideoInput,
+        intr: *mut InterruptState,
+        playback: bool,
+    ) -> Result<Self, String> {
         let ps = ffi::avformat_alloc_context();
         if ps.is_null() {
             return Err("out of memory (AVFormatContext)".into());
@@ -202,8 +289,37 @@ impl<'a> FfInput<'a> {
 
         let (mut avio, mut cursor): (*mut ffi::AVIOContext, *mut MemCursor) =
             (std::ptr::null_mut(), std::ptr::null_mut());
+        let mut ra: *mut RaCursor = std::ptr::null_mut();
         let url = match input {
-            VideoInput::Path(p) => path_cstring(p),
+            VideoInput::Path(p) => {
+                if playback {
+                    if let Some(ring) = start_readahead(p) {
+                        let buf = ffi::av_malloc(AVIO_BUF_SIZE) as *mut u8;
+                        if !buf.is_null() {
+                            ra = Box::into_raw(Box::new(RaCursor { ring, intr }));
+                            avio = ffi::avio_alloc_context(
+                                buf,
+                                AVIO_BUF_SIZE as c_int,
+                                0,
+                                ra as *mut c_void,
+                                Some(ra_read),
+                                None,
+                                Some(ra_seek),
+                            );
+                            if avio.is_null() {
+                                ffi::av_free(buf as *mut c_void);
+                                drop(Box::from_raw(ra));
+                                ra = std::ptr::null_mut();
+                            } else {
+                                (*ps).pb = avio;
+                            }
+                        }
+                        // Any allocation failure above: fall through with a null
+                        // avio — the plain path open below still works.
+                    }
+                }
+                path_cstring(p)
+            }
             VideoInput::Bytes { data, name } => {
                 cursor = Box::into_raw(Box::new(MemCursor {
                     data: data.clone(),
@@ -256,6 +372,9 @@ impl<'a> FfInput<'a> {
             if !cursor.is_null() {
                 drop(Box::from_raw(cursor));
             }
+            if !ra.is_null() {
+                drop(Box::from_raw(ra)); // Ring::drop signals the filler out
+            }
             return Err(format!(
                 "couldn't open the video ({}): {}",
                 input.display_name(),
@@ -266,6 +385,7 @@ impl<'a> FfInput<'a> {
             ctx: Some(ff::format::context::Input::wrap(ps_mut)),
             avio,
             cursor,
+            ra,
             intr,
             _cancel: PhantomData,
         })
@@ -327,13 +447,30 @@ impl Drop for FfInput<'_> {
                 ffi::av_freep(&mut (*self.avio).buffer as *mut _ as *mut c_void);
                 ffi::avio_context_free(&mut self.avio);
             }
-            // 3. The cursor (drops its Arc refcount) and interrupt state.
+            // 3. The cursors — Mem drops its Arc refcount; Ra signals the
+            //    filler thread to exit (never joins: a read blocked on a dead
+            //    server must not hang teardown; the ring's Arc keeps its state
+            //    alive until the thread notices). Then the interrupt state,
+            //    LAST — the ra callbacks hold a pointer into it.
             if !self.cursor.is_null() {
                 drop(Box::from_raw(self.cursor));
+            }
+            if !self.ra.is_null() {
+                drop(Box::from_raw(self.ra));
             }
             drop(Box::from_raw(self.intr));
         }
     }
+}
+
+/// Build the read-ahead ring for a playback `Path` open — `None` (→ the direct
+/// open path) when disabled (`PB_READAHEAD_MB=0`), the file is empty/unopenable
+/// (FFmpeg will surface its own error), or the filler thread can't spawn.
+fn start_readahead(path: &std::path::Path) -> Option<Ring> {
+    let src = readahead::FileSource::open(path).ok()?;
+    let cap = readahead::cap_from_env(readahead::ByteSource::len(&src))?;
+    let diag = std::env::var_os("PB_VIDEO_DIAG").is_some_and(|v| v != "0");
+    Ring::start(Box::new(src), cap, diag).ok()
 }
 
 /// A filesystem path as the C string FFmpeg opens. Non-UTF-8 paths pass through
@@ -450,6 +587,41 @@ mod tests {
         // And the interrupt callback agrees (this is what libav polls inside
         // blocking work).
         assert_eq!(interrupt_cb(input.intr as *mut c_void), 1);
+    }
+
+    /// `open_playback` on a Path engages the read-ahead ring (the `ra` cursor —
+    /// asserted so this can never silently test the direct path, Codex
+    /// disposition 6) and behaves like the direct open. Repeated open/drop
+    /// exercises the ring's teardown beside the AVIO/cursor frees.
+    #[test]
+    fn playback_path_open_engages_the_ring_and_drops_cleanly_repeatedly() {
+        let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/video/black_then_color.mp4");
+        for _ in 0..8 {
+            let mut input =
+                FfInput::open_playback(&VideoInput::Path(p.clone()), None).expect("playback open");
+            assert!(!input.ra.is_null(), "the ring must engage for a Path open");
+            assert!(input.cursor.is_null(), "no mem cursor on the ring path");
+            let n = input.ctx().streams().count();
+            assert!(n >= 1, "expected at least the video stream, got {n}");
+        }
+    }
+
+    /// `open_playback` over in-RAM bytes stays on the MemCursor path — the
+    /// bytes are already RAM; a ring would only add a copy.
+    #[test]
+    fn playback_bytes_open_stays_on_the_mem_cursor() {
+        let mut input = FfInput::open_playback(
+            &VideoInput::Bytes {
+                data: fixture_bytes(),
+                name: "clip.mp4".into(),
+            },
+            None,
+        )
+        .expect("bytes open");
+        assert!(input.ra.is_null());
+        assert!(!input.cursor.is_null());
+        assert!(input.ctx().streams().count() >= 1);
     }
 
     /// A truncated container opens-or-fails but never hangs: the stream-info

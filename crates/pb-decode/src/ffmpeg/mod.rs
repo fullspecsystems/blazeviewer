@@ -42,6 +42,8 @@ pub mod init;
 pub mod io;
 pub mod pcm;
 pub mod probe;
+pub mod read_stats;
+pub mod readahead;
 pub mod tracks;
 
 // The audio decoder rides with `ffprobe` too (not just `ffvideo`): the Windows trimmed
