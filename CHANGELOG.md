@@ -24,6 +24,10 @@ with any pre-release suffix carried only by the tag.
   seventeen bound commands (Undo, Slideshow, Thumbnails, Describe, audio and
   subtitle track keys, Copy Path, and more) had shortcuts that worked but were
   invisible and un-remappable in Settings. A test now guards the rule.
+- Trackpad pinch-zoom is smoother. On Windows a precision-touchpad pinch arrives
+  as coarse zoom steps, so zooming used to jump in visible increments; it now
+  eases between steps into a continuous glide. (Set `PB_EASE_ZOOM=0` to restore
+  the old instant-step behavior.)
 
 ### Fixed
 

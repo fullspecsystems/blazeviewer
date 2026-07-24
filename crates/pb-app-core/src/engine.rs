@@ -185,6 +185,29 @@ pub const PINCH_GAIN: f32 = 1.0;
 /// Scroll-wheel / trackpad tuning (read by `AppCore::scroll`). `WHEEL_ZOOM_STEP` is the per-line
 /// zoom factor for a line-precise wheel/swipe (Ctrl+scroll, or the Zoom setting).
 pub const WHEEL_ZOOM_STEP: f32 = 0.1;
+
+/// Eased scroll-zoom shaping (smooths the coarse `LineDelta` pinch notches — see [`ZoomEase`]).
+/// `ZOOM_EASE_TAU` is the exponential time constant (seconds) of the glide — each tick closes
+/// `1 - exp(-dt/TAU)` of the remaining gap to the target, so smaller = snappier, larger =
+/// floatier. `ZOOM_EASE_EPS` is the "close enough" ratio at which the ease snaps to the target
+/// and finishes (avoids an asymptotic tail that never ends). Tuned by feel; A/B off with
+/// `PB_EASE_ZOOM=0`.
+pub const ZOOM_EASE_TAU: f32 = 0.06;
+/// Finish the ease when the live zoom is within this fraction of the target.
+pub const ZOOM_EASE_EPS: f32 = 0.002;
+
+/// The fraction of the remaining *multiplicative* zoom gap to close this tick, for the
+/// [`ZOOM_EASE_TAU`] time constant. Frame-rate independent (driven by real `dt`);
+/// `dt <= 0` returns `0.0` so the first (zero-elapsed) tick just latches the clock and the glide
+/// starts on the next tick. Approaches `1.0` as `dt` grows, so a long frame still lands near the
+/// target rather than crawling.
+pub fn zoom_ease_alpha(dt: f32) -> f32 {
+    if dt <= 0.0 {
+        0.0
+    } else {
+        1.0 - (-dt / ZOOM_EASE_TAU).exp()
+    }
+}
 /// Per-**pixel** zoom factor for a pixel-precise scroll (a macOS trackpad two-finger swipe). Much
 /// smaller than [`WHEEL_ZOOM_STEP`] because a trackpad delivers many events of tens of pixels each;
 /// `0.0025` gives ~1.6× over a full swipe.
@@ -1345,6 +1368,50 @@ mod tests {
             assert!(e <= (t / 0.9) + 1e-6, "eased ≤ linear");
             prev = e;
         }
+    }
+
+    /// The eased scroll-zoom step fraction. Zero at `dt == 0` (first tick
+    /// latches only), in `(0, 1)` for a normal frame, and toward `1` for a long frame — always
+    /// frame-rate independent and monotonic in `dt`.
+    #[test]
+    fn zoom_ease_alpha_is_bounded_and_monotonic() {
+        assert_eq!(zoom_ease_alpha(0.0), 0.0, "a zero-length tick moves nothing");
+        assert_eq!(zoom_ease_alpha(-1.0), 0.0, "a negative dt is treated as zero");
+        let a = zoom_ease_alpha(0.008); // ~120 Hz
+        assert!(a > 0.0 && a < 1.0, "a normal frame closes a fraction (got {a})");
+        assert!(
+            zoom_ease_alpha(1.0) > 0.99,
+            "a long frame lands near the target rather than crawling"
+        );
+        let (mut prev, mut dt) = (0.0, 0.001);
+        while dt <= 0.5 {
+            let cur = zoom_ease_alpha(dt);
+            assert!(cur >= prev, "monotonic non-decreasing in dt");
+            prev = cur;
+            dt += 0.001;
+        }
+    }
+
+    /// Driving the same exponential the ease uses in log-space (independent of any GPU geometry):
+    /// a 2× zoom target must converge to within `ZOOM_EASE_EPS` in a reasonable number of
+    /// ~120 Hz frames, and never overshoot — the property `apply_zoom_ease` relies on to finish.
+    #[test]
+    fn zoom_ease_converges_within_bounded_frames() {
+        let target = 2.0_f32;
+        let mut zoom = 1.0_f32;
+        let mut frames = 0;
+        loop {
+            let ratio = target / zoom;
+            if (ratio - 1.0).abs() <= ZOOM_EASE_EPS {
+                break;
+            }
+            let step = ratio.powf(zoom_ease_alpha(0.008));
+            zoom *= step;
+            assert!(zoom <= target + 1e-6, "never overshoots the target (got {zoom})");
+            frames += 1;
+            assert!(frames < 120, "must converge well under a second of frames");
+        }
+        assert!((zoom - target).abs() < 0.01, "lands on the target (got {zoom})");
     }
 
     /// Task #94.2 resume policy: remember only a position meaningfully into a

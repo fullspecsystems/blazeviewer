@@ -227,6 +227,26 @@ pub struct FitStash {
     pub bytes: u64,
 }
 
+/// Eased scroll-zoom state. On Windows a precision-touchpad **pinch** arrives as
+/// coarse Ctrl+wheel notches (each a ~10% `LineDelta` step — the OS driver
+/// quantizes the gesture for legacy Ctrl+wheel-zoom compatibility), so an instant
+/// per-notch zoom visibly stairsteps. Instead of applying each notch immediately,
+/// `queue_zoom_ease` accumulates an absolute `target` zoom + the cursor `anchor`,
+/// and `apply_zoom_ease` (per tick) glides `view.zoom` toward it — smoothing the
+/// steps into a ramp. Cleared when it reaches the target. `None` = no ease in
+/// flight. A pixel-precise trackpad swipe (macOS) is already fine-grained and
+/// zooms instantly; only the coarse `LineDelta` path eases. Toggle off for an
+/// A/B feel comparison with `PB_EASE_ZOOM=0`.
+#[derive(Debug, Clone, Copy)]
+pub struct ZoomEase {
+    /// Absolute zoom the ease is converging on (already clamped to the view range).
+    pub target: f32,
+    /// Screen-space point kept fixed across the glide (the cursor when the notch landed).
+    pub anchor: [f32; 2],
+    /// The last tick the ease advanced, for a frame-rate-independent `dt`.
+    pub last: Option<Instant>,
+}
+
 pub struct AppCore {
     /// The injected wall-clock "now" for this event/tick — **the core never calls
     /// `Instant::now()`** (NS0 5.5 / Phase 0.3). The shell stamps it at each event-loop entry
@@ -303,6 +323,8 @@ pub struct AppCore {
     /// Pinch-zoom gesture timing accumulators (start + last event).
     pub zoom_started: Option<Instant>,
     pub zoom_last: Option<Instant>,
+    /// The in-flight eased scroll-zoom, if any (see [`ZoomEase`]).
+    pub zoom_ease: Option<ZoomEase>,
     /// Two-finger pan gesture timing accumulators (start + last event).
     pub pan_started: Option<Instant>,
     pub pan_last: Option<Instant>,

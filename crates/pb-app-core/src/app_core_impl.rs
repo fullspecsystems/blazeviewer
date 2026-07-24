@@ -76,6 +76,14 @@ use crate::{
     SlotContent, Toast, ToastIcon, UndoAction,
 };
 
+/// Is the eased scroll-zoom on? Default on; `PB_EASE_ZOOM=0` restores the instant
+/// per-notch behavior (the revert lever + an A/B feel comparison). Read once and cached.
+fn ease_scroll_zoom() -> bool {
+    use std::sync::OnceLock;
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var("PB_EASE_ZOOM").map_or(true, |v| v != "0"))
+}
+
 /// Interim adapter (task #54 Phase 0): a core [`DetailRow`] to the HUD table row it
 /// projects onto. Retires with the HUD's Details tab.
 fn hud_row(r: DetailRow) -> Row {
@@ -188,6 +196,7 @@ impl AppCore {
             video_resume: std::collections::HashMap::new(),
             zoom_started: None,
             zoom_last: None,
+            zoom_ease: None,
             pan_started: None,
             pan_last: None,
             resize_settle_at: None,
@@ -1184,13 +1193,50 @@ impl AppCore {
             }
             ScrollDelta::Lines { x, y } => {
                 if zoom {
-                    self.zoom_about_cursor((1.0 + y * WHEEL_ZOOM_STEP).max(0.05));
+                    // A line-precise zoom notch is coarse — on Windows a touchpad *pinch* is
+                    // delivered as ±10% Ctrl+wheel steps, so applying each instantly stairsteps.
+                    // Fold the notch into an eased target that the tick glides toward instead.
+                    // `PB_EASE_ZOOM=0` restores the instant behavior.
+                    if ease_scroll_zoom() {
+                        self.queue_zoom_ease((1.0 + y * WHEEL_ZOOM_STEP).max(0.05));
+                    } else {
+                        self.zoom_about_cursor((1.0 + y * WHEEL_ZOOM_STEP).max(0.05));
+                    }
                 } else {
                     self.pan_by_pixels(
                         x * WHEEL_PAN_STEP * GESTURE_PAN_DIR,
                         y * WHEEL_PAN_STEP * GESTURE_PAN_DIR,
                     );
                 }
+            }
+        }
+    }
+
+    /// Fold one coarse scroll-zoom notch into the eased target (see [`ZoomEase`]).
+    /// Compounds onto the in-flight target if a glide is already
+    /// running (so a fast flurry of notches accumulates), else onto the live zoom.
+    /// The anchor tracks the current cursor so the ease zooms toward wherever the
+    /// pointer is. The tick's `apply_zoom_ease` does the actual per-frame motion.
+    fn queue_zoom_ease(&mut self, factor: f32) {
+        let base = self.zoom_ease.map_or(self.view.zoom, |z| z.target);
+        let target = (base * factor).clamp(MIN_ZOOM, MAX_ZOOM);
+        let anchor = self.last_cursor.unwrap_or_else(|| {
+            self.screen_and_image()
+                .map_or([0.0, 0.0], |(_, _, sw, sh)| {
+                    [sw as f32 / 2.0, sh as f32 / 2.0]
+                })
+        });
+        match self.zoom_ease.as_mut() {
+            Some(z) => {
+                z.target = target;
+                z.anchor = anchor;
+            }
+            None => {
+                self.zoom_ease = Some(crate::ZoomEase {
+                    target,
+                    anchor,
+                    last: None,
+                });
             }
         }
     }
@@ -1268,7 +1314,9 @@ impl AppCore {
         self.poll_describe_scan();
 
         // 2. Continuous zoom/pan while their keys are held (accelerating ramp).
-        let transforming = self.apply_view_holds(now);
+        // Also glide any eased scroll-zoom toward its target — OR'd into `transforming` so it
+        // keeps the loop ticking + suppresses the info panel like a held ramp.
+        let transforming = self.apply_view_holds(now) | self.apply_zoom_ease(now);
 
         // 3. Gated self-paced advance while a nav key (space/backspace) is held. The initial tap
         // delay gates *repeat*, not draining/presenting, so a first-press miss shows the moment

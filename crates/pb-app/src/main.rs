@@ -782,6 +782,7 @@ impl App {
             video_resume: HashMap::new(),
             zoom_started: None,
             zoom_last: None,
+            zoom_ease: None,
             pan_started: None,
             pan_last: None,
             resize_settle_at: None,

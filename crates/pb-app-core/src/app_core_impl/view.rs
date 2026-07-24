@@ -402,6 +402,59 @@ impl AppCore {
         }
         changed
     }
+
+    /// Drive the eased scroll-zoom set up by `queue_zoom_ease`. Each tick closes an exponential
+    /// fraction of the remaining gap between
+    /// the live zoom and the target (`ZOOM_EASE_TAU`), applying the step **about the stored
+    /// anchor** so the pixel under the cursor stays pinned across the whole glide — turning the
+    /// Windows touchpad's coarse ±10% pinch notches into a smooth ramp. Snaps to the target and
+    /// clears the ease once within `ZOOM_EASE_EPS`. Returns whether it advanced (so the tick
+    /// keeps polling + redrawing, exactly like a held zoom ramp). A held zoom key wins — it owns
+    /// `view.zoom`, so any in-flight ease is dropped rather than fighting it.
+    pub fn apply_zoom_ease(&mut self, now: Instant) -> bool {
+        let Some(mut ease) = self.zoom_ease else {
+            return false;
+        };
+        if self.zoom_held().is_some() {
+            self.zoom_ease = None;
+            return false;
+        }
+        let Some((iw, ih, sw, sh)) = self.screen_and_image() else {
+            self.zoom_ease = None;
+            return false;
+        };
+
+        let last = ease.last.unwrap_or(now);
+        let dt = (now - last).as_secs_f32().min(0.1);
+        ease.last = Some(now);
+
+        let ratio = ease.target / self.view.zoom;
+        let alpha = if (ratio - 1.0).abs() <= ZOOM_EASE_EPS {
+            // Close enough: snap exactly onto the target and finish (no asymptotic tail).
+            1.0
+        } else {
+            // Otherwise close an exponential fraction of the gap; `dt == 0` (first tick) latches
+            // the clock and moves nothing — the glide starts next tick.
+            crate::engine::zoom_ease_alpha(dt)
+        };
+        // `ratio^alpha` is the fraction of the multiplicative gap to close this tick; `alpha == 1`
+        // applies the whole remaining `ratio`, landing exactly on the target.
+        let step = ratio.powf(alpha);
+        // #124: reconcile AFTER `zoom_about` (it reads the bound texture dims to pin the anchor).
+        self.view.zoom_about(step, ease.anchor, iw, ih, sw, sh);
+        self.reconcile_zoom_rep();
+        self.push_view();
+        self.draw();
+        // A pinch that crosses whether the image overflows flips the grab affordance.
+        self.refresh_cursor();
+
+        if alpha >= 1.0 {
+            self.zoom_ease = None;
+        } else {
+            self.zoom_ease = Some(ease);
+        }
+        true
+    }
 }
 
 #[cfg(test)]
@@ -868,5 +921,77 @@ mod tests {
             core.target_pending(),
             "the item is pending an async re-present at the new fit"
         );
+    }
+
+    // ----- Eased scroll-zoom (`apply_zoom_ease` / `queue_zoom_ease`) -----------------------------
+
+    /// The first tick only latches the clock (dt = 0) and must NOT snap to the target — the
+    /// glide happens on the ticks that have real elapsed time.
+    #[test]
+    fn eased_zoom_first_tick_latches_without_snapping() {
+        let mut core = zoom_test_core();
+        let t0 = core.now;
+        core.zoom_ease = Some(crate::ZoomEase {
+            target: 2.0,
+            anchor: [0.5, 0.5],
+            last: None,
+        });
+
+        let advanced = core.apply_zoom_ease(t0);
+        assert!(advanced, "an active ease keeps the loop ticking");
+        assert!(
+            (core.view.zoom - 1.0).abs() < 1e-6,
+            "the first (dt=0) tick must not move the zoom (got {})",
+            core.view.zoom
+        );
+        assert!(core.zoom_ease.is_some(), "the ease is still in flight");
+    }
+
+    /// A flurry of scroll notches compounds onto a single eased target (so fast pinching
+    /// accumulates rather than resetting), clamped to the view's zoom range, with the anchor
+    /// tracking the live cursor. (Convergence of the glide itself is proved hermetically in
+    /// `engine::tests::zoom_ease_alpha_*`, since the headless mock reports a zero image size.)
+    #[test]
+    fn queued_notches_compound_onto_one_target() {
+        let mut core = zoom_test_core();
+        core.view.zoom = 1.0;
+        core.last_cursor = Some([12.0, 34.0]);
+
+        core.queue_zoom_ease(1.1);
+        core.queue_zoom_ease(1.1);
+        let ease = core.zoom_ease.expect("an ease is in flight");
+        assert!(
+            (ease.target - 1.1 * 1.1).abs() < 1e-5,
+            "two notches compound multiplicatively (got {})",
+            ease.target
+        );
+        assert_eq!(ease.anchor, [12.0, 34.0], "the anchor tracks the cursor");
+
+        // Zoom-out notches below the floor clamp to MIN_ZOOM, never past it.
+        core.zoom_ease = None;
+        core.view.zoom = MIN_ZOOM;
+        core.queue_zoom_ease(0.5);
+        assert!(
+            (core.zoom_ease.unwrap().target - MIN_ZOOM).abs() < 1e-6,
+            "the target is clamped to the zoom floor"
+        );
+    }
+
+    /// A held zoom key owns `view.zoom`; an in-flight ease must yield to it rather than fight,
+    /// dropping itself on the next tick.
+    #[test]
+    fn eased_zoom_yields_to_a_held_zoom_key() {
+        let mut core = zoom_test_core();
+        core.zoom_ease = Some(crate::ZoomEase {
+            target: 4.0,
+            anchor: [0.5, 0.5],
+            last: None,
+        });
+        // Simulate a held zoom-in key (the mechanism `zoom_held` reads).
+        core.held.insert(PbKey::Equal, Action::ZoomIn);
+
+        let advanced = core.apply_zoom_ease(core.now);
+        assert!(!advanced, "the ease defers to the held key");
+        assert!(core.zoom_ease.is_none(), "and drops itself");
     }
 }

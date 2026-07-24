@@ -114,7 +114,7 @@ pub mod video_native;
 pub mod video_session;
 
 pub use action::{Action, ActionKind};
-pub use app_core::{AppCore, ArchiveScope, FitStash, Nav, PreviewWatchdog, Viewport};
+pub use app_core::{AppCore, ArchiveScope, FitStash, Nav, PreviewWatchdog, Viewport, ZoomEase};
 pub use config::config_dir;
 pub use contract::{CoreEffect, CoreEvent, KeyResolution, MenuState, Modifiers};
 pub use follow::{FollowState, ScrollTo};
