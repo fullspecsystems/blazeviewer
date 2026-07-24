@@ -1342,6 +1342,7 @@ impl AppCoreHandle {
             cancel_scan_enabled: s.cancel_scan_enabled,
             undo_enabled: s.undo.is_some(),
             undo_label: s.undo.as_deref().unwrap_or("Undo").to_string(),
+            skip_next_visible: s.skip_next_visible,
         }
     }
 
@@ -2361,6 +2362,8 @@ impl AppCoreHandle {
         // override it here the way the winit shell does (`current_menu_state`).
         let next = contract::MenuState {
             show_archives: self.core.settings.show_archives,
+            // Playback ▸ Skip to Next Item — visible only with live video (task #94).
+            skip_next_visible: self.core.space_toggles_video(),
             ..next
         };
         if self.last_menu_state == next {
@@ -4448,6 +4451,7 @@ mod ffi {
         cancel_scan_enabled: bool,
         undo_enabled: bool,
         undo_label: String,
+        skip_next_visible: bool,
     }
 
     extern "Rust" {

@@ -188,6 +188,11 @@ pub struct MenuState {
     /// macOS only: whether native (Spaces) full-screen is engaged, so the shell can
     /// flip the item's "Enter/Exit Full Screen" label. Always `false` on Windows.
     pub native_fullscreen_engaged: bool,
+    /// Playback ▸ Skip to Next Item — shown only while the displayed item has live
+    /// video playback (task #94: the menu twin of ⇧Space / the scrubber skip button;
+    /// hidden otherwise — plain Image ▸ Next covers the still case). Defaulted off by
+    /// the pure choke point; each shell overrides from `space_toggles_video`.
+    pub skip_next_visible: bool,
 }
 
 /// What the right-click **photo context menu** should offer for the current photo (task

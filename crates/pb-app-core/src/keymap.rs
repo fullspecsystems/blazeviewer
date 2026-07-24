@@ -208,6 +208,7 @@ pub const EDITOR_GROUPS: &[(&str, &[Action])] = &[
         "Navigation",
         &[
             Action::Next,
+            Action::SkipNext,
             Action::Prev,
             Action::Random,
             Action::RandomPrev,
@@ -231,6 +232,7 @@ pub const EDITOR_GROUPS: &[(&str, &[Action])] = &[
             Action::ShowImageText,
             Action::Help,
             Action::FolderTree,
+            Action::Thumbnails,
             Action::TogglePanels,
             Action::OpenParent,
             Action::PrevFolder,
@@ -238,6 +240,14 @@ pub const EDITOR_GROUPS: &[(&str, &[Action])] = &[
             Action::Fullscreen,
             Action::Recursive,
             Action::ShowArchives,
+            Action::SlideshowToggle,
+            Action::SlideshowFaster,
+            Action::SlideshowSlower,
+            Action::CancelScan,
+            // Winit-shell concept (macOS has the native toolbar) — listed because its
+            // default binding exists on every platform and must be visible to the
+            // editor's conflict handling (the #94 guard test's rule).
+            Action::ToggleToolbar,
         ],
     ),
     (
@@ -248,10 +258,17 @@ pub const EDITOR_GROUPS: &[(&str, &[Action])] = &[
             Action::CompareToggle,
             Action::ComparePin,
             Action::Copy,
+            Action::CopyPath,
+            Action::CopyImageDetails,
             Action::CopyImageText,
+            Action::CopyDescription,
+            Action::DescribeImage,
+            Action::AskImage,
+            Action::RevealInFileManager,
             Action::SaveRotation,
             Action::Delete,
             Action::DeletePermanent,
+            Action::Undo,
             Action::OpenFile,
             Action::OpenFolder,
         ],
@@ -264,6 +281,9 @@ pub const EDITOR_GROUPS: &[(&str, &[Action])] = &[
             Action::FramePrev,
             Action::MuteLiveAudio,
             Action::ToggleSubtitles,
+            Action::SubtitleCycle,
+            Action::AudioNext,
+            Action::AudioPrev,
         ],
     ),
     (
@@ -1152,5 +1172,33 @@ mod subtitle_key_tests {
             .filter(|a| km.bindings_for(*a).contains(&c))
             .collect();
         assert_eq!(owners, vec![Action::ToggleSubtitles]);
+    }
+}
+
+#[cfg(test)]
+mod editor_group_tests {
+    use super::*;
+
+    /// Task #94 regression (owner-caught): `SkipNext` shipped without an
+    /// EDITOR_GROUPS row, so the Shortcuts editor never showed it. The table is
+    /// deliberately curated, but every action carrying a DEFAULT chord must be
+    /// visible in the editor — otherwise its binding exists and can conflict
+    /// with user rebinds while being invisible and uneditable.
+    #[test]
+    fn every_action_with_a_default_chord_is_editable() {
+        let defaults = Keymap::defaults();
+        let editable: Vec<Action> = EDITOR_GROUPS
+            .iter()
+            .flat_map(|(_, actions)| actions.iter().copied())
+            .collect();
+        for action in Action::ALL {
+            if !defaults.bindings_for(*action).is_empty() {
+                assert!(
+                    editable.contains(action),
+                    "{} has a default binding but no Shortcuts-editor row",
+                    action.id()
+                );
+            }
+        }
     }
 }

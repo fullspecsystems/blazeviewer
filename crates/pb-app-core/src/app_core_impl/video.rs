@@ -320,7 +320,7 @@ impl AppCore {
     /// space as plain navigation, so it never replays a finished film. Only
     /// `nav_press` (the keyboard) consults this; the menu's "Next image" always
     /// navigates.
-    pub(crate) fn space_toggles_video(&self) -> bool {
+    pub fn space_toggles_video(&self) -> bool {
         use crate::video::VideoSessionState::*;
         self.video.as_ref().is_some_and(|v| {
             Some(v.item()) == self.displayed_item

@@ -17,7 +17,13 @@ with any pre-release suffix carried only by the tag.
   every shortcut, and it hold-blazes) or the new **skip button** beside play in
   the video controls (macOS). Pausing and resuming now briefly reveal the
   playback controls, so a Space-pause visibly acknowledges instead of silently
-  freezing the picture.
+  freezing the picture. A "Skip to Next Item" entry appears in the Playback
+  menu while a video is up (hidden otherwise — with no video, plain Next
+  covers it).
+- The Shortcuts editor now lists **every** action that has a key binding —
+  seventeen bound commands (Undo, Slideshow, Thumbnails, Describe, audio and
+  subtitle track keys, Copy Path, and more) had shortcuts that worked but were
+  invisible and un-remappable in Settings. A test now guards the rule.
 
 ### Fixed
 

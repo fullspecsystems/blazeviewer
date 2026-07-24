@@ -126,6 +126,8 @@ final class MenuBar: NSObject {
         items["cancel_scan"]?.isEnabled = s.cancel_scan_enabled
         items["undo"]?.isEnabled = s.undo_enabled
         items["undo"]?.title = s.undo_label.toString()
+        // Contextual: only offered while a video is in playback (task #94).
+        items["skip_next"]?.isHidden = !s.skip_next_visible
     }
 
     // MARK: - Construction
@@ -395,6 +397,14 @@ final class MenuBar: NSObject {
         // transport items moved here from Image, which keeps the still-image verbs.
         main.addItem(submenu("Playback", [
             item("play_pause", "Play/Pause"),
+            // Skip to the next item while a video is up (task #94) — the menu twin of
+            // ⇧Space and the scrubber's skip button. Hidden unless playback is live
+            // (`SetMenuState.skip_next_visible`): with no video, Image ▸ Next covers it.
+            {
+                let skip = item("skip_next", "Skip to Next Item")
+                skip.isHidden = true
+                return skip
+            }(),
             item("frame_next", "Next Frame"),
             item("frame_prev", "Previous Frame"),
             sep(),
