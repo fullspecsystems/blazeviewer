@@ -542,6 +542,9 @@ fn default_bindings() -> Vec<(Action, Vec<KeyChord>)> {
     let one = |a: Action, s: &str| (a, vec![p(s)]);
     vec![
         (Action::Next, vec![p("Space")]),
+        // Task #94: over a live video, plain Space toggles pause — Shift+Space is
+        // "Space with intent": always the next item, and it hold-to-blazes.
+        (Action::SkipNext, vec![p("Shift+Space")]),
         (Action::Prev, vec![p("Backspace")]),
         (Action::Random, vec![p("Enter"), p("NumpadEnter")]),
         (

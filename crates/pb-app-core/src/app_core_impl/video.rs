@@ -362,6 +362,7 @@ impl AppCore {
             None => None,
         };
         if let Some(cmd) = cmd {
+            self.arm_video_line_flash(); // acknowledge the pause on screen (task #94)
             self.effects.push(cmd);
             self.draw();
         }
@@ -394,6 +395,7 @@ impl AppCore {
                 .push(contract::CoreEffect::SeekVideoAudio { position });
         }
         if let Some(cmd) = cmd {
+            self.arm_video_line_flash(); // acknowledge the resume on screen (task #94)
             self.effects.push(cmd);
             self.draw();
         }
@@ -2419,6 +2421,76 @@ mod tests {
             core.held.contains_key(&PbKey::Space),
             "space is a nav key again (hold-to-blaze arms)"
         );
+    }
+
+    /// #94: Shift+Space (`Action::SkipNext`) is the escape forward — it navigates
+    /// even over a PLAYING video (the override only intercepts plain `Next`),
+    /// and it arms hold-to-blaze like any nav key.
+    #[test]
+    fn skip_next_navigates_over_a_playing_video() {
+        use crate::pb_key::PbKey;
+        let mut core = core_with_a_native_video(); // Playing, item 0 displayed
+        core.effects.clear();
+        core.nav_press(PbKey::Space, Action::SkipNext);
+        assert!(
+            !core.effects.iter().any(|e| matches!(
+                e,
+                contract::CoreEffect::PauseVideo { .. } | contract::CoreEffect::ResumeVideo { .. }
+            )),
+            "SkipNext must never toggle playback"
+        );
+        assert!(
+            core.held.contains_key(&PbKey::Space),
+            "SkipNext is a nav key: hold-to-blaze arms"
+        );
+    }
+
+    /// #94: the default keymap binds Shift+Space to SkipNext, and the engine
+    /// resolves it to forward navigation.
+    #[test]
+    fn shift_space_defaults_to_skip_next() {
+        use crate::keymap::{KeyChord, Keymap};
+        use crate::pb_key::PbKey;
+        let km = Keymap::defaults();
+        let chord = KeyChord::new(PbKey::Space, false, true, false, false);
+        assert_eq!(km.action_for(&chord), Some(Action::SkipNext));
+        assert_eq!(
+            crate::engine::nav_of(Action::SkipNext),
+            Some(crate::app_core::Nav::Forward)
+        );
+    }
+
+    /// #94: pausing and resuming flash the on-screen controls (`video_osd_until`),
+    /// so a Space-pause visibly acknowledges instead of silently freezing the
+    /// picture.
+    #[test]
+    fn pause_and_resume_flash_the_video_controls() {
+        let mut core = core_with_a_native_video(); // Playing
+                                                   // The flash's own preconditions (same as the hover-reveal test): the
+                                                   // native info line exists and the displayed item has metadata.
+        core.native_info = true;
+        core.current = Some(crate::meta::PhotoMeta {
+            rel: "clip.mp4".into(),
+            w: 64,
+            h: 64,
+            size: None,
+            codec: "MP4",
+            animated: None,
+            recovered: None,
+        });
+        assert!(core.video_osd_until.is_none(), "no flash before the toggle");
+        core.video_play_pause(0); // Playing → pause command
+        assert!(core.video_osd_until.is_some(), "pause reveals the controls");
+
+        if let Some(crate::video_native::ActiveVideoBackend::Native(p)) = core.video.as_mut() {
+            p.on_state_changed(
+                pb_decode::VideoSessionId(7),
+                crate::video::VideoSessionState::Paused,
+            );
+        }
+        core.video_osd_until = None;
+        core.video_play_pause(0); // Paused → resume command
+        assert!(core.video_osd_until.is_some(), "resume reveals them again");
     }
 
     /// #94 guard: only the KEYBOARD press is overridden — the menu's "Next image"

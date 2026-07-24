@@ -12,7 +12,12 @@ with any pre-release suffix carried only by the tag.
 - Pressing Space while a video is playing now pauses it (and resumes when
   paused) instead of skipping to the next item — the same contextual override
   the arrow keys already do for seeking. Once the clip ends, Space goes back to
-  being "next". The menu's "Next image" and the `P` key are unchanged.
+  being "next". The menu's "Next image" and the `P` key are unchanged. To skip
+  forward mid-clip: **Shift+Space** ("Next even while playing", remappable like
+  every shortcut, and it hold-blazes) or the new **skip button** beside play in
+  the video controls (macOS). Pausing and resuming now briefly reveal the
+  playback controls, so a Space-pause visibly acknowledges instead of silently
+  freezing the picture.
 
 ### Fixed
 

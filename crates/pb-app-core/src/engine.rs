@@ -405,7 +405,7 @@ pub fn render_planar_present(
 /// handler and `held_nav`).
 pub fn nav_of(action: Action) -> Option<Nav> {
     match action {
-        Action::Next => Some(Nav::Forward),
+        Action::Next | Action::SkipNext => Some(Nav::Forward),
         Action::Prev => Some(Nav::Backward),
         Action::Random => Some(Nav::Random),
         Action::RandomPrev => Some(Nav::RandomPrev),

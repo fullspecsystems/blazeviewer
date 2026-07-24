@@ -31,6 +31,10 @@ pub enum Action {
     Prev,
     Random,
     RandomPrev,
+    /// Next item even while a video is playing (task #94): plain `Next` (space)
+    /// becomes the pause/resume toggle over a live clip, so this is the escape
+    /// forward — same `Nav::Forward`, never intercepted by the video override.
+    SkipNext,
     // Pan (continuous while held).
     PanLeft,
     PanRight,
@@ -170,6 +174,7 @@ impl Action {
         Action::Prev,
         Action::Random,
         Action::RandomPrev,
+        Action::SkipNext,
         Action::PanLeft,
         Action::PanRight,
         Action::PanUp,
@@ -236,6 +241,7 @@ impl Action {
             Action::Prev => "prev",
             Action::Random => "random",
             Action::RandomPrev => "random_prev",
+            Action::SkipNext => "skip_next",
             Action::PanLeft => "pan_left",
             Action::PanRight => "pan_right",
             Action::PanUp => "pan_up",
@@ -311,6 +317,7 @@ impl Action {
             Action::Prev => "Previous image",
             Action::Random => "Random image",
             Action::RandomPrev => "Previous random image",
+            Action::SkipNext => "Next even while playing",
             Action::PanLeft => "Pan left",
             Action::PanRight => "Pan right",
             Action::PanUp => "Pan up",
@@ -389,7 +396,11 @@ impl Action {
     /// How the input layer drives this action.
     pub fn kind(self) -> ActionKind {
         match self {
-            Action::Next | Action::Prev | Action::Random | Action::RandomPrev => ActionKind::Nav,
+            Action::Next
+            | Action::Prev
+            | Action::Random
+            | Action::RandomPrev
+            | Action::SkipNext => ActionKind::Nav,
             Action::PanLeft
             | Action::PanRight
             | Action::PanUp

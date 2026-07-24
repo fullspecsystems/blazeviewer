@@ -134,6 +134,7 @@ impl AppCore {
                 "Browse",
                 vec![
                     row("Next image", sc(Action::Next)),
+                    row("Next even while playing", sc(Action::SkipNext)),
                     row("Previous image", sc(Action::Prev)),
                     row("Random image", sc(Action::Random)),
                     row("Previous random", sc(Action::RandomPrev)),

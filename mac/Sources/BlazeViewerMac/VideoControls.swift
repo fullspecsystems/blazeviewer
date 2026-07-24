@@ -22,6 +22,21 @@ struct VideoPlaybackRow: View {
             .help(model.videoPlaying ? "Pause" : "Play")
             .accessibilityLabel(model.videoPlaying ? "Pause" : "Play")
 
+            // Skip to the next item (task #94): with Space now the pause/resume toggle
+            // over a live clip, this is the on-screen escape forward — the same
+            // `skip_next` action ⇧Space dispatches. No prev twin: Backspace still
+            // navigates backward unchanged (owner call, 2026-07-24).
+            Button(action: { model.menuAction("skip_next") }) {
+                Image(systemName: "forward.end.fill")
+                    .font(.system(size: 12))
+                    .foregroundStyle(.primary)
+                    .frame(width: 18, height: 20)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help("Next item (⇧Space)")
+            .accessibilityLabel("Next item")
+
             // Elapsed time — its width is RESERVED to the total's width (the widest it can
             // ever be) so the string changing (e.g. "28:00" → "1:12:34" when you seek past the
             // hour, or "9:59" → "10:00") can't reflow the HStack and slide the scrubber

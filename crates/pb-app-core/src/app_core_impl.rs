@@ -484,7 +484,7 @@ impl AppCore {
     /// path.
     pub fn dispatch_action(&mut self, action: Action) {
         match action {
-            Action::Next => self.advance(Nav::Forward),
+            Action::Next | Action::SkipNext => self.advance(Nav::Forward),
             Action::Prev => self.advance(Nav::Backward),
             Action::Random => self.advance(Nav::Random),
             Action::RandomPrev => self.advance(Nav::RandomPrev),
