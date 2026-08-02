@@ -16,8 +16,8 @@ with any pre-release suffix carried only by the tag.
   yours to bind). Built for long culling and labelling passes: a whole afternoon
   of "this one goes there" becomes one key at a time.
   - Each slot can **move** (the default — the source folder drains as you go) or
-    **copy**, and a pill names the destination as it files so you can see which
-    key you hit.
+    **copy**, and a pill names the destination as it files, so you can see which
+    key you hit without looking away from the photo.
   - **Sidecar files come along.** A `.xmp`, `.txt`, `.json`, `.yaml`, `.aae` or
     similar file named after the photo travels with it — so an ML training set
     keeps its label files and a RAW keeps its edits, instead of being quietly

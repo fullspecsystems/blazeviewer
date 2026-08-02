@@ -79,7 +79,9 @@ impl AppCore {
             return;
         }
 
-        self.show_toast_icon(&format!("→ {label}"), ToastIcon::Recycle);
+        // The folder-with-a-down-arrow glyph carries the "filed into" sense, so the text is
+        // just the destination name — an arrow in both would be saying it twice.
+        self.show_toast_icon(&label, ToastIcon::Sorted);
         if slot.mode == SortMode::Move {
             // The item is leaving. Freeze any animation on the doomed photo and defer the
             // advance a beat so the pill registers first — exactly `finish_delete`'s timing,
@@ -317,7 +319,11 @@ mod tests {
             Some(0),
             "the advance is scheduled on the keypress, not on the I/O"
         );
-        assert_eq!(toast_of(&core).as_deref(), Some("→ out"));
+        assert_eq!(
+            toast_of(&core).as_deref(),
+            Some("out"),
+            "the pill names the destination"
+        );
 
         settle(&mut core);
         assert!(!src.exists(), "the file left the source folder");

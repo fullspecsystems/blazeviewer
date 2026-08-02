@@ -57,6 +57,11 @@ pub mod assets {
     pub const FOLDER_OPEN: &str = include_str!("../icons/folder-open.svg");
     /// Folder with an up arrow — the folder-tree overlay's "up to the parent" row.
     pub const FOLDER_UP: &str = include_str!("../icons/folder-arrow-up.svg");
+    /// Folder with a down arrow — a Quick Sort filed the photo into a folder (task #136).
+    /// Deliberately **not** the recycle/trash glyph the first cut reused: a bin on a
+    /// *successful file* reads as "deleted", which is alarming for an operation that moved
+    /// the photo somewhere on purpose.
+    pub const FOLDER_DOWN: &str = include_str!("../icons/folder-arrow-down.svg");
     /// Up caret — the folder tree's clickable "n more above" paging marker.
     pub const CARET_UP: &str = include_str!("../icons/caret-up.svg");
     /// Down caret — the folder tree's clickable "n more below" paging marker.

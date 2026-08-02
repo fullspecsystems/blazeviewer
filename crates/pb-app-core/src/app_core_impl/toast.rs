@@ -66,6 +66,7 @@ impl AppCore {
             // for "you're now hearing a different track" and the set already carries it.
             ToastIcon::AudioTrack => Some(icon::assets::VOLUME),
             ToastIcon::AudioTrackFailed => Some(icon::assets::VOLUME_SLASH),
+            ToastIcon::Sorted => Some(icon::assets::FOLDER_DOWN),
         };
         if let Some(hud) = self.hud.as_ref() {
             if let Some((rgba, w, h)) = hud.render_panel_icon(msg, px, pad, fa, hud.theme().bg) {

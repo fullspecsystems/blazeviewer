@@ -1584,6 +1584,13 @@ final class CoreModel {
         case 13: return "captions.bubble"  // Captions off
         case 14: return "speaker.wave.2.fill"  // Audio track switched
         case 15: return "speaker.slash.fill"  // Audio track switch refused
+        // Quick Sort filed the photo (task #136). NOT a bin: the first cut reused the
+        // recycle glyph, and a trash can on a *successful file* reads as "deleted".
+        // `tray.and.arrow.down` over `folder.badge.plus` ("add a folder", the wrong verb)
+        // — it carries the same into-a-container sense as the HUD's `folder-arrow-down`,
+        // and it pairs with the Quick Sort tab's own tray icon. (There is no
+        // `folder.badge.arrow.down` in SF Symbols; checked.)
+        case 16: return "tray.and.arrow.down.fill"  // Sorted into a folder
         default: return nil  // None
         }
     }

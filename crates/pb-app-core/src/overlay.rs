@@ -201,6 +201,12 @@ pub enum ToastIcon {
     AudioTrack = 14,
     /// A switch that did **not** happen — the previous track is still playing.
     AudioTrackFailed = 15,
+    /// A Quick Sort filed the photo into a folder (task #136) — a folder with a down arrow.
+    ///
+    /// Its own icon rather than reusing [`Recycle`](Self::Recycle), which the first cut did:
+    /// a bin glyph on a *successful file* reads as "deleted", which is exactly the wrong
+    /// thing to flash at someone who just moved a photo somewhere on purpose.
+    Sorted = 16,
 }
 
 impl ToastIcon {

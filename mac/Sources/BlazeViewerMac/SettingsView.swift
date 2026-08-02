@@ -985,6 +985,8 @@ struct QuickSortPane: View {
     /// Two-step Clear All. A confirmation dialog for a config reset would be heavier than the
     /// thing it guards, but sixteen configured folders is real work to lose to a stray click.
     @State private var confirmingClear = false
+    /// Debounce for name typing — see `scheduleLabelPush`.
+    @State private var labelPushTask: Task<Void, Never>?
 
     var body: some View {
         Form {
@@ -1039,51 +1041,91 @@ struct QuickSortPane: View {
         }
     }
 
+    /// One slot, on **two lines**: the identity (chord, name, mode) on top, the destination
+    /// underneath.
+    ///
+    /// A single line does not fit. The Settings window is a fixed 560 pt and cannot be
+    /// resized (that was punted after five attempts), while a destination path is arbitrarily
+    /// long — so on one line the path column is squeezed to a stub like `/Users/j…nknown`,
+    /// which is exactly the part you need to read to know the slot is pointed where you think.
+    /// Giving the path its own full-width line is what buys it back.
     @ViewBuilder
     private func row(_ slot: Binding<CoreModel.QuickSortSlotItem>) -> some View {
         let s = slot.wrappedValue
-        HStack(spacing: 8) {
-            // The chord is the row's identity — it is what the fingers actually learn — so it
-            // leads, in a fixed-width column so sixteen rows line up.
-            Text(s.chord.isEmpty ? "—" : s.chord)
-                .font(.system(.body, design: .rounded).weight(.medium))
-                .foregroundStyle(s.chord.isEmpty ? .tertiary : .primary)
-                .frame(width: 34, alignment: .leading)
-            TextField(
-                s.folder.isEmpty ? "Slot \(s.index + 1)" : folderName(s.folder),
-                text: slot.label
-            )
-            .textFieldStyle(.roundedBorder)
-            .frame(width: 120)
-            .onSubmit { push(slot.wrappedValue) }
-            Text(s.folder.isEmpty ? "No folder chosen" : s.folder)
-                .lineLimit(1)
-                .truncationMode(.middle)
-                .foregroundStyle(s.folder.isEmpty ? .tertiary : .secondary)
-                .frame(maxWidth: .infinity, alignment: .leading)
-            // Move vs Copy. A Copy leaves the photo in the deck, so the viewer does not
-            // advance — worth knowing, hence the help tag rather than a bare label.
-            Picker("", selection: slot.copies) {
-                Text("Move").tag(false)
-                Text("Copy").tag(true)
-            }
-            .labelsHidden()
-            .frame(width: 90)
-            .help("Move takes the file out of its folder and advances. Copy leaves it in place.")
-            .onChange(of: s.copies) { _, _ in push(slot.wrappedValue) }
-            Button("Choose…") { choose(slot) }
-            if !s.folder.isEmpty {
-                Button {
-                    slot.wrappedValue.folder = ""
-                    slot.wrappedValue.label = ""
-                    push(slot.wrappedValue)
-                } label: {
-                    Image(systemName: "xmark.circle.fill")
+        VStack(alignment: .leading, spacing: 5) {
+            HStack(spacing: 8) {
+                // The chord is the row's identity — it is what the fingers actually learn — so
+                // it leads, in a fixed-width column so sixteen rows line up.
+                Text(s.chord.isEmpty ? "—" : s.chord)
+                    .font(.system(.body, design: .rounded).weight(.medium))
+                    .foregroundStyle(s.chord.isEmpty ? .tertiary : .primary)
+                    .frame(width: 34, alignment: .leading)
+                // The name the sort pill will show. `prompt`, not the title argument: a
+                // `TextField("x", text:)` in a macOS Form renders "x" as a LABEL to the left
+                // of the box, which read as a mystery caption beside an unexplained empty
+                // field. As a prompt it sits *inside* the box, greyed — so an untouched slot
+                // literally shows the folder name it is going to fall back to.
+                TextField(
+                    "",
+                    text: slot.label,
+                    prompt: Text(s.folder.isEmpty ? "Slot \(s.index + 1)" : folderName(s.folder))
+                )
+                .labelsHidden()
+                .textFieldStyle(.roundedBorder)
+                .frame(maxWidth: .infinity)
+                .onChange(of: s.label) { _, _ in scheduleLabelPush(slot.wrappedValue) }
+                .onSubmit { push(slot.wrappedValue) }
+                // Move vs Copy. A Copy leaves the photo in the deck, so the viewer does not
+                // advance — worth knowing, hence the help tag rather than a bare label.
+                Picker("", selection: slot.copies) {
+                    Text("Move").tag(false)
+                    Text("Copy").tag(true)
                 }
-                .buttonStyle(.borderless)
-                .foregroundStyle(.tertiary)
-                .help("Clear this slot")
+                .labelsHidden()
+                .frame(width: 92)
+                .help(
+                    "Move takes the file out of its folder and advances to the next photo. "
+                        + "Copy leaves the original in place, so the photo stays on screen.")
+                .onChange(of: s.copies) { _, _ in push(slot.wrappedValue) }
             }
+            HStack(spacing: 8) {
+                // Indented to the name column so the path reads as belonging to the row above
+                // rather than starting a new one.
+                Spacer().frame(width: 34)
+                Text(s.folder.isEmpty ? "No folder chosen" : s.folder)
+                    .font(.caption)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .foregroundStyle(s.folder.isEmpty ? .tertiary : .secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .help(s.folder)
+                Button("Choose…") { choose(slot) }
+                    .controlSize(.small)
+                if !s.folder.isEmpty {
+                    Button {
+                        slot.wrappedValue.folder = ""
+                        slot.wrappedValue.label = ""
+                        push(slot.wrappedValue)
+                    } label: {
+                        Image(systemName: "xmark.circle.fill")
+                    }
+                    .buttonStyle(.borderless)
+                    .foregroundStyle(.tertiary)
+                    .help("Clear this slot")
+                }
+            }
+        }
+        .padding(.vertical, 2)
+    }
+
+    /// Push a name edit on a 250 ms debounce — the same shape as the main pane's
+    /// `scheduleApply`, so typing a label doesn't rewrite `settings.toml` once per keystroke.
+    private func scheduleLabelPush(_ slot: CoreModel.QuickSortSlotItem) {
+        labelPushTask?.cancel()
+        labelPushTask = Task {
+            try? await Task.sleep(for: .milliseconds(250))
+            guard !Task.isCancelled else { return }
+            push(slot)
         }
     }
 
