@@ -1227,6 +1227,42 @@ mod subtitle_key_tests {
 }
 
 #[cfg(test)]
+mod quick_sort_binding_tests {
+    use super::*;
+
+    /// The digit keys must actually resolve to a Quick Sort action — the whole feature is
+    /// unreachable if they don't, and no other test walks chord → action for these.
+    #[test]
+    fn the_digit_bank_resolves_to_its_slots() {
+        let km = Keymap::defaults();
+        for slot in 0u8..7 {
+            let chord = KeyChord::parse(&format!("{}", slot + 1)).expect("digit parses");
+            assert_eq!(
+                km.action_for(&chord),
+                Some(Action::QuickSort(slot)),
+                "bare digit {} must file into slot {}",
+                slot + 1,
+                slot + 1
+            );
+        }
+        for slot in 7u8..14 {
+            let chord = KeyChord::parse(&format!("Shift+{}", slot - 6)).expect("chord parses");
+            assert_eq!(km.action_for(&chord), Some(Action::QuickSort(slot)));
+        }
+    }
+
+    /// And the shifted bank must not collide with the bare one.
+    #[test]
+    fn shift_digit_is_a_distinct_chord_from_the_bare_digit() {
+        let km = Keymap::defaults();
+        assert_ne!(
+            km.action_for(&KeyChord::parse("1").unwrap()),
+            km.action_for(&KeyChord::parse("Shift+1").unwrap())
+        );
+    }
+}
+
+#[cfg(test)]
 mod editor_group_tests {
     use super::*;
 

@@ -186,19 +186,57 @@ I/O, temp dirs:
 
 ## Handoff
 
-**Verified** — (nothing yet; plan only)
+**Verified** (Mac session, 2026-08-02)
 
-**Not verified** — everything.
+- `pb-app-core`: 941 tests pass (38 new). The 2 remaining failures
+  (`a_real_video_probes_off_thread_and_lands_its_catalog`,
+  `copy_details_mid_probe_defers_and_copies_the_complete_set`) **reproduce on clean `main`**
+  — pre-existing, task #134. Clippy clean under `-D warnings` for `pb-app-core` + `pb-mac-ffi`.
+- **Windows/Linux winit shell type-checks**: `cargo clippy -p pb-app --all-targets --target
+  x86_64-pc-windows-msvc -- -D warnings` — clean. So the new `AppCore.quick_sort_queue` field
+  is *not* struct-literal debt; it is verified. (⚠ This contradicts the 2026-07-20 note that
+  the Mac cross-check was blocked by blake3's C build — retested, it completes. Memory
+  updated.)
+- **Live on macOS, end to end**, against a real folder: chose a destination through the
+  Settings pane (confirmed it wrote `settings.toml`), pressed `1` on `photo1.jpg` → the file
+  **and its `photo1.txt` YOLO label** landed in the destination, the deck advanced and rebuilt
+  (`photo2.jpg · 1 of 2`), `⌘Z` returned both files with content intact and the deck went back
+  to `1 of 3`. Pressing an unconfigured slot toasted **"No folder set for Quick Sort 3"**.
+- The Quick Sort Settings pane renders correctly: 16 rows, chord column showing `1`–`7` then
+  `⇧1`–`⇧7`, Move/Copy picker, Choose…, and Clear All.
 
-**Decisions / corrections** — the three owner decisions above (2026-08-02).
+**Not verified**
 
-**Cross-platform debt**
-- Adding `AppCore` state breaks `pb-app`'s **struct literal** and not the Mac's
-  `new_host` — the Windows cross-check is mandatory before pushing (see
-  `windows-cross-check-from-macos` memory for the exact temporary Cargo edits).
-- The no-trace test lives in `pb-app/src/main.rs`, which does not build on macOS. A Mac
-  session **cannot** run it.
-- The winit/egui `SettingsTab::QuickSort` is authored blind from the Mac —
-  behaviour-unverified until a Windows session launches it.
+- **The winit/egui Settings tab does not exist yet** — on Windows/Linux the feature works from
+  the keyboard, but slots can only be configured by hand-editing `settings.toml`. This is the
+  main outstanding item.
+- Menu entries (an Image ▸ Quick Sort submenu listing configured slots) are not wired on
+  either shell.
+- Nothing was tested on a **network share or across volumes**, so the `EXDEV` copy fallback
+  has only its forced unit test behind it, not a real cross-volume move.
+- Hammering the key at blaze rates was not measured; the coalesce-removals-per-beat
+  optimization in the plan above is **not implemented** (one rebuild per press today).
+- The no-trace test lives in `pb-app/src/main.rs`, which does not build on macOS — a Mac
+  session cannot run it. It should still hold (quick sort is only reachable from a keypress),
+  but a Windows session should confirm.
 
-**Claimed** — Mac session, 2026-08-02: `pb-app-core` core + macOS Settings tab.
+**Decisions / corrections**
+
+- The three owner decisions above (2026-08-02): sidecars travel, per-slot Move/Copy, create a
+  missing destination.
+- Owner, mid-session: 16 slots (not 7), `Shift+1`–`Shift+7` for the second bank, and a
+  Clear All for privacy.
+- **Numpad secondaries were designed in and then dropped.** `PbKey`'s numpad *digits* are
+  deliberately display-only (no `from_name` arm) **and** `mac/…/KeyMap.swift` does not map them,
+  so the binding would have been dead on macOS. Wiring both is its own change.
+- ⚠ **Automation note for whoever tests this next:** `osascript ... keystroke "1"` does **not**
+  deliver digits to this app — `key code 18` does. Two apparent "the feature doesn't fire"
+  failures were entirely this. A pre-existing binding (`9` = Fill) reproduced the same
+  non-response, which is what proved it was the harness and not the feature.
+
+**Cross-platform debt** — none outstanding from this commit (the winit cross-check passed).
+The missing egui Settings tab is *unbuilt work*, listed under **Not verified** above, not debt
+from a blind edit.
+
+**Claimed** — Mac session, 2026-08-02: `pb-app-core` core + macOS Settings tab. **Released.**
+The egui Settings tab is unclaimed and is the natural next piece for a Windows session.

@@ -7,6 +7,29 @@ with any pre-release suffix carried only by the tag.
 
 ## [Unreleased]
 
+### Added
+
+- **Quick Sort** — file the photo you're looking at into a folder with one
+  keypress, then move straight on to the next. Set up to sixteen destination
+  folders in **Settings ▸ Quick Sort**; `1`–`7` fill the first seven and
+  `Shift+1`–`Shift+7` the next seven (all remappable, and the last two slots are
+  yours to bind). Built for long culling and labelling passes: a whole afternoon
+  of "this one goes there" becomes one key at a time.
+  - Each slot can **move** (the default — the source folder drains as you go) or
+    **copy**, and a pill names the destination as it files so you can see which
+    key you hit.
+  - **Sidecar files come along.** A `.xmp`, `.txt`, `.json`, `.yaml`, `.aae` or
+    similar file named after the photo travels with it — so an ML training set
+    keeps its label files and a RAW keeps its edits, instead of being quietly
+    orphaned.
+  - **Undo** (`⌘Z` / `Ctrl+Z`) puts the photo, its sidecars, and its place in
+    the deck back — several times over, so a mis-hit in a fast run is cheap.
+  - A name that already exists at the destination is kept, not overwritten: the
+    incoming file lands as `IMG_1234-1.jpg`, and its sidecars follow it.
+  - Blaze Viewer still records nothing about what you filed or where — only the
+    folders you chose, and **Clear All Destinations** in Settings removes even
+    those.
+
 ### Changed
 
 - Pressing Space while a video is playing now pauses it (and resumes when
