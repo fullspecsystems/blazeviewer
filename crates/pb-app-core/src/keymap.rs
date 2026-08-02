@@ -203,6 +203,20 @@ impl fmt::Display for KeyChord {
 /// (matching the menu). Shared by every shell's Shortcuts editor — the egui tab and
 /// the SwiftUI settings pane render the SAME groups/order, so the editors can't
 /// drift. Each command gets a Primary + Secondary chord slot (see [`Keymap::slot`]).
+/// The Quick Sort slots as an editor group (task #136). Built in const off
+/// [`crate::quick_sort::SLOT_COUNT`] rather than written out, so adding a slot cannot leave
+/// the Shortcuts editor a row short — which is precisely the #94 bug this table's guard test
+/// exists to catch.
+const QUICK_SORT_ACTIONS: [Action; crate::quick_sort::SLOT_COUNT] = {
+    let mut out = [Action::QuickSort(0); crate::quick_sort::SLOT_COUNT];
+    let mut i = 0;
+    while i < crate::quick_sort::SLOT_COUNT {
+        out[i] = Action::QuickSort(i as u8);
+        i += 1;
+    }
+    out
+};
+
 pub const EDITOR_GROUPS: &[(&str, &[Action])] = &[
     (
         "Navigation",
@@ -273,6 +287,10 @@ pub const EDITOR_GROUPS: &[(&str, &[Action])] = &[
             Action::OpenFolder,
         ],
     ),
+    // Every slot, not just the 14 with a default chord: binding one of the spares is exactly
+    // how a user reaches slots 15–16, so hiding them would make the extra slots unreachable
+    // rather than merely unbound.
+    ("Quick Sort", &QUICK_SORT_ACTIONS),
     (
         "Animation",
         &[
@@ -560,7 +578,7 @@ fn chord_strings(value: &toml::Value) -> Option<Vec<String>> {
 fn default_bindings() -> Vec<(Action, Vec<KeyChord>)> {
     let p = |s: &str| KeyChord::parse(s).expect("default chord must parse");
     let one = |a: Action, s: &str| (a, vec![p(s)]);
-    vec![
+    let mut v = vec![
         (Action::Next, vec![p("Space")]),
         // Task #94: over a live video, plain Space toggles pause — Shift+Space is
         // "Space with intent": always the next item, and it hold-to-blazes.
@@ -703,7 +721,40 @@ fn default_bindings() -> Vec<(Action, Vec<KeyChord>)> {
         // About is menu-only (no default key).
         (Action::About, vec![]),
         one(Action::Quit, "Esc"),
-    ]
+    ];
+    v.extend(quick_sort_bindings());
+    v
+}
+
+/// Quick Sort's default chords (task #136): slots 1–7 on the bare digits `1`–`7`, slots 8–14
+/// on `Shift+1`–`Shift+7`, and every slot past that unbound.
+///
+/// **Why the first bank stops at seven:** `8`/`9`/`0` are already Fit / Fill / Toggle-1:1
+/// above. The shifted digits are entirely free, which is what makes a second bank possible
+/// without displacing anything — and because a chord matches the **physical** key plus
+/// modifier flags, `Shift+1` is a real chord on every layout rather than `!` on some of them.
+///
+/// **No numpad secondaries**, though a one-handed numpad sort is the obvious wish — and this
+/// is the feature that would want it most. Two things block it, both real: `PbKey`'s numpad
+/// *digits* are deliberately display-only (named but with no `from_name` arm — see
+/// `numpad_digits_are_named_but_not_parseable`), and `mac/…/KeyMap.swift` does not map them at
+/// all, so a numpad binding would be dead on macOS even after teaching the parser. Wiring both
+/// is its own change, not a rider on this one.
+///
+/// Unbound slots still appear in Settings and in the Shortcuts editor, so binding one is a
+/// normal thing the user can do rather than a limit they run into.
+fn quick_sort_bindings() -> Vec<(Action, Vec<KeyChord>)> {
+    let p = |s: &str| KeyChord::parse(s).expect("default chord must parse");
+    (0..crate::quick_sort::SLOT_COUNT)
+        .map(|slot| {
+            let chords = match slot {
+                0..=6 => vec![p(&format!("{}", slot + 1))],
+                7..=13 => vec![p(&format!("Shift+{}", slot - 6))],
+                _ => vec![],
+            };
+            (Action::QuickSort(slot as u8), chords)
+        })
+        .collect()
 }
 
 /// Read the user's `keymap.toml` from the config dir, if it exists and is readable.

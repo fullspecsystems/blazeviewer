@@ -34,6 +34,30 @@ pub enum UndoAction {
         name: String,
         handle: crate::delete::RestoreHandle,
     },
+    /// Undo a Quick Sort (task #136): put the file back where it came from and re-insert it
+    /// into the playlist at `index`.
+    ///
+    /// Recorded only once the worker reports the sort **finished**, mirroring how
+    /// `finish_delete` records only a delete that genuinely reached a restorable bin — so
+    /// there is never an entry describing a move that is still in flight or that failed.
+    ///
+    /// The two modes reverse differently, which is why `mode` is carried:
+    /// [`SortMode::Move`](crate::quick_sort::SortMode::Move) renames `to` back to `from`;
+    /// [`Copy`](crate::quick_sort::SortMode::Copy) *deletes* `to` (the original never left,
+    /// so restoring it would be a no-op and the copy is the only thing we made).
+    Sorted {
+        index: usize,
+        /// Where the file came from — where undo puts it back.
+        from: PathBuf,
+        /// Where it landed. Not simply `dest_dir + from.file_name()`: a destination collision
+        /// may have suffixed it (`IMG_1234-1.jpg`).
+        to: PathBuf,
+        /// `(from, to)` for every sidecar that actually travelled, so undo returns the whole
+        /// set. A sidecar that failed to move is absent here and needs no reversing.
+        sidecars: Vec<(PathBuf, PathBuf)>,
+        name: String,
+        mode: crate::quick_sort::SortMode,
+    },
 }
 
 impl UndoAction {
@@ -49,6 +73,7 @@ impl UndoAction {
                 format!("Undo Rotate {}", elide_name(&name))
             }
             UndoAction::Deletion { name, .. } => format!("Undo Delete {}", elide_name(name)),
+            UndoAction::Sorted { name, .. } => format!("Undo Sort {}", elide_name(name)),
         }
     }
 }

@@ -1659,6 +1659,64 @@
         "priority": "high",
         "dependencies": [],
         "subtasks": []
+      },
+      {
+        "id": 136,
+        "title": "Quick Sort — folder slots bound to 1-7 (one-key photo filing)",
+        "description": "Seven configurable destination-folder slots, each bound to a digit key. Pressing the key files the displayed photo into that folder (Move or Copy per slot), takes known sidecars with it, flashes the slot name, and advances. Undoable off the existing stack. Plan: .taskmaster/docs/quick-sort-plan.md",
+        "status": "in-progress",
+        "priority": "high",
+        "dependencies": [],
+        "subtasks": [
+          {
+            "id": 1,
+            "title": "quick_sort.rs — pure logic + move I/O",
+            "description": "QuickSortSlot model, unique_name_in collision suffixing, sidecars_for (stem + full-name match), destination resolution, fs::rename with cross-volume copy fallback. Tests first.",
+            "status": "pending"
+          },
+          {
+            "id": 2,
+            "title": "Action::QuickSort(u8) + keymap defaults",
+            "description": "Tuple variant with const id/label tables; defaults 1-7 primary, Numpad1-7 secondary. Verified 1-7 are unbound.",
+            "status": "pending"
+          },
+          {
+            "id": 3,
+            "title": "Settings model — quick_sort: Vec<QuickSortSlot>",
+            "description": "Serde-defaulted slot list: folder, label, Move/Copy mode.",
+            "status": "pending"
+          },
+          {
+            "id": 4,
+            "title": "UndoAction::Sorted + restore",
+            "description": "Path-keyed undo variant restoring the image and every sidecar that actually moved; reinsert into the deck at its old index.",
+            "status": "pending"
+          },
+          {
+            "id": 5,
+            "title": "app_core_impl/quick_sort.rs — keypress path",
+            "description": "Validate slot, guard archive entries, stop a playing video, retire + advance, dispatch off-thread, apply result. Coalesce removals into one rebuild per beat.",
+            "status": "pending"
+          },
+          {
+            "id": 6,
+            "title": "macOS Settings — Quick Sort tab",
+            "description": "SwiftUI TabView tab + per-slot FFI. Must fit the fixed 560x680 window (resizing is punted).",
+            "status": "pending"
+          },
+          {
+            "id": 7,
+            "title": "winit/egui Settings — SettingsTab::QuickSort",
+            "description": "pb-ui components in dialog.rs. Authored blind from the Mac — behaviour-unverified until a Windows session runs it.",
+            "status": "pending"
+          },
+          {
+            "id": 8,
+            "title": "Menu items + CHANGELOG",
+            "description": "Image menu entries showing each configured slot label; Unreleased changelog line.",
+            "status": "pending"
+          }
+        ]
       }
     ],
     "metadata": {

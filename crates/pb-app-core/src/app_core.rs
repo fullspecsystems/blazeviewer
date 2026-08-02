@@ -901,6 +901,12 @@ pub struct AppCore {
     /// A delete blocked by a still-retiring video reader, awaiting its bounded
     /// retry (task #79 phase 7 — the delete-while-playing case).
     pub pending_delete_retry: Option<DeleteRetry>,
+    /// The Quick Sort worker (task #136), spawned on the first sort so a session that never
+    /// uses the feature starts no thread. `poll_quick_sort` drains its results each tick.
+    ///
+    /// RAM-only and dropped on exit like every other runtime cache (privacy #2): there is no
+    /// on-disk queue, so an unfinished sort simply never happened.
+    pub quick_sort_queue: Option<crate::quick_sort::SortQueue>,
     /// The text currently shown in the video position pill (`m:ss / m:ss`), so it
     /// re-rasterizes only when the second ticks over — not per frame.
     pub video_pill_text: Option<String>,

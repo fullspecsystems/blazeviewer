@@ -85,6 +85,7 @@ pub mod panels;
 pub mod pb_key;
 pub mod poster_select;
 pub mod prompt;
+pub mod quick_sort;
 pub mod retry;
 pub mod save_rotation;
 pub mod scan;

@@ -29,6 +29,7 @@ mod nav;
 mod open;
 mod panels;
 mod prefs;
+mod quick_sort;
 mod save_rotation;
 mod secret;
 mod slideshow;
@@ -332,6 +333,7 @@ impl AppCore {
             video_diag_last: None,
             video_seek_last: None,
             pending_delete_retry: None,
+            quick_sort_queue: None,
             video_pill_text: None,
             video_osd_until: None,
             video_geometry_stale: false,
@@ -699,6 +701,9 @@ impl AppCore {
             // `request_delete_confirm`. The shell only renders the confirm; Yes routes back through
             // `ConfirmAnswered(true)`.
             Action::DeletePermanent => self.request_delete_confirm(),
+            // Quick Sort (task #136): file the photo into slot `i`'s folder. The press itself
+            // does no I/O — see `quick_sort_to_slot`.
+            Action::QuickSort(i) => self.quick_sort_to_slot(i),
             // Host-side commands — the residue whose execution *is* a platform operation: Quit's
             // window teardown. Routed through the one `ShellFlowAction` seam so the whole action
             // vocabulary still dispatches here; the host runs the native op (see the effect's doc).
@@ -1266,6 +1271,10 @@ impl AppCore {
         }
         // 0'. A delete blocked by a retiring video reader retries here (bounded).
         self.poll_delete_retry();
+        // 0''. Quick Sort (task #136): land any move/copy the worker finished — the undo entry
+        // is recorded here, and a failure puts the item back in the deck. Cheap no-op until
+        // the user's first sort spawns the worker.
+        self.poll_quick_sort();
         // 1. Absorb finished decodes (uploads; presents the target if it arrived).
         self.drain_results();
         // 1'. macOS archive video (off the event loop): land a finished playback byte read
