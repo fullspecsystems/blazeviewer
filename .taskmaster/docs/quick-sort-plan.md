@@ -205,11 +205,23 @@ I/O, temp dirs:
 - The Quick Sort Settings pane renders correctly: 16 rows, chord column showing `1`–`7` then
   `⇧1`–`⇧7`, Move/Copy picker, Choose…, and Clear All.
 
+> ## ⛔ The egui Settings tab is ON HOLD — do not build it (owner, 2026-08-02)
+>
+> "I'll keep polishing the mac side — wait until I'm really happy with this one and I'll do
+> the egui side on windows later."
+>
+> The macOS pane is still moving (two owner-driven revisions on day one: the row layout and
+> the toast icon). Porting a design that is still changing means porting it twice and then
+> reconciling two drifted versions — the exact failure the cross-machine section of the root
+> `CLAUDE.md` warns about. **Wait for the owner to call the Mac pane settled.** Windows/Linux
+> keyboard behaviour already works; only slot *configuration* needs `settings.toml` by hand
+> in the meantime.
+
 **Not verified**
 
 - **The winit/egui Settings tab does not exist yet** — on Windows/Linux the feature works from
-  the keyboard, but slots can only be configured by hand-editing `settings.toml`. This is the
-  main outstanding item.
+  the keyboard, but slots can only be configured by hand-editing `settings.toml`.
+  **Deliberately deferred — see the hold notice above.**
 - Menu entries (an Image ▸ Quick Sort submenu listing configured slots) are not wired on
   either shell.
 - Nothing was tested on a **network share or across volumes**, so the `EXDEV` copy fallback
@@ -239,4 +251,7 @@ The missing egui Settings tab is *unbuilt work*, listed under **Not verified** a
 from a blind edit.
 
 **Claimed** — Mac session, 2026-08-02: `pb-app-core` core + macOS Settings tab. **Released.**
-The egui Settings tab is unclaimed and is the natural next piece for a Windows session.
+
+The egui Settings tab is **not** available to claim — see the hold notice above. The owner is
+polishing the macOS pane first and will do the egui side on Windows themselves afterwards. A
+Windows session arriving here should pick up something else.

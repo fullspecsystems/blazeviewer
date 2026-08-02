@@ -1707,13 +1707,13 @@
           {
             "id": 7,
             "title": "winit/egui Settings — SettingsTab::QuickSort",
-            "description": "pb-ui components in dialog.rs. Authored blind from the Mac — behaviour-unverified until a Windows session runs it.",
-            "status": "pending"
+            "description": "ON HOLD (owner, 2026-08-02): do not build until the macOS pane is settled — the owner will do the egui side on Windows themselves. Porting a still-changing design means porting it twice. See the hold notice in .taskmaster/docs/quick-sort-plan.md.",
+            "status": "deferred"
           },
           {
             "id": 8,
             "title": "Menu items + CHANGELOG",
-            "description": "Image menu entries showing each configured slot label; Unreleased changelog line.",
+            "description": "CHANGELOG done. Menu entries (an Image > Quick Sort submenu listing configured slots) still pending on both shells.",
             "status": "pending"
           }
         ]
