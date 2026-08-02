@@ -309,6 +309,17 @@ pub struct Settings {
     pub panel_pos_tree: Option<(f32, f32)>,
     /// The Help panel's dragged position (see `panel_pos_inspector`).
     pub panel_pos_help: Option<(f32, f32)>,
+    /// **Quick Sort** destination slots (task #136) — where each digit key files the displayed
+    /// photo. Always normalized to [`crate::quick_sort::SLOT_COUNT`] entries on load
+    /// ([`Settings::load`]), so a hand-edited file can't make an index go out of range.
+    ///
+    /// A **user-chosen preference**, deliberately set in Settings — the same category as
+    /// [`picker_dir`](Self::picker_dir), not a record of anything viewed (privacy #2). It
+    /// records where you'd like photos to go, never which photos went there: no counters, no
+    /// history, no destination MRU. Settings ▸ Quick Sort ▸ Clear All empties every slot in one
+    /// action ([`crate::quick_sort::cleared_slots`]) for when you'd rather the folder names
+    /// weren't on disk at all.
+    pub quick_sort: Vec<crate::quick_sort::QuickSortSlot>,
 }
 
 impl Default for Settings {
@@ -365,6 +376,9 @@ impl Default for Settings {
             panel_pos_inspector: None, // default homes until the user drags (task #54)
             panel_pos_tree: None,
             panel_pos_help: None,
+            // Sixteen empty slots — Quick Sort does nothing until the user points a slot at a
+            // folder, so the digit keys stay inert on a fresh install (task #136).
+            quick_sort: crate::quick_sort::cleared_slots(),
         }
     }
 }
@@ -402,6 +416,9 @@ impl Settings {
             self.slideshow_interval_secs.max(0.0),
         ))
         .as_secs_f64();
+        // Pad/trim the quick-sort slots so every `Action::QuickSort(i)` has somewhere to look.
+        // A hand-edited file with three slots (or thirty) must not make an index a panic.
+        self.quick_sort = crate::quick_sort::normalize_slots(std::mem::take(&mut self.quick_sort));
     }
 
     /// The letterbox / background fill for a **resolved** dark/light flag (task #46).

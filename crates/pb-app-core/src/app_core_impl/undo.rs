@@ -86,6 +86,16 @@ impl AppCore {
                     self.show_toast("Couldn't restore");
                 }
             },
+            // Undo a Quick Sort: return the file (and its sidecars) and put it back in the
+            // deck — or, for a Copy, delete the copy we made. See `undo_quick_sort`.
+            UndoAction::Sorted {
+                index,
+                from,
+                to,
+                sidecars,
+                name,
+                mode,
+            } => self.undo_quick_sort(index, from, to, sidecars, name, mode),
         }
     }
 

@@ -958,6 +958,7 @@ impl App {
             video_read_rx,
             video_seek_last: None,
             pending_delete_retry: None,
+            quick_sort_queue: None,
             video_pill_text: None,
             video_osd_until: None,
             video_geometry_stale: false,
