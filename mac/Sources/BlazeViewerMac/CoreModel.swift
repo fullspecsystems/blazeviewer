@@ -1669,6 +1669,29 @@ final class CoreModel {
         var id: String { title }
     }
 
+    /// One Quick Sort slot as the settings pane edits it (task #136).
+    struct QuickSortSlotItem: Identifiable, Equatable {
+        /// 0-based; the user-facing number is `index + 1`.
+        let index: Int
+        var folder: String
+        var label: String
+        /// `true` = Copy, `false` = Move. A Bool rather than the raw mode byte because the
+        /// row draws it as one toggle.
+        var copies: Bool
+        /// The chord this slot currently answers to ("" = unbound). Read-only here — it is
+        /// edited in Shortcuts, which is the one place bindings live.
+        let chord: String
+        var id: Int { index }
+
+        /// What the pill would say: the user's label, else the folder's own name. Mirrors
+        /// `QuickSortSlot::display_label` so the pane shows exactly what a press will.
+        var displayLabel: String {
+            let trimmed = label.trimmingCharacters(in: .whitespaces)
+            if !trimmed.isEmpty { return trimmed }
+            return folder.isEmpty ? "" : (folder as NSString).lastPathComponent
+        }
+    }
+
     /// Begin editing (draft = the live keymap). Called when the Settings window opens.
     // ---- The Subtitles settings tab (task #90.4) ----------------------------------
     //
@@ -1731,6 +1754,35 @@ final class CoreModel {
     /// the 261 ms while the user reads the pane rather than on a film's first cue.
     func subtitlePreviewReady() -> Bool {
         core.subtitle_preview_ready()
+    }
+
+    // MARK: - Quick Sort (task #136)
+
+    /// Every configured-or-not slot, in slot order — what the Quick Sort pane opens on.
+    /// Pulled through indexed accessors (a `Vec` of Rust structs carrying Strings does not
+    /// cross back to Swift); `SLOT_COUNT` reads on open is nothing.
+    func quickSortSlots() -> [QuickSortSlotItem] {
+        (0..<Int(quick_sort_slot_count())).map { i in
+            QuickSortSlotItem(
+                index: i,
+                folder: core.quick_sort_slot_folder(UInt(i)).toString(),
+                label: core.quick_sort_slot_label(UInt(i)).toString(),
+                copies: core.quick_sort_slot_mode(UInt(i)) == 1,
+                chord: core.quick_sort_slot_chord(UInt(i)).toString()
+            )
+        }
+    }
+
+    /// Push one edited slot. The core diffs and no-ops when unchanged, so the pane may call
+    /// this freely (including on its own load echo) without touching the disk.
+    func quickSortSetSlot(_ slot: QuickSortSlotItem) {
+        core.quick_sort_set_slot(
+            UInt(slot.index), slot.folder, slot.label, slot.copies ? 1 : 0)
+    }
+
+    /// Settings ▸ Quick Sort ▸ Clear All — empties every destination in one action.
+    func quickSortClearAll() {
+        core.quick_sort_clear_all()
     }
 
     func keymapBeginEdit() {

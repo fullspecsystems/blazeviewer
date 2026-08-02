@@ -1955,6 +1955,92 @@ impl AppCoreHandle {
         ));
     }
 
+    // ---- The Quick Sort tab (task #136) -------------------------------------------
+
+    /// A slot's destination folder, or `""` when unconfigured (the key does nothing).
+    fn quick_sort_slot_folder(&self, i: usize) -> String {
+        self.core
+            .settings
+            .quick_sort
+            .get(i)
+            .and_then(|s| s.folder.as_ref())
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    }
+
+    /// The user's own name for the slot, or `""` (the pane then shows the folder's name —
+    /// the same fallback `QuickSortSlot::display_label` applies at press time).
+    fn quick_sort_slot_label(&self, i: usize) -> String {
+        self.core
+            .settings
+            .quick_sort
+            .get(i)
+            .map(|s| s.label.clone())
+            .unwrap_or_default()
+    }
+
+    /// `0` = Move, `1` = Copy.
+    fn quick_sort_slot_mode(&self, i: usize) -> u8 {
+        match self.core.settings.quick_sort.get(i).map(|s| s.mode) {
+            Some(pb_app_core::quick_sort::SortMode::Copy) => 1,
+            _ => 0,
+        }
+    }
+
+    /// The chord currently bound to this slot, or `""` when unbound (slots 15–16 by default).
+    fn quick_sort_slot_chord(&self, i: usize) -> String {
+        self.core
+            .shortcut_for(pb_app_core::action::Action::QuickSort(i as u8))
+    }
+
+    /// One edited slot → settings + the file. Diffs first and **hard no-ops when unchanged**,
+    /// exactly like `settings_edited` / `set_forced_subtitles`: the pane echoes every slot back
+    /// on open, and sixteen echoes must not each rewrite `settings.toml`.
+    fn quick_sort_set_slot(&mut self, i: usize, folder: String, label: String, mode: u8) {
+        let Some(existing) = self.core.settings.quick_sort.get(i) else {
+            return;
+        };
+        let next = pb_app_core::quick_sort::QuickSortSlot {
+            folder: (!folder.is_empty()).then(|| std::path::PathBuf::from(folder)),
+            label,
+            mode: if mode == 1 {
+                pb_app_core::quick_sort::SortMode::Copy
+            } else {
+                pb_app_core::quick_sort::SortMode::Move
+            },
+        };
+        if *existing == next {
+            return;
+        }
+        let mut s = self.core.settings.clone();
+        s.quick_sort[i] = next;
+        self.push_settings(s);
+    }
+
+    /// Settings ▸ Quick Sort ▸ Clear All.
+    fn quick_sort_clear_all(&mut self) {
+        let cleared = pb_app_core::quick_sort::cleared_slots();
+        if self.core.settings.quick_sort == cleared {
+            return;
+        }
+        let mut s = self.core.settings.clone();
+        s.quick_sort = cleared;
+        self.push_settings(s);
+    }
+
+    /// Route an edited `Settings` through the one path every preference takes, so
+    /// `apply_settings` stays the single place a preference reaches both the engine and the
+    /// file (and so `persist_prefs` still gates the write in tests).
+    fn push_settings(&mut self, s: pb_app_core::settings::Settings) {
+        self.core.now = Instant::now();
+        self.core.handle(CoreEvent::DialogResolved(
+            contract::DialogResult::SettingsEdited {
+                settings: Some(Box::new(s)),
+                keymap: None,
+            },
+        ));
+    }
+
     // ---- The Subtitles tab (task #90.4) -------------------------------------------
 
     /// The saved style, for the pane to open on.
@@ -2836,6 +2922,12 @@ fn fire_art_rgba() -> Vec<u8> {
 /// same constraint that shaped the keymap editor).
 fn subtitle_font_count() -> usize {
     pb_app_core::subtitle::FONT_CHOICES.len()
+}
+
+/// How many Quick Sort slots the pane should draw (task #136). From the core constant, not a
+/// Swift-side literal — raising `SLOT_COUNT` must grow the pane, never leave it a row short.
+fn quick_sort_slot_count() -> usize {
+    pb_app_core::quick_sort::SLOT_COUNT
 }
 
 /// The font at `i`, or `""` past the end (which the picker reads as the system font, so
@@ -4775,6 +4867,24 @@ mod ffi {
         fn fire_art_rgba() -> Vec<u8>;
         fn settings_form(&self) -> SettingsFormFfi;
         fn settings_edited(&mut self, form: SettingsFormFfi);
+
+        // The Quick Sort settings tab (task #136). Indexed accessors rather than a
+        // `Vec<QuickSortSlotFfi>`, for the same reason the keymap editor and the subtitle
+        // font list are indexed: a Vec of structs carrying Strings does not cross back to
+        // Swift. Sixteen slots × three reads on open is nothing.
+        fn quick_sort_slot_count() -> usize;
+        fn quick_sort_slot_folder(&self, i: usize) -> String;
+        fn quick_sort_slot_label(&self, i: usize) -> String;
+        fn quick_sort_slot_mode(&self, i: usize) -> u8;
+        // The chord currently bound to this slot, formatted for display ("1", "⇧ 2"), or ""
+        // when unbound. Read from the LIVE keymap, not the defaults table, so a slot the user
+        // rebound in Shortcuts shows what it actually answers to.
+        fn quick_sort_slot_chord(&self, i: usize) -> String;
+        fn quick_sort_set_slot(&mut self, i: usize, folder: String, label: String, mode: u8);
+        // Settings ▸ Quick Sort ▸ Clear All — the feature's privacy escape hatch. One call
+        // rather than sixteen `set_slot("")`s so it is a single deliberate action, and so a
+        // partial failure can't leave half the folder names on disk.
+        fn quick_sort_clear_all(&mut self);
 
         // The Subtitles settings tab (task #90.4). Its own pull/push pair, separate from
         // the 37-field settings form — see SubtitleStyleFfi.

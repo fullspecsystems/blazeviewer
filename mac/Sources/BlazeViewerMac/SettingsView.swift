@@ -74,6 +74,12 @@ struct SettingsView: View {
             SubtitlesPane(model: model)
                 .settingsTab(cap: settingsHeightCap)
                 .tabItem { tabLabel("Subtitles", symbol: "captions.bubble") }
+            // Its own pane + its own pull/push (task #136): sixteen folder rows is a
+            // screen's worth of content, and folding it into General would both blow that
+            // tab's height and bury a feature you configure once and then use for hours.
+            QuickSortPane(model: model)
+                .settingsTab(cap: settingsHeightCap)
+                .tabItem { tabLabel("Quick Sort", symbol: "tray.full") }
             ShortcutsPane(model: model)
                 .settingsTab(cap: settingsHeightCap)
                 .tabItem { tabLabel("Shortcuts", symbol: "keyboard") }
@@ -958,5 +964,151 @@ struct SettingsDraft: Equatable {
 extension Double {
     fileprivate func clamped(_ lo: Double, _ hi: Double) -> Double {
         Swift.min(Swift.max(self, lo), hi)
+    }
+}
+
+/// **Settings ▸ Quick Sort** (task #136) — the destination folder behind each of the sixteen
+/// one-key filing slots.
+///
+/// Its own pane rather than a section at the foot of General: sixteen folder rows is a screen's
+/// worth of content, and burying it would make a feature you configure once and use for hours
+/// look like an afterthought.
+///
+/// Auto-saving like every other pane — each edit pushes straight through
+/// `quickSortSetSlot`, and the core diffs and no-ops when nothing changed, so the load echo
+/// costs no disk write.
+struct QuickSortPane: View {
+    let model: CoreModel
+
+    @State private var slots: [CoreModel.QuickSortSlotItem] = []
+    @State private var loaded = false
+    /// Two-step Clear All. A confirmation dialog for a config reset would be heavier than the
+    /// thing it guards, but sixteen configured folders is real work to lose to a stray click.
+    @State private var confirmingClear = false
+
+    var body: some View {
+        Form {
+            Section {
+                Text(
+                    "Press a slot's key while viewing a photo to file it into that folder. "
+                        + "Sidecar files (.xmp, .txt, .json) come along, and Undo puts "
+                        + "everything back."
+                )
+                .font(.callout)
+                .foregroundStyle(.secondary)
+            }
+            Section("Slots") {
+                ForEach($slots) { $slot in
+                    row($slot)
+                }
+            }
+            Section {
+                if confirmingClear {
+                    HStack {
+                        Text("Clear all \(slots.count) destinations?")
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                        Button("Cancel") { confirmingClear = false }
+                        Button("Clear All", role: .destructive) {
+                            model.quickSortClearAll()
+                            confirmingClear = false
+                            reload()
+                        }
+                    }
+                } else {
+                    Button("Clear All Destinations…") { confirmingClear = true }
+                        .frame(maxWidth: .infinity, alignment: .center)
+                }
+            } footer: {
+                // Says the true thing rather than the reassuring one: the folders you choose
+                // are saved, nothing about what you sorted ever is.
+                Text(
+                    "Blaze Viewer never records which photos you filed or where. "
+                        + "Clearing removes the saved folder names too."
+                )
+                .font(.caption)
+                .foregroundStyle(.tertiary)
+            }
+        }
+        .formStyle(.grouped)
+        .onAppear {
+            if !loaded {
+                reload()
+                loaded = true
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func row(_ slot: Binding<CoreModel.QuickSortSlotItem>) -> some View {
+        let s = slot.wrappedValue
+        HStack(spacing: 8) {
+            // The chord is the row's identity — it is what the fingers actually learn — so it
+            // leads, in a fixed-width column so sixteen rows line up.
+            Text(s.chord.isEmpty ? "—" : s.chord)
+                .font(.system(.body, design: .rounded).weight(.medium))
+                .foregroundStyle(s.chord.isEmpty ? .tertiary : .primary)
+                .frame(width: 34, alignment: .leading)
+            TextField(
+                s.folder.isEmpty ? "Slot \(s.index + 1)" : folderName(s.folder),
+                text: slot.label
+            )
+            .textFieldStyle(.roundedBorder)
+            .frame(width: 120)
+            .onSubmit { push(slot.wrappedValue) }
+            Text(s.folder.isEmpty ? "No folder chosen" : s.folder)
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .foregroundStyle(s.folder.isEmpty ? .tertiary : .secondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            // Move vs Copy. A Copy leaves the photo in the deck, so the viewer does not
+            // advance — worth knowing, hence the help tag rather than a bare label.
+            Picker("", selection: slot.copies) {
+                Text("Move").tag(false)
+                Text("Copy").tag(true)
+            }
+            .labelsHidden()
+            .frame(width: 90)
+            .help("Move takes the file out of its folder and advances. Copy leaves it in place.")
+            .onChange(of: s.copies) { _, _ in push(slot.wrappedValue) }
+            Button("Choose…") { choose(slot) }
+            if !s.folder.isEmpty {
+                Button {
+                    slot.wrappedValue.folder = ""
+                    slot.wrappedValue.label = ""
+                    push(slot.wrappedValue)
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                }
+                .buttonStyle(.borderless)
+                .foregroundStyle(.tertiary)
+                .help("Clear this slot")
+            }
+        }
+    }
+
+    private func folderName(_ path: String) -> String {
+        (path as NSString).lastPathComponent
+    }
+
+    private func choose(_ slot: Binding<CoreModel.QuickSortSlotItem>) {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.canCreateDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.prompt = "Choose"
+        if panel.runModal() == .OK, let url = panel.url {
+            slot.wrappedValue.folder = url.path
+            push(slot.wrappedValue)
+        }
+    }
+
+    private func push(_ slot: CoreModel.QuickSortSlotItem) {
+        model.quickSortSetSlot(slot)
+    }
+
+    private func reload() {
+        slots = model.quickSortSlots()
     }
 }
