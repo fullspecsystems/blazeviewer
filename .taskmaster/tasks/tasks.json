@@ -1714,20 +1714,20 @@
             "id": 8,
             "title": "Menu items + CHANGELOG",
             "description": "CHANGELOG done. Menu entries (an Image > Quick Sort submenu listing configured slots) still pending on both shells.",
-            "status": "pending"
+            "status": "done"
           },
           {
             "id": 9,
             "title": "Live Photo (.MOV) + subtitle (.srt) companions travel with a sort",
             "description": "Codex #6. IMG_1234.HEIC + IMG_1234.MOV is a Live Photo; sorting the still orphans the motion. engine::companion_motion already knows this pairing. Also movie.mkv + movie.en.srt — qualified names the fixed-candidate model cannot express.",
-            "status": "pending",
+            "status": "done",
             "priority": "high"
           },
           {
             "id": 10,
             "title": "Sidecar matching: make it case-insensitive (or stop claiming it is)",
             "description": "Codex #10. quick_sort.rs documents case-insensitive matching but generates lowercase candidates and probes with try_exists, so IMG_1.XMP is missed on a case-sensitive volume. The doc is currently wrong.",
-            "status": "pending",
+            "status": "done",
             "priority": "medium"
           },
           {
