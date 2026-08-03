@@ -196,17 +196,22 @@ first finding it was right — that one was reproduced as real data loss before 
 | 1 | An incoming sidecar overwrote one already at the destination when the *image* name was free but the *sidecar* name was taken | **Real, critical, reproduced.** Fixed by `unique_name_for_group` |
 | 2 | Undo moved sidecars back unconditionally, clobbering one that reappeared | **Real.** Sidecars now get the image's no-clobber rule |
 
+**Also fixed (commit `5169ae1c`)** — findings #6 and #10, which shared one root cause: companions
+were *generated* as a fixed candidate set and probed, so they could not be matched
+case-insensitively, could not include a Live Photo's `.MOV`, and could not express a qualified
+`movie.en.forced.srt`. They are now **discovered** from the directory listing
+(`companions_in`), with subtitles delegated to `sidecar::parse_sidecar`.
+
 **Accepted, not yet fixed** — ranked by how likely they are to bite this corpus:
 
-1. **Live Photo + subtitle companions are dropped.** `IMG_1234.HEIC` + `IMG_1234.MOV` is a
+1. ~~**Live Photo + subtitle companions are dropped.**~~ **FIXED** — `IMG_1234.HEIC` + `IMG_1234.MOV` is a
    Live Photo; sorting the still orphans the motion and breaks it. `movie.mkv` +
    `movie.en.srt` likewise. The app *already* knows the first pairing —
    `engine::companion_motion`. The fixed-candidate model also can't express a qualified name
    like `movie.en.srt`. **The most likely of these to hurt a real library.**
-2. **Sidecar matching is not case-insensitive**, though `quick_sort.rs` claims it is: the
-   candidates are generated lowercase and probed with a plain `try_exists`, so `IMG_1.XMP`
-   is missed on a case-sensitive volume. *The documentation is currently wrong* — fix the code
-   or the comment.
+2. ~~**Sidecar matching is not case-insensitive**~~ **FIXED** — matching is now case-insensitive
+   *by rule* (not by host filesystem), so a corpus behaves the same on APFS and on a
+   case-sensitive volume.
 3. **In-flight sorts aren't scoped to their deck.** `SortJob` carries no deck generation, so a
    slow sort that lands after the user opens a different folder can push an undo entry — or
    reinsert an old path — into the *new* deck.

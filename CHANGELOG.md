@@ -18,17 +18,27 @@ with any pre-release suffix carried only by the tag.
   - Each slot can **move** (the default — the source folder drains as you go) or
     **copy**, and a pill names the destination as it files, so you can see which
     key you hit without looking away from the photo.
-  - **Sidecar files come along.** A `.xmp`, `.txt`, `.json`, `.yaml`, `.aae` or
-    similar file named after the photo travels with it — so an ML training set
-    keeps its label files and a RAW keeps its edits, instead of being quietly
-    orphaned.
-  - **Undo** (`⌘Z` / `Ctrl+Z`) puts the photo, its sidecars, and its place in
+  - **Companion files come along.** Anything named after the photo travels with
+    it, so nothing is left orphaned:
+    - sidecars — `.xmp`, `.txt`, `.json`, `.yaml`, `.aae` and friends, so an ML
+      training set keeps its labels and a RAW keeps its edits;
+    - a **Live Photo's motion component** — filing `IMG_1234.HEIC` takes
+      `IMG_1234.MOV` with it instead of quietly breaking the Live Photo;
+    - a **video's subtitles**, including language and forced tags:
+      `movie.en.forced.srt` follows `movie.mkv` and keeps its tags.
+  - **Undo** (`⌘Z` / `Ctrl+Z`) puts the photo, its companions, and its place in
     the deck back — several times over, so a mis-hit in a fast run is cheap.
-  - A name that already exists at the destination is kept, not overwritten: the
-    incoming file lands as `IMG_1234-1.jpg`, and its sidecars follow it.
+  - Nothing at the destination is ever overwritten. If the name is taken the
+    incoming file lands as `IMG_1234-1.jpg`, and its companions move with it
+    under matching names so they stay attached.
+  - Reachable by mouse too: **File ▸ Quick Sort**, and the same flyout on the
+    photo's right-click menu, each row showing the key it answers to.
   - Blaze Viewer still records nothing about what you filed or where — only the
     folders you chose, and **Clear All Destinations** in Settings removes even
     those.
+  - *macOS first:* the keys and the menus work everywhere, but the Settings ▸
+    Quick Sort pane is macOS-only for now. On Windows and Linux the slots are
+    configured by hand in `settings.toml` until that pane lands.
 
 ### Changed
 
