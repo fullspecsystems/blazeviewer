@@ -244,6 +244,38 @@ mod tests {
         panic!("the quick-sort worker never reported");
     }
 
+    /// The **menu route** (task #136): File ▸ Quick Sort and the photo context menu carry the
+    /// stable Action id (`quick_sort_6`) on each row, which the host hands straight to
+    /// `Action::from_id` → `CoreEvent::MenuAction`. This pins that a menu-invoked sort is the
+    /// *same operation* as the keypress, right down to the slot it picks — an off-by-one
+    /// between the row's 1-based name and the action's 0-based payload would silently file
+    /// photos into the neighbouring folder, which is the worst possible failure here.
+    #[test]
+    fn a_menu_row_files_into_the_slot_its_id_names() {
+        let t = TempTree::new("menu");
+        let src = t.write("src/a.jpg", "pixels");
+        let dest = t.path("out");
+        let mut core = test_core();
+        // Slot 6 for the user, index 5 for the code.
+        configure(&mut core, 5, &dest, SortMode::Move);
+        core.source = Arc::new(FsSource::new(vec![src.clone()]));
+        core.displayed_item = Some(0);
+
+        let action = crate::action::Action::from_id("quick_sort_6").expect("the menu row's id");
+        assert_eq!(
+            action,
+            crate::action::Action::QuickSort(5),
+            "the 1-based row name maps to the 0-based slot index"
+        );
+        core.handle(contract::CoreEvent::MenuAction(action));
+
+        settle(&mut core);
+        assert!(
+            dest.join("a.jpg").exists(),
+            "the menu route files into slot 6's folder, not a neighbour's"
+        );
+    }
+
     #[test]
     fn an_unconfigured_slot_says_so_and_does_nothing() {
         let mut core = test_core();

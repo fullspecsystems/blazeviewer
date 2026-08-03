@@ -36,6 +36,24 @@ final class MenuBar: NSObject {
     /// Video" instead; the holder stays enabled and the state is always re-derivable.
     private var subtitlesMenu: NSMenu?
     private var audioMenu: NSMenu?
+    /// The File ▸ Quick Sort flyout (task #136) — same `menuNeedsUpdate` pull as the two
+    /// above, and for the same reason: the slot list is a property of *settings*, while
+    /// `SetMenuState` is a fixed struct, so pushing sixteen titles through it would be
+    /// plumbing a generation counter to keep two copies in step. Built at open instead;
+    /// nothing to invalidate when the user edits a slot.
+    ///
+    /// ⚠ Its holder obeys the same one-way-door rule as the flyouts above: **never disabled**.
+    /// When there is nothing to sort the *rows* go grey; the holder stays hoverable.
+    private var quickSortMenu: NSMenu?
+    /// Whether the displayed item is a real file on disk, from the last `SetMenuState`.
+    /// Cached because the Quick Sort rows are built in `menuNeedsUpdate`, which gets no
+    /// state argument.
+    ///
+    /// Deliberately the **same predicate** as Show in Finder (`reveal_enabled`): both ask
+    /// "is there a real on-disk file for the current item?", which is false for an archive
+    /// entry and for the empty deck. If the two ever need to diverge, split the flag then
+    /// rather than now.
+    private var canQuickSort = false
 
     init(model: CoreModel) {
         self.model = model
@@ -123,6 +141,7 @@ final class MenuBar: NSObject {
         items["compare_toggle"]?.isEnabled = s.compare_toggle_enabled
         items["save_rotation"]?.isEnabled = s.save_rotation_enabled
         items["reveal"]?.isEnabled = s.reveal_enabled
+        canQuickSort = s.reveal_enabled // same predicate — see the property's doc
         items["cancel_scan"]?.isEnabled = s.cancel_scan_enabled
         items["undo"]?.isEnabled = s.undo_enabled
         items["undo"]?.title = s.undo_label.toString()
@@ -185,6 +204,50 @@ final class MenuBar: NSObject {
         let holder = NSMenuItem(title: "Audio", action: nil, keyEquivalent: "")
         holder.submenu = menu
         return holder
+    }
+
+    /// The File ▸ Quick Sort flyout (task #136) — one row per configured slot, pulled at
+    /// open (see `quickSortMenu`).
+    private func quickSortFlyout() -> NSMenuItem {
+        let menu = NSMenu(title: "Quick Sort")
+        menu.autoenablesItems = false
+        menu.delegate = self
+        quickSortMenu = menu
+        let holder = NSMenuItem(title: "Quick Sort", action: nil, keyEquivalent: "")
+        holder.submenu = menu
+        return holder
+    }
+
+    /// Build the Quick Sort rows, shared by the menu bar and the photo context menu so the
+    /// two can't drift. `target`/`selector` differ between the two call sites (each has its
+    /// own fired-handler), but both read the Action id off `representedObject`.
+    ///
+    /// The digit is an **`NSMenuItemBadge`, never a key equivalent** — the same rule the
+    /// bare-key commands already follow (`refreshShortcutBadges`). A real key equivalent on
+    /// `1` would let the menu swallow the digit from every text field in the app and fire
+    /// while another window is key. The badge is read from the LIVE keymap, so rebinding a
+    /// slot in Shortcuts updates the menu with no extra plumbing.
+    static func quickSortRows(
+        model: CoreModel, enabled: Bool, target: AnyObject, selector: Selector
+    ) -> [NSMenuItem] {
+        let rows = model.quickSortMenuRows()
+        guard !rows.isEmpty else {
+            let none = NSMenuItem(title: "No Folders Configured", action: nil, keyEquivalent: "")
+            none.isEnabled = false
+            return [none]
+        }
+        return rows.map { row in
+            let item = NSMenuItem(title: row.title, action: selector, keyEquivalent: "")
+            item.target = target
+            item.representedObject = row.actionId
+            // Grey — not hidden — when the current item has no file on disk (an archive
+            // entry, the empty deck): the slots still exist, they just can't act right now.
+            item.isEnabled = enabled
+            if !row.badge.isEmpty {
+                item.badge = NSMenuItemBadge(string: row.badge)
+            }
+            return item
+        }
     }
 
     /// An audio row was chosen. Carries the row index, like the subtitle rows — the core
@@ -282,6 +345,10 @@ final class MenuBar: NSObject {
             sep(),
             item("save_rotation", "Save Rotation", key: "s", enabled: false),
             item("reveal", "Show in Finder", enabled: false),
+            // Quick Sort (task #136) sits with the other on-disk verbs and ABOVE the trash
+            // group: "Move to Portraits" is the same verb as "Move to Trash" with a different
+            // destination, and convention puts the destructive one last.
+            quickSortFlyout(),
             sep(),
             // Finder idioms: Move to Trash = ⌘⌫, Delete Immediately = ⌥⌘⌫ (⇧⌘⌫ is
             // Finder's Empty Trash). ⌘-chords, so no double-fire vs the bare Del keys.
@@ -458,6 +525,25 @@ extension MenuBar: NSMenuDelegate {
         guard let model else { return }
         if menu === audioMenu {
             audioNeedsUpdate(menu, model)
+            return
+        }
+        if menu === quickSortMenu {
+            menu.removeAllItems()
+            for row in Self.quickSortRows(
+                model: model, enabled: canQuickSort, target: self, selector: #selector(fire(_:))
+            ) {
+                menu.addItem(row)
+            }
+            menu.addItem(.separator())
+            // Always present, even with every slot configured: this is how the feature is
+            // discovered at all. Someone who has never pressed a digit finds it here.
+            // Fires the plain `settings` id — the Settings window reopens on whichever tab
+            // it was last showing, which is Quick Sort once you have been there.
+            let configure = NSMenuItem(
+                title: "Configure Slots…", action: #selector(fire(_:)), keyEquivalent: "")
+            configure.target = self
+            configure.representedObject = "settings"
+            menu.addItem(configure)
             return
         }
         guard menu === subtitlesMenu else { return }
