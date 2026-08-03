@@ -991,13 +991,18 @@ struct QuickSortPane: View {
     var body: some View {
         Form {
             Section {
-                Text(
-                    "Press a slot's key while viewing a photo to file it into that folder. "
-                        + "Sidecar files (.xmp, .txt, .json) come along, and Undo puts "
-                        + "everything back."
-                )
+                // Two Texts, not one wrapped paragraph: they say different things — what the
+                // keys do, and what comes along for the ride — and letting the second sentence
+                // start wherever the first happened to run out reads as one run-on blur.
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("Press a slot's key while viewing a photo to file it into that folder.")
+                    Text(
+                        "Sidecar files (.xmp, .txt, .json) come along, and Undo puts "
+                            + "everything back.")
+                }
                 .font(.callout)
                 .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
             }
             Section("Slots") {
                 ForEach($slots) { $slot in
