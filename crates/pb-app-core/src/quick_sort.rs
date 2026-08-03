@@ -215,68 +215,139 @@ const SIDECAR_EXTS: &[&str] = &[
     "xmp", "txt", "json", "yaml", "yml", "aae", "thm", "pp3", "dop", "on1", "arp",
 ];
 
-/// Which of the two real sidecar naming conventions a candidate follows. Both exist in the
-/// wild and both must be matched — and they must be *renamed differently* when the image
-/// collides in the destination, which is why the form is carried rather than inferred.
+/// Which prefix of the companion's name the image owns. Both conventions exist in the wild,
+/// and they must be *renamed differently* when the image collides in the destination — which
+/// is why the form is carried rather than re-derived.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SidecarForm {
-    /// `IMG_1234.xmp` beside `IMG_1234.cr2` — replace the stem. Adobe's RAW convention, and
-    /// YOLO's.
+    /// The image's **stem** leads: `IMG_1234.xmp` beside `IMG_1234.cr2` (Adobe's RAW
+    /// convention, YOLO's labels), `IMG_1234.MOV` beside `IMG_1234.HEIC` (a Live Photo), and
+    /// `movie.en.forced.srt` beside `movie.mkv`.
     Stem,
-    /// `IMG_1234.jpg.xmp` beside `IMG_1234.jpg` — replace the whole name.
+    /// The image's **whole name** leads: `IMG_1234.jpg.xmp` beside `IMG_1234.jpg`.
     FullName,
 }
 
-/// A file name that *would* be a sidecar of the image, if it exists. The caller probes; nothing
-/// here touches the filesystem (the same pure-rules-over-names discipline as
-/// [`crate::sidecar`], and it keeps the cost at a fixed ~22 `try_exists` probes instead of a
-/// `read_dir` that scales with the folder).
+/// A file that travels with the image.
+///
+/// Discovered from the directory's own listing rather than generated as a fixed candidate set.
+/// That change (2026-08-03) is what makes three things possible at once, none of which the
+/// generate-and-probe model could express:
+///
+/// - **case-insensitive matching** — the module claimed it and did not do it, because the
+///   generated candidates were always lowercase, so `IMG_1.XMP` was missed on a
+///   case-sensitive volume;
+/// - **Live Photo motion** — `IMG_1234.HEIC` + `IMG_1234.MOV`, where sorting the still alone
+///   orphans the motion component and silently breaks the Live Photo;
+/// - **qualified subtitle names** — `movie.en.forced.srt`, whose language/flag tokens are
+///   unbounded and so cannot be enumerated ahead of time.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SidecarCandidate {
     pub name: String,
     pub form: SidecarForm,
+    /// How many leading bytes of `name` the image owns — its full name or its stem, per
+    /// `form`. Stored rather than re-derived so [`renamed_for`](Self::renamed_for) can swap
+    /// the prefix exactly, whatever the companion's own dots and case look like.
+    owned_prefix_len: usize,
 }
 
 impl SidecarCandidate {
-    /// This sidecar's name once the image has been renamed to `new_image_name` — so a sidecar
-    /// stays attached to its image even when a destination collision forced `IMG_1234.jpg` to
-    /// land as `IMG_1234-1.jpg`. Getting this wrong is how you silently detach every label file
-    /// in a colliding batch.
+    /// This companion's name once the image has been renamed to `new_image_name` — so it stays
+    /// attached even when a destination collision forced `IMG_1234.jpg` to land as
+    /// `IMG_1234-1.jpg`. Getting this wrong silently detaches every label in a colliding batch.
+    ///
+    /// Swaps the leading prefix and keeps the entire tail, so a qualified name survives whole:
+    /// `movie.en.forced.srt` → `movie-1.en.forced.srt`, never `movie-1.srt`.
     pub fn renamed_for(&self, new_image_name: &str) -> String {
-        let (_, sidecar_ext) = split_name(&self.name);
+        let (new_stem, _) = split_name(new_image_name);
+        // The prefix length is taken from the *stored* form, so the swap is exact even when
+        // the companion's case differs from the image's (`img_1.jpg` + `IMG_1.MOV`).
+        let tail = &self.name[self.owned_prefix_len..];
         match self.form {
-            SidecarForm::Stem => {
-                let (new_stem, _) = split_name(new_image_name);
-                format!("{new_stem}{sidecar_ext}")
-            }
-            SidecarForm::FullName => format!("{new_image_name}{sidecar_ext}"),
+            SidecarForm::Stem => format!("{new_stem}{tail}"),
+            SidecarForm::FullName => format!("{new_image_name}{tail}"),
         }
     }
 }
 
-/// Every name that would be a sidecar of `image_name`, in both conventions. Fixed length
-/// (`2 × SIDECAR_EXTS`), deterministic order, no I/O.
-pub fn sidecar_candidates(image_name: &str) -> Vec<SidecarCandidate> {
+/// Extensions that make a same-stem video the still's **motion component** rather than a
+/// separate clip. Mirrors [`crate::video::is_companion_candidate`] — the app's existing rule,
+/// reused so the scan's companion dedup and the sort cannot disagree about what a Live Photo
+/// is. An `IMG_1234.mp4` beside `IMG_1234.jpg` is deliberately *not* one.
+const MOTION_EXTS: &[&str] = &["mov", "qt"];
+
+/// Every sibling that belongs to `image_name`, given the directory's listing.
+///
+/// Pure — the caller supplies the names (the same rules-over-names discipline as
+/// [`crate::sidecar`], which this delegates to for subtitles). Matching is case-insensitive
+/// **by rule**, not by whatever the host filesystem happens to do, so a corpus behaves the
+/// same on APFS and on a case-sensitive volume.
+pub fn companions_in(image_name: &str, siblings: &[String]) -> Vec<SidecarCandidate> {
     let (stem, _) = split_name(image_name);
-    let mut out = Vec::with_capacity(SIDECAR_EXTS.len() * 2);
-    for ext in SIDECAR_EXTS {
-        // Full-name first: `IMG_1234.jpg.xmp` is unambiguous, while the stem form of an
-        // extension-less file would be the file itself (guarded below).
-        out.push(SidecarCandidate {
-            name: format!("{image_name}.{ext}"),
-            form: SidecarForm::FullName,
-        });
-        let stem_form = format!("{stem}.{ext}");
-        // A sidecar is never the image itself — matters for an extension-less image, where the
-        // stem *is* the whole name.
-        if !stem_form.eq_ignore_ascii_case(image_name) {
+    let lower_name = image_name.to_ascii_lowercase();
+    let lower_stem = stem.to_ascii_lowercase();
+    // A still can own a `.mov`; a video cannot (`movie.mkv` + `movie.mov` are two films).
+    let image_is_video = is_video_name(image_name);
+
+    let mut out: Vec<SidecarCandidate> = Vec::new();
+    for sib in siblings {
+        if sib.eq_ignore_ascii_case(image_name) {
+            continue; // a file is never its own companion
+        }
+        let lower = sib.to_ascii_lowercase();
+
+        // `IMG_1234.jpg.xmp` — the whole image name leads, then a known sidecar extension.
+        if let Some(tail) = lower
+            .strip_prefix(&lower_name)
+            .and_then(|t| t.strip_prefix('.'))
+        {
+            if SIDECAR_EXTS.contains(&tail) {
+                out.push(SidecarCandidate {
+                    name: sib.clone(),
+                    form: SidecarForm::FullName,
+                    owned_prefix_len: image_name.len(),
+                });
+                continue;
+            }
+        }
+
+        // Everything else must start at the stem, at a dot boundary — the rule that stops
+        // `IMG_12345.txt` from being claimed by `IMG_1234.jpg`.
+        let Some(tail) = lower.strip_prefix(&lower_stem) else {
+            continue;
+        };
+        if !tail.starts_with('.') {
+            continue;
+        }
+        let ext = tail.rsplit('.').next().unwrap_or("");
+        let is_sidecar = SIDECAR_EXTS.contains(&ext) && tail.matches('.').count() == 1;
+        let is_motion =
+            !image_is_video && MOTION_EXTS.contains(&ext) && tail.matches('.').count() == 1;
+        // Subtitles last, and delegated: `sidecar::parse_sidecar` already owns the
+        // exact-or-dot-separated stem rule and the language/flag token grammar, so
+        // `movie.en.forced.srt` matches without this module learning what "forced" means.
+        let is_subtitle = crate::sidecar::parse_sidecar(image_name, sib).is_some();
+        if is_sidecar || is_motion || is_subtitle {
             out.push(SidecarCandidate {
-                name: stem_form,
+                name: sib.clone(),
                 form: SidecarForm::Stem,
+                owned_prefix_len: stem.len(),
             });
         }
     }
+    // Stable order regardless of what `read_dir` returned, so an outcome (and its undo entry)
+    // is reproducible.
+    out.sort_by(|a, b| a.name.cmp(&b.name));
     out
+}
+
+/// Whether a name is one of our video containers — the guard that stops `movie.mkv` claiming
+/// `movie.mov` as a "Live Photo". Uses the same classifier the deck types items with.
+fn is_video_name(name: &str) -> bool {
+    name.rsplit_once('.')
+        .map(|(_, ext)| ext)
+        .and_then(crate::video::VideoContainer::from_extension)
+        .is_some()
 }
 
 // ── The I/O ───────────────────────────────────────────────────────────────────────────────
@@ -310,11 +381,18 @@ pub fn perform(src: &Path, dest_dir: &Path, mode: SortMode) -> Result<SortOutcom
     std::fs::create_dir_all(dest_dir)
         .map_err(|e| format!("Couldn't create {}: {e}", dest_dir.display()))?;
 
-    // Which sidecars actually exist beside the image, probed once.
-    let present: Vec<SidecarCandidate> = sidecar_candidates(src_name)
-        .into_iter()
-        .filter(|c| src_dir.join(&c.name).try_exists().unwrap_or(false))
-        .collect();
+    // Which companions actually sit beside the image. One `read_dir` rather than a fixed set
+    // of `try_exists` probes: matching case-insensitively, spotting a Live Photo's `.MOV`, and
+    // recognizing `movie.en.forced.srt` all need to *see* the names, not guess them. The cost
+    // scales with the folder, but this runs on the worker — it never touches the keypress.
+    let siblings: Vec<String> = std::fs::read_dir(src_dir)
+        .map(|rd| {
+            rd.filter_map(|e| e.ok())
+                .filter_map(|e| e.file_name().into_string().ok())
+                .collect()
+        })
+        .unwrap_or_default();
+    let present = companions_in(src_name, &siblings);
 
     let dest_name = unique_name_for_group(src_name, &present, |candidate| {
         dest_dir.join(candidate).try_exists().unwrap_or(false)
@@ -614,81 +692,181 @@ mod tests {
         assert!(!out.contains('('), "no parentheses: {out}");
     }
 
-    // ── sidecars ──────────────────────────────────────────────────────────────────────────
+    // ── companions ────────────────────────────────────────────────────────────────────────
 
-    fn names(image: &str) -> Vec<String> {
-        sidecar_candidates(image)
+    /// Match `image` against a directory listing, returning the companion names found.
+    fn found(image: &str, siblings: &[&str]) -> Vec<String> {
+        let sibs: Vec<String> = siblings.iter().map(|s| s.to_string()).collect();
+        companions_in(image, &sibs)
             .into_iter()
             .map(|c| c.name)
             .collect()
     }
 
     #[test]
-    fn sidecar_candidates_cover_both_conventions() {
-        let out = names("IMG_1234.jpg");
-        assert!(out.contains(&"IMG_1234.xmp".to_string()), "stem form");
+    fn both_sidecar_conventions_are_found() {
+        let out = found(
+            "IMG_1234.jpg",
+            &[
+                "IMG_1234.jpg",
+                "IMG_1234.xmp",
+                "IMG_1234.jpg.xmp",
+                "IMG_1234.txt",
+                "IMG_1234.json",
+            ],
+        );
+        assert!(
+            out.contains(&"IMG_1234.xmp".to_string()),
+            "stem form: {out:?}"
+        );
         assert!(
             out.contains(&"IMG_1234.jpg.xmp".to_string()),
-            "full-name form"
+            "full-name form: {out:?}"
         );
-        assert!(out.contains(&"IMG_1234.txt".to_string()), "YOLO labels");
+        assert!(out.contains(&"IMG_1234.txt".to_string()), "YOLO label");
         assert!(out.contains(&"IMG_1234.json".to_string()), "COCO-style");
     }
 
+    /// The claim this module makes in its docs, which the old generate-and-probe model quietly
+    /// did NOT honour: candidates were emitted lowercase, so an uppercase sidecar was missed
+    /// entirely on a case-sensitive volume.
     #[test]
-    fn sidecar_candidates_never_include_the_image_itself() {
-        // An extension-less image: its stem IS its whole name, so the stem form of `.txt`
-        // would be fine, but for a `.txt` "image" the stem form would name the file itself.
-        let out = names("notes.txt");
+    fn matching_is_case_insensitive_by_rule() {
+        let out = found(
+            "IMG_1234.JPG",
+            &["IMG_1234.JPG", "img_1234.XMP", "IMG_1234.Txt"],
+        );
+        assert!(out.contains(&"img_1234.XMP".to_string()), "{out:?}");
+        assert!(out.contains(&"IMG_1234.Txt".to_string()), "{out:?}");
+    }
+
+    /// A Live Photo: the still owns the same-stem `.MOV`. Sorting the still alone would
+    /// orphan the motion component and break it — and the app already pairs these
+    /// (`video::is_companion_candidate`), so the sort must agree.
+    #[test]
+    fn a_live_photos_motion_component_travels_with_the_still() {
+        let out = found("IMG_1234.HEIC", &["IMG_1234.HEIC", "IMG_1234.MOV"]);
+        assert_eq!(out, vec!["IMG_1234.MOV".to_string()]);
+        // Lowercase and `.qt` too.
+        assert_eq!(
+            found("IMG_1.jpg", &["IMG_1.jpg", "IMG_1.mov"]),
+            vec!["IMG_1.mov".to_string()]
+        );
+        assert_eq!(
+            found("IMG_1.jpg", &["IMG_1.jpg", "IMG_1.QT"]),
+            vec!["IMG_1.QT".to_string()]
+        );
+    }
+
+    /// ⚠ The same-stem `.mp4` is deliberately NOT a companion — Apple only pairs `.mov`/`.qt`,
+    /// and `video::is_companion_candidate` says so. Claiming it would drag an unrelated clip.
+    #[test]
+    fn a_same_stem_mp4_is_not_a_live_photo_companion() {
+        assert!(found("IMG_1234.jpg", &["IMG_1234.jpg", "IMG_1234.mp4"]).is_empty());
+    }
+
+    /// And a VIDEO never claims a same-stem `.mov`: `movie.mkv` + `movie.mov` are two films,
+    /// not a still and its motion.
+    #[test]
+    fn a_video_does_not_claim_a_same_stem_mov() {
+        assert!(found("movie.mkv", &["movie.mkv", "movie.mov"]).is_empty());
+    }
+
+    /// Qualified subtitle names — the case a fixed candidate set can never express, since the
+    /// language and flag tokens are unbounded. Delegated to `sidecar::parse_sidecar`.
+    #[test]
+    fn qualified_subtitle_sidecars_travel_with_a_video() {
+        let out = found(
+            "movie.mkv",
+            &[
+                "movie.mkv",
+                "movie.srt",
+                "movie.en.srt",
+                "movie.en.forced.srt",
+                "movie.fr.vtt",
+            ],
+        );
+        for want in [
+            "movie.srt",
+            "movie.en.srt",
+            "movie.en.forced.srt",
+            "movie.fr.vtt",
+        ] {
+            assert!(
+                out.contains(&want.to_string()),
+                "{want} missing from {out:?}"
+            );
+        }
+    }
+
+    /// The sequel's subtitles are not this film's (the dot-boundary rule).
+    #[test]
+    fn a_near_miss_stem_is_not_a_companion() {
+        let out = found(
+            "IMG_1234.jpg",
+            &["IMG_1234.jpg", "IMG_12345.txt", "IMG_123.txt"],
+        );
+        assert!(out.is_empty(), "{out:?}");
+        assert!(found("movie.mkv", &["movie.mkv", "movie2.srt"]).is_empty());
+    }
+
+    #[test]
+    fn an_unrelated_extension_is_not_a_companion() {
+        let out = found(
+            "IMG_1234.jpg",
+            &["IMG_1234.jpg", "IMG_1234.png", "IMG_1234.cr2"],
+        );
+        assert!(out.is_empty(), "a sibling image is its own item: {out:?}");
+    }
+
+    #[test]
+    fn a_file_is_never_its_own_companion() {
+        let out = found("notes.txt", &["notes.txt", "notes.txt.txt"]);
+        assert_eq!(out, vec!["notes.txt.txt".to_string()], "{out:?}");
+    }
+
+    #[test]
+    fn a_companion_follows_the_image_through_a_collision_rename() {
+        let sibs: Vec<String> = [
+            "IMG_1234.jpg",
+            "IMG_1234.txt",
+            "IMG_1234.jpg.xmp",
+            "IMG_1234.MOV",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let found = companions_in("IMG_1234.jpg", &sibs);
+        let renamed: Vec<String> = found
+            .iter()
+            .map(|c| c.renamed_for("IMG_1234-1.jpg"))
+            .collect();
         assert!(
-            !out.contains(&"notes.txt".to_string()),
-            "a file is not its own sidecar: {out:?}"
+            renamed.contains(&"IMG_1234-1.txt".to_string()),
+            "{renamed:?}"
         );
         assert!(
-            out.contains(&"notes.txt.txt".to_string()),
-            "the full-name form is still a distinct file"
+            renamed.contains(&"IMG_1234-1.jpg.xmp".to_string()),
+            "{renamed:?}"
         );
-    }
-
-    #[test]
-    fn a_near_miss_stem_is_not_a_sidecar() {
-        let out = names("IMG_1234.jpg");
         assert!(
-            !out.contains(&"IMG_12345.txt".to_string()),
-            "a longer stem is a different file"
+            renamed.contains(&"IMG_1234-1.MOV".to_string()),
+            "{renamed:?}"
         );
-        assert!(!out.contains(&"IMG_123.txt".to_string()));
+        // Unchanged image name → unchanged companion names.
+        for c in &found {
+            assert_eq!(c.renamed_for("IMG_1234.jpg"), c.name);
+        }
     }
 
+    /// A qualified subtitle keeps its whole tail through a rename — `movie-1.en.forced.srt`,
+    /// never a flattened `movie-1.srt` (which would lose the language and the forced flag).
     #[test]
-    fn an_unrelated_extension_is_not_a_sidecar() {
-        let out = names("IMG_1234.jpg");
-        assert!(!out.contains(&"IMG_1234.mp4".to_string()));
-        assert!(!out.contains(&"IMG_1234.png".to_string()));
-    }
-
-    #[test]
-    fn a_sidecar_follows_the_image_through_a_collision_rename() {
-        let stem = SidecarCandidate {
-            name: "IMG_1234.txt".into(),
-            form: SidecarForm::Stem,
-        };
-        let full = SidecarCandidate {
-            name: "IMG_1234.jpg.xmp".into(),
-            form: SidecarForm::FullName,
-        };
-        // The image landed as IMG_1234-1.jpg; both sidecars must land attached to it.
-        assert_eq!(stem.renamed_for("IMG_1234-1.jpg"), "IMG_1234-1.txt");
-        assert_eq!(full.renamed_for("IMG_1234-1.jpg"), "IMG_1234-1.jpg.xmp");
-    }
-
-    #[test]
-    fn a_sidecar_keeps_its_name_when_the_image_did_not_collide() {
-        let stem = SidecarCandidate {
-            name: "IMG_1234.txt".into(),
-            form: SidecarForm::Stem,
-        };
-        assert_eq!(stem.renamed_for("IMG_1234.jpg"), "IMG_1234.txt");
+    fn a_qualified_subtitle_keeps_its_tokens_through_a_rename() {
+        let sibs = vec!["movie.mkv".to_string(), "movie.en.forced.srt".to_string()];
+        let found = companions_in("movie.mkv", &sibs);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].renamed_for("movie-1.mkv"), "movie-1.en.forced.srt");
     }
 
     // ── slots ─────────────────────────────────────────────────────────────────────────────
@@ -942,6 +1120,40 @@ mod tests {
             "the newer file wins; undo must not restore the stale one over it"
         );
         assert!(src.exists(), "the image itself still came home");
+    }
+
+    /// End to end on real files: sorting a Live Photo's still takes its `.MOV` along, and a
+    /// video takes its qualified subtitle. Neither was true before 2026-08-03 — the still was
+    /// filed alone and the Live Photo silently broke.
+    #[test]
+    fn perform_takes_a_live_photo_and_a_subtitle_along() {
+        let t = TempTree::new("companions");
+        let still = t.write("src/IMG_9.HEIC", "still");
+        t.write("src/IMG_9.MOV", "motion"); // the Live Photo's motion component
+        t.write("src/IMG_9.mp4", "unrelated clip"); // NOT a companion
+        let dest = t.path("out");
+
+        let outcome = perform(&still, &dest, SortMode::Move).expect("sort the still");
+
+        assert!(
+            dest.join("IMG_9.MOV").exists(),
+            "the motion component followed"
+        );
+        assert!(!still.exists());
+        assert!(
+            t.path("src/IMG_9.mp4").exists(),
+            "the same-stem mp4 is a separate item and stays"
+        );
+        assert_eq!(outcome.sidecars.len(), 1);
+
+        let movie = t.write("src/film.mkv", "video");
+        t.write("src/film.en.forced.srt", "subs");
+        let outcome = perform(&movie, &dest, SortMode::Move).expect("sort the video");
+        assert!(
+            dest.join("film.en.forced.srt").exists(),
+            "the qualified subtitle followed, tokens intact"
+        );
+        assert_eq!(outcome.sidecars.len(), 1);
     }
 
     #[test]
