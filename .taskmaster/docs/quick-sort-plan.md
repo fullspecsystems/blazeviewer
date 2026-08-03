@@ -184,6 +184,58 @@ I/O, temp dirs:
 - `Action::QuickSort` id/label round-trip + `ALL` uniqueness (existing tests cover it once
   the variants are added)
 
+## Codex review triage (2026-08-03)
+
+A `codex exec` review of `main...HEAD`. Its verdict was "not safe to merge yet" and on the
+first finding it was right — that one was reproduced as real data loss before fixing.
+
+**Fixed (commit `68641649`):**
+
+| # | Finding | Verdict |
+|---|---|---|
+| 1 | An incoming sidecar overwrote one already at the destination when the *image* name was free but the *sidecar* name was taken | **Real, critical, reproduced.** Fixed by `unique_name_for_group` |
+| 2 | Undo moved sidecars back unconditionally, clobbering one that reappeared | **Real.** Sidecars now get the image's no-clobber rule |
+
+**Accepted, not yet fixed** — ranked by how likely they are to bite this corpus:
+
+1. **Live Photo + subtitle companions are dropped.** `IMG_1234.HEIC` + `IMG_1234.MOV` is a
+   Live Photo; sorting the still orphans the motion and breaks it. `movie.mkv` +
+   `movie.en.srt` likewise. The app *already* knows the first pairing —
+   `engine::companion_motion`. The fixed-candidate model also can't express a qualified name
+   like `movie.en.srt`. **The most likely of these to hurt a real library.**
+2. **Sidecar matching is not case-insensitive**, though `quick_sort.rs` claims it is: the
+   candidates are generated lowercase and probed with a plain `try_exists`, so `IMG_1.XMP`
+   is missed on a case-sensitive volume. *The documentation is currently wrong* — fix the code
+   or the comment.
+3. **In-flight sorts aren't scoped to their deck.** `SortJob` carries no deck generation, so a
+   slow sort that lands after the user opens a different folder can push an undo entry — or
+   reinsert an old path — into the *new* deck.
+4. **Rapid presses can sort a photo that was never shown.** `flush_pending_delete` advances
+   `displayed_item` logically while the previous frame is still on screen, so a second press
+   inside the 160 ms advance window files the *next* photo. Sharpest finding in the review;
+   it strikes exactly the hammering case the feature is for.
+5. **The worker doesn't keep the event loop awake and isn't drained at shutdown.**
+   `work_pending()` doesn't include quick sort, so a slow SMB result can sit in the channel
+   until an unrelated event wakes the app; teardown neither joins nor cancels, so a queued
+   sort can silently never happen.
+6. **A copy that succeeded but whose source removal failed is reported as total failure** —
+   leaving an untracked duplicate at the destination with no undo entry. Retrying then makes
+   `a-1.jpg`, `a-2.jpg`. Also: the copy fallback runs after *every* rename error, not just
+   `EXDEV`, and the plan's "copy → verify → unlink" never got its verify.
+7. Undo runs its I/O **synchronously on the event loop** — undoing a cross-volume move can
+   freeze for the length of the copy. The forward path was made async and the reverse wasn't.
+8. Same-folder detection is **lexical**, so a symlinked destination isn't recognized as the
+   photo's own folder and it self-renames instead of no-opping.
+9. Destination-inside-source can be re-discovered by a *streaming* recursive scan.
+10. RAW+JPEG sharing one `.xmp`: whichever is sorted first claims it.
+
+**Judged not worth acting on:** symlink/xattr/timestamp preservation through the copy fallback
+(real but platform-dependent and untested against these volumes); the first press spawning a
+thread (~µs); the O(N) playlist rebuild per press (already known — see the Prime-Directive
+section above). The review also flagged that failure paths `eprintln!` full file paths; that is
+**pre-existing house practice** (`delete.rs` does the same) rather than something Quick Sort
+introduced, but it is worth a project-wide decision.
+
 ## Handoff
 
 **Verified** (Mac session, 2026-08-02)
