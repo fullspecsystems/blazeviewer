@@ -166,6 +166,41 @@ pub fn unique_name(name: &str, is_taken: impl Fn(&str) -> bool) -> String {
         .expect("the range is unbounded")
 }
 
+/// A destination name free for the image **and every one of its sidecars at once**.
+///
+/// ⚠ This is the fix for a real, deterministic data-loss bug (found by a Codex review,
+/// 2026-08-03, and reproduced before fixing). Naming the image alone is not enough: with
+/// `IMG_1.jpg` + `IMG_1.txt` incoming, and a destination that already holds `IMG_1.txt` but
+/// **no** `IMG_1.jpg`, the image took the free `IMG_1.jpg` and the sidecar was then written
+/// straight over the existing label — `fs::rename` replaces silently on POSIX, and the
+/// `fs::copy` fallback does the same on Windows. A training set's label was destroyed with no
+/// error and nothing to undo it, which is precisely the silent corruption the sidecar feature
+/// exists to prevent.
+///
+/// Suffixing the group as a unit — rather than giving each file its own suffix — is what keeps
+/// a sidecar attached to its image: `IMG_1-2.jpg` must be accompanied by `IMG_1-2.txt`, never
+/// by an independently-numbered `IMG_1-5.txt`.
+///
+/// The original collision test missed this because it seeded *both* `IMG_1.jpg` and
+/// `IMG_1.txt`, so the image was pushed to `IMG_1-1.jpg` and `IMG_1-1.txt` happened to be free.
+/// The asymmetric case is the dangerous one.
+fn unique_name_for_group(
+    name: &str,
+    sidecars: &[SidecarCandidate],
+    is_taken: impl Fn(&str) -> bool,
+) -> String {
+    let group_free =
+        |image: &str| !is_taken(image) && !sidecars.iter().any(|s| is_taken(&s.renamed_for(image)));
+    if group_free(name) {
+        return name.to_string();
+    }
+    let (stem, ext) = split_name(name);
+    (1u32..)
+        .map(|n| format!("{stem}-{n}{ext}"))
+        .find(|candidate| group_free(candidate))
+        .expect("the range is unbounded")
+}
+
 // ── Sidecars ──────────────────────────────────────────────────────────────────────────────
 
 /// Extensions we treat as belonging to the image beside them. `xmp`/`pp3`/`dop`/`on1`/`arp` are
@@ -275,7 +310,13 @@ pub fn perform(src: &Path, dest_dir: &Path, mode: SortMode) -> Result<SortOutcom
     std::fs::create_dir_all(dest_dir)
         .map_err(|e| format!("Couldn't create {}: {e}", dest_dir.display()))?;
 
-    let dest_name = unique_name(src_name, |candidate| {
+    // Which sidecars actually exist beside the image, probed once.
+    let present: Vec<SidecarCandidate> = sidecar_candidates(src_name)
+        .into_iter()
+        .filter(|c| src_dir.join(&c.name).try_exists().unwrap_or(false))
+        .collect();
+
+    let dest_name = unique_name_for_group(src_name, &present, |candidate| {
         dest_dir.join(candidate).try_exists().unwrap_or(false)
     });
     let dest = dest_dir.join(&dest_name);
@@ -283,16 +324,14 @@ pub fn perform(src: &Path, dest_dir: &Path, mode: SortMode) -> Result<SortOutcom
     transfer(src, &dest, mode)?;
 
     // Sidecars are best-effort from here: the image has already moved, and a stalled `.xmp`
-    // must not turn a completed sort into a failure.
+    // must not turn a completed sort into a failure. Their destinations are already known
+    // free — `unique_name_for_group` above cleared the whole set together.
     let mut outcome = SortOutcome {
         dest,
         ..Default::default()
     };
-    for candidate in sidecar_candidates(src_name) {
+    for candidate in present {
         let from = src_dir.join(&candidate.name);
-        if !from.try_exists().unwrap_or(false) {
-            continue;
-        }
         let to = dest_dir.join(candidate.renamed_for(&dest_name));
         match transfer(&from, &to, mode) {
             Ok(()) => outcome.sidecars.push((from, to)),
@@ -459,6 +498,18 @@ pub fn undo_sort(
     // Sidecars are best-effort on the way back too: the image is the operation, and a stuck
     // `.xmp` must not leave the undo half-done and unreportable.
     for (orig, moved) in sidecars {
+        // ⚠ The same no-clobber rule the image gets above. Undo used to move a sidecar back
+        // unconditionally, so an editor that wrote a fresh `a.xmp` after the sort had it
+        // silently replaced by the stale one we were returning (Codex review, 2026-08-03).
+        // Leaving ours at the destination is recoverable; overwriting the user's newer file
+        // is not.
+        if orig.try_exists().unwrap_or(false) {
+            eprintln!(
+                "quick sort undo: {} reappeared — leaving the sorted copy alone",
+                orig.display()
+            );
+            continue;
+        }
         if let Err(e) = move_file(moved, orig) {
             eprintln!(
                 "quick sort undo: sidecar {} not restored: {e}",
@@ -819,6 +870,78 @@ mod tests {
             "first label",
             "the earlier label is untouched"
         );
+    }
+
+    /// ⚠ REGRESSION (Codex review, 2026-08-03 — reproduced as real data loss before fixing).
+    /// The destination holds `IMG_1.txt` but **no** `IMG_1.jpg`. The image alone would have
+    /// found `IMG_1.jpg` free and its sidecar would then have been written straight over the
+    /// existing label. The whole group must move aside together.
+    #[test]
+    fn an_incoming_sidecar_never_overwrites_one_already_at_the_destination() {
+        let t = TempTree::new("sidecar_clobber");
+        let src = t.write("src/IMG_1.jpg", "new pixels");
+        t.write("src/IMG_1.txt", "NEW label");
+        let dest_dir = t.path("out");
+        t.write("out/IMG_1.txt", "OLD label"); // present; the IMAGE name is free
+
+        let outcome = perform(&src, &dest_dir, SortMode::Move).expect("sort");
+
+        assert_eq!(
+            std::fs::read_to_string(dest_dir.join("IMG_1.txt")).expect("read"),
+            "OLD label",
+            "the label already at the destination survives"
+        );
+        assert_eq!(
+            outcome.dest,
+            dest_dir.join("IMG_1-1.jpg"),
+            "the image moves aside even though its own name was free, so its label can follow"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dest_dir.join("IMG_1-1.txt")).expect("read"),
+            "NEW label",
+            "and the incoming label lands beside its own image"
+        );
+    }
+
+    /// The mirror case: the IMAGE name is taken but the sidecar's is free. The group still
+    /// moves as a unit, so the pair stays attached.
+    #[test]
+    fn the_group_moves_as_a_unit_when_only_the_image_name_collides() {
+        let t = TempTree::new("image_clobber");
+        let src = t.write("src/IMG_1.jpg", "new pixels");
+        t.write("src/IMG_1.txt", "NEW label");
+        let dest_dir = t.path("out");
+        t.write("out/IMG_1.jpg", "old pixels");
+
+        let outcome = perform(&src, &dest_dir, SortMode::Move).expect("sort");
+
+        assert_eq!(outcome.dest, dest_dir.join("IMG_1-1.jpg"));
+        assert_eq!(
+            std::fs::read_to_string(dest_dir.join("IMG_1-1.txt")).expect("read"),
+            "NEW label"
+        );
+    }
+
+    /// Undo must not clobber a sidecar that reappeared at the source while the photo was away.
+    #[test]
+    fn undo_leaves_a_sidecar_that_came_back_while_the_photo_was_sorted() {
+        let t = TempTree::new("undo_clobber");
+        let src = t.write("src/a.jpg", "pixels");
+        t.write("src/a.txt", "original label");
+        let dest_dir = t.path("out");
+
+        let outcome = perform(&src, &dest_dir, SortMode::Move).expect("sort");
+        // An editor writes a NEW label at the source before the user undoes.
+        t.write("src/a.txt", "freshly written label");
+
+        undo_sort(&src, &outcome.dest, &outcome.sidecars, SortMode::Move).expect("undo");
+
+        assert_eq!(
+            std::fs::read_to_string(t.path("src/a.txt")).expect("read"),
+            "freshly written label",
+            "the newer file wins; undo must not restore the stale one over it"
+        );
+        assert!(src.exists(), "the image itself still came home");
     }
 
     #[test]
