@@ -1715,6 +1715,55 @@
             "title": "Menu items + CHANGELOG",
             "description": "CHANGELOG done. Menu entries (an Image > Quick Sort submenu listing configured slots) still pending on both shells.",
             "status": "pending"
+          },
+          {
+            "id": 9,
+            "title": "Live Photo (.MOV) + subtitle (.srt) companions travel with a sort",
+            "description": "Codex #6. IMG_1234.HEIC + IMG_1234.MOV is a Live Photo; sorting the still orphans the motion. engine::companion_motion already knows this pairing. Also movie.mkv + movie.en.srt — qualified names the fixed-candidate model cannot express.",
+            "status": "pending",
+            "priority": "high"
+          },
+          {
+            "id": 10,
+            "title": "Sidecar matching: make it case-insensitive (or stop claiming it is)",
+            "description": "Codex #10. quick_sort.rs documents case-insensitive matching but generates lowercase candidates and probes with try_exists, so IMG_1.XMP is missed on a case-sensitive volume. The doc is currently wrong.",
+            "status": "pending",
+            "priority": "medium"
+          },
+          {
+            "id": 11,
+            "title": "Scope in-flight sorts to their deck",
+            "description": "Codex #5. SortJob carries no deck generation, so a late result can push an undo entry or reinsert an old path into a deck opened since.",
+            "status": "pending",
+            "priority": "medium"
+          },
+          {
+            "id": 12,
+            "title": "Do not sort a photo that was never presented",
+            "description": "Codex #4. flush_pending_delete advances displayed_item logically while the old frame is still on screen, so a second press inside the 160ms window files the NEXT photo. Hits exactly the hammering case.",
+            "status": "pending",
+            "priority": "medium"
+          },
+          {
+            "id": 13,
+            "title": "Worker: event-loop wake + shutdown drain",
+            "description": "Codex #7. work_pending() omits quick sort so a slow result waits for an unrelated wake; teardown neither joins nor cancels, so a queued sort can silently never run.",
+            "status": "pending",
+            "priority": "medium"
+          },
+          {
+            "id": 14,
+            "title": "Copy-succeeded-but-unlink-failed leaves an untracked duplicate",
+            "description": "Codex #3. Reported as total failure, so no undo entry and a retry makes a-1.jpg, a-2.jpg. Also: the copy fallback runs after EVERY rename error, not just EXDEV, and the planned copy->verify->unlink never got its verify.",
+            "status": "pending",
+            "priority": "medium"
+          },
+          {
+            "id": 15,
+            "title": "Undo I/O runs on the event loop",
+            "description": "Codex #12. Undoing a cross-volume move blocks for the length of the copy. The forward path was made async; the reverse was not.",
+            "status": "pending",
+            "priority": "low"
           }
         ]
       }
