@@ -1258,6 +1258,35 @@ final class CoreModel {
         if canReveal {
             add("reveal", "Show in Finder")
         }
+        // Quick Sort (task #136) — the mouse route to the feature, which otherwise has none.
+        // **One row**, not one per slot: this menu is already eighteen items, and a flyout
+        // keeps the whole feature to a single line of it. Only offered when the item is a
+        // real file on disk (same `canReveal` predicate the menu bar uses); an archive entry
+        // simply doesn't show it, rather than showing a dead submenu.
+        if canReveal {
+            let holder = NSMenuItem(title: "Quick Sort", action: nil, keyEquivalent: "")
+            let sub = NSMenu(title: "Quick Sort")
+            sub.autoenablesItems = false
+            for row in MenuBar.quickSortRows(
+                model: self, enabled: true, target: self,
+                selector: #selector(self.contextItemFired(_:))
+            ) {
+                sub.addItem(row)
+            }
+            // Same footer as the menu-bar flyout, and for the same reason: it is how the
+            // feature is discovered, and a mouse user is exactly who needs the route to
+            // Settings. Parity matters more than brevity here — a flyout that offers
+            // "Configure Slots…" in one menu and not the other reads as a bug.
+            sub.addItem(.separator())
+            let configure = NSMenuItem(
+                title: "Configure Slots…", action: #selector(self.contextItemFired(_:)),
+                keyEquivalent: "")
+            configure.target = self
+            configure.representedObject = "settings"
+            sub.addItem(configure)
+            holder.submenu = sub
+            menu.addItem(holder)
+        }
         menu.addItem(.separator())
         add("fullscreen", fullscreen ? "Exit Quick Full Screen" : "Enter Quick Full Screen")
         NSMenu.popUpContextMenu(menu, with: event, for: view)
@@ -1790,6 +1819,35 @@ final class CoreModel {
     /// Settings ▸ Quick Sort ▸ Clear All — empties every destination in one action.
     func quickSortClearAll() {
         core.quick_sort_clear_all()
+    }
+
+    /// One row of the File ▸ Quick Sort flyout (and its context-menu twin).
+    struct QuickSortMenuRow: Identifiable {
+        /// The keymap/menu Action id (`quick_sort_3`) — the same string the keyboard
+        /// dispatches, so a menu-invoked sort is byte-for-byte the same operation.
+        let actionId: String
+        /// "Move to Portraits" / "Copy to Keepers". The **verb is in the title** because
+        /// this is the only surface where the Move/Copy distinction is visible at the
+        /// moment you act — the toast pill can't show it and the picker is in Settings.
+        let title: String
+        /// The chord this slot answers to, for the right-aligned badge ("" = unbound).
+        let badge: String
+        var id: String { actionId }
+    }
+
+    /// The configured slots as menu rows, in slot order. Unconfigured slots are omitted —
+    /// sixteen "Slot 12 (unset)" rows would be noise, and the flyout's own
+    /// "Configure Slots…" footer is the route to setting one up.
+    func quickSortMenuRows() -> [QuickSortMenuRow] {
+        quickSortSlots()
+            .filter { !$0.folder.isEmpty }
+            .map { slot in
+                QuickSortMenuRow(
+                    actionId: "quick_sort_\(slot.index + 1)",
+                    title: (slot.copies ? "Copy to " : "Move to ") + slot.displayLabel,
+                    badge: slot.chord
+                )
+            }
     }
 
     func keymapBeginEdit() {
