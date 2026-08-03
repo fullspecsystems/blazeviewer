@@ -1375,10 +1375,21 @@ mod tests {
     /// frame-rate independent and monotonic in `dt`.
     #[test]
     fn zoom_ease_alpha_is_bounded_and_monotonic() {
-        assert_eq!(zoom_ease_alpha(0.0), 0.0, "a zero-length tick moves nothing");
-        assert_eq!(zoom_ease_alpha(-1.0), 0.0, "a negative dt is treated as zero");
+        assert_eq!(
+            zoom_ease_alpha(0.0),
+            0.0,
+            "a zero-length tick moves nothing"
+        );
+        assert_eq!(
+            zoom_ease_alpha(-1.0),
+            0.0,
+            "a negative dt is treated as zero"
+        );
         let a = zoom_ease_alpha(0.008); // ~120 Hz
-        assert!(a > 0.0 && a < 1.0, "a normal frame closes a fraction (got {a})");
+        assert!(
+            a > 0.0 && a < 1.0,
+            "a normal frame closes a fraction (got {a})"
+        );
         assert!(
             zoom_ease_alpha(1.0) > 0.99,
             "a long frame lands near the target rather than crawling"
@@ -1407,11 +1418,17 @@ mod tests {
             }
             let step = ratio.powf(zoom_ease_alpha(0.008));
             zoom *= step;
-            assert!(zoom <= target + 1e-6, "never overshoots the target (got {zoom})");
+            assert!(
+                zoom <= target + 1e-6,
+                "never overshoots the target (got {zoom})"
+            );
             frames += 1;
             assert!(frames < 120, "must converge well under a second of frames");
         }
-        assert!((zoom - target).abs() < 0.01, "lands on the target (got {zoom})");
+        assert!(
+            (zoom - target).abs() < 0.01,
+            "lands on the target (got {zoom})"
+        );
     }
 
     /// Task #94.2 resume policy: remember only a position meaningfully into a
