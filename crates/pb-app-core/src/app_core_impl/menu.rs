@@ -83,6 +83,13 @@ impl AppCore {
         let Some(item) = self.displayed_item else {
             return;
         };
+        // Generation metadata (task #137) is a property of the file, so answering
+        // it needs the metadata read. That read is memoized per item and this is an
+        // explicit user action — and "Copy Image Details", a sibling item in this
+        // very menu, already forces the same read — so paying it here keeps the
+        // menu honest rather than offering commands that toast "nothing to copy".
+        // It inherits the read's known event-loop debt; it does not add a new kind.
+        self.ensure_exif_cached(item);
         let state = contract::ContextMenuState {
             has_image: true,
             has_motion: self.has_motion(item) || self.item_is_video(item),
@@ -90,6 +97,7 @@ impl AppCore {
             fullscreen: !self.windowed,
             compare_pinned: self.compare_pin.is_some(),
             compare_pinned_here: self.compare_pin == Some(item),
+            has_generation: self.exif_cache.get(&item).is_some_and(|d| d.gen.is_some()),
         };
         self.effects
             .push(contract::CoreEffect::ShowContextMenu(state));

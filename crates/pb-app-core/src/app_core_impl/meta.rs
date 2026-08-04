@@ -106,19 +106,20 @@ impl AppCore {
                 });
                 return rows;
             }
-            // The Generation block (task #137) leads the facts: on an AI image it
-            // is what the user opened the panel for, and burying it under twenty
-            // EXIF rows would mean scrolling for the headline. Built on its own
-            // path from `genmeta`, deliberately NOT through the EXIF row loop
-            // below — `is_exif_blob` would drop a prompt at 256 bytes and
-            // `truncate_exif_value` would cut it to 72 characters.
-            if let Some(gen) = &details.gen {
-                rows.extend(crate::genmeta::detail_rows(gen));
-            }
             rows.push(DetailRow::Pair {
                 label: "File Size".to_string(),
                 value: format!("{} bytes", hud::format_thousands(details.size)),
             });
+            // The Generation block (task #137) sits directly under the basic
+            // identity facts — dimensions, codec, file size — and above the EXIF
+            // table: it is what the user opened the panel for on an AI image, but
+            // it is not itself an identity fact, so it does not split that group.
+            // Built on its own path from `genmeta`, deliberately NOT through the
+            // EXIF row loop below — `is_exif_blob` would drop a prompt at 256
+            // bytes and `truncate_exif_value` would cut it to 72 characters.
+            if let Some(gen) = &details.gen {
+                rows.extend(crate::genmeta::detail_rows(gen));
+            }
             for (tag, val) in &details.fields {
                 // Skip binary blobs that render as meaningless hex (Apple
                 // MakerNote/Padding are kilobytes long); truncate anything else
@@ -644,14 +645,16 @@ mod tests {
             "the prompt must be a Body row: {flat:?}"
         );
         assert!(flat.iter().any(|r| r == "Seed: 4242"), "{flat:?}");
-        // Ahead of the ordinary facts: on an AI image the recipe is what the
-        // panel was opened for, and burying it under EXIF means scrolling.
-        if let Some(size_at) = flat.iter().position(|r| r.starts_with("File Size")) {
-            assert!(
-                heading < size_at,
-                "Generation must lead the facts: {flat:?}"
-            );
-        }
+        // Under the basic identity facts — dimensions, codec, file size — which
+        // stay together as one group, and above the EXIF table (owner, 2026-08-04).
+        let size_at = flat
+            .iter()
+            .position(|r| r.starts_with("File Size"))
+            .expect("a File Size row");
+        assert!(
+            size_at < heading,
+            "the identity facts must not be split by the Generation block: {flat:?}"
+        );
         let _ = std::fs::remove_file(&path);
     }
 

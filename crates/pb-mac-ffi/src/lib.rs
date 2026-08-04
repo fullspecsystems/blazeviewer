@@ -3378,6 +3378,16 @@ fn map_effect(e: contract::CoreEffect) -> ffi::CoreEffectFfi {
         }
         // The right-click photo context menu (task #41): the host builds the popup from
         // these flags (has_image, has_motion, can_reveal, fullscreen).
+        //
+        // ⚠ CROSS-PLATFORM DEBT (task #137): `ContextMenuState` also carries
+        // `has_generation`, which is NOT forwarded here. Adding it means a 7th
+        // tuple element plus a matching change in the Swift host, and the Windows
+        // session that added the field cannot compile either — `pb-mac-ffi` is
+        // `cfg(target_os = "macos")`, so a mistake here produces zero errors off
+        // Mac. Leaving it out is the safe failure: macOS simply omits the two
+        // Copy Generation items from the right-click menu (they remain reachable
+        // from the Edit menu once the Mac wires them). Field access, not a struct
+        // literal, so the new field does not break this build either way.
         C::ShowContextMenu(s) => E::ShowContextMenu(
             s.has_image,
             s.has_motion,

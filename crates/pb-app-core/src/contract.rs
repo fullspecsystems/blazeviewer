@@ -219,6 +219,14 @@ pub struct ContextMenuState {
     pub compare_pinned: bool,
     /// The displayed photo IS the pin → the pin item reads "Unpin from Compare".
     pub compare_pinned_here: bool,
+    /// The displayed photo carries AI generation metadata (task #137) → include the
+    /// Copy Generation Prompt / Data items.
+    ///
+    /// Contextual here but *not* in the menu bar, and the asymmetry is deliberate:
+    /// this popup is rebuilt on every right-click, so a per-photo test is free,
+    /// while muda has no `menuNeedsUpdate` — keeping the bar in sync would mean
+    /// tearing it down on every navigation, on the hot path.
+    pub has_generation: bool,
 }
 
 /// What to write to the system clipboard — the shell-neutral payload of

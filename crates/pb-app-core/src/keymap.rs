@@ -275,6 +275,8 @@ pub const EDITOR_GROUPS: &[(&str, &[Action])] = &[
             Action::CopyPath,
             Action::CopyImageDetails,
             Action::CopyImageText,
+            Action::CopyGenerationPrompt,
+            Action::CopyGenerationData,
             Action::CopyDescription,
             Action::DescribeImage,
             Action::AskImage,
@@ -619,6 +621,12 @@ fn default_bindings() -> Vec<(Action, Vec<KeyChord>)> {
         // Copy the text recognized *in* the photo (OCR + QR, task #45) — menu/context
         // menu by default; a user can bind a key in Settings.
         (Action::CopyImageText, vec![]),
+        // Copy an AI image's generation prompt / raw payload (task #137) — menu and
+        // context menu only by default. Unbound rather than given a chord: they
+        // apply to a small minority of files, and every free chord is worth more
+        // to an action that works on any photo. Bindable in Settings ▸ Shortcuts.
+        (Action::CopyGenerationPrompt, vec![]),
+        (Action::CopyGenerationData, vec![]),
         // Show the recognized text in a HUD panel — read before copying.
         one(Action::ShowImageText, "T"),
         // Describe the photo with a vision model (task #44); Shift+D asks a specific

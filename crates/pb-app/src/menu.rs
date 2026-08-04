@@ -41,6 +41,9 @@ pub mod ids {
     pub const COPY_IMAGE_DETAILS: &str = "copy_image_details";
     /// Matches `Action::CopyImageText.id()` so the Mac host's raw-id path agrees.
     pub const COPY_IMAGE_TEXT: &str = "copy_text";
+    // AI generation metadata (task #137) — ids match the corresponding `Action::*.id()`.
+    pub const COPY_GEN_PROMPT: &str = "copy_gen_prompt";
+    pub const COPY_GEN_DATA: &str = "copy_gen_data";
     // AI image description (task #44) — ids match the corresponding `Action::*.id()`.
     pub const DESCRIBE: &str = "describe";
     pub const ASK_IMAGE: &str = "ask_image";
@@ -251,6 +254,8 @@ pub enum MenuAction {
     CopyPath,
     CopyImageDetails,
     CopyImageText,
+    CopyGenerationPrompt,
+    CopyGenerationData,
     DescribeImage,
     AskImage,
     CopyDescription,
@@ -312,6 +317,8 @@ impl MenuAction {
             MenuAction::CopyPath => Action::CopyPath,
             MenuAction::CopyImageDetails => Action::CopyImageDetails,
             MenuAction::CopyImageText => Action::CopyImageText,
+            MenuAction::CopyGenerationPrompt => Action::CopyGenerationPrompt,
+            MenuAction::CopyGenerationData => Action::CopyGenerationData,
             MenuAction::DescribeImage => Action::DescribeImage,
             MenuAction::AskImage => Action::AskImage,
             MenuAction::CopyDescription => Action::CopyDescription,
@@ -374,6 +381,8 @@ pub fn action_for(id: &str) -> Option<MenuAction> {
         COPY_PATH => MenuAction::CopyPath,
         COPY_IMAGE_DETAILS => MenuAction::CopyImageDetails,
         COPY_IMAGE_TEXT => MenuAction::CopyImageText,
+        COPY_GEN_PROMPT => MenuAction::CopyGenerationPrompt,
+        COPY_GEN_DATA => MenuAction::CopyGenerationData,
         DESCRIBE => MenuAction::DescribeImage,
         ASK_IMAGE => MenuAction::AskImage,
         COPY_DESCRIPTION => MenuAction::CopyDescription,
@@ -588,6 +597,22 @@ pub fn build_menu(keymap: &Keymap) -> BuiltMenu {
         &item(
             ids::COPY_IMAGE_TEXT,
             &labeled(keymap, "Copy Text from Image", Action::CopyImageText),
+        ),
+        // AI generation metadata (task #137). Always present rather than shown
+        // only for generated images: muda has no `menuNeedsUpdate`, so a
+        // per-photo rebuild costs a menu teardown on every navigation. The
+        // commands toast honestly on an ordinary photo instead.
+        &item(
+            ids::COPY_GEN_PROMPT,
+            &labeled(
+                keymap,
+                "Copy Generation Prompt",
+                Action::CopyGenerationPrompt,
+            ),
+        ),
+        &item(
+            ids::COPY_GEN_DATA,
+            &labeled(keymap, "Copy Generation Data", Action::CopyGenerationData),
         ),
         // AI image description (task #44).
         &PredefinedMenuItem::separator(),
@@ -907,6 +932,16 @@ pub fn menu_bar_spec(keymap: &Keymap, s: &crate::contract::MenuState) -> Vec<Men
                 item(
                     MenuAction::CopyImageText,
                     &l("Copy Text from Image", Action::CopyImageText),
+                    true,
+                ),
+                item(
+                    MenuAction::CopyGenerationPrompt,
+                    &l("Copy Generation Prompt", Action::CopyGenerationPrompt),
+                    true,
+                ),
+                item(
+                    MenuAction::CopyGenerationData,
+                    &l("Copy Generation Data", Action::CopyGenerationData),
                     true,
                 ),
                 sep(),
@@ -1356,6 +1391,15 @@ pub fn build_context_menu(state: &crate::contract::ContextMenuState) -> Menu {
         &item(ids::COPY_IMAGE_DETAILS, "Copy Image Details"),
         &item(ids::COPY_IMAGE_TEXT, "Copy Text from Image"),
     ]);
+    // AI generation metadata (task #137) — only for a photo that actually carries
+    // it. This popup is rebuilt per right-click, so unlike the menu bar it can
+    // afford to be contextual.
+    if state.has_generation {
+        let _ = menu.append_items(&[
+            &item(ids::COPY_GEN_PROMPT, "Copy Generation Prompt"),
+            &item(ids::COPY_GEN_DATA, "Copy Generation Data"),
+        ]);
+    }
     // AI image description (task #44).
     let _ = menu.append_items(&[
         &sep(),

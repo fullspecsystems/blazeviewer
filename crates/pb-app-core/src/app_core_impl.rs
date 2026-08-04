@@ -528,6 +528,8 @@ impl AppCore {
             Action::CopyPath => self.copy_path(),
             Action::CopyImageDetails => self.copy_image_details(),
             Action::CopyImageText => self.copy_image_text(),
+            Action::CopyGenerationPrompt => self.copy_generation_prompt(),
+            Action::CopyGenerationData => self.copy_generation_data(),
             Action::ShowImageText => self.toggle_image_text(),
             Action::DescribeImage => self.describe_image(),
             Action::AskImage => self.ask_image(),

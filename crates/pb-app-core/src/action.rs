@@ -70,6 +70,20 @@ pub enum Action {
     /// payloads, task #45) to the clipboard. Menu/context-menu by default (no key);
     /// runs the scan on demand if the result isn't already cached.
     CopyImageText,
+    /// Copy the current photo's **generation prompt** — the positive prompt of a
+    /// ComfyUI / Automatic1111 image (task #137). The thing people actually want
+    /// to paste. Refuses, with the reason, when the workflow assembled the prompt
+    /// rather than storing it, since there is no text to give.
+    CopyGenerationPrompt,
+    /// Copy the current photo's **raw generation payload** (task #137) — the
+    /// ComfyUI workflow graph, or the Automatic1111 parameters block —
+    /// byte-for-byte, so it pastes back into the tool that made it.
+    ///
+    /// Deliberately *not* named "workflow JSON": the payload may be an API graph
+    /// or plain A1111 text, and a name that promises JSON would be lying on those
+    /// files. The menu label specializes per tool; this one stays neutral because
+    /// it is what the Shortcuts editor shows, with no file in hand.
+    CopyGenerationData,
     /// Show the text recognized in the current photo (plus QR payloads) in a HUD
     /// panel (`T`, task #45) — read before copying. Same on-device scan and RAM-only
     /// cache as [`Action::CopyImageText`].
@@ -202,6 +216,8 @@ const BASE_ACTIONS: &[Action] = &[
     Action::CopyPath,
     Action::CopyImageDetails,
     Action::CopyImageText,
+    Action::CopyGenerationPrompt,
+    Action::CopyGenerationData,
     Action::ShowImageText,
     Action::DescribeImage,
     Action::AskImage,
@@ -351,6 +367,8 @@ impl Action {
             Action::CopyPath => "copy_path",
             Action::CopyImageDetails => "copy_image_details",
             Action::CopyImageText => "copy_text",
+            Action::CopyGenerationPrompt => "copy_gen_prompt",
+            Action::CopyGenerationData => "copy_gen_data",
             Action::ShowImageText => "show_text",
             Action::DescribeImage => "describe",
             Action::AskImage => "ask_image",
@@ -433,6 +451,8 @@ impl Action {
             Action::CopyPath => "Copy file path",
             Action::CopyImageDetails => "Copy image details",
             Action::CopyImageText => "Copy text from image",
+            Action::CopyGenerationPrompt => "Copy generation prompt",
+            Action::CopyGenerationData => "Copy generation data",
             Action::ShowImageText => "Show text in image",
             Action::DescribeImage => "Describe image",
             Action::AskImage => "Ask about image",
