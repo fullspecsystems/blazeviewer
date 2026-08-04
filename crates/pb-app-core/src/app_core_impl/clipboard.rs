@@ -133,7 +133,7 @@ impl AppCore {
             if let Some(gen) = &details.gen {
                 for row in crate::genmeta::detail_rows(gen) {
                     lines.push(match row {
-                        DetailRow::Span { text, .. } => text,
+                        DetailRow::Span { text, .. } | DetailRow::Section { text, .. } => text,
                         DetailRow::Pair { label, value } => format!("{label}: {value}"),
                         DetailRow::Body { text } => text,
                     });
@@ -151,9 +151,9 @@ impl AppCore {
             if let Some(catalog) = &details.media {
                 for row in crate::tracks::track_rows(catalog, details.has_audio) {
                     lines.push(match row {
-                        DetailRow::Span { text, .. } => text,
+                        DetailRow::Span { text, .. } | DetailRow::Section { text, .. } => text,
                         DetailRow::Pair { label, value } => format!("{label}: {value}"),
-                        // Track rows never produce one, but the match stays
+                        // Track rows never produce these, but the match stays
                         // exhaustive so a new row kind is a compile error here
                         // rather than a silently dropped line.
                         DetailRow::Body { text } => text,

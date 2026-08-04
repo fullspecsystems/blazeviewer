@@ -641,23 +641,48 @@ fn describe_pass(graph: &Graph, node: &Node) -> String {
 /// ("assembled by PromptCombinator") is the honest outcome, and far more useful
 /// than a blank space the user reads as a bug.
 pub fn detail_rows(meta: &GenerationMeta) -> Vec<crate::panels::DetailRow> {
-    use crate::panels::DetailRow;
+    use crate::action::Action;
+    use crate::panels::{DetailRow, RowAction};
     let mut rows = Vec::new();
     let span = |text: String, bold: bool| DetailRow::Span { text, bold };
+
+    // The section heading's buttons. **Copy prompt only appears when there is a
+    // literal prompt to copy** — offering a button whose sole outcome is a
+    // refusal toast is worse than not offering it, and the panel already says
+    // why the prompt is missing right underneath. Copy data is always offered:
+    // reaching this function at all means a payload exists.
+    let heading = |text: String, meta: &GenerationMeta| {
+        let mut actions = Vec::new();
+        if meta
+            .positive
+            .as_ref()
+            .is_some_and(|p| p.text.as_ref().is_some_and(|t| !t.is_empty()))
+        {
+            actions.push(RowAction {
+                label: "Copy prompt".to_string(),
+                action: Action::CopyGenerationPrompt,
+            });
+        }
+        actions.push(RowAction {
+            label: "Copy data".to_string(),
+            action: Action::CopyGenerationData,
+        });
+        DetailRow::Section { text, actions }
+    };
 
     if !meta.has_facts() {
         // A payload we cannot read anything out of. Say so plainly rather than
         // showing nothing, so the Copy command does not look like it does
         // nothing when the user reaches for it.
-        rows.push(span(format!("Generation ({})", meta.tool.name()), true));
+        rows.push(heading(format!("Generation ({})", meta.tool.name()), meta));
         rows.push(DetailRow::Pair {
             label: "Details".to_string(),
-            value: "present but not readable — use Copy generation data".to_string(),
+            value: "present but not readable — copy it with the button above".to_string(),
         });
         return rows;
     }
 
-    rows.push(span(format!("Generation ({})", meta.tool.name()), true));
+    rows.push(heading(format!("Generation ({})", meta.tool.name()), meta));
     // A prompt we HAVE gets a bold heading over a full-width paragraph; a prompt we
     // do not gets a label/value pair, because the value is a short note rather than
     // content and belongs in the facts table. Both are labelled either way — an

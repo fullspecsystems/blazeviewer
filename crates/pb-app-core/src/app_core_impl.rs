@@ -91,6 +91,10 @@ fn hud_row(r: DetailRow) -> Row {
     match r {
         DetailRow::Span { text, bold } => Row::Span { text, bold },
         DetailRow::Pair { label, value } => Row::Pair { label, value },
+        // The HUD is a static raster with no hit-testing, so a Section's buttons
+        // cannot exist here — it degrades to the bold heading it also is. The
+        // commands remain on the Edit menu for this path.
+        DetailRow::Section { text, .. } => Row::Span { text, bold: true },
         // The HUD table has no paragraph row — it lays every row out on one
         // line, sized to the widest column. A prompt therefore projects onto a
         // plain full-width span and will be clipped rather than wrapped. That is

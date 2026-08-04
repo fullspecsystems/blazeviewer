@@ -1919,6 +1919,10 @@ impl App {
             // The Describe tab's "Ask" button opens the ask-a-question dialog
             // (`DialogKind::AskImage`) — fully wired on winit (multi-line question field).
             A::Ask => self.core.dispatch_action(Action::AskImage),
+            // A Details section-heading button (task #137) already carries the
+            // Action it means, so it runs through the same dispatch as the menu
+            // item and keymap binding for the same command.
+            A::DispatchAction(a) => self.core.dispatch_action(a),
             A::TreeToggle(path) => self.core.fs_tree_toggle(&path),
             A::TreeOpen(path) => self.core.fs_tree_open(path),
             A::TreeExtendUp => self.core.fs_tree_extend_up(),

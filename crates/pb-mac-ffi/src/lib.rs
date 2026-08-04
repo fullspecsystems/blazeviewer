@@ -469,6 +469,17 @@ impl AppCoreHandle {
                             rows.push((if bold { 0 } else { 4 }, text, String::new()))
                         }
                         DetailRow::Pair { label, value } => rows.push((1, label, value)),
+                        // ⚠ CROSS-PLATFORM DEBT (task #137): a Section is a bold
+                        // heading that carries inline buttons (Copy prompt / Copy
+                        // data). The flattened row tuple has no room for them, so
+                        // macOS gets the heading as a plain kind 0 and loses the
+                        // buttons. Chosen deliberately over a blind Swift change a
+                        // Windows session cannot compile — `pb-mac-ffi` builds to an
+                        // empty staticlib off Mac, so an error here is invisible.
+                        // The commands stay reachable from the Edit menu meanwhile.
+                        // The Mac fix: carry `actions` and render them like the
+                        // Describe tab's "Ask" button (InspectorPanel.swift:211).
+                        DetailRow::Section { text, .. } => rows.push((0, text, String::new())),
                         // A wrapped paragraph (a generation prompt, task #137) is
                         // kind 2 — the body-paragraph row the Swift side already
                         // renders. On Details (tab 0) that takes the literal
@@ -3378,16 +3389,6 @@ fn map_effect(e: contract::CoreEffect) -> ffi::CoreEffectFfi {
         }
         // The right-click photo context menu (task #41): the host builds the popup from
         // these flags (has_image, has_motion, can_reveal, fullscreen).
-        //
-        // ⚠ CROSS-PLATFORM DEBT (task #137): `ContextMenuState` also carries
-        // `has_generation`, which is NOT forwarded here. Adding it means a 7th
-        // tuple element plus a matching change in the Swift host, and the Windows
-        // session that added the field cannot compile either — `pb-mac-ffi` is
-        // `cfg(target_os = "macos")`, so a mistake here produces zero errors off
-        // Mac. Leaving it out is the safe failure: macOS simply omits the two
-        // Copy Generation items from the right-click menu (they remain reachable
-        // from the Edit menu once the Mac wires them). Field access, not a struct
-        // literal, so the new field does not break this build either way.
         C::ShowContextMenu(s) => E::ShowContextMenu(
             s.has_image,
             s.has_motion,

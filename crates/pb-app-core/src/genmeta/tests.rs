@@ -480,8 +480,8 @@ fn detail_rows_lead_with_a_heading_and_put_prompts_in_body_rows() {
     let m = comfy(SIMPLE);
     let rows = detail_rows(&m);
     assert!(
-        matches!(&rows[0], DetailRow::Span { text, bold: true } if text == "Generation (ComfyUI)"),
-        "first row must be the heading, got {:?}",
+        matches!(&rows[0], DetailRow::Section { text, .. } if text == "Generation (ComfyUI)"),
+        "first row must be the section heading, got {:?}",
         rows[0]
     );
     // A prompt is a wrapped paragraph, never a label/value pair — the pair
@@ -513,7 +513,10 @@ fn every_prompt_paragraph_has_a_bold_heading_above_it() {
         if matches!(row, DetailRow::Body { .. }) {
             let above = i.checked_sub(1).map(|j| &rows[j]);
             assert!(
-                matches!(above, Some(DetailRow::Span { bold: true, .. })),
+                matches!(
+                    above,
+                    Some(DetailRow::Span { bold: true, .. }) | Some(DetailRow::Section { .. })
+                ),
                 "a Body row must follow a bold heading, got {above:?} above {row:?}"
             );
         }
@@ -522,7 +525,9 @@ fn every_prompt_paragraph_has_a_bold_heading_above_it() {
     let headings: Vec<&str> = rows
         .iter()
         .filter_map(|r| match r {
-            DetailRow::Span { text, bold: true } => Some(text.as_str()),
+            DetailRow::Span { text, bold: true } | DetailRow::Section { text, .. } => {
+                Some(text.as_str())
+            }
             _ => None,
         })
         .collect();
@@ -530,6 +535,45 @@ fn every_prompt_paragraph_has_a_bold_heading_above_it() {
         headings,
         ["Generation (ComfyUI)", "Prompt", "Negative prompt"]
     );
+}
+
+/// The section heading carries its copy buttons, and **Copy prompt appears only
+/// when there is a prompt to copy** — a button whose only outcome is a refusal
+/// toast is worse than no button, especially with the reason already on screen
+/// directly beneath it.
+#[test]
+fn the_section_heading_offers_copy_buttons_that_can_actually_succeed() {
+    use crate::action::Action;
+    use crate::panels::DetailRow;
+
+    let buttons = |m: &GenerationMeta| match &detail_rows(m)[0] {
+        DetailRow::Section { actions, .. } => {
+            actions.iter().map(|a| a.action).collect::<Vec<Action>>()
+        }
+        other => panic!("expected a Section heading, got {other:?}"),
+    };
+
+    // A literal prompt: both buttons.
+    assert_eq!(
+        buttons(&comfy(SIMPLE)),
+        [Action::CopyGenerationPrompt, Action::CopyGenerationData]
+    );
+
+    // An unresolved prompt: data only — the prompt button could only ever fail.
+    let unresolved = r#"{
+      "1": {"class_type": "PromptCombinator", "inputs": {"input_list_1": "girl"}},
+      "2": {"class_type": "CLIPTextEncode", "inputs": {"text": ["1", 0]}},
+      "3": {"class_type": "EmptyLatentImage", "inputs": {"width": 64, "height": 64}},
+      "4": {"class_type": "KSampler", "inputs": {"seed": 1, "steps": 10,
+            "positive": ["2", 0], "negative": ["2", 0], "latent_image": ["3", 0]}},
+      "5": {"class_type": "SaveImage", "inputs": {"images": ["4", 0]}}
+    }"#;
+    assert_eq!(buttons(&comfy(unresolved)), [Action::CopyGenerationData]);
+
+    // A payload with no readable facts still offers the data copy — that is the
+    // whole reason its "not readable" row points at a button.
+    let payload_only = parse(&chunks(&[("workflow", r#"{"nodes": []}"#)]), None).unwrap();
+    assert_eq!(buttons(&payload_only), [Action::CopyGenerationData]);
 }
 
 #[test]
@@ -562,8 +606,8 @@ fn an_unreadable_payload_says_so_rather_than_showing_nothing() {
     let rows = detail_rows(&m);
     assert!(
         rows.iter().any(|r| matches!(r,
-            DetailRow::Pair { value, .. } if value.contains("Copy generation data"))),
-        "an unreadable payload must point at the copy command: {rows:?}"
+            DetailRow::Pair { value, .. } if value.contains("button above"))),
+        "an unreadable payload must point at the copy button: {rows:?}"
     );
 }
 

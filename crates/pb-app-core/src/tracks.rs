@@ -974,7 +974,9 @@ mod tests {
     fn labels(rows: &[DetailRow]) -> Vec<String> {
         rows.iter()
             .map(|r| match r {
-                DetailRow::Span { text, .. } => format!("[{text}]"),
+                DetailRow::Span { text, .. } | DetailRow::Section { text, .. } => {
+                    format!("[{text}]")
+                }
                 DetailRow::Pair { label, value } => format!("{label}: {value}"),
                 DetailRow::Body { text } => text.clone(),
             })

@@ -444,7 +444,9 @@ mod tests {
         }
         rows.iter()
             .map(|r| match r {
-                DetailRow::Span { text, .. } => format!("[{text}]"),
+                DetailRow::Span { text, .. } | DetailRow::Section { text, .. } => {
+                    format!("[{text}]")
+                }
                 DetailRow::Pair { label, value } => format!("{label}: {value}"),
                 DetailRow::Body { text } => text.clone(),
             })
@@ -631,7 +633,9 @@ mod tests {
 
         let rows = core.exif_rows();
         let text = |r: &DetailRow| match r {
-            DetailRow::Span { text, .. } | DetailRow::Body { text } => text.clone(),
+            DetailRow::Span { text, .. }
+            | DetailRow::Section { text, .. }
+            | DetailRow::Body { text } => text.clone(),
             DetailRow::Pair { label, value } => format!("{label}: {value}"),
         };
         let flat: Vec<String> = rows.iter().map(text).collect();

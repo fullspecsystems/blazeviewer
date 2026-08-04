@@ -1391,15 +1391,11 @@ pub fn build_context_menu(state: &crate::contract::ContextMenuState) -> Menu {
         &item(ids::COPY_IMAGE_DETAILS, "Copy Image Details"),
         &item(ids::COPY_IMAGE_TEXT, "Copy Text from Image"),
     ]);
-    // AI generation metadata (task #137) — only for a photo that actually carries
-    // it. This popup is rebuilt per right-click, so unlike the menu bar it can
-    // afford to be contextual.
-    if state.has_generation {
-        let _ = menu.append_items(&[
-            &item(ids::COPY_GEN_PROMPT, "Copy Generation Prompt"),
-            &item(ids::COPY_GEN_DATA, "Copy Generation Data"),
-        ]);
-    }
+    // No generation-metadata items here (owner, 2026-08-04). They act on the
+    // Details panel's Generation section and live as buttons on its heading —
+    // where they are in front of the data they copy, and where they appear only
+    // for the images that have any. This menu is for commands that apply to any
+    // photo. Both remain in the Edit menu and are bindable in Settings.
     // AI image description (task #44).
     let _ = menu.append_items(&[
         &sep(),

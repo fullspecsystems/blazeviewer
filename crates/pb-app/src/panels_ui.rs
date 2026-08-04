@@ -129,6 +129,11 @@ pub enum PanelAction {
     CopyText,
     CopyDescribe,
     Ask,
+    /// A button on a [`DetailRow::Section`] heading was clicked (task #137) — run
+    /// its `Action` verbatim. Generic on purpose: a section button is already
+    /// expressed as an `Action`, so this needs no new variant per button and the
+    /// button cannot drift from the menu item running the same command.
+    DispatchAction(pb_app_core::action::Action),
     TreeToggle(PathBuf),
     TreeOpen(PathBuf),
     TreeExtendUp,
@@ -2574,7 +2579,9 @@ fn inspector_panel(
                     .show(ui, |ui| {
                         ui.spacing_mut().item_spacing.y = 8.0;
                         match &insp.snapshot {
-                            InspectorSnapshot::Details(d) => details_body(ui, p, d, content_w),
+                            InspectorSnapshot::Details(d) => {
+                                details_body(ui, p, d, content_w, actions)
+                            }
                             InspectorSnapshot::Text(t) => text_body(ui, p, t),
                             InspectorSnapshot::Describe(d) => {
                                 describe_body(ui, p, d, content_w, actions)
@@ -2748,7 +2755,13 @@ fn copy_action(tab: InspectorTab) -> PanelAction {
     }
 }
 
-fn details_body(ui: &mut egui::Ui, p: &Palette, d: &DetailsPanel, content_w: f32) {
+fn details_body(
+    ui: &mut egui::Ui,
+    p: &Palette,
+    d: &DetailsPanel,
+    content_w: f32,
+    actions: &mut Vec<PanelAction>,
+) {
     if d.rows.is_empty() {
         ui.label(RichText::new("Nothing to show").color(panel_secondary(p)));
         return;
@@ -2795,6 +2808,50 @@ fn details_body(ui: &mut egui::Ui, p: &Palette, d: &DetailsPanel, content_w: f32
                             .selectable(true),
                     );
                 });
+            }
+            // A section heading with inline buttons (task #137): the heading text
+            // on the left, its actions right-aligned on the same line, so the
+            // copy controls sit with the data they copy.
+            DetailRow::Section {
+                text,
+                actions: acts,
+            } => {
+                let font =
+                    FontId::new(DETAIL_HEADER_SIZE, FontFamily::Name(pb_ui::SEMIBOLD.into()));
+                let row_h = ui.text_style_height(&egui::TextStyle::Body).max(18.0);
+                let (rect, _) = ui.allocate_exact_size(
+                    egui::vec2(ui.available_width(), row_h),
+                    egui::Sense::hover(),
+                );
+                let cy = rect.center().y;
+                let g = galley(ui, text, font, p.text, f32::INFINITY);
+                paint_vtext(ui, rect.left(), cy, &g);
+                // Right-to-left so the rightmost button keeps its edge as labels
+                // change width (the prompt button is present only sometimes).
+                let btn_font = FontId::new(DETAIL_SIZE, FontFamily::Proportional);
+                let mut right = rect.right();
+                for (i, a) in acts.iter().enumerate().rev() {
+                    let bg = galley(ui, &a.label, btn_font.clone(), p.accent, f32::INFINITY);
+                    let bw = bg.size().x;
+                    let x = right - bw;
+                    paint_vtext(ui, x, cy, &bg);
+                    let hit = egui::Rect::from_min_max(
+                        egui::pos2(x - 4.0, rect.top()),
+                        egui::pos2(right + 2.0, rect.bottom()),
+                    );
+                    let resp = ui.interact(
+                        hit,
+                        ui.id().with(("section_btn", i, text)),
+                        egui::Sense::click(),
+                    );
+                    if resp.hovered() {
+                        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                    }
+                    if resp.clicked() {
+                        actions.push(PanelAction::DispatchAction(a.action));
+                    }
+                    right = x - 12.0;
+                }
             }
             // A wrapped paragraph (a generation prompt, task #137): full width,
             // no label column — the heading above it names it. Selectable so a

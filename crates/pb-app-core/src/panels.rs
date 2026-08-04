@@ -27,6 +27,21 @@ pub enum DetailRow {
     Span { text: String, bold: bool },
     /// A two-column row: label + value.
     Pair { label: String, value: String },
+    /// A bold section heading carrying **inline action buttons** (task #137) — the
+    /// Generation block's Copy Prompt / Copy Data pair.
+    ///
+    /// The buttons live here rather than in the context menu because they act on
+    /// *this section*, and a context menu that lists them for every photo would
+    /// offer two commands that fail on almost all of them.
+    ///
+    /// Carries [`Action`](crate::action::Action) values, not strings: both shells
+    /// already dispatch that vocabulary (winit directly, macOS via
+    /// [`Action::id`](crate::action::Action::id)), so a button needs no new
+    /// plumbing and cannot drift from the menu item that runs the same command.
+    Section {
+        text: String,
+        actions: Vec<RowAction>,
+    },
     /// A full-width **wrapped paragraph** — a generation prompt (task #137).
     ///
     /// Distinct from [`Span`](DetailRow::Span), which is a single heading line:
@@ -34,6 +49,15 @@ pub enum DetailRow {
     /// rather than be clipped to a column. It deliberately has no label; the
     /// heading above it says what it is.
     Body { text: String },
+}
+
+/// One inline button on a [`DetailRow::Section`] heading (task #137).
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct RowAction {
+    /// Short button text — "Copy prompt", not "Copy Generation Prompt". The
+    /// heading beside it already supplies the "generation" half.
+    pub label: String,
+    pub action: crate::action::Action,
 }
 
 /// The Inspector ▸ Details tab: the full metadata table for the displayed photo.
@@ -49,7 +73,7 @@ impl DetailsPanel {
         self.rows
             .iter()
             .map(|r| match r {
-                DetailRow::Span { text, .. } => text.clone(),
+                DetailRow::Span { text, .. } | DetailRow::Section { text, .. } => text.clone(),
                 DetailRow::Pair { label, value } => format!("{label}: {value}"),
                 // Body text is already the value — a `label:` prefix would be
                 // inventing one, and a pasted prompt must be paste-ready.
