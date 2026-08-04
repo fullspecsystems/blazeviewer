@@ -2796,6 +2796,16 @@ fn details_body(ui: &mut egui::Ui, p: &Palette, d: &DetailsPanel, content_w: f32
                     );
                 });
             }
+            // A wrapped paragraph (a generation prompt, task #137): full width,
+            // no label column — the heading above it names it. Selectable so a
+            // prompt can be dragged out without the Copy command.
+            DetailRow::Body { text } => {
+                ui.add(
+                    egui::Label::new(RichText::new(text).size(DETAIL_SIZE).color(p.text))
+                        .wrap()
+                        .selectable(true),
+                );
+            }
         }
     }
 }

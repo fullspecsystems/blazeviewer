@@ -91,6 +91,12 @@ fn hud_row(r: DetailRow) -> Row {
     match r {
         DetailRow::Span { text, bold } => Row::Span { text, bold },
         DetailRow::Pair { label, value } => Row::Pair { label, value },
+        // The HUD table has no paragraph row — it lays every row out on one
+        // line, sized to the widest column. A prompt therefore projects onto a
+        // plain full-width span and will be clipped rather than wrapped. That is
+        // acceptable only because this adapter is the interim path that retires
+        // with the HUD's Details tab; the egui and native presenters both wrap.
+        DetailRow::Body { text } => Row::Span { text, bold: false },
     }
 }
 

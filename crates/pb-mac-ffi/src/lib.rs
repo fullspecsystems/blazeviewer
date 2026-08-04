@@ -469,6 +469,13 @@ impl AppCoreHandle {
                             rows.push((if bold { 0 } else { 4 }, text, String::new()))
                         }
                         DetailRow::Pair { label, value } => rows.push((1, label, value)),
+                        // A wrapped paragraph (a generation prompt, task #137) is
+                        // kind 2 — the body-paragraph row the Swift side already
+                        // renders. On Details (tab 0) that takes the literal
+                        // `Text` branch, not `MarkdownBlocksView`, so prompt
+                        // punctuation is shown as typed rather than parsed as
+                        // Markdown.
+                        DetailRow::Body { text } => rows.push((2, text, String::new())),
                     }
                 }
             }

@@ -27,6 +27,13 @@ pub enum DetailRow {
     Span { text: String, bold: bool },
     /// A two-column row: label + value.
     Pair { label: String, value: String },
+    /// A full-width **wrapped paragraph** — a generation prompt (task #137).
+    ///
+    /// Distinct from [`Span`](DetailRow::Span), which is a single heading line:
+    /// this is body text that may run to thousands of characters and must wrap
+    /// rather than be clipped to a column. It deliberately has no label; the
+    /// heading above it says what it is.
+    Body { text: String },
 }
 
 /// The Inspector ▸ Details tab: the full metadata table for the displayed photo.
@@ -44,6 +51,9 @@ impl DetailsPanel {
             .map(|r| match r {
                 DetailRow::Span { text, .. } => text.clone(),
                 DetailRow::Pair { label, value } => format!("{label}: {value}"),
+                // Body text is already the value — a `label:` prefix would be
+                // inventing one, and a pasted prompt must be paste-ready.
+                DetailRow::Body { text } => text.clone(),
             })
             .collect::<Vec<_>>()
             .join("\n")

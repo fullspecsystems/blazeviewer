@@ -564,6 +564,18 @@ fn sample_frame(dark: bool, tab: InspectorTab, welcome: bool) -> PanelFrame {
                     label: "Lens".into(),
                     value: "Main Camera — 6.86mm f/1.78".into(),
                 },
+                // A generation prompt (task #137) — the screenshot's only
+                // multi-line body row, so the shot exercises paragraph wrapping
+                // rather than only the label/value grid.
+                DetailRow::Span {
+                    text: "Generation (ComfyUI)".into(),
+                    bold: true,
+                },
+                DetailRow::Body {
+                    text: "a red bird on a wire at golden hour, shallow depth of field, \
+                           35mm, highly detailed feathers, soft rim light"
+                        .into(),
+                },
                 DetailRow::Span {
                     text: "Exposure".into(),
                     bold: true,

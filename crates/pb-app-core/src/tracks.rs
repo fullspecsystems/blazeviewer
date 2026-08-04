@@ -976,6 +976,7 @@ mod tests {
             .map(|r| match r {
                 DetailRow::Span { text, .. } => format!("[{text}]"),
                 DetailRow::Pair { label, value } => format!("{label}: {value}"),
+                DetailRow::Body { text } => text.clone(),
             })
             .collect()
     }

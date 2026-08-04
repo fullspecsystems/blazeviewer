@@ -140,6 +140,10 @@ impl AppCore {
                     lines.push(match row {
                         DetailRow::Span { text, .. } => text,
                         DetailRow::Pair { label, value } => format!("{label}: {value}"),
+                        // Track rows never produce one, but the match stays
+                        // exhaustive so a new row kind is a compile error here
+                        // rather than a silently dropped line.
+                        DetailRow::Body { text } => text,
                     });
                 }
             }
