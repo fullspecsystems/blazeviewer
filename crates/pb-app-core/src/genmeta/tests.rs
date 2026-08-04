@@ -498,6 +498,40 @@ fn detail_rows_lead_with_a_heading_and_put_prompts_in_body_rows() {
     );
 }
 
+/// Every prompt paragraph is introduced by a **bold** heading.
+///
+/// Regression (owner-reported, 2026-08-04): "Negative prompt" shipped as
+/// `bold: false`, which the presenters treat as a *sub-header* — the
+/// regular-weight style the folder path under a filename uses — so it read as
+/// stray body text rather than a label for the paragraph beneath it. The bold
+/// flag is the only thing distinguishing the two, so it needs pinning.
+#[test]
+fn every_prompt_paragraph_has_a_bold_heading_above_it() {
+    use crate::panels::DetailRow;
+    let rows = detail_rows(&comfy(SIMPLE));
+    for (i, row) in rows.iter().enumerate() {
+        if matches!(row, DetailRow::Body { .. }) {
+            let above = i.checked_sub(1).map(|j| &rows[j]);
+            assert!(
+                matches!(above, Some(DetailRow::Span { bold: true, .. })),
+                "a Body row must follow a bold heading, got {above:?} above {row:?}"
+            );
+        }
+    }
+    // And both are named, so neither paragraph is left to be guessed at.
+    let headings: Vec<&str> = rows
+        .iter()
+        .filter_map(|r| match r {
+            DetailRow::Span { text, bold: true } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        headings,
+        ["Generation (ComfyUI)", "Prompt", "Negative prompt"]
+    );
+}
+
 #[test]
 fn an_unresolved_prompt_still_gets_a_row_saying_why() {
     use crate::panels::DetailRow;

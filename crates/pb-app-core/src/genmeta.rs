@@ -658,28 +658,28 @@ pub fn detail_rows(meta: &GenerationMeta) -> Vec<crate::panels::DetailRow> {
     }
 
     rows.push(span(format!("Generation ({})", meta.tool.name()), true));
-    if let Some(p) = &meta.positive {
-        match (&p.text, p.unresolved_reason()) {
-            (Some(text), _) => rows.push(DetailRow::Body { text: text.clone() }),
-            (None, Some(why)) => rows.push(DetailRow::Pair {
-                label: "Prompt".to_string(),
-                value: why,
-            }),
-            (None, None) => {}
-        }
-    }
-    if let Some(n) = &meta.negative {
-        match (&n.text, n.unresolved_reason()) {
+    // A prompt we HAVE gets a bold heading over a full-width paragraph; a prompt we
+    // do not gets a label/value pair, because the value is a short note rather than
+    // content and belongs in the facts table. Both are labelled either way — an
+    // unlabelled paragraph under "Generation" leaves the reader guessing which
+    // prompt they are looking at, and the two are not interchangeable.
+    let mut prompt_rows =
+        |heading: &str, label: &str, p: &PromptText| match (&p.text, p.unresolved_reason()) {
             (Some(text), _) => {
-                rows.push(span("Negative prompt".to_string(), false));
+                rows.push(span(heading.to_string(), true));
                 rows.push(DetailRow::Body { text: text.clone() });
             }
             (None, Some(why)) => rows.push(DetailRow::Pair {
-                label: "Negative".to_string(),
+                label: label.to_string(),
                 value: why,
             }),
             (None, None) => {}
-        }
+        };
+    if let Some(p) = &meta.positive {
+        prompt_rows("Prompt", "Prompt", p);
+    }
+    if let Some(n) = &meta.negative {
+        prompt_rows("Negative prompt", "Negative", n);
     }
     let mut pair = |label: &str, value: String| {
         rows.push(DetailRow::Pair {
