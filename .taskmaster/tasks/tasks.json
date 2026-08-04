@@ -1815,37 +1815,37 @@
             "id": 1,
             "title": "pb-decode::png_text - validated PNG text-chunk walker",
             "description": "Walk to IEND (chunks may follow IDAT), skipping IDAT by length. Validate CRC of any collected chunk. Collect ONLY prompt/workflow/parameters. Duplicate keyword = ambiguous, drop both. Inflate capped at 1 MB, discard the chunk atomically on overflow (never truncate). Truncated/non-PNG -> empty, never panics. Does NOT ride catch_panics (private + typed to DecodedImage, pb-decode/src/lib.rs:813), so it needs its own fuzz target - fuzz/Cargo.toml has exactly one pb-decode target today (probe_avis).",
-            "status": "pending"
+            "status": "done"
           },
           {
             "id": 2,
             "title": "pb-decode::read_exif_user_comment - raw-bytes charset decode",
             "description": "field_value (pb-decode/src/metadata.rs:27) only byte-decodes Value::Ascii; UserComment is Undefined and reaches callers mangled through display_value(). Decode the 8-byte charset prefix (ASCII/UNICODE/JIS/undefined) and UTF-16 by BOM while the raw field bytes still exist. Required before the A1111 JPEG/WebP arm can work at all.",
-            "status": "pending"
+            "status": "done"
           },
           {
             "id": 3,
             "title": "genmeta - types, tool detection, A1111 parser",
             "description": "GenerationMeta/GenTool/PromptText+PromptSource (no GenTool::Unknown - absence is None). has_payload covers 'workflow present, facts absent'. Detection: a `prompt` key -> ComfyUI (workflow NOT required); `parameters` or an A1111-shaped UserComment -> A1111. A1111 parsing must use known-key boundary rules: the param record is the LAST line and only if it starts with a known key; split on ', ' only at a `Key: ` boundary (values contain commas); split prompts at the LAST '\\nNegative prompt: '. Prompts stored capped at 16 KB; raw payloads NOT retained.",
-            "status": "pending"
+            "status": "done"
           },
           {
             "id": 4,
             "title": "genmeta - the ComfyUI candidate-agreement walk",
             "description": "INVARIANT: a fact is emitted only when every viable candidate agrees; otherwise omitted. Collect ALL SaveImage terminals (no terminal -> no facts; never pick an arbitrary sink). BFS over ALL image-like inputs (DAG, not a path) with visited set + depth cap. A sampler must have positive+negative+latent_image (NOT merely `steps` - detailers/upscalers have steps). Headline only when a UNIQUE deepest sampler exists (img2img breaks 'deepest = base'). Prompt link resolution is CUT: a linked `text` is Unresolved{via}, no text. Linked scalars resolve only by exact input-name match on the source node. Forked `model` chain (a merge) -> omit the model. Latent size only from a genuine chain head with literal width+height.",
-            "status": "pending"
+            "status": "done"
           },
           {
             "id": 5,
             "title": "DetailRow::Body + all six consumer sites",
             "description": "New variant for a wrapped paragraph. Complete inventory (rev-1 missed the first two): app_core_impl.rs:90 hud_row (HUD adapter), app_core_impl/clipboard.rs:141 (exhaustive match inside copy_image_details), pb-mac-ffi/src/lib.rs:463 (-> kind 2), pb-app/src/panels_ui.rs:2761, pb-app-core/src/panels.rs:41 copy_text, pb-app/src/egui_shot.rs:544 (a screenshot FIXTURE builder, not a presenter). macOS InspectorPanel.swift:249 needs nothing - Details is tab 0 so kind 2 takes the literal Text branch, not MarkdownBlocksView (unverified from Windows).",
-            "status": "pending"
+            "status": "done"
           },
           {
             "id": 6,
             "title": "Wire into ItemDetails / ensure_exif_cached / exif_rows / copy_image_details",
             "description": "gen: Option<GenerationMeta> on ItemDetails - constructors are ready/loading, the archive arm (meta.rs:204), video.rs:259 and media_details.rs:297 (both missed in rev-1), plus test literals; doors+videos = None per the kind opt-out rule. Generation block ordered after the filename/path header and error row, before Dimensions. Generation rows are built on a SEPARATE path from EXIF rows and must NOT route through is_exif_blob (a 256-BYTE cutoff, engine.rs:1093) or truncate_exif_value. copy_image_details (clipboard.rs:98) is a SEPARATE production copy path from DetailsPanel::copy_text - both must carry the block or they disagree about the same file.",
-            "status": "pending"
+            "status": "done"
           },
           {
             "id": 7,
@@ -1856,7 +1856,7 @@
           {
             "id": 8,
             "title": "CHANGELOG + corpus verification + privacy tests",
-            "description": "Verify against C:\\Users\\jdlien\\code\\bw-sample-images (3 ComfyUI PNGs, not committed). Re-run viewing_a_folder_writes_nothing_to_disk + the static fs::write audit. Add the explicit regression test proving generation text never reaches default_describe_prompt (build_context at prompt.rs:99 happens not to consume it today, but that is an accident, not a guarantee). PB_PERF episode around Inspector-open. CHANGELOG under [Unreleased] / Added.",
+            "description": "Verify against C:\\Users\\jdlien\\code\\bw-sample-images (3 ComfyUI PNGs, not committed). Re-run viewing_a_folder_writes_nothing_to_disk + the static fs::write audit. Add the explicit regression test proving generation text never reaches default_describe_prompt (build_context at prompt.rs:99 happens not to consume it today, but that is an accident, not a guarantee). PB_PERF episode around Inspector-open. CHANGELOG under [Unreleased] / Added. || PARTIAL 2026-08-04: CHANGELOG written, corpus verified via the genmeta_probe example (all facts match a hand analysis), and the describe-context privacy regression test landed. Still owed: re-run viewing_a_folder_writes_nothing_to_disk + the static fs::write audit, and the PB_PERF episode.",
             "status": "pending"
           }
         ]
