@@ -4,7 +4,7 @@
       {
         "id": 18,
         "title": "Preview-first code-review follow-ups (Codex + workflow review)",
-        "description": "Deferred findings from the preview-first review. None block v0.1, but track them.",
+        "description": "Deferred findings from the preview-first review. None block v0.1, but track them. || PRUNE 2026-07-27: subtasks 1 and 2 cancelled as duplicates (they are standalone tasks #95 and #96). Live findings remaining here: 3 (decode-pool soft byte cap), 4 (DecodeKind in the pool key), 6 (tier state-machine tests).",
         "status": "pending",
         "priority": "low",
         "dependencies": [
@@ -15,16 +15,18 @@
           {
             "id": 1,
             "title": "HDR HEICs bypass preview-first",
-            "description": "Windows WIC reorder tracked as standalone task #95; macOS Image-I/O thumbnail path as task #97.",
-            "status": "pending",
-            "parentId": "undefined"
+            "description": "Windows WIC reorder tracked as standalone task #95; macOS Image-I/O thumbnail path as task #97. || CANCELLED 2026-07-27 as a duplicate tracker - the live home is task #95. No work dropped.",
+            "status": "cancelled",
+            "parentId": "undefined",
+            "updatedAt": "2026-07-27T22:23:07.725Z"
           },
           {
             "id": 2,
             "title": "Fill mode decodes full-res -> cover-to-screen target",
-            "description": "Tracked as standalone task #96 (semantic Contain/Cover decode target, per-image).",
-            "status": "pending",
-            "parentId": "undefined"
+            "description": "Tracked as standalone task #96 (semantic Contain/Cover decode target, per-image). || CANCELLED 2026-07-27 as a duplicate tracker - the live home is task #96. No work dropped.",
+            "status": "cancelled",
+            "parentId": "undefined",
+            "updatedAt": "2026-07-27T22:23:07.730Z"
           },
           {
             "id": 3,
@@ -54,7 +56,8 @@
             "status": "pending",
             "parentId": "undefined"
           }
-        ]
+        ],
+        "updatedAt": "2026-07-27T22:23:07.730Z"
       },
       {
         "id": 32,
@@ -709,7 +712,8 @@
             "id": 10,
             "title": "macOS fill latency: poster tiles retained + no double walk (owner-measured)",
             "description": "Owner on \\\\beenas.local\\Media\\Videos: opening the strip on a movie folder showed blank placeholders for NEARLY A MINUTE. ROOT CAUSE = starvation, not throughput: the pool's documented order is 'every display/poster want ahead of every thumb want' (decode_pool.rs:22), so thumb fills cannot start until the whole display prefetch window drains, and on a movie folder every one of those is a multi-second network walk. TWO WRONG DIAGNOSES tried first, recorded so they are not re-derived: (a) 'raise the thumb concurrency cap' - wrong layer, a concurrency limit trickles tiles from second one rather than withholding them for a minute; (b) 'the #114 selection dedup is the cure' - it halves work per VISITED movie but does not reduce N distinct movies x one walk each. FIXES: (1) 6b701b3b - thumbs_capture retains a VIDEO's displayed image as its tile even when the strip was never opened (a video's displayed image IS its poster, already paid for); photos keep the `enabled` gate because a photo thumb is a cheap local re-decode and capturing every displayed photo would put a derive on every frame of a blaze. TRAP: gating on `capture` instead of turning it ON is a NO-OP off Windows - enable_capture()'s only call site is land_selection_tile, which is cfg!(windows). (2) the double-walk fix - every film in the display window was walked TWICE concurrently (Display poster + Thumb fill), because the only guard (pending_items) is built from pending_uploads i.e. decodes that already RETURNED, so an in-flight walk was invisible; suppression is scoped to !poster_select_supported() so the Windows selection branch keeps its Demand::Thumb union (which routes a FAILED walk into thumbs.failed). MEASURED (owner, PB_THUMB_DIAG=1, same share): first tile 199 ms (from ~60 s), 10 tiles <1 s, 70 tiles in 17 s. Remaining: a ~700 ms/tile plateau from ~1 s to ~15 s = fill walks contending with the still-draining display window; ONLY the #114 selection parity would collapse that (worth ~10-14 s on that folder), deliberately not scheduled.",
-            "status": "done"
+            "status": "done",
+            "parentId": "undefined"
           }
         ]
       },
@@ -951,7 +955,7 @@
       {
         "id": 92,
         "title": "Feature-film poster frame selection on the Windows (MF) + macOS (AVFoundation) backends",
-        "description": "The seek-deep, shallow-first, brightness+contrast poster selection (fixes all-black posters for films that open on a studio logo / fade-in) shipped only on the FFmpeg backend (crates/pb-decode/src/ffmpeg/poster.rs; Mac MKV/WebM + Linux). The Windows Media Foundation poster (mf_poster.rs) and the macOS AVFoundation poster (av_poster.rs, MP4/MOV via the Live-Photo streaming reader) still use the old first-non-black mean-luma walk (30 frames / ~1s), so feature-film posters remain black there. Port the same strategy: reuse the shared scoring (crate::video::poster_frame_score / POSTER_GOOD_SCORE / luma_stats_rgba8), add a head-walk then seek deeper (shallow-first offsets ~8/20/45/90s clamped to min(5min, 50%)) and pick the best-scoring frame. MF supports IMFSourceReader::SetCurrentPosition seeking; AVFoundation needs an AVAssetReader timeRange start offset added to the streaming reader (the harder one - the reader currently reads from the start). OWNER 2026-07-19: the Windows deep-walk (267b1e9b, on main) is flagged GOOD ENOUGH FOR NOW - the worst issue (pure-black posters) is resolved. Accepted quirk: some Netflix specials (e.g. Ali Wong) that previously showed good posters now pick white-ish frames - most likely the blank-title-card skip trading black leads for white cards; revisit only if it grates. The macOS AVFoundation half (subtask 2) remains open. DIAGNOSED 2026-07-19 (owner noticed thumb strip vs poster disagree on the same clip): the thumb strip and the main poster run the SAME scored walk (engine.rs Thumb-purpose videos route through the normal poster path) but at DIFFERENT decode fit sizes, and frames are scored AFTER fitting (mf_poster.rs ~288/~325 -> poster_frame_score ~384) against fixed thresholds (POSTER_DETAIL_MIN), so the gate is resolution-dependent: at display size the white title card's grain/vignette texture likely clears the detail gate (walk stops there); at thumb size downscaling averages it away, the card fails, and the walk continues to a real scene - hence thumb=scene, poster=white. Candidate fix when revisited: score every candidate on a fixed-size downscale (~256 px wide) so the pick is resolution-independent and thumb == poster by construction.",
+        "description": "The seek-deep, shallow-first, brightness+contrast poster selection (fixes all-black posters for films that open on a studio logo / fade-in) shipped only on the FFmpeg backend (crates/pb-decode/src/ffmpeg/poster.rs; Mac MKV/WebM + Linux). The Windows Media Foundation poster (mf_poster.rs) and the macOS AVFoundation poster (av_poster.rs, MP4/MOV via the Live-Photo streaming reader) still use the old first-non-black mean-luma walk (30 frames / ~1s), so feature-film posters remain black there. Port the same strategy: reuse the shared scoring (crate::video::poster_frame_score / POSTER_GOOD_SCORE / luma_stats_rgba8), add a head-walk then seek deeper (shallow-first offsets ~8/20/45/90s clamped to min(5min, 50%)) and pick the best-scoring frame. MF supports IMFSourceReader::SetCurrentPosition seeking; AVFoundation needs an AVAssetReader timeRange start offset added to the streaming reader (the harder one - the reader currently reads from the start). OWNER 2026-07-19: the Windows deep-walk (267b1e9b, on main) is flagged GOOD ENOUGH FOR NOW - the worst issue (pure-black posters) is resolved. Accepted quirk: some Netflix specials (e.g. Ali Wong) that previously showed good posters now pick white-ish frames - most likely the blank-title-card skip trading black leads for white cards; revisit only if it grates. The macOS AVFoundation half (subtask 2) remains open. DIAGNOSED 2026-07-19 (owner noticed thumb strip vs poster disagree on the same clip): the thumb strip and the main poster run the SAME scored walk (engine.rs Thumb-purpose videos route through the normal poster path) but at DIFFERENT decode fit sizes, and frames are scored AFTER fitting (mf_poster.rs ~288/~325 -> poster_frame_score ~384) against fixed thresholds (POSTER_DETAIL_MIN), so the gate is resolution-dependent: at display size the white title card's grain/vignette texture likely clears the detail gate (walk stops there); at thumb size downscaling averages it away, the card fails, and the walk continues to a real scene - hence thumb=scene, poster=white. Candidate fix when revisited: score every candidate on a fixed-size downscale (~256 px wide) so the pick is resolution-independent and thumb == poster by construction. || PRUNE 2026-07-27: .1 (Windows MF) shipped and .2 now lives in #121.6, so this task is a shell - close it when #121.6 lands.",
         "status": "pending",
         "priority": "medium",
         "dependencies": [
@@ -968,11 +972,13 @@
           {
             "id": 2,
             "title": "macOS AVFoundation backend (av_poster.rs)",
-            "description": "Give the Live-Photo streaming reader an AVAssetReader timeRange start offset so decode_video_poster can sample deeper into the clip, then reuse the shared best-frame selection. Covers MP4/MOV feature films on macOS. SUPERSEDED 2026-07-19: implemented as task #121 subtask 6 (the shared poster-walk driver), so the macOS deep walk arrives as a trait impl rather than a fourth hand-written copy. PINNED 2026-07-19 (1eee423e): av_poster.rs now carries an #[ignore]d test, poster_deep_seeks_past_a_long_black_intro, the macOS twin of the MF one. Measured today it returns MEAN LUMA 0 on deep_seek_black_lead.mp4 - a literally black poster. Phase 4b of #121 must make it pass and drop the #[ignore]. Low priority: MOV/MP4 on this library are smartphone clips that open on content.",
-            "status": "pending",
-            "parentId": "undefined"
+            "description": "Give the Live-Photo streaming reader an AVAssetReader timeRange start offset so decode_video_poster can sample deeper into the clip, then reuse the shared best-frame selection. Covers MP4/MOV feature films on macOS. SUPERSEDED 2026-07-19: implemented as task #121 subtask 6 (the shared poster-walk driver), so the macOS deep walk arrives as a trait impl rather than a fourth hand-written copy. PINNED 2026-07-19 (1eee423e): av_poster.rs now carries an #[ignore]d test, poster_deep_seeks_past_a_long_black_intro, the macOS twin of the MF one. Measured today it returns MEAN LUMA 0 on deep_seek_black_lead.mp4 - a literally black poster. Phase 4b of #121 must make it pass and drop the #[ignore]. Low priority: MOV/MP4 on this library are smartphone clips that open on content. || CANCELLED 2026-07-27 as a duplicate tracker - subsumed by #121.6 (AVFoundation 4b: av_poster onto the shared poster_walk driver), which #121 was explicitly written to absorb. No work dropped.",
+            "status": "cancelled",
+            "parentId": "undefined",
+            "updatedAt": "2026-07-27T22:23:07.735Z"
           }
-        ]
+        ],
+        "updatedAt": "2026-07-27T22:23:07.735Z"
       },
       {
         "id": 93,
@@ -1244,8 +1250,8 @@
       {
         "id": 109,
         "title": "Harden the deck-open pipeline against cross-type races (deferred follow-ups)",
-        "description": "Follow-ups from the Codex root-cause review of the 'archive door card frozen over a photo' bug (fixed 2026-07-17 by a core-side extend guard in apply_scan_batch + a winit shell cross-cancel of the folder-scan and archive-open workers). The primary bug (mode A: a stale folder-scan batch extending an archive deck) is fixed on BOTH shells by the core guard. These are the remaining, lower-severity hardening items Codex recommended:\n(1) macOS shell (pb-mac-ffi) parity: mirror the winit begin_archive_open/begin_dir_scan cross-cancel so starting either worker drops the other. Without it, macOS is still exposed to 'mode B' (a stale folder scan's FIRST batch bootstrapping over an archive opened just after the scan started) - LOW severity (a clean rebuild onto the wrong-but-valid folder deck, not the frozen-view corruption; the core guard already covers mode A on mac). Needs an on-device build to verify (cfg(macos), can't compile on Windows).\n(2) Shared open generation (Codex #1/#2): replace the global scan_bootstrapped boolean + independent archive_gen/scan_gen with ONE monotonic open generation shared by both worker types, threaded through the contract (BeginArchiveOpen/BeginDirScan effects + ArchiveResolved/ScanBatch events carry it), so any result whose generation != the latest open is dropped in the core - the general, race-proof fix that also closes mode B shell-neutrally.\n(3) DONE 2026-07-19 via task #119 - Decode identity (Codex #4): DecodeKey carries content_gen on every job (dedup identity included); staleness is per-validity-domain (decode_pool::validity) at the pool cancel, ingestion, rebuild retention, and drain gates. Cross-deck decodes can no longer dedup as current. See plans/119-decode-validity-domains.md.\n(4) DONE 2026-07-19 - Renderer upload correctness (Codex #5): Renderer::upload_slot now returns bool (false + loud stderr on an out-of-bounds slot, gpu.rs); both drain_results call sites gate on it - the reserve path rolls the reservation back (release_pending) and the upgrade path keeps preview_resident/sharpen bookkeeping untouched; both production mark_resident returns (the reserve path and the GPU-derive path; the upgrade path has none) are checked with a loud [ring-desync] error instead of ignored. Regression tests: a_refused_upload_is_never_marked_resident_and_rolls_back + a_refused_upgrade_upload_keeps_the_preview_sharpen_eligible (a RefusingUploads Renderer double; pb-render now re-exports wgpu so doubles can name device/queue types).\n(5) present_item result propagation (Codex #6): make present_item return success and have try_present_target/drain_results propagate it; on a genuine present_slot miss, abort the current drain batch and resync ONCE after the loop (never invalidate mid-loop - that was the reverted cff70ca0/c383107a repair that bumped the epoch mid drain_results and purged the retained full-res tier, regressing instant fullscreen to a preview flash).\nCodex full analysis saved during the 2026-07-17 session. The present_slot->bool signature + the PB_DOOR_DIAG diagnostics (render draw-source + core door belief + present_slot-miss log) are already in the tree from that session and are the starting point for (4)/(5). STATUS 2026-07-19: item (1) macOS shell parity DONE (5089f36a - begin_archive_open cross-cancels the dir scan and vice versa; two tests, each verified to fail without its edit; ScanProgress::is_cancelled made pub for parity with OpenProgress). Item (4) upload_slot->bool + gated mark_resident DONE from the Windows side (5a2c2bf2). REMAINING: (2) the shared open generation, (3) decode identity (content_gen/deck_gen in DecodeKey), (5) present_item result propagation.\nPLAN 2026-07-21: .taskmaster/plans/109-ring-bridge-closeout.md (rev 2, Codex round-1 folded in) scopes remaining items (2)+(5) + the RingSlot identity stamp as THREE pieces: A - stamp the renderer RingSlot with the full core identity (item, content_gen, rep) taken from the accepted outcome reservation (NOT live self.content_gen - a swap-without-bump would mint a matching stamp), verify at present_slot, stamp EVERY writer (upload_slot/derive_fit/remaps); B - present_item returns bool + atomic present (commit nothing until a verified bind) + refusal-recovery contract (invalidate the residency record, keep target unresolved + pump awake via target_pending in work_pending, re-request, retry to a verified bind or terminal failure) - MUST land WITH A (A alone converts corruption into a PERMANENT HOLD); C - provenance-gate apply_scan_batch by BackgroundOps OpId (the archive_scope guard is UNSAFE - it rejects a legit archive->folder scan), closing mode B which A cannot see (a stale BOOTSTRAP rebuilds both rings consistently). Retires audit finding #3 + the #132 door-card wrong-occupant race, verified by invariant/recovery tests not the flaky manual repro.\nDONE 2026-07-21 (commits 3bc3d027 B + d51bb3b5 A; plan 109-ring-bridge-closeout.md ## Handoff). Item (2) shared open generation: VERIFIED ALREADY CLOSED by #126 (BackgroundOps single generation + poll_dir_scan is_current gate drops any stale batch before apply_scan_batch; the mode-B hole is stale). Item (5) present_item result propagation + the RingSlot identity stamp: DONE. B = atomic present (commit only on a verified bind) + returns bool + refusal recovery (ResidentRing::evict_slot, no epoch/gen bump). A = pb_core::SlotIdentity stamped on every RingSlot writer from the outcome key; present_slot(slot, expected) refuses a wrong occupant. Tests: evict_slot_frees_a_resident_slot_for_recovery, a_refused_present_commits_no_state_and_reports_not_shown, present_refuses_a_diverged_slot_stamp_and_recovers. Status review (not done) pending the ONE cross-machine gate: the winit pb-app build/run on Windows (safe by construction — pb-app has zero references to the changed Renderer methods + no AppCore field added; pb-mac-ffi builds clean on-machine).",
-        "status": "review",
+        "description": "Follow-ups from the Codex root-cause review of the 'archive door card frozen over a photo' bug (fixed 2026-07-17 by a core-side extend guard in apply_scan_batch + a winit shell cross-cancel of the folder-scan and archive-open workers). The primary bug (mode A: a stale folder-scan batch extending an archive deck) is fixed on BOTH shells by the core guard. These are the remaining, lower-severity hardening items Codex recommended:\n(1) macOS shell (pb-mac-ffi) parity: mirror the winit begin_archive_open/begin_dir_scan cross-cancel so starting either worker drops the other. Without it, macOS is still exposed to 'mode B' (a stale folder scan's FIRST batch bootstrapping over an archive opened just after the scan started) - LOW severity (a clean rebuild onto the wrong-but-valid folder deck, not the frozen-view corruption; the core guard already covers mode A on mac). Needs an on-device build to verify (cfg(macos), can't compile on Windows).\n(2) Shared open generation (Codex #1/#2): replace the global scan_bootstrapped boolean + independent archive_gen/scan_gen with ONE monotonic open generation shared by both worker types, threaded through the contract (BeginArchiveOpen/BeginDirScan effects + ArchiveResolved/ScanBatch events carry it), so any result whose generation != the latest open is dropped in the core - the general, race-proof fix that also closes mode B shell-neutrally.\n(3) DONE 2026-07-19 via task #119 - Decode identity (Codex #4): DecodeKey carries content_gen on every job (dedup identity included); staleness is per-validity-domain (decode_pool::validity) at the pool cancel, ingestion, rebuild retention, and drain gates. Cross-deck decodes can no longer dedup as current. See plans/119-decode-validity-domains.md.\n(4) DONE 2026-07-19 - Renderer upload correctness (Codex #5): Renderer::upload_slot now returns bool (false + loud stderr on an out-of-bounds slot, gpu.rs); both drain_results call sites gate on it - the reserve path rolls the reservation back (release_pending) and the upgrade path keeps preview_resident/sharpen bookkeeping untouched; both production mark_resident returns (the reserve path and the GPU-derive path; the upgrade path has none) are checked with a loud [ring-desync] error instead of ignored. Regression tests: a_refused_upload_is_never_marked_resident_and_rolls_back + a_refused_upgrade_upload_keeps_the_preview_sharpen_eligible (a RefusingUploads Renderer double; pb-render now re-exports wgpu so doubles can name device/queue types).\n(5) present_item result propagation (Codex #6): make present_item return success and have try_present_target/drain_results propagate it; on a genuine present_slot miss, abort the current drain batch and resync ONCE after the loop (never invalidate mid-loop - that was the reverted cff70ca0/c383107a repair that bumped the epoch mid drain_results and purged the retained full-res tier, regressing instant fullscreen to a preview flash).\nCodex full analysis saved during the 2026-07-17 session. The present_slot->bool signature + the PB_DOOR_DIAG diagnostics (render draw-source + core door belief + present_slot-miss log) are already in the tree from that session and are the starting point for (4)/(5). STATUS 2026-07-19: item (1) macOS shell parity DONE (5089f36a - begin_archive_open cross-cancels the dir scan and vice versa; two tests, each verified to fail without its edit; ScanProgress::is_cancelled made pub for parity with OpenProgress). Item (4) upload_slot->bool + gated mark_resident DONE from the Windows side (5a2c2bf2). REMAINING: (2) the shared open generation, (3) decode identity (content_gen/deck_gen in DecodeKey), (5) present_item result propagation.\nPLAN 2026-07-21: .taskmaster/plans/109-ring-bridge-closeout.md (rev 2, Codex round-1 folded in) scopes remaining items (2)+(5) + the RingSlot identity stamp as THREE pieces: A - stamp the renderer RingSlot with the full core identity (item, content_gen, rep) taken from the accepted outcome reservation (NOT live self.content_gen - a swap-without-bump would mint a matching stamp), verify at present_slot, stamp EVERY writer (upload_slot/derive_fit/remaps); B - present_item returns bool + atomic present (commit nothing until a verified bind) + refusal-recovery contract (invalidate the residency record, keep target unresolved + pump awake via target_pending in work_pending, re-request, retry to a verified bind or terminal failure) - MUST land WITH A (A alone converts corruption into a PERMANENT HOLD); C - provenance-gate apply_scan_batch by BackgroundOps OpId (the archive_scope guard is UNSAFE - it rejects a legit archive->folder scan), closing mode B which A cannot see (a stale BOOTSTRAP rebuilds both rings consistently). Retires audit finding #3 + the #132 door-card wrong-occupant race, verified by invariant/recovery tests not the flaky manual repro.\nDONE 2026-07-21 (commits 3bc3d027 B + d51bb3b5 A; plan 109-ring-bridge-closeout.md ## Handoff). Item (2) shared open generation: VERIFIED ALREADY CLOSED by #126 (BackgroundOps single generation + poll_dir_scan is_current gate drops any stale batch before apply_scan_batch; the mode-B hole is stale). Item (5) present_item result propagation + the RingSlot identity stamp: DONE. B = atomic present (commit only on a verified bind) + returns bool + refusal recovery (ResidentRing::evict_slot, no epoch/gen bump). A = pb_core::SlotIdentity stamped on every RingSlot writer from the outcome key; present_slot(slot, expected) refuses a wrong occupant. Tests: evict_slot_frees_a_resident_slot_for_recovery, a_refused_present_commits_no_state_and_reports_not_shown, present_refuses_a_diverged_slot_stamp_and_recovers. Status review (not done) pending the ONE cross-machine gate: the winit pb-app build/run on Windows (safe by construction — pb-app has zero references to the changed Renderer methods + no AppCore field added; pb-mac-ffi builds clean on-machine). || CLOSED 2026-07-27: the one remaining gate (winit pb-app build + run on Windows) is cleared on the Windows box - `scripts/build-windows.ps1` with the ship feature set (libheif,dav1d,ffprobe) builds clean, and pb-core + pb-app-core are green (909 + 104 tests, 0 failed) including all three named regressions: a_refused_present_commits_no_state_and_reports_not_shown, present_refuses_a_diverged_slot_stamp_and_recovers, evict_slot_frees_a_resident_slot_for_recovery. NOT done: a live GUI smoke of an actual cross-type deck open - the intermittent presentation symptom is tracked separately as #132.",
+        "status": "done",
         "priority": "medium",
         "dependencies": [
           "104"
@@ -1302,14 +1308,14 @@
             "title": "Phase 5 (optional) - bare compressed single images",
             "description": "photo.jpg.gz / photo.png.bz2 / photo.jxl.zst open as one-entry sources (NOT .svgz - already a supported image via svg.rs). The picker already offers the bare suffixes; today they refuse cleanly, this makes them open.",
             "status": "pending",
-            "parentId": 116
+            "parentId": "116"
           },
           {
             "id": 2,
             "title": "Fuzz run + corpus benchmarks",
             "description": "Run cargo fuzz run tar_open on the Linux side (nightly; target compiles on MSVC too). Corpus benchmarks: plain-tar index latency, codec throughput, cancel latency, peak RSS on representative multi-GB tarballs. Owner previously judged this low-value given tar rides mature incumbent crates (see testing-effort-calibration memory) - re-scope or drop if that judgment still holds.",
             "status": "pending",
-            "parentId": 116
+            "parentId": "116"
           }
         ]
       },
@@ -1326,21 +1332,21 @@
             "title": "Windows audio track switching",
             "description": "Blocked on more than effort: WasapiAudio::open takes no track at all, and the catalog hands out TrackLocator::FfStream (an FFmpeg stream index, since #100 made FFmpeg the demuxer) while MF Source Reader enumerates its OWN indices - a real currency mismatch the TrackLocator seam exists for but nobody has resolved. Windows audio IS the master clock, so a mid-playback switch must tear down and re-prime it at the playhead. Cannot be verified without listening.",
             "status": "pending",
-            "parentId": 117
+            "parentId": "117"
           },
           {
             "id": 2,
             "title": "winit subtitle track picker UI (popover/menu flyout)",
             "description": "Core is ready and shell-agnostic (subtitle_picker_rows / select_subtitle_row / subtitle_tracks_known, incl. tri-state). Two homes, both real work: the winit playback bar is a hand-laid-out egui info pill (panels_ui.rs), not a transport HStack like the Mac's, so a popover means manual layout + hit-testing + the video_bar_interactive gate; a menu flyout needs machinery muda lacks (macOS uses NSMenuDelegate.menuNeedsUpdate to pull tracks as the menu opens; muda builds the tree once and only mirrors checkmarks). Shift+C + the existing menu item cover the function meanwhile.",
             "status": "pending",
-            "parentId": 117
+            "parentId": "117"
           },
           {
             "id": 3,
             "title": "Linux: verify subtitle overlay renders",
             "description": "Same wgpu presenter path as Windows/macOS, so it should follow, but nobody has run it on Linux yet.",
             "status": "pending",
-            "parentId": 117
+            "parentId": "117"
           }
         ]
       },
@@ -1374,7 +1380,7 @@
       {
         "id": 123,
         "title": "Instant F-toggle before the Original lands: current-Original priority + a geometry-pair Fit stash",
-        "description": "FIX 2 SHIPPED 2026-07-19 (plan: plans/123-geometry-pair-fit-stash.md rev 2, one Codex round folded - burst-start capture, Arc<RingSlot> aliasing, exact fit+inset+rotation identity, settle-hook beats Original-rebind/derive/CPU-want, external-bytes budget accounting, 4 core tests + 1 pb-core test). Owner smoke pending: park, F, F - second F instant, [sharp-diag] fit-stash re-present firing. FIX 1 SHIPPED 2026-07-19 (current-Original priority: the parked photo's own Original job is inserted directly after its display ladder in request_prefetch, ahead of neighbour previews/fulls and thumbs; neighbours/pin stay in the below-thumbs tail; order-pinned by the_current_photos_parked_original_outranks_the_neighbour_refill). FIX 2 (geometry-pair Fit stash) OWNER-APPROVED in direction, pending its own plan + Codex round: retain the previous geometry's presented Fit for the current photo, keyed by EXACT (item, content_gen, fit box) identity, budget-accounted, first-evicted; ~one Fit texture (~28-66MB) vs the multi-second re-decode; also the only possible instant path for derive-ineligible (ICC mode-1/RAW) photos. Owner note: does not need to cover novel resize sizes - the two-state fullscreen toggle is the common case.\nOwner repro 2026-07-19 (engagement shoot, 36MP sRGB baseline JPEGs - file probe ruled out RAW/ICC-mode-1/progressive/size; thumbnail strip CLOSED): parked on a photo late in a 279-item folder, every F re-decodes visibly until 'way after the pie', and re-toggling mid-decode restarts the visible reload. Two mechanisms, confirmed by code reading:\n(A) THE PIE MEASURES THE WRONG CONTRACT + THE ORIGINAL IS STARVED BY THE NEIGHBOUR REFILL. The pie clears on the Fit present, but instant toggles need the parked ORIGINAL, which is queued at the very bottom of the want list (below the ahead-ring fulls; below thumbs too, but the strip was closed here). Every F correctly kills all neighbour Fits and re-queues DOZENS of 36MP fit decodes above the Original, so repeated toggling keeps it perpetually at the back (~10s+ of queue at 36MP). FIX 1 (small, surgical): rank the CURRENT photo's parked Original directly after the current photo's own display ladder - above neighbour previews/fulls and thumbs. Bounded cost: exactly one decode job; parked = F/zoom is the next likely action (prime directive), its prerequisite must not queue behind 30 neighbours. The owner's below-thumbs calibration was about 'a few big originals' (the whole tier) starving visible thumbnails - promoting ONE job does not reopen that.\n(B) THE ONE-DEEP HELD STASH ALWAYS MISSES A TWO-STATE OSCILLATION. On each geometry change the presented texture escapes into the single renderer 'held' fallback and every other Fit is freed; F is a two-point oscillation, so the texture you toggle BACK to was freed one toggle ago - 'I literally just had these pixels' re-decodes from scratch. FIX 2 (the owner's idea): a geometry-PAIR stash - retain the previous geometry's presented Fit texture for the current photo (keyed by item + fit box / epoch parity), so toggle-back is a pure rebind from the FIRST F, zero decode, before any Original exists. NOTE: this is also the ONLY possible instant-toggle path for derive-ineligible photos (ICC mode-1, RAW - derive_fit refuses them forever), so it is not just a race-window patch. Design care: keep it renderer+ring coherent (the #119 validity/#109.4 fail-loud discipline - a stashed texture must carry its fit identity so present can match exactly, never trust 'same epoch parity'); the stash is RAM/VRAM-only session state (privacy posture unchanged).\nSequencing: Fix 1 first (minutes, kills most of the felt pain: pie + ~one decode arms the derive path); Fix 2 second (design-review worthy, touches ring identity). Verify: park on _DE25786-class photo, F immediately and repeatedly - first toggle may decode once; toggle-back must be instant from then on, pie or no pie.",
+        "description": "FIX 2 SHIPPED 2026-07-19 (plan: plans/123-geometry-pair-fit-stash.md rev 2, one Codex round folded - burst-start capture, Arc<RingSlot> aliasing, exact fit+inset+rotation identity, settle-hook beats Original-rebind/derive/CPU-want, external-bytes budget accounting, 4 core tests + 1 pb-core test). Owner smoke pending: park, F, F - second F instant, [sharp-diag] fit-stash re-present firing. FIX 1 SHIPPED 2026-07-19 (current-Original priority: the parked photo's own Original job is inserted directly after its display ladder in request_prefetch, ahead of neighbour previews/fulls and thumbs; neighbours/pin stay in the below-thumbs tail; order-pinned by the_current_photos_parked_original_outranks_the_neighbour_refill). FIX 2 (geometry-pair Fit stash) OWNER-APPROVED in direction, pending its own plan + Codex round: retain the previous geometry's presented Fit for the current photo, keyed by EXACT (item, content_gen, fit box) identity, budget-accounted, first-evicted; ~one Fit texture (~28-66MB) vs the multi-second re-decode; also the only possible instant path for derive-ineligible (ICC mode-1/RAW) photos. Owner note: does not need to cover novel resize sizes - the two-state fullscreen toggle is the common case.\nOwner repro 2026-07-19 (engagement shoot, 36MP sRGB baseline JPEGs - file probe ruled out RAW/ICC-mode-1/progressive/size; thumbnail strip CLOSED): parked on a photo late in a 279-item folder, every F re-decodes visibly until 'way after the pie', and re-toggling mid-decode restarts the visible reload. Two mechanisms, confirmed by code reading:\n(A) THE PIE MEASURES THE WRONG CONTRACT + THE ORIGINAL IS STARVED BY THE NEIGHBOUR REFILL. The pie clears on the Fit present, but instant toggles need the parked ORIGINAL, which is queued at the very bottom of the want list (below the ahead-ring fulls; below thumbs too, but the strip was closed here). Every F correctly kills all neighbour Fits and re-queues DOZENS of 36MP fit decodes above the Original, so repeated toggling keeps it perpetually at the back (~10s+ of queue at 36MP). FIX 1 (small, surgical): rank the CURRENT photo's parked Original directly after the current photo's own display ladder - above neighbour previews/fulls and thumbs. Bounded cost: exactly one decode job; parked = F/zoom is the next likely action (prime directive), its prerequisite must not queue behind 30 neighbours. The owner's below-thumbs calibration was about 'a few big originals' (the whole tier) starving visible thumbnails - promoting ONE job does not reopen that.\n(B) THE ONE-DEEP HELD STASH ALWAYS MISSES A TWO-STATE OSCILLATION. On each geometry change the presented texture escapes into the single renderer 'held' fallback and every other Fit is freed; F is a two-point oscillation, so the texture you toggle BACK to was freed one toggle ago - 'I literally just had these pixels' re-decodes from scratch. FIX 2 (the owner's idea): a geometry-PAIR stash - retain the previous geometry's presented Fit texture for the current photo (keyed by item + fit box / epoch parity), so toggle-back is a pure rebind from the FIRST F, zero decode, before any Original exists. NOTE: this is also the ONLY possible instant-toggle path for derive-ineligible photos (ICC mode-1, RAW - derive_fit refuses them forever), so it is not just a race-window patch. Design care: keep it renderer+ring coherent (the #119 validity/#109.4 fail-loud discipline - a stashed texture must carry its fit identity so present can match exactly, never trust 'same epoch parity'); the stash is RAM/VRAM-only session state (privacy posture unchanged).\nSequencing: Fix 1 first (minutes, kills most of the felt pain: pie + ~one decode arms the derive path); Fix 2 second (design-review worthy, touches ring identity). Verify: park on _DE25786-class photo, F immediately and repeatedly - first toggle may decode once; toggle-back must be instant from then on, pie or no pie. || OWNER 2026-07-27 (kept in review, NOT closed): typical use is fixed, but the deck can still reach a state where F-toggling never becomes instant - unhandled edge cases, not yet characterized. Needs a repro before closing.",
         "status": "review",
         "priority": "high",
         "dependencies": [],
@@ -1396,44 +1402,50 @@
         "status": "in-progress",
         "priority": "medium",
         "dependencies": [
-          114
+          "114"
         ],
         "subtasks": [
           {
             "id": 1,
             "title": "poster_walk.rs + rational_to_hns + FakeBackend tests",
             "description": "The driver, Best<F>, ScanOutcome, SeekError, and the one rational->hns conversion helper in video.rs. Nothing wired: pure addition, zero behavior change. Tests cover head-good-no-seeks, offset ordering/collapse, Refused from seek AND Stop from scan, cancel/deadline during the last failed seek, deadline inside a scan, Best first-max-wins + lazy consider_with.",
-            "status": "done"
+            "status": "done",
+            "parentId": "undefined"
           },
           {
             "id": 2,
             "title": "MF onto the driver (behavior-neutral)",
             "description": "DONE 2026-07-19 on the WINDOWS machine (owner-owned per the 2026-07-19 decision), so it was NOT a blind port - plan risk 1 did not apply. Deleted mf_poster's deep_scan + Best; MfPosterBackend implements PosterBackend. Reader lifetime: the caller's head reader is held by REFERENCE and never retired here (an owned clone would be the second COM ref that drops inline, ~1s on HEVC); the deep-seek reader is owned and retired off-thread at the top of the next seek (the old per-burst ordering) with a Drop impl as the catch-all, and the backend is scoped to drop BEFORE the final fit. Kept: the per-sample deadline check (now ScanOutcome::Stop) and the deadline creation point before facts/negotiation. Two neutrality decisions the plan did not spell out, both pinned in comments: (a) the invalid-position degrade is gated on `positioned` - mapping it to Stop unconditionally would have changed the HEAD walk, where that HRESULT previously propagated out of poster_inner via `?`; extracted as classify_burst_read purely to be testable without an IMFSourceReader and tested over all four combinations, which is the walk-site coverage the old :1174 test never had; (b) only the HEAD burst may define `origin` - matters only when the head decodes nothing at all, where the origin must stay unset (->0) rather than be redefined by a deep sample, or PosterChoice would split the same absolute timestamp differently than today (every consumer uses origin+relative as a pair, so replay was safe either way; closed anyway because neutrality is this phase's contract). NEUTRALITY MEASURED, NOT ASSERTED: ab_poster_walk over 8 real feature films x 2 walk variants (16 walks) run BEFORE and AFTER - all 16 chosen-frame timestamps identical (146.2/10.4/41.7/44.0/18.0/10.4/10.4/40.9 s), 0 pick mismatches, 0 failures; warm-cache totals 6126/6163 ms after vs 6200/6197 ms before (a first pass looked ~9% slower purely because the refactor ran cold and the baseline warm - re-measured warm-vs-warm). Workspace 1483 tests pass, clippy --workspace --all-targets -D warnings clean, ship-feature build (libheif,dav1d,ffprobe) links. Success criterion 1 now met: `fn deep_scan` exists nowhere, `struct Best` only in poster_walk.rs. REMAINING: owner smoke on screen - the probe covers the pick, not the rendered tile.",
-            "status": "done"
+            "status": "done",
+            "parentId": "undefined"
           },
           {
             "id": 3,
             "title": "FFmpeg 3a: mechanical port + scRGB judge hoist (behavior-neutral)",
             "description": "PosterWalk becomes the trait impl; Best<ff::frame::Video> gains ts_hns; hoist scrgb_frame_score/bright_enough into video.rs unchanged, with a no-resize judge path so FFmpeg's already-judge-sized pixels don't pay an extra clone. DONE 2026-07-19. One honest deviation from the plan's 'behavior-neutral' label: the driver's BETWEEN-BURST deadline check is structurally inherent to using walk_poster, so it arrives with 3a rather than 3b. It can only stop a walk the AVIO interrupt deadline would have killed anyway, returning best-so-far instead of an error. 3b keeps the genuinely subtle half: classifying an interrupt-triggered read error as cancellation vs elapsed-deadline vs real decode error.",
-            "status": "done"
+            "status": "done",
+            "parentId": "undefined"
           },
           {
             "id": 4,
             "title": "FFmpeg 3b: driver deadline + interrupt classification (intended change)",
             "description": "Add the between-burst deadline check and classify interrupt-triggered read errors (ffmpeg/poster.rs:224) as cancellation vs elapsed-deadline vs real decode error. Deliberately NOT behavior-neutral.",
-            "status": "pending"
+            "status": "pending",
+            "parentId": "undefined"
           },
           {
             "id": 5,
             "title": "AVFoundation 4a: internal _at helper + PTS plumbing (behavior-neutral)",
             "description": "Add decode_live_motion_streaming_at(start: Option<Duration>, timed_emit) internally; public Live Photo entry delegates with None. Surface CMSampleBufferGetPresentationTimeStamp via an AV-private timed callback - do NOT add PTS to AnimFrame. Zero-offset Live Photo regression tests land here. LOW PRIORITY (2026-07-19): see the task-level note - smartphone clips never deep-walk.",
-            "status": "pending"
+            "status": "pending",
+            "parentId": "undefined"
           },
           {
             "id": 6,
             "title": "AVFoundation 4b: av_poster onto the driver (#92.2, intended change)",
             "description": "seek records a pending offset (origin + target) and scan invokes the _at helper; judge via video::poster_judge; delete the first-bright-frame logic. Intended macOS changes: no 1s media cap, best-scored fallback, bright-AND-textured stop, 15s deadline, deep seeks. Watch VFR/low-fps media. LOW PRIORITY (2026-07-19): see the task-level note - smartphone clips never deep-walk.",
-            "status": "pending"
+            "status": "pending",
+            "parentId": "undefined"
           }
         ]
       },
@@ -1441,7 +1453,7 @@
         "id": 124,
         "title": "Zoom magnifies the fit-sized texture instead of raising resolution (rep selection is mode-derived, should be resolution-derived)",
         "description": "OWNER BUG REPORT 2026-07-19: \"zooming in only stretches the currently displayed texture but does not actually increase the resolution displayed.\" CONFIRMED by code reading (agent trace, no runtime repro yet).\n\nEVIDENCE. Zoom is a pure vertex transform: zoom_step (app_core_impl.rs:2180) / zoom_about_cursor (:3825) / the hold-to-zoom ramp (:11392) all mutate view.zoom -> push_view (:8630) -> Renderer::set_view (pb-render/src/gpu.rs:3444), which ONLY rewrites the 4-vertex quad. UVs are always the full 0.0..1.0 (view.rs:48); view.rs:7 states the intent outright ('rotation/zoom/pan are perf-neutral transforms with no re-decode').\n\nROOT CAUSE. display_kind() (app_core_impl.rs:6666) and decode_fit() (:6628) pick the rep from view.mode ALONE - view.zoom is never consulted:\n    match self.view.mode { Fit => self.fit, Fill | Original => None }\nSo in Fit mode the resident texture is fit-box-sized and zoom cannot reach the ring's Original slot, even when a full-res Original IS already resident (the parked tier, :6386, radius from full_res_radius() :6928). Mode is being used as a PROXY for 'how many source pixels does the screen need', and zoom is exactly the input that breaks the proxy. The correct predicate is resolution-derived, not mode-derived.\n\nIMPACT. 24MP photo, 3840x2160 viewport, Fit mode, zoom to 300%: you are sampling ~1280x720 texels of the ~3840x2160 fit texture, magnified with a plain bilinear mag_filter (gpu.rs:3133; no anisotropy, no lod_clamp) - roughly 1/9 the detail the source could supply. MAX_ZOOM is 32 (view.rs:60), so it degrades much further. Fit-rep textures are also mip_level_count: 1 (only the Original gets mips, gpu.rs:1863/1913), so zoom-OUT in Fit mode is unfiltered minification too.\n\nNO SETTLE HOOK EXISTS. The 180ms RESIZE_SETTLE debounce (engine.rs:143, armed at app_core_impl.rs:1506, drained :1925) is gated on a real fit-box change (:1435). No zoom path touches resize_settle_at, fit, epoch, invalidate_geometry, request_prefetch, or content_gen. Nothing is requested on zoom-stop because there is no zoom-stop.\n\nWHY IT SURVIVED THIS LONG. set_scale_mode sets view.zoom = 1.0 (:5479), so pressing 0 / 1:1 masks it - in Original/Fill mode decode_fit() returns None, the full-res mipped texture is bound, and zoom magnifies real source pixels. That is currently the ONLY way to see native detail.\n\nSCOPE, CORRECTED BY THE OWNER 2026-07-19: the assistant first read the comment at :6386-6392 ('a Fit<->1:1 toggle / zoom on those photos is an instant rebind') as an unimplemented CLAIM. The owner - who wrote it - clarified that 'zoom' there means the Fit<->1:1 MODE TOGGLE, not the smooth zoom. The comment is accurate and needs no fix, and this was never a regression from intended behavior; it is an unimplemented capability. That sharpens the bug rather than shrinking it:\n  - Fit<->1:1 toggle: ALREADY CORRECT (set_scale_mode flips display_kind to Original and rebinds the resident full-res texture).\n  - Smooth zoom in FIT mode (+/-, pinch, Ctrl+scroll, hold-to-zoom): THE GAP. Never flips the rep, so it magnifies the fit texture.\n  - Smooth zoom in 1:1/Fill mode: already correct - the Original is bound, and past 100% it is correctly showing all the data that exists.\nSo the fix reduces to: make smooth zoom do what the 1:1 toggle already does. The machinery is built, shipped and proven (#106.7); only the trigger is missing - which lowers the risk profile considerably.\n\nOPEN QUESTION FOR THE OWNER (affects priority): which was actually observed - soft pixels while in Fit after a pinch/+ zoom (this bug), or softness while in 1:1 (a different problem, possibly not a bug at all)?\n\nPROPOSED APPROACH (assistant recommendation, NOT owner-approved - wants a plan + Codex round before implementation). Three rungs of the existing cancellable refinement ladder:\n\nRUNG 0 (the ballgame; instant, zero decode): make rep selection resolution-derived so that once zoom would magnify past the fit texture's native detail, display_kind() binds the RESIDENT Original instead of Fit. For any parked photo inside full_res_radius this is a pure rebind - exactly the 'never repeat likely work' corollary. Geometry should fall out for free rather than needing a stash: base_scale is computed from image_size(), which returns the BOUND TEXTURE's dims (gpu.rs:3669, screen_and_image at :11347), so base_scale * zoom * tex_size is identical either side of the swap and the image must not jump. VERIFY THAT CLAIM FIRST - it is the load-bearing assumption and it was reasoned, not measured. Also fixes zoom-out (the Original is mipped).\n\nRUNG 1 (instant, no decode): while no better pixels exist, stop magnifying with bilinear. A Catmull-Rom / Lanczos magnification path costs nothing per frame and the GPU-Lanczos machinery (#110) plus pb-render's ab_report A/B/X harness already exist to pick the kernel on evidence rather than taste.\n\nRUNG 2 (settle, cancellable; SEPARATE TASK once 0+1 are measured): for when the Original is NOT resident - full_res_radius 0, big RAW, outside the ring - request an ROI decode on zoom-stop, reusing the resize_settle_at debounce pattern, cancelled by any further zoom/pan/nav. The correct decode-to-purpose answer is NOT 'decode the full original': it is decode ONLY THE VISIBLE RECT at display resolution, which is bounded work regardless of zoom depth or source megapixels (a 300% view of a 24MP file is a ~1/9 crop at viewport res - CHEAPER than the fit decode was). KNOWN OBSTACLE: decode-to-purpose today means FitBox, i.e. a SCALE not a CROP. Adding an ROI rect is real work and backend support is uneven - JPEG DCT-block cropping is cheap, most other backends mean decode-full-then-crop, which defeats the purpose for precisely the big files that need it most. Ship 0+1 first and measure; rung 2 may only matter at radius 0.\n\nSCOPE NOTE: the macOS host was not audited for a separate zoom implementation. The Renderer trait seam (pb-render/src/lib.rs:229) suggests it shares set_view, but that is unverified - check pb-mac-ffi / mac/ before assuming the fix is cross-platform by construction.\n\nPRIME DIRECTIVE FRAMING: parked zoom is a parked interaction, so it owes both budgets - interaction -> photon <= one refresh (rung 0 is a rebind, so it clears trivially) AND time-to-max-quality after parking (today: never, at any zoom > 1 in Fit mode).",
-        "status": "pending",
+        "status": "done",
         "priority": "high",
         "dependencies": [],
         "details": "Anchors verified 2026-07-19 against main @ 84c6d084. Key sites: decode_fit app_core_impl.rs:6628; display_rep/display_kind :6666-6679; display_slot :6699; parked Original tier :6386-6413 (+ the stale zoom claim in its comment); full_res_radius :6928; set_scale_mode zoom reset :5479; try_gpu_derive_fit early-bail on a resident Fit :5765; derive_fit_box :5843; zoom_step :2180; zoom_about_cursor :3825; hold-to-zoom :11392; screen_and_image :11347; push_view :8630. Render side: set_view gpu.rs:3444; quad_vertices :638; sampler gpu.rs:3133 (and :1951/:2111/:2226/:5594); Original mips :1863/:1913; image_size :3669. View math: pb-render/src/view.rs:7 (the 'no re-decode' doc), :48 corner_uvs, :60 MAX_ZOOM, :114 displayed_size. Debounce: engine.rs:143 RESIZE_SETTLE, app_core_impl.rs:1404-1506 resize + :1925 drain.",
@@ -1451,33 +1463,39 @@
             "id": 1,
             "title": "Verify the no-jump assumption and the resident-Original hit rate",
             "description": "Before designing anything: confirm that base_scale derived from image_size() really does make a Fit->Original rebind geometrically identical at a fixed zoom (reasoned from gpu.rs:3669 + app_core_impl.rs:11347, never measured). Also measure how often the Original is actually resident when a user zooms at the default full_res_radius - that number decides whether rung 2 is urgent or academic.",
-            "status": "pending"
+            "status": "pending",
+            "parentId": "undefined"
           },
           {
             "id": 2,
             "title": "Rung 0: resolution-derived rep selection so zoom binds the resident Original",
             "description": "Replace the mode-only predicate in display_kind()/decode_fit() with one that accounts for required sampling density (mode, zoom, fit box, source dims). Bind the Original when it is resident and zoom would magnify past the Fit rep's detail; fall back to Fit otherwise. Pure rebind, no decode. Fix the stale zoom claim in the comment at app_core_impl.rs:6386-6392 in the same change.",
-            "status": "pending"
+            "status": "pending",
+            "parentId": "undefined"
           },
           {
             "id": 3,
             "title": "Rung 1: better magnification kernel while no better pixels exist",
             "description": "Bilinear is the worst case for magnification and is what the sampler does today (gpu.rs:3133). Evaluate Catmull-Rom / Lanczos mag via pb-render's ab_report A/B/X matrix and ship the winner. Per-frame cost should be negligible; verify that rather than assume it.",
-            "status": "pending"
+            "status": "pending",
+            "parentId": "undefined"
           },
           {
             "id": 4,
             "title": "Confirm the macOS host shares the fix (or file the gap)",
             "description": "The mac/ + pb-mac-ffi zoom path was not audited. Verify it routes through the same Renderer::set_view seam (pb-render/src/lib.rs:229) and inherits rungs 0/1; if it has its own zoom implementation, scope that separately rather than claiming cross-platform coverage.",
-            "status": "pending"
+            "status": "pending",
+            "parentId": "undefined"
           },
           {
             "id": 5,
             "title": "Scope rung 2 (ROI decode on zoom-stop) as its own task after measuring",
             "description": "Only once 0+1 have shipped and the residency numbers from subtask 1 are in. Carries the real design work: a crop rect through the decode-to-purpose path (today FitBox is a scale, not a crop), uneven backend support, a zoom-stop settle hook modelled on resize_settle_at, and cancellation on any zoom/pan/nav.",
-            "status": "pending"
+            "status": "pending",
+            "parentId": "undefined"
           }
-        ]
+        ],
+        "updatedAt": "2026-07-27T22:22:40.409Z"
       },
       {
         "id": 125,
@@ -1493,37 +1511,43 @@
             "id": 1,
             "title": "Write the body-diff verifier and rehearse on `prefs` (5 fns / 185 LOC)",
             "description": "The verifier first, then the smallest possible cluster end-to-end: new core/prefs.rs, one impl AppCore block, its tests moved with it, verifier green, workspace green. If anything about the mechanism is wrong (module naming, test visibility, cfg-gated methods, doc-link breakage) it surfaces here at 185 LOC instead of at 2,882.",
-            "status": "pending"
+            "status": "pending",
+            "parentId": "undefined"
           },
           {
             "id": 2,
             "title": "Triage the 59 unassigned methods into keep-central vs a cluster",
             "description": "A human read, before the bigger moves depend on the answer. Output is a written assignment list, not code. Methods that resist naming are the signal: genuinely cross-cutting stays in app_core_impl.rs; badly named gets moved unchanged with a rename filed separately.",
-            "status": "pending"
+            "status": "pending",
+            "parentId": "undefined"
           },
           {
             "id": 3,
             "title": "Extract the small leaves: archive, scan, view",
             "description": "7/129, 13/395, 22/568. One cluster per commit, verifier per commit. view/ was touched by #124 so re-confirm nothing is mid-flight there first.",
-            "status": "pending"
+            "status": "pending",
+            "parentId": "undefined"
           },
           {
             "id": 4,
             "title": "Extract the mid leaves: files, tree, panels",
             "description": "15/581, 38/856, 40/891. Same discipline. By the end of this step the process has been proven six times.",
-            "status": "pending"
+            "status": "pending",
+            "parentId": "undefined"
           },
           {
             "id": 5,
             "title": "Extract video/audio/playback (96 fns / 2,882 LOC) - the big win",
             "description": "Deliberately last among the leaves. Largest cluster and the one with the most existing sibling modules (video_session.rs, video_native.rs, subtitle.rs), so also the one where the core/ vs top-level naming distinction matters most.",
-            "status": "pending"
+            "status": "pending",
+            "parentId": "undefined"
           },
           {
             "id": 6,
             "title": "Stop, re-measure, and decide whether the residency engine moves at all",
             "description": "Explicitly a decision point, not a plan to continue. The file should be ~6-8k by here. The residency/decode cluster (44 fns / 2,388 LOC) is genuinely coupled and is the hot path; splitting it is a different argument that deserves its own evidence. Also decide the anti-regrowth guard here, with real post-split numbers to set the threshold from.",
-            "status": "pending"
+            "status": "pending",
+            "parentId": "undefined"
           }
         ]
       },
@@ -1541,25 +1565,29 @@
             "id": 1,
             "title": "Move the dir-scan lifecycle into AppCore (the pattern in miniature)",
             "description": "5 functions, one dialog kind, no password path, no retry: spawn, pump, supersede-by-generation, cancel, reveal-after-delay. State-machine tests first. Both shells must lose their DirScan struct, their SCAN_DIALOG_DELAY, and ~150 lines each. Gate on a real macOS run before subtask 2 begins. [2026-07-20: DONE on both shells. Core owns spawn+pump+status (a78bfddd); mac −202/+82 (71f78e01); winit −270/+102 (f3ca4795), which also unified winit onto the ambient pill per owner call. Verified: 851 core + 36 mac tests, macOS app runs, winit cross-checked clippy-clean for x86_64-pc-windows-msvc. REVIEW = owner smoke: macOS pill/Cancel/quit-mid-scan, and Windows pill incl. the pre-bootstrap phase + cancel-with-empty-deck.] [2026-07-20 CLOSED: owner smoke-tested BOTH platforms — macOS unchanged (the pass condition for a pure-DRY move), Windows builds and looks correct incl. the unified pill. Windows native clippy -D warnings + tests green on the self-hosted runner. Remaining cleanup: delete the retained #[allow(dead_code)] Scanning dialog from pb-app, now that its revert-safety reason has expired.]",
-            "status": "done"
+            "status": "done",
+            "parentId": "undefined"
           },
           {
             "id": 2,
             "title": "Move the archive-open lifecycle into AppCore",
             "description": "The hard one: password prompt, wrong-password re-prompt, RAM pre-flight, progress, the Loading->Password dialog transition, and the SecretString path under the Second Directive. Do not start until subtask 1 has landed and been exercised on macOS. Carries the full privacy checklist.",
-            "status": "done"
+            "status": "done",
+            "parentId": "undefined"
           },
           {
             "id": 3,
             "title": "Move the strays: apply_menu_state, confirm_delete_permanent, the two toggles",
             "description": "Small, independent, and a reasonable stopping point. ~86 winit / ~116 mac lines between them. | DEFERRED OUT of #126 by plan section 5a (Codex round 1): these are not worker-lifecycle code, and bundling them blurs the acceptance boundary. They want their own task.",
-            "status": "cancelled"
+            "status": "cancelled",
+            "parentId": "undefined"
           },
           {
             "id": 4,
             "title": "Verify the audit's cross-cancel claim, and record any real divergence found",
             "description": "Audit #3 / task #109 item 1 claims the mac shell lacks the cross-cancel between the two worker types that Windows got in 8293a662. Unverified. If true, this task closes it for free and that should be recorded; if false, correct the audit. Also record any genuine behavioural divergence discovered during subtasks 1-3 rather than silently flattening it - a difference that was deliberate needs an owner call, not a merge. [2026-07-20: RESOLVED — the audit's claim is FALSE at HEAD. macOS has cross-cancel in BOTH directions with explicit '#109 item 1, winit parity — 8293a662' comments (pb-mac-ffi/src/lib.rs). Independently confirmed by 6bc8f7db. The audit is stale. Real divergences found instead: the scan-pill bootstrap gate (§12.3) and the scan_display_name fallback, both recorded and resolved deliberately rather than flattened.]",
-            "status": "done"
+            "status": "done",
+            "parentId": "undefined"
           }
         ]
       },
@@ -1575,25 +1603,29 @@
             "id": 1,
             "title": "pb-decode: recovery ladder + recovered flag",
             "description": "zune strict-first then lenient; on error fall back to OS codec (ImageIO/WIC) then image crate; flag DecodedImage.recovered with the reason. Tests with crafted malformed JPEGs.",
-            "status": "done"
+            "status": "done",
+            "parentId": "undefined"
           },
           {
             "id": 2,
             "title": "pb-app-core: recovered map + details-panel notice + reliable present_failed",
             "description": "Carry recovered reason per-item (RAM-only), show a notice line in the details/info panel, ensure a truly-failed decode resolves the pie.",
-            "status": "done"
+            "status": "done",
+            "parentId": "undefined"
           },
           {
             "id": 3,
             "title": "macOS shell: kill the pie + placeholder + notice display",
             "description": "Swift host must react to the failed/resolved state (stop spinner, show placeholder) and render the recovery notice.",
-            "status": "done"
+            "status": "done",
+            "parentId": "undefined"
           },
           {
             "id": 4,
             "title": "winit shell: placeholder parity (cross-platform debt)",
             "description": "Windows/Linux placeholder + notice; verify on Windows.",
-            "status": "pending"
+            "status": "pending",
+            "parentId": "undefined"
           }
         ]
       },
@@ -1604,7 +1636,7 @@
         "status": "review",
         "priority": "medium",
         "dependencies": [
-          109
+          "109"
         ],
         "subtasks": []
       },
@@ -1620,25 +1652,29 @@
             "id": 1,
             "title": "ReadStats window accumulator + producer demux-stall diag (PB_VIDEO_DIAG)",
             "description": "Pure 2s-window fold (reads/avg/max/>20ms/>40ms, injected now, unit-tested); producer times each packet.read.",
-            "status": "done"
+            "status": "done",
+            "parentId": "undefined"
           },
           {
             "id": 2,
             "title": "Read-ahead ring behind FfInput::open_playback (video + audio inputs)",
             "description": "readahead.rs: ByteSource seam, ring + epoch-tagged filler, AVIO callbacks honoring InterruptState at entry + waits; cap=min(64MiB,len), keep_behind=min(8MiB,cap/4), PB_READAHEAD_MB clamp [4,1024] / 0=off; spawn-failure falls back to direct; src-read diag; engaged from producer, VideoDemuxer, audio decoder opens.",
-            "status": "done"
+            "status": "done",
+            "parentId": "undefined"
           },
           {
             "id": 3,
             "title": "Scoped AVDiscard (video-kept opens only) + VideoSession Drop-cancel rider",
             "description": "discard_all_except in producer + VideoDemuxer opens only (NOT audio/cues — dispositions 1+2); parity test incl. payload checksums; impl Drop for VideoSession sets cancel + test.",
-            "status": "done"
+            "status": "done",
+            "parentId": "undefined"
           },
           {
             "id": 4,
             "title": "Validation + docs: SMB A/B on the Air, local-SSD regression A/B, CHANGELOG, handoff",
             "description": "Owner A/B PB_READAHEAD_MB=0 vs default over the share (src-read/demux-stall/session diags) AND locally on the Studio; CHANGELOG entry; Windows cross-check; handoff ledger.",
-            "status": "pending"
+            "status": "pending",
+            "parentId": "undefined"
           }
         ]
       },
@@ -1655,7 +1691,7 @@
         "id": 135,
         "title": "FFmpeg packet leak in every hand-rolled read loop (the 2026-07-24 OOM)",
         "description": "Root cause of the M5 Air OOM (Blaze at 44.89 GB): av_read_frame requires the destination packet to be unreffed by the caller between reads, but ffmpeg_next Packet::read is a bare av_read_frame — every loop reusing one ff::Packet (video producer, audio decoder incl. its skip-all-video-packets loop, VideoDemuxer, cues scan, poster walk) leaked every packet buffer, ~the container bitrate per open input. Confirmed with `leaks` (1.08 GB in 587k av_malloc/av_buffer_realloc blocks after 80 s of realtime play) and fixed with ffmpeg::read_into_reused (av_packet_unref before read) at all 6 sites; the leak_probe ignored test (PB_LEAK_CLIP) shows RSS dead-flat at 1128 MB for 2 min vs +139 MB/10s before. Pre-dates #133 — the read-ahead ring merely made long smooth playback possible, letting the leak run to OOM; it also retroactively explains the ORIGINAL Air report (choppy after minutes even from local SSD = leak -> swap on 16 GB). Owner long-play validation pending.",
-        "status": "review",
+        "status": "done",
         "priority": "high",
         "dependencies": [],
         "subtasks": []
@@ -1766,18 +1802,74 @@
             "priority": "low"
           }
         ]
+      },
+      {
+        "id": 137,
+        "title": "AI generation metadata in Details (ComfyUI + A1111)",
+        "description": "ComfyUI/A1111 images carry the whole recipe in PNG tEXt chunks (or EXIF UserComment) and Blaze Viewer reads none of it - three layers block it: pb-decode never reads PNG text chunks, is_exif_blob drops values over 256 BYTES, EXIF_VALUE_MAX truncates at 72 chars. Add a Generation section at the top of Inspector > Details plus Copy Generation Prompt / Copy Generation Data; raw JSON is never dumped inline. SAFETY INVARIANT: a fact is emitted only when every viable candidate agrees, else omitted - greedy first-match traversal (rev-1) broke this five ways. Parses graph SHAPE not node types, and parses `prompt` (the executed graph) never `workflow` (which holds muted nodes that did not run). Plan: .taskmaster/docs/generation-metadata-plan.md (rev 2, post-Codex review)",
+        "status": "in-progress",
+        "priority": "medium",
+        "dependencies": [],
+        "subtasks": [
+          {
+            "id": 1,
+            "title": "pb-decode::png_text - validated PNG text-chunk walker",
+            "description": "Walk to IEND (chunks may follow IDAT), skipping IDAT by length. Validate CRC of any collected chunk. Collect ONLY prompt/workflow/parameters. Duplicate keyword = ambiguous, drop both. Inflate capped at 1 MB, discard the chunk atomically on overflow (never truncate). Truncated/non-PNG -> empty, never panics. Does NOT ride catch_panics (private + typed to DecodedImage, pb-decode/src/lib.rs:813), so it needs its own fuzz target - fuzz/Cargo.toml has exactly one pb-decode target today (probe_avis).",
+            "status": "pending"
+          },
+          {
+            "id": 2,
+            "title": "pb-decode::read_exif_user_comment - raw-bytes charset decode",
+            "description": "field_value (pb-decode/src/metadata.rs:27) only byte-decodes Value::Ascii; UserComment is Undefined and reaches callers mangled through display_value(). Decode the 8-byte charset prefix (ASCII/UNICODE/JIS/undefined) and UTF-16 by BOM while the raw field bytes still exist. Required before the A1111 JPEG/WebP arm can work at all.",
+            "status": "pending"
+          },
+          {
+            "id": 3,
+            "title": "genmeta - types, tool detection, A1111 parser",
+            "description": "GenerationMeta/GenTool/PromptText+PromptSource (no GenTool::Unknown - absence is None). has_payload covers 'workflow present, facts absent'. Detection: a `prompt` key -> ComfyUI (workflow NOT required); `parameters` or an A1111-shaped UserComment -> A1111. A1111 parsing must use known-key boundary rules: the param record is the LAST line and only if it starts with a known key; split on ', ' only at a `Key: ` boundary (values contain commas); split prompts at the LAST '\\nNegative prompt: '. Prompts stored capped at 16 KB; raw payloads NOT retained.",
+            "status": "pending"
+          },
+          {
+            "id": 4,
+            "title": "genmeta - the ComfyUI candidate-agreement walk",
+            "description": "INVARIANT: a fact is emitted only when every viable candidate agrees; otherwise omitted. Collect ALL SaveImage terminals (no terminal -> no facts; never pick an arbitrary sink). BFS over ALL image-like inputs (DAG, not a path) with visited set + depth cap. A sampler must have positive+negative+latent_image (NOT merely `steps` - detailers/upscalers have steps). Headline only when a UNIQUE deepest sampler exists (img2img breaks 'deepest = base'). Prompt link resolution is CUT: a linked `text` is Unresolved{via}, no text. Linked scalars resolve only by exact input-name match on the source node. Forked `model` chain (a merge) -> omit the model. Latent size only from a genuine chain head with literal width+height.",
+            "status": "pending"
+          },
+          {
+            "id": 5,
+            "title": "DetailRow::Body + all six consumer sites",
+            "description": "New variant for a wrapped paragraph. Complete inventory (rev-1 missed the first two): app_core_impl.rs:90 hud_row (HUD adapter), app_core_impl/clipboard.rs:141 (exhaustive match inside copy_image_details), pb-mac-ffi/src/lib.rs:463 (-> kind 2), pb-app/src/panels_ui.rs:2761, pb-app-core/src/panels.rs:41 copy_text, pb-app/src/egui_shot.rs:544 (a screenshot FIXTURE builder, not a presenter). macOS InspectorPanel.swift:249 needs nothing - Details is tab 0 so kind 2 takes the literal Text branch, not MarkdownBlocksView (unverified from Windows).",
+            "status": "pending"
+          },
+          {
+            "id": 6,
+            "title": "Wire into ItemDetails / ensure_exif_cached / exif_rows / copy_image_details",
+            "description": "gen: Option<GenerationMeta> on ItemDetails - constructors are ready/loading, the archive arm (meta.rs:204), video.rs:259 and media_details.rs:297 (both missed in rev-1), plus test literals; doors+videos = None per the kind opt-out rule. Generation block ordered after the filename/path header and error row, before Dimensions. Generation rows are built on a SEPARATE path from EXIF rows and must NOT route through is_exif_blob (a 256-BYTE cutoff, engine.rs:1093) or truncate_exif_value. copy_image_details (clipboard.rs:98) is a SEPARATE production copy path from DetailsPanel::copy_text - both must carry the block or they disagree about the same file.",
+            "status": "pending"
+          },
+          {
+            "id": 7,
+            "title": "CopyGenerationPrompt + CopyGenerationData - full plumbing",
+            "description": "Tool-neutral names: 'Copy Workflow JSON' would lie when the payload is an API graph or A1111 text, and pretty-printing contradicts verbatim. Data copy is byte-for-byte verbatim, preferring workflow -> prompt -> parameters; the MENU label may specialize via rebuild-on-signature. ~17 sites, mirroring Action::CopyImageText: action.rs:72/204/353/435, keymap.rs:277/621, app_core_impl.rs:524 (dispatch arm only; implementation goes in app_core_impl/clipboard.rs per where-code-goes.md), pb-app/menu.rs:43/253/314/376/589/908/1357/1592, main.rs:1917, CoreModel.swift:886.",
+            "status": "pending"
+          },
+          {
+            "id": 8,
+            "title": "CHANGELOG + corpus verification + privacy tests",
+            "description": "Verify against C:\\Users\\jdlien\\code\\bw-sample-images (3 ComfyUI PNGs, not committed). Re-run viewing_a_folder_writes_nothing_to_disk + the static fs::write audit. Add the explicit regression test proving generation text never reaches default_describe_prompt (build_context at prompt.rs:99 happens not to consume it today, but that is an accident, not a guarantee). PB_PERF episode around Inspector-open. CHANGELOG under [Unreleased] / Added.",
+            "status": "pending"
+          }
+        ]
       }
     ],
     "metadata": {
       "version": "1.0.0",
-      "lastModified": "2026-07-19T00:00:00.000Z",
-      "taskCount": 46,
-      "completedCount": 1,
+      "lastModified": "2026-07-27T22:23:07.735Z",
+      "taskCount": 58,
+      "completedCount": 7,
       "tags": [
         "master"
-      ],
-      "created": "2026-07-19T05:32:07.941Z",
-      "description": "Tasks for master context"
+      ]
     }
   }
 }

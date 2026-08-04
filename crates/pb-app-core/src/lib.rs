@@ -67,6 +67,10 @@ pub mod engine;
 pub mod folder_tree;
 pub mod follow;
 pub mod fs_tree;
+// AI generation metadata (task #137): ComfyUI / Automatic1111 recipes read out of
+// PNG text chunks. Pure parsing — its safety invariant is "a fact is emitted only
+// when every viable candidate agrees, else omitted."
+pub mod genmeta;
 pub mod image_text;
 pub mod keymap;
 pub mod launch;

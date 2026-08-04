@@ -25,6 +25,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "png_text"
+path = "fuzz_targets/png_text.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "tar_open"
 path = "fuzz_targets/tar_open.rs"
 test = false

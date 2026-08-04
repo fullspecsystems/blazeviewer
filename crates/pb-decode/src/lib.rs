@@ -114,6 +114,7 @@ mod jxl;
 mod libheif;
 pub mod metadata;
 pub mod orientation;
+pub mod png_text;
 /// The one poster walk policy (task #115), shared by the MF / FFmpeg /
 /// AVFoundation backends. Pure: no unsafe, no cfg, no I/O.
 pub mod poster_walk;
@@ -196,7 +197,7 @@ pub use libheif::LibHeifDecoder;
 pub use livephoto::{
     decode_live_motion, decode_live_motion_streaming, probe_video_details, probe_video_stream,
 };
-pub use metadata::read_exif_fields;
+pub use metadata::{read_exif_fields, read_exif_user_comment};
 #[cfg(windows)]
 pub use mf_audio::{MfAudioDecoder, MfAudioFormat};
 #[cfg(windows)]
@@ -207,6 +208,7 @@ pub use mf_poster::{
 };
 #[cfg(windows)]
 pub use mf_stream::mem_istream;
+pub use png_text::read_png_text;
 pub use thumb::{derive_thumbnail, exif_thumbnail, jpeg_preview_first, jpeg_sof_dims};
 // Platform-neutral (defined in `video`); both platform probes construct it.
 #[cfg(windows)]
