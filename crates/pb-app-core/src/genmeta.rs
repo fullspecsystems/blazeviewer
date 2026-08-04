@@ -630,5 +630,84 @@ fn describe_pass(graph: &Graph, node: &Node) -> String {
     }
 }
 
+/// The Details panel's **Generation** block, or empty when there is nothing
+/// worth showing (task #137).
+///
+/// Pure, so the panel and the Copy Image Details command can share one
+/// definition and cannot disagree about the same file — the shape
+/// [`crate::tracks::track_rows`] already establishes for video tracks.
+///
+/// An unreadable prompt still produces a row. Saying *why* it is missing
+/// ("assembled by PromptCombinator") is the honest outcome, and far more useful
+/// than a blank space the user reads as a bug.
+pub fn detail_rows(meta: &GenerationMeta) -> Vec<crate::panels::DetailRow> {
+    use crate::panels::DetailRow;
+    let mut rows = Vec::new();
+    let span = |text: String, bold: bool| DetailRow::Span { text, bold };
+
+    if !meta.has_facts() {
+        // A payload we cannot read anything out of. Say so plainly rather than
+        // showing nothing, so the Copy command does not look like it does
+        // nothing when the user reaches for it.
+        rows.push(span(format!("Generation ({})", meta.tool.name()), true));
+        rows.push(DetailRow::Pair {
+            label: "Details".to_string(),
+            value: "present but not readable — use Copy generation data".to_string(),
+        });
+        return rows;
+    }
+
+    rows.push(span(format!("Generation ({})", meta.tool.name()), true));
+    if let Some(p) = &meta.positive {
+        match (&p.text, p.unresolved_reason()) {
+            (Some(text), _) => rows.push(DetailRow::Body { text: text.clone() }),
+            (None, Some(why)) => rows.push(DetailRow::Pair {
+                label: "Prompt".to_string(),
+                value: why,
+            }),
+            (None, None) => {}
+        }
+    }
+    if let Some(n) = &meta.negative {
+        match (&n.text, n.unresolved_reason()) {
+            (Some(text), _) => {
+                rows.push(span("Negative prompt".to_string(), false));
+                rows.push(DetailRow::Body { text: text.clone() });
+            }
+            (None, Some(why)) => rows.push(DetailRow::Pair {
+                label: "Negative".to_string(),
+                value: why,
+            }),
+            (None, None) => {}
+        }
+    }
+    let mut pair = |label: &str, value: String| {
+        rows.push(DetailRow::Pair {
+            label: label.to_string(),
+            value,
+        })
+    };
+    if let Some(model) = &meta.model {
+        pair("Model", model.clone());
+    }
+    for (name, strength) in &meta.loras {
+        pair(
+            "LoRA",
+            if strength.is_empty() {
+                name.clone()
+            } else {
+                format!("{name} ({strength})")
+            },
+        );
+    }
+    for (label, value) in &meta.params {
+        pair(label, value.clone());
+    }
+    for (i, p) in meta.passes.iter().enumerate() {
+        pair(&format!("Pass {}", i + 2), p.clone());
+    }
+    rows
+}
+
 #[cfg(test)]
 mod tests;

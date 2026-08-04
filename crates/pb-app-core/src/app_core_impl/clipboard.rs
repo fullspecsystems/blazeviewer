@@ -122,6 +122,18 @@ impl AppCore {
             lines.push(format!("Codec: {}", meta.codec.to_uppercase()));
         }
         if let Some(details) = self.exif_cache.get(&item) {
+            // The Generation block (task #137), from the same builder the panel
+            // uses — this is a separate copy path, so sharing the derivation is
+            // what stops the two disagreeing about the same file.
+            if let Some(gen) = &details.gen {
+                for row in crate::genmeta::detail_rows(gen) {
+                    lines.push(match row {
+                        DetailRow::Span { text, .. } => text,
+                        DetailRow::Pair { label, value } => format!("{label}: {value}"),
+                        DetailRow::Body { text } => text,
+                    });
+                }
+            }
             lines.push(format!(
                 "File Size: {} bytes",
                 hud::format_thousands(details.size)

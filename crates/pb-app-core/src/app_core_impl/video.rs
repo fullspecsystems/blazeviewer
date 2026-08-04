@@ -274,6 +274,11 @@ impl AppCore {
                 probe_state: crate::media_details::ProbeState::Ready,
                 // AVFoundation probed it — that path doesn't parse the DoVi record.
                 dovi_incompatible: false,
+                // A video is not a generated still. Answered explicitly rather
+                // than inherited, per the crate's "a new kind opts out, not in"
+                // rule — this is a struct literal precisely so the compiler
+                // makes every kind state its own answer.
+                gen: None,
             },
         );
         self.emit_panels_changed();

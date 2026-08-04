@@ -267,6 +267,59 @@ mod tests {
         });
     }
 
+    /// ⛔ **Privacy (Second Directive), task #137.** A generation prompt must never
+    /// reach the describe context. Describe can post the image and its context to a
+    /// **user-configured endpoint** — so leaking the prompt here would ship the
+    /// user's own (often personal) prompt text to a server as a silent byproduct of
+    /// pressing `D`, with no opt-in and no warning.
+    ///
+    /// `build_context` happens to read only `ItemDetails::fields` today, so this
+    /// passes by construction — which is exactly why it needs a test. That is an
+    /// accident of the current code, not a guarantee, and the obvious "improvement"
+    /// of feeding richer metadata to the describer would silently break it.
+    #[test]
+    fn a_generation_prompt_never_reaches_the_describe_prompt() {
+        use crate::genmeta::{GenTool, GenerationMeta};
+        let mut core = test_core();
+        core.displayed_item = Some(0);
+        // Seed the cache directly: `ensure_exif_cached` returns early when the
+        // entry exists, so this is the item's metadata as far as describe is
+        // concerned — no filesystem needed.
+        let mut gen = GenerationMeta {
+            tool: GenTool::ComfyUI,
+            positive: None,
+            negative: None,
+            model: Some("SECRETMODEL".into()),
+            loras: Vec::new(),
+            params: vec![("Seed".into(), "SECRETSEED".into())],
+            passes: Vec::new(),
+            has_payload: true,
+        };
+        gen.positive = Some(crate::genmeta::PromptText {
+            text: Some("SECRETPROMPT a very private thing".into()),
+            source: crate::genmeta::PromptSource::Literal,
+        });
+        core.exif_cache.insert(
+            0,
+            crate::app_core::ItemDetails::ready(10, vec![("Make".into(), "Canon".into())])
+                .with_gen(Some(gen)),
+        );
+
+        let prompt = core.default_describe_prompt(0);
+        for secret in ["SECRETPROMPT", "SECRETMODEL", "SECRETSEED"] {
+            assert!(
+                !prompt.contains(secret),
+                "generation metadata leaked into the describe prompt ({secret}): {prompt}"
+            );
+        }
+        // The ordinary EXIF path still works, so this is a real boundary rather
+        // than an empty context that would pass vacuously.
+        assert!(
+            prompt.contains("Canon"),
+            "the EXIF camera fact should still reach the describer: {prompt}"
+        );
+    }
+
     #[test]
     fn describe_result_caches_by_item() {
         let mut core = test_core();

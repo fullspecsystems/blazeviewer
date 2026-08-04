@@ -301,6 +301,9 @@ pub fn probe_job(source: &dyn ItemSource, item: usize, generation: u64) -> ItemD
         has_audio,
         probe_state: ProbeState::Ready,
         dovi_incompatible,
+        // This is the video container probe; a video carries no generation
+        // recipe. Stills get theirs on the `Image` arm of `ensure_exif_cached`.
+        gen: None,
     }
 }
 

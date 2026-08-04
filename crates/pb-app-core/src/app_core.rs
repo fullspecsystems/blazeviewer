@@ -165,6 +165,16 @@ pub struct ItemDetails {
     /// (macos-video-smoothness §2). Compat-id 1/2/4 content degrades cleanly and
     /// stays `false`.
     pub dovi_incompatible: bool,
+    /// How this image was generated, when it says so (task #137) — a ComfyUI or
+    /// Automatic1111 recipe read out of the file's text chunks. `None` for the
+    /// overwhelming majority of images, and always for videos and archive doors,
+    /// which never carry one.
+    ///
+    /// Only the *parsed* facts are kept, never the raw payload: the 24 KB
+    /// workflow graph a single ComfyUI PNG carries would cost ~140 MB across a
+    /// 5,000-image deck in this unbudgeted per-deck map, for something almost
+    /// never read. The copy command re-reads the file instead.
+    pub gen: Option<crate::genmeta::GenerationMeta>,
 }
 
 impl ItemDetails {
@@ -177,7 +187,14 @@ impl ItemDetails {
             has_audio: None,
             probe_state: crate::media_details::ProbeState::Ready,
             dovi_incompatible: false,
+            gen: None,
         }
+    }
+
+    /// Attach generation metadata to a still's entry.
+    pub fn with_gen(mut self, gen: Option<crate::genmeta::GenerationMeta>) -> Self {
+        self.gen = gen;
+        self
     }
 
     /// The placeholder a video's cold miss records while its worker probes. Its presence

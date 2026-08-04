@@ -470,6 +470,75 @@ fn a1111_without_a_parameter_record_is_all_prompt() {
     assert!(m.params.is_empty());
 }
 
+// ---------------------------------------------------------------------------
+// The Details rows
+// ---------------------------------------------------------------------------
+
+#[test]
+fn detail_rows_lead_with_a_heading_and_put_prompts_in_body_rows() {
+    use crate::panels::DetailRow;
+    let m = comfy(SIMPLE);
+    let rows = detail_rows(&m);
+    assert!(
+        matches!(&rows[0], DetailRow::Span { text, bold: true } if text == "Generation (ComfyUI)"),
+        "first row must be the heading, got {:?}",
+        rows[0]
+    );
+    // A prompt is a wrapped paragraph, never a label/value pair — the pair
+    // renderer clips to a fixed label column.
+    assert!(
+        rows.iter()
+            .any(|r| matches!(r, DetailRow::Body { text } if text == "a red bird")),
+        "the positive prompt must be a Body row: {rows:?}"
+    );
+    assert!(
+        rows.iter()
+            .any(|r| matches!(r, DetailRow::Body { text } if text == "blurry")),
+        "the negative prompt must be a Body row: {rows:?}"
+    );
+}
+
+#[test]
+fn an_unresolved_prompt_still_gets_a_row_saying_why() {
+    use crate::panels::DetailRow;
+    let json = r#"{
+      "1": {"class_type": "PromptCombinator", "inputs": {"input_list_1": "girl"}},
+      "2": {"class_type": "CLIPTextEncode", "inputs": {"text": ["1", 0]}},
+      "3": {"class_type": "EmptyLatentImage", "inputs": {"width": 64, "height": 64}},
+      "4": {"class_type": "KSampler", "inputs": {"seed": 1, "steps": 10,
+            "positive": ["2", 0], "negative": ["2", 0], "latent_image": ["3", 0]}},
+      "5": {"class_type": "SaveImage", "inputs": {"images": ["4", 0]}}
+    }"#;
+    let rows = detail_rows(&comfy(json));
+    // Blank space reads as a bug; naming the cause is the useful answer.
+    assert!(
+        rows.iter().any(|r| matches!(r,
+            DetailRow::Pair { label, value }
+                if label == "Prompt" && value.contains("PromptCombinator"))),
+        "an unresolved prompt must explain itself: {rows:?}"
+    );
+    // And the combinator's word list is still nowhere in the output.
+    assert!(!format!("{rows:?}").contains("girl"));
+}
+
+#[test]
+fn an_unreadable_payload_says_so_rather_than_showing_nothing() {
+    use crate::panels::DetailRow;
+    let m = parse(&chunks(&[("workflow", r#"{"nodes": []}"#)]), None).unwrap();
+    let rows = detail_rows(&m);
+    assert!(
+        rows.iter().any(|r| matches!(r,
+            DetailRow::Pair { value, .. } if value.contains("Copy generation data"))),
+        "an unreadable payload must point at the copy command: {rows:?}"
+    );
+}
+
+#[test]
+fn detail_rows_are_empty_for_nothing() {
+    // The common case: an ordinary photo grows no rows at all.
+    assert!(parse(&chunks(&[("Software", "gimp")]), None).is_none());
+}
+
 #[test]
 fn an_a1111_shaped_user_comment_is_recognized() {
     // The JPEG/WebP path: the same block arrives via EXIF UserComment.

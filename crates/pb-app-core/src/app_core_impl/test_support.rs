@@ -146,6 +146,7 @@ pub(super) fn seed_details(
             has_audio,
             probe_state: crate::media_details::ProbeState::Ready,
             dovi_incompatible: false,
+            gen: None,
         },
     );
 }

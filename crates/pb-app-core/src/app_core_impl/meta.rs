@@ -106,6 +106,15 @@ impl AppCore {
                 });
                 return rows;
             }
+            // The Generation block (task #137) leads the facts: on an AI image it
+            // is what the user opened the panel for, and burying it under twenty
+            // EXIF rows would mean scrolling for the headline. Built on its own
+            // path from `genmeta`, deliberately NOT through the EXIF row loop
+            // below — `is_exif_blob` would drop a prompt at 256 bytes and
+            // `truncate_exif_value` would cut it to 72 characters.
+            if let Some(gen) = &details.gen {
+                rows.extend(crate::genmeta::detail_rows(gen));
+            }
             rows.push(DetailRow::Pair {
                 label: "File Size".to_string(),
                 value: format!("{} bytes", hud::format_thousands(details.size)),
@@ -212,9 +221,18 @@ impl AppCore {
             crate::video::LibraryItemKind::Image => {
                 if let Ok(bytes) = self.source.bytes(item) {
                     let fields = read_exif_fields(&bytes);
+                    // Generation metadata (task #137), from the same read. A
+                    // chunk-header walk plus one bounded JSON parse — see
+                    // `genmeta`'s caps. Source-agnostic, so a ComfyUI PNG inside
+                    // an archive gets this too.
+                    let gen = crate::genmeta::parse(
+                        &pb_decode::read_png_text(&bytes),
+                        pb_decode::read_exif_user_comment(&bytes).as_deref(),
+                    );
                     self.exif_cache.insert(
                         item,
-                        crate::app_core::ItemDetails::ready(bytes.len() as u64, fields),
+                        crate::app_core::ItemDetails::ready(bytes.len() as u64, fields)
+                            .with_gen(gen),
                     );
                 }
             }
@@ -486,6 +504,7 @@ mod tests {
             has_audio: Some(true),
             probe_state: crate::media_details::ProbeState::Ready,
             dovi_incompatible: false,
+            gen: None,
         })
         .unwrap();
         core.exif_cache
@@ -552,6 +571,112 @@ mod tests {
             Some(crate::media_details::ProbeState::Loading),
             "identity mismatch must reject the result"
         );
+    }
+
+    /// A minimal but genuinely valid PNG carrying one `tEXt` chunk — enough for
+    /// `read_png_text` to walk, without committing a real generated image (whose
+    /// payload is the user's, not a fixture; see the plan's *Fixtures* note).
+    fn png_with_text(keyword: &str, text: &str) -> Vec<u8> {
+        fn crc32(kind: &[u8], data: &[u8]) -> u32 {
+            let mut crc = 0xFFFF_FFFFu32;
+            for &b in kind.iter().chain(data) {
+                crc ^= b as u32;
+                for _ in 0..8 {
+                    let mask = (crc & 1).wrapping_neg();
+                    crc = (crc >> 1) ^ (0xEDB8_8320 & mask);
+                }
+            }
+            !crc
+        }
+        fn push(out: &mut Vec<u8>, kind: &[u8], data: &[u8]) {
+            out.extend_from_slice(&(data.len() as u32).to_be_bytes());
+            out.extend_from_slice(kind);
+            out.extend_from_slice(data);
+            out.extend_from_slice(&crc32(kind, data).to_be_bytes());
+        }
+        let mut png = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+        push(&mut png, b"IHDR", &[0, 0, 0, 1, 0, 0, 0, 1, 8, 6, 0, 0, 0]);
+        let mut chunk = keyword.as_bytes().to_vec();
+        chunk.push(0);
+        chunk.extend_from_slice(text.as_bytes());
+        push(&mut png, b"tEXt", &chunk);
+        push(
+            &mut png,
+            b"IDAT",
+            &[0x78, 0x9C, 0x03, 0x00, 0x00, 0x00, 0x00, 0x01],
+        );
+        push(&mut png, b"IEND", &[]);
+        png
+    }
+
+    /// End to end (task #137): a generated PNG on disk reaches the Details table
+    /// as a Generation block, ahead of Dimensions, with the prompt as a Body row.
+    #[test]
+    fn a_generated_png_lands_a_generation_block_in_the_details_table() {
+        let dir = std::env::temp_dir().join(format!("pb-genmeta-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("generated.png");
+        let params = "a red bird on a wire\nNegative prompt: blurry\nSteps: 20, Seed: 4242";
+        std::fs::write(&path, png_with_text("parameters", params)).unwrap();
+
+        let mut core = test_core();
+        core.source = Arc::new(FsSource::new(vec![path.clone()]));
+        core.playlist = Playlist::new(1, 0);
+        core.displayed_item = Some(0);
+        core.ensure_exif_cached(0);
+
+        let gen = core.exif_cache[&0].gen.as_ref().expect("parsed");
+        assert_eq!(gen.tool, crate::genmeta::GenTool::Automatic1111);
+
+        let rows = core.exif_rows();
+        let text = |r: &DetailRow| match r {
+            DetailRow::Span { text, .. } | DetailRow::Body { text } => text.clone(),
+            DetailRow::Pair { label, value } => format!("{label}: {value}"),
+        };
+        let flat: Vec<String> = rows.iter().map(text).collect();
+        let heading = flat
+            .iter()
+            .position(|r| r.contains("Generation"))
+            .expect("a Generation heading");
+        assert!(
+            rows.iter()
+                .any(|r| matches!(r, DetailRow::Body { text } if text == "a red bird on a wire")),
+            "the prompt must be a Body row: {flat:?}"
+        );
+        assert!(flat.iter().any(|r| r == "Seed: 4242"), "{flat:?}");
+        // Ahead of the ordinary facts: on an AI image the recipe is what the
+        // panel was opened for, and burying it under EXIF means scrolling.
+        if let Some(size_at) = flat.iter().position(|r| r.starts_with("File Size")) {
+            assert!(
+                heading < size_at,
+                "Generation must lead the facts: {flat:?}"
+            );
+        }
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// The regression that matters for everyone else: an ordinary photo must grow
+    /// no new rows at all, and pay for no parsing it cannot use.
+    #[test]
+    fn an_ordinary_photo_grows_no_generation_rows() {
+        let dir = std::env::temp_dir().join(format!("pb-genmeta-plain-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("plain.png");
+        std::fs::write(&path, png_with_text("Software", "some editor")).unwrap();
+
+        let mut core = test_core();
+        core.source = Arc::new(FsSource::new(vec![path.clone()]));
+        core.playlist = Playlist::new(1, 0);
+        core.displayed_item = Some(0);
+        core.ensure_exif_cached(0);
+
+        assert!(core.exif_cache[&0].gen.is_none(), "no recipe, no metadata");
+        let rows = core.exif_rows();
+        assert!(
+            !format!("{rows:?}").contains("Generation"),
+            "an ordinary photo must not sprout a Generation block: {rows:?}"
+        );
+        let _ = std::fs::remove_file(&path);
     }
 
     /// A dead worker must not leave the entry stuck on "Reading…" forever — the
