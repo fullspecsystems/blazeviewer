@@ -249,13 +249,9 @@ impl SettingsDraft {
             slideshow_interval: s.slideshow_interval_secs,
             picker_fixed: s.picker_dir.is_some(),
             picker_dir: s.picker_dir.clone(),
-            quick_sort: {
-                // Pad to the full slot count so the tab can index rows directly. A
-                // settings.toml written by an older build (or hand-edited) carries fewer.
-                let mut v = s.quick_sort.clone();
-                v.resize_with(pb_app_core::quick_sort::SLOT_COUNT, Default::default);
-                v
-            },
+            // Pad to the full slot count so the tab can index rows directly; a
+            // settings.toml from an older build (or hand-edited) carries fewer.
+            quick_sort: pb_app_core::quick_sort::normalize_slots(s.quick_sort.clone()),
             describe_backend: match s.describe_backend {
                 settings::DescribeBackend::Auto => 0,
                 settings::DescribeBackend::AppleOnDevice => 1,

@@ -94,6 +94,54 @@ impl QuickSortSlot {
     }
 }
 
+/// One configured slot as a **menu row** — a shell's Quick Sort flyout, in either the menu
+/// bar or the right-click menu.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MenuRow {
+    /// The action this row fires. Shells dispatch it directly, or by
+    /// [`id`](crate::action::Action::id) where they route menu items as strings.
+    pub action: crate::action::Action,
+    /// The full item text: `"Move to Portraits"` / `"Copy to Keepers"`. The verb leads
+    /// because it is the part that differs *and* the part with consequences — a row that
+    /// read only "Portraits" would hide whether the original survives.
+    pub title: String,
+    /// The slot's primary chord for the accelerator column, empty when unbound.
+    pub chord: String,
+}
+
+/// The configured slots as menu rows, in slot order.
+///
+/// **Unconfigured slots are omitted.** Sixteen "Slot 12 (unset)" rows would be noise, and a
+/// flyout's own "Configure Slots…" footer is the route to setting one up — so an empty
+/// result means "offer only that footer", not "hide the menu".
+///
+/// Pure, and shared so the two shells cannot word the same row differently. `chord_for`
+/// supplies the live binding, since chords are remappable and must not be derived from the
+/// slot index.
+pub fn menu_rows(
+    slots: &[QuickSortSlot],
+    chord_for: impl Fn(u8) -> Option<String>,
+) -> Vec<MenuRow> {
+    slots
+        .iter()
+        .enumerate()
+        .take(SLOT_COUNT)
+        .filter(|(_, s)| s.is_configured())
+        .map(|(i, s)| MenuRow {
+            action: crate::action::Action::QuickSort(i as u8),
+            title: format!(
+                "{} to {}",
+                match s.mode {
+                    SortMode::Move => "Move",
+                    SortMode::Copy => "Copy",
+                },
+                s.display_label()
+            ),
+            chord: chord_for(i as u8).unwrap_or_default(),
+        })
+        .collect()
+}
+
 /// Pad/trim a persisted slot list to exactly [`SLOT_COUNT`], so the rest of the code can index
 /// slots without bounds-checking a user-edited `settings.toml`.
 pub fn normalize_slots(mut slots: Vec<QuickSortSlot>) -> Vec<QuickSortSlot> {
@@ -610,6 +658,64 @@ fn utf8_name(path: &Path) -> Result<&str, String> {
 mod tests {
     use super::*;
     use std::collections::HashSet;
+
+    // ── menu_rows ─────────────────────────────────────────────────────────────────────────
+
+    fn slot(folder: Option<&str>, label: &str, mode: SortMode) -> QuickSortSlot {
+        QuickSortSlot {
+            folder: folder.map(PathBuf::from),
+            label: label.to_string(),
+            mode,
+        }
+    }
+
+    #[test]
+    fn menu_rows_lead_with_the_verb_and_carry_the_live_chord() {
+        let slots = vec![
+            slot(Some("/pics/Portraits"), "Portraits", SortMode::Move),
+            slot(Some("/pics/Keepers"), "Keepers", SortMode::Copy),
+        ];
+        let rows = menu_rows(&slots, |i| Some(format!("{}", i + 1)));
+        assert_eq!(rows.len(), 2);
+        // The verb leads: it differs between rows AND it is the part with consequences.
+        assert_eq!(rows[0].title, "Move to Portraits");
+        assert_eq!(rows[1].title, "Copy to Keepers");
+        assert_eq!(rows[0].action, crate::action::Action::QuickSort(0));
+        assert_eq!(rows[1].action, crate::action::Action::QuickSort(1));
+        assert_eq!(rows[0].chord, "1");
+        assert_eq!(rows[1].chord, "2");
+    }
+
+    #[test]
+    fn menu_rows_omit_unconfigured_slots_but_keep_slot_identity() {
+        // Sixteen "(unset)" rows would be noise; the flyout's Configure footer is the route
+        // to setting one up. The surviving rows must still carry their ORIGINAL slot index,
+        // or the third configured slot would fire the first slot's folder.
+        let mut slots = normalize_slots(Vec::new());
+        slots[4] = slot(Some("/pics/Five"), "Five", SortMode::Move);
+        let rows = menu_rows(&slots, |_| None);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].action, crate::action::Action::QuickSort(4));
+        assert_eq!(
+            rows[0].chord, "",
+            "an unbound slot gets an empty accelerator"
+        );
+    }
+
+    #[test]
+    fn menu_rows_fall_back_to_the_folder_name() {
+        // The label is optional; a configured slot always has something to show.
+        let rows = menu_rows(&[slot(Some("/pics/Selects"), "  ", SortMode::Move)], |_| {
+            None
+        });
+        assert_eq!(rows[0].title, "Move to Selects");
+    }
+
+    #[test]
+    fn menu_rows_are_empty_when_nothing_is_configured() {
+        assert!(menu_rows(&normalize_slots(Vec::new()), |_| None).is_empty());
+        assert!(menu_rows(&[], |_| None).is_empty());
+    }
 
     // ── split_name ────────────────────────────────────────────────────────────────────────
 

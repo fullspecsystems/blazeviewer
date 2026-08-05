@@ -572,6 +572,13 @@ struct App {
     /// `subtitle_tracks_menu`, same reasons.
     audio_tracks_menu: Option<muda::Submenu>,
     audio_menu_sig: Option<AudioMenuSig>,
+    /// The File ▸ Quick Sort flyout (task #136) — same rebuilt-rows shape again.
+    quick_sort_menu: Option<muda::Submenu>,
+    /// What that flyout was last built for: the slots themselves plus their live chords.
+    /// Both inputs matter — a slot renamed in Settings *and* a chord remapped in Shortcuts
+    /// each change a row's text. Sixteen slots, so the per-tick compare is trivial, and it
+    /// only clones on an actual change.
+    quick_sort_menu_sig: Option<QuickSortMenuSig>,
     /// An in-flight audio track switch: (engine sequence, requested picker row). The
     /// engine runs on its own thread and confirms asynchronously; the sample tick polls
     /// the outcome and reports it to the core, which toasts **only on a confirmed
@@ -598,6 +605,19 @@ struct SubtitleMenuSig {
     tracks_known: bool,
     active: Option<u64>,
     on: bool,
+}
+
+/// The inputs the File ▸ Quick Sort flyout's rows depend on (task #136): the configured
+/// slots and the chords bound to them.
+///
+/// Not `Copy` like its siblings — a slot carries a path and a label — but it is compared
+/// sixteen entries at a time against a stored clone, and only re-cloned when something
+/// actually changed. Slots move only via Settings, so that is rare.
+#[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct QuickSortMenuSig {
+    slots: Vec<pb_app_core::quick_sort::QuickSortSlot>,
+    chords: Vec<Option<pb_app_core::keymap::KeyChord>>,
 }
 
 /// The inputs the Playback ▸ Audio Track flyout's rows depend on — the audio twin of
@@ -1041,6 +1061,8 @@ impl App {
             subtitle_menu_sig: None,
             audio_tracks_menu: None,
             audio_menu_sig: None,
+            quick_sort_menu: None,
+            quick_sort_menu_sig: None,
             pending_audio_switch: None,
             audio_row_reported: -1,
         }
@@ -2236,6 +2258,7 @@ impl App {
             self.compare_pin_item = Some(built.compare_pin);
             self.compare_toggle_item = Some(built.compare_toggle);
             self.subtitle_tracks_menu = Some(built.subtitle_tracks);
+            self.quick_sort_menu = Some(built.quick_sort);
             self.audio_tracks_menu = Some(built.audio_tracks);
             self.view_checks = Some(built.checks);
         }
@@ -2253,6 +2276,29 @@ impl App {
     /// of track labels every frame behind a playing video.
     // Windows/macOS only: there is no native menu on Linux (its egui bar has no submenus,
     // so `Shift+C` stays the route there).
+    /// Refill File ▸ Quick Sort when the slots or their chords change (task #136).
+    ///
+    /// Same shape and same reason as [`Self::refresh_subtitle_track_menu`]: muda builds the
+    /// tree once and has no `menuNeedsUpdate`, so a flyout left alone would keep showing the
+    /// folders that were configured when the window opened.
+    #[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
+    fn refresh_quick_sort_menu(&mut self) {
+        let Some(sub) = self.quick_sort_menu.clone() else {
+            return;
+        };
+        let sig = QuickSortMenuSig {
+            slots: self.core.settings.quick_sort.clone(),
+            chords: (0..pb_app_core::quick_sort::SLOT_COUNT)
+                .map(|i| self.core.keymap.slot(Action::QuickSort(i as u8), 0))
+                .collect(),
+        };
+        if self.quick_sort_menu_sig.as_ref() == Some(&sig) {
+            return;
+        }
+        menu::fill_quick_sort(&sub, &sig.slots, &self.core.keymap);
+        self.quick_sort_menu_sig = Some(sig);
+    }
+
     #[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
     fn refresh_subtitle_track_menu(&mut self) {
         if self.subtitle_tracks_menu.is_none() {
@@ -2536,7 +2582,8 @@ impl App {
     /// `dispatch_action`), and the local menu only needs to outlive this call. `None` position
     /// = the current cursor location. The seam an AppKit host re-implements with an `NSMenu`.
     fn show_context_menu_native(&mut self, state: &contract::ContextMenuState) {
-        let menu = menu::build_context_menu(state);
+        let menu =
+            menu::build_context_menu(state, &self.core.settings.quick_sort, &self.core.keymap);
         let Some(window) = self.window.as_ref() else {
             return;
         };
@@ -4130,6 +4177,7 @@ impl ApplicationHandler for App {
         // guard, so this is a tuple compare on all but the few ticks where the list moved.
         #[cfg(any(windows, target_os = "macos"))]
         self.refresh_subtitle_track_menu();
+        self.refresh_quick_sort_menu();
         #[cfg(any(windows, target_os = "macos"))]
         self.refresh_audio_track_menu();
         // 0b. Apply any files dropped on the window this burst (coalesced — winit

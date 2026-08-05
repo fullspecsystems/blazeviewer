@@ -256,6 +256,9 @@ pub enum MenuAction {
     CopyImageText,
     CopyGenerationPrompt,
     CopyGenerationData,
+    /// File ▸ Quick Sort ▸ *slot* (task #136) — carries the slot index, since the flyout's
+    /// rows are built from the user's configured folders rather than a fixed item list.
+    QuickSort(u8),
     DescribeImage,
     AskImage,
     CopyDescription,
@@ -319,6 +322,7 @@ impl MenuAction {
             MenuAction::CopyImageText => Action::CopyImageText,
             MenuAction::CopyGenerationPrompt => Action::CopyGenerationPrompt,
             MenuAction::CopyGenerationData => Action::CopyGenerationData,
+            MenuAction::QuickSort(i) => Action::QuickSort(i),
             MenuAction::DescribeImage => Action::DescribeImage,
             MenuAction::AskImage => Action::AskImage,
             MenuAction::CopyDescription => Action::CopyDescription,
@@ -422,7 +426,14 @@ pub fn action_for(id: &str) -> Option<MenuAction> {
         AUDIO_CYCLE => MenuAction::AudioCycle,
         HELP => MenuAction::Help,
         ABOUT => MenuAction::About,
-        _ => return None,
+        // Quick Sort slots (task #136) are sixteen ids that would be sixteen near-identical
+        // arms here, so they resolve through the action vocabulary itself — the same
+        // `quick_sort_N` ids the keymap file uses. A slot added to `SLOT_COUNT` therefore
+        // needs no change in this file at all.
+        other => match Action::from_id(other) {
+            Some(Action::QuickSort(i)) => MenuAction::QuickSort(i),
+            _ => return None,
+        },
     };
     Some(action)
 }
@@ -539,6 +550,12 @@ pub struct BuiltMenu {
     /// the same one: the state lives in the submenu's **contents** ("No Video"), which are
     /// always re-derivable, never in the holder's enabled flag.
     pub subtitle_tracks: Submenu,
+    /// The File ▸ Quick Sort flyout (task #136). Held for the same reason as
+    /// [`subtitle_tracks`](BuiltMenu::subtitle_tracks): its rows are the user's configured
+    /// slots, so they are **refilled** at runtime (`App::refresh_quick_sort_menu`) rather
+    /// than checked/enabled. The same never-disable-the-holder rule applies — "No Folders
+    /// Configured" lives in the contents, never in the holder's enabled flag.
+    pub quick_sort: Submenu,
     /// The Playback ▸ Audio Track flyout (task #99) — same rebuilt-per-file contract
     /// (and the same ⚠ never-disable-the-holder rule) as `subtitle_tracks`.
     pub audio_tracks: Submenu,
@@ -553,6 +570,45 @@ pub struct BuiltMenu {
 /// EXIF-writable file — see `App::refresh_save_menu_item`; starts disabled), and the
 /// **View checks** (scale mode / recursive / fullscreen — see
 /// `App::refresh_view_menu_checks`).
+/// Fill a **Quick Sort flyout** with the configured slots (task #136).
+///
+/// Shared by the menu bar and the right-click menu so the two can't drift — and built from
+/// `pb_app_core::quick_sort::menu_rows`, so the row wording is the core's, not this file's.
+///
+/// Always ends with **Configure Slots…**, even when every slot is set: it is how the feature
+/// is discovered at all, and a mouse user is exactly who needs the route to Settings. With
+/// nothing configured that footer is the only live row, under a disabled explanation — an
+/// empty menu would read as broken.
+pub fn fill_quick_sort(
+    sub: &Submenu,
+    slots: &[pb_app_core::quick_sort::QuickSortSlot],
+    keymap: &Keymap,
+) {
+    // muda has no `remove_all`, and `remove_at` shifts the rest down — so drain from 0.
+    while sub.remove_at(0).is_some() {}
+    let rows = pb_app_core::quick_sort::menu_rows(slots, |slot| {
+        keymap
+            .slot(Action::QuickSort(slot), 0)
+            .map(|c| c.to_string())
+    });
+    if rows.is_empty() {
+        let none = MenuItem::with_id("quick_sort_none", "No Folders Configured", false, None);
+        let _ = sub.append(&none);
+    }
+    for row in &rows {
+        // The chord rides in muda's accelerator column via the same `\t` convention the
+        // rest of this file uses; an unbound slot simply shows no hint.
+        let label = if row.chord.is_empty() {
+            row.title.clone()
+        } else {
+            format!("{}\t{}", row.title, row.chord)
+        };
+        let _ = sub.append(&item(row.action.id(), &label));
+    }
+    let _ = sub.append(&PredefinedMenuItem::separator());
+    let _ = sub.append(&item(ids::SETTINGS, "Configure Slots\u{2026}"));
+}
+
 #[cfg_attr(not(windows), allow(dead_code))] // used on Windows; Linux has no native menu
 pub fn build_menu(keymap: &Keymap) -> BuiltMenu {
     let menu = Menu::new();
@@ -565,6 +621,10 @@ pub fn build_menu(keymap: &Keymap) -> BuiltMenu {
     // Disabled until a folder scan is actually streaming in (toggled at runtime).
     let cancel_scan = MenuItem::with_id(ids::CANCEL_SCAN, "Stop Scanning", false, None);
 
+    // Quick Sort (task #136), beside the other file operations. Populated by
+    // `fill_quick_sort` here and refilled whenever the slots change — muda has no
+    // `menuNeedsUpdate`, so a flyout built once would show yesterday's folders.
+    let quick_sort = Submenu::new("Quick Sort", true);
     let file = Submenu::new("&File", true);
     let _ = file.append_items(&[
         &item(ids::OPEN_FILE, "Open File…\tO"),
@@ -573,6 +633,7 @@ pub fn build_menu(keymap: &Keymap) -> BuiltMenu {
         &sep(),
         &save_rotation,
         &reveal,
+        &quick_sort,
         &sep(),
         &item(ids::DELETE, "Delete\tDel"),
         &item(ids::DELETE_PERMANENTLY, "Delete Permanently\tShift+Del"),
@@ -798,6 +859,7 @@ pub fn build_menu(keymap: &Keymap) -> BuiltMenu {
         compare_pin,
         compare_toggle,
         subtitle_tracks,
+        quick_sort,
         audio_tracks,
         checks: ViewChecks {
             fit,
@@ -1351,7 +1413,11 @@ pub fn menu_nav_key(nav: &mut MenuNav, groups: &[MenuGroup], key: MenuKey) -> Me
 /// [`ContextMenuState`](crate::contract::ContextMenuState): **Play** only when the photo has
 /// motion, **Show in Finder/Explorer** only for a real on-disk file. Works in the borderless
 /// fullscreen speed mode too, where the menu bar is hidden — its whole point.
-pub fn build_context_menu(state: &crate::contract::ContextMenuState) -> Menu {
+pub fn build_context_menu(
+    state: &crate::contract::ContextMenuState,
+    quick_sort_slots: &[pb_app_core::quick_sort::QuickSortSlot],
+    keymap: &Keymap,
+) -> Menu {
     let menu = Menu::new();
     let sep = || PredefinedMenuItem::separator();
 
@@ -1391,6 +1457,14 @@ pub fn build_context_menu(state: &crate::contract::ContextMenuState) -> Menu {
         &item(ids::COPY_IMAGE_DETAILS, "Copy Image Details"),
         &item(ids::COPY_IMAGE_TEXT, "Copy Text from Image"),
     ]);
+    // Quick Sort (task #136), matching the Mac's right-click flyout. Offered whenever the
+    // item is a real on-disk file — the same predicate as Reveal, since a slot moves a
+    // file and an archive entry has none to move.
+    if state.can_reveal {
+        let sub = Submenu::new("Quick Sort", true);
+        fill_quick_sort(&sub, quick_sort_slots, keymap);
+        let _ = menu.append_items(&[&sep(), &sub]);
+    }
     // No generation-metadata items here (owner, 2026-08-04). They act on the
     // Details panel's Generation section and live as buttons on its heading —
     // where they are in front of the data they copy, and where they appear only
