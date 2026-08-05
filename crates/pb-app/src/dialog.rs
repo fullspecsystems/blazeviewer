@@ -1553,7 +1553,7 @@ fn password_dialog(
                     // Two-line prompt: "Enter the password for" / the quoted file name.
                     ui.label(egui::RichText::new(prompt).size(MSG_SIZE));
                     ui.add_space(16.0); // breathing room between the prompt and field
-                    let field = pbui::text_field(input, "Password")
+                    let field = pbui::text_field(ui, input, "Password")
                         .password(true)
                         .desired_width(f32::INFINITY);
                     let resp = ui.add_enabled(!checking, field);
@@ -1993,18 +1993,24 @@ fn quick_sort_tab(
             let s = &mut d.quick_sort[slot];
 
             ui.horizontal(|ui| {
-                // Wide enough for the longest default chord ("Shift+1"), so the name
-                // fields all start on the same x and the column reads as a column.
-                ui.add_sized(
-                    [62.0, pbui::CONTROL_H],
-                    egui::Label::new(
-                        egui::RichText::new(&chord)
-                            .font(egui::FontId::new(
-                                13.0,
-                                egui::FontFamily::Name(pbui::SEMIBOLD.into()),
-                            ))
-                            .color(p.text_secondary),
-                    ),
+                // Left-aligned in a fixed column: the chord doubles as the slot's index,
+                // so it wants to start on the same x as the destination path below it —
+                // centered in its column it floated between the two, belonging to
+                // neither. The width fits the longest default chord ("Shift+1"), so the
+                // name fields still all begin at one x.
+                ui.allocate_ui_with_layout(
+                    egui::vec2(62.0, pbui::CONTROL_H),
+                    egui::Layout::left_to_right(egui::Align::Center),
+                    |ui| {
+                        ui.label(
+                            egui::RichText::new(&chord)
+                                .font(egui::FontId::new(
+                                    13.0,
+                                    egui::FontFamily::Name(pbui::SEMIBOLD.into()),
+                                ))
+                                .color(p.text_secondary),
+                        );
+                    },
                 );
                 // The pb-ui field, not a bare TextEdit: the component carries FIELD_MARGIN,
                 // which is what makes it exactly CONTROL_H and so the same height as the
@@ -2012,7 +2018,7 @@ fn quick_sort_tab(
                 // sat visibly taller — the drift CONTROL_H exists to prevent.
                 ui.add_sized(
                     [150.0, pbui::CONTROL_H],
-                    pbui::text_field(&mut s.label, "Name"),
+                    pbui::text_field(ui, &mut s.label, "Name"),
                 );
                 let mut copy = s.mode == SortMode::Copy;
                 egui::ComboBox::from_id_salt(("qs_mode", slot))
@@ -2188,7 +2194,7 @@ fn ai_tab(
                 Some("OpenAI-compatible server: LM Studio, Ollama, or llama.cpp."),
                 |ui| {
                     ui.add(
-                        pbui::text_field(&mut d.describe_endpoint, "http://localhost:1234/v1")
+                        pbui::text_field(ui, &mut d.describe_endpoint, "http://localhost:1234/v1")
                             .desired_width(230.0),
                     );
                 },
@@ -2202,7 +2208,7 @@ fn ai_tab(
                 |ui| {
                     ui.horizontal(|ui| {
                         ui.add(
-                            pbui::text_field(&mut d.describe_model, "(loaded model)")
+                            pbui::text_field(ui, &mut d.describe_model, "(loaded model)")
                                 .desired_width(150.0),
                         );
                         // The picker fills from the last probe; picking sets the field.

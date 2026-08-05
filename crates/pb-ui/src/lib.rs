@@ -796,13 +796,25 @@ fn filled_button(ui: &mut egui::Ui, base: Color32, text: &str) -> egui::Response
     .inner
 }
 
-/// A standard single-line **text field** with balanced [`FIELD_MARGIN`] padding so it
-/// matches the 32px control height (rather than egui's cramped default). Chain
-/// `.desired_width(..)`, `.password(true)`, `.hint_text(..)`, etc. on the result.
-pub fn text_field<'t>(text: &'t mut String, hint: &str) -> egui::TextEdit<'t> {
+/// A standard single-line **text field** at exactly [`CONTROL_H`], so it sits flush with a
+/// button or combo beside it. Chain `.desired_width(..)`, `.password(true)`, etc.
+///
+/// The vertical padding is **derived from the measured row height** rather than taken from
+/// [`FIELD_MARGIN`]'s 8px. A `TextEdit`'s height is `row_height + margin.y`, and at the 14.5px
+/// body face that came to ~35px — three past the token it was documented as matching. Nothing
+/// looked wrong until a field stood next to a combo (the Quick Sort slot rows) and the pair
+/// were visibly misaligned. Deriving it keeps them equal if the body size ever changes.
+pub fn text_field<'t>(ui: &egui::Ui, text: &'t mut String, hint: &str) -> egui::TextEdit<'t> {
+    let row = ui.text_style_height(&TextStyle::Body);
+    let pad = ((CONTROL_H - row) * 0.5).max(0.0);
     egui::TextEdit::singleline(text)
+        .margin(Margin {
+            left: FIELD_MARGIN.left,
+            right: FIELD_MARGIN.right,
+            top: pad,
+            bottom: pad,
+        })
         .hint_text(hint.to_owned())
-        .margin(FIELD_MARGIN)
 }
 
 /// A slider with a **stable-width value box**: egui sizes the box to the formatted

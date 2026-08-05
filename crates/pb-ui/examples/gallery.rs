@@ -285,7 +285,7 @@ impl Gallery {
         });
 
         pb_ui::section_label(ui, p, "Text field");
-        ui.add(pb_ui::text_field(&mut self.text, "Type here").desired_width(240.0));
+        ui.add(pb_ui::text_field(ui, &mut self.text, "Type here").desired_width(240.0));
 
         pb_ui::section_label(ui, p, "Progress bar");
         // A few representative fills (empty, partial, full) — the determinate bar the
@@ -343,7 +343,7 @@ impl Gallery {
             );
             ui.add_space(10.0);
             ui.add(
-                pb_ui::text_field(&mut self.password, "Password")
+                pb_ui::text_field(ui, &mut self.password, "Password")
                     .password(true)
                     .desired_width(f32::INFINITY),
             );
