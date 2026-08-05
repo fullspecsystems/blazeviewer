@@ -1743,8 +1743,8 @@
           {
             "id": 7,
             "title": "winit/egui Settings — SettingsTab::QuickSort",
-            "description": "ON HOLD (owner, 2026-08-02): do not build until the macOS pane is settled — the owner will do the egui side on Windows themselves. Porting a still-changing design means porting it twice. See the hold notice in .taskmaster/docs/quick-sort-plan.md.",
-            "status": "deferred"
+            "description": "HOLD LIFTED 2026-08-05 (owner: \"the quicksort feature needs the egui configuration UI... that'll be the next feature we need to work on\"). Build SettingsTab::QuickSort in the winit/egui Settings window, mirroring the settled macOS pane: 16 slot rows, chord column (1-7 then Shift+1-7, last two unbound), Move/Copy picker, Choose..., Clear All. Use pb-ui components - never hand-roll an egui::Button in dialog.rs. Until this ships, Windows/Linux users can only configure slots by hand-editing settings.toml.",
+            "status": "pending"
           },
           {
             "id": 8,
@@ -1850,14 +1850,14 @@
           {
             "id": 7,
             "title": "CopyGenerationPrompt + CopyGenerationData - full plumbing",
-            "description": "Tool-neutral names: 'Copy Workflow JSON' would lie when the payload is an API graph or A1111 text, and pretty-printing contradicts verbatim. Data copy is byte-for-byte verbatim, preferring workflow -> prompt -> parameters; the MENU label may specialize via rebuild-on-signature. ~17 sites, mirroring Action::CopyImageText: action.rs:72/204/353/435, keymap.rs:277/621, app_core_impl.rs:524 (dispatch arm only; implementation goes in app_core_impl/clipboard.rs per where-code-goes.md), pb-app/menu.rs:43/253/314/376/589/908/1357/1592, main.rs:1917, CoreModel.swift:886.",
-            "status": "pending"
+            "description": "Tool-neutral names: 'Copy Workflow JSON' would lie when the payload is an API graph or A1111 text, and pretty-printing contradicts verbatim. Data copy is byte-for-byte verbatim, preferring workflow -> prompt -> parameters; the MENU label may specialize via rebuild-on-signature. ~17 sites, mirroring Action::CopyImageText: action.rs:72/204/353/435, keymap.rs:277/621, app_core_impl.rs:524 (dispatch arm only; implementation goes in app_core_impl/clipboard.rs per where-code-goes.md), pb-app/menu.rs:43/253/314/376/589/908/1357/1592, main.rs:1917, CoreModel.swift:886. || DONE 2026-08-05, with two owner revisions: the commands are BUTTONS on the Generation section heading (DetailRow::Section + RowAction carrying Action values), not context-menu items - which also deleted ContextMenuState.has_generation and its forced right-click metadata read. Copy prompt shows only when a literal prompt exists; the payload button is 'Copy JSON' (ComfyUI) vs 'Copy parameters' (A1111, not JSON).",
+            "status": "done"
           },
           {
             "id": 8,
             "title": "CHANGELOG + corpus verification + privacy tests",
-            "description": "Verify against C:\\Users\\jdlien\\code\\bw-sample-images (3 ComfyUI PNGs, not committed). Re-run viewing_a_folder_writes_nothing_to_disk + the static fs::write audit. Add the explicit regression test proving generation text never reaches default_describe_prompt (build_context at prompt.rs:99 happens not to consume it today, but that is an accident, not a guarantee). PB_PERF episode around Inspector-open. CHANGELOG under [Unreleased] / Added. || PARTIAL 2026-08-04: CHANGELOG written, corpus verified via the genmeta_probe example (all facts match a hand analysis), and the describe-context privacy regression test landed. Still owed: re-run viewing_a_folder_writes_nothing_to_disk + the static fs::write audit, and the PB_PERF episode.",
-            "status": "pending"
+            "description": "Remaining: the PB_PERF episode around Inspector-open (the extraction cost is bounded by genmeta's caps but not measured). DONE already: CHANGELOG, corpus verification (owner-confirmed live on Windows), the describe-context privacy regression test, and the 7 no-trace privacy tests re-run green. NOT DONE and must not be claimed: the A1111 arm has no real sample - both the `parameters` parser and the EXIF UserComment path are fixture-only until a real PNG and a real JPEG/WebP are checked.",
+            "status": "in-progress"
           }
         ]
       }

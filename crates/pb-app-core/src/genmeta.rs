@@ -95,13 +95,14 @@ impl PromptText {
 
     /// The one-line explanation shown in place of a prompt we could not read.
     ///
-    /// Just "assembled by X" — the row is already labelled *Prompt* and rendered
+    /// Just "Assembled by X" — the row is already labelled *Prompt* and rendered
     /// as a note rather than a value, so a preamble explaining that this is not
-    /// the prompt only repeats what the presentation already says.
+    /// the prompt only repeats what the presentation already says. Sentence-cased
+    /// because it stands alone in its column, not as a fragment after the label.
     pub fn unresolved_reason(&self) -> Option<String> {
         match &self.source {
             PromptSource::Literal => None,
-            PromptSource::Unresolved { via } => Some(format!("assembled by {via}")),
+            PromptSource::Unresolved { via } => Some(format!("Assembled by {via}")),
         }
     }
 }
@@ -686,7 +687,7 @@ pub fn detail_rows(meta: &GenerationMeta) -> Vec<crate::panels::DetailRow> {
         rows.push(heading(format!("Generation ({})", meta.tool.name()), meta));
         rows.push(DetailRow::Note {
             label: "Details".to_string(),
-            text: "present but not readable — copy it with the button above".to_string(),
+            text: "Present but not readable — copy it with the button above".to_string(),
         });
         return rows;
     }

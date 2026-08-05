@@ -19,6 +19,12 @@ with any pre-release suffix carried only by the tag.
     it says so instead of showing you a plausible guess. The same goes for every
     other fact: when a workflow is ambiguous about which settings produced the
     image, the row is left out rather than filled in with the wrong number.
+  - **Copy buttons sit on the Generation heading.** *Copy prompt* takes just the
+    prompt text, ready to paste into a generator, and appears only when there is
+    one to take. *Copy JSON* takes the entire ComfyUI workflow exactly as it was
+    written, so it loads straight back into ComfyUI (on an Automatic1111 image
+    the button reads *Copy parameters*, since that metadata is not JSON). Both
+    are also in the Edit menu, and can be given keyboard shortcuts in Settings.
   - The details still copy in full, so the whole recipe pastes into a note.
 
 - **Quick Sort** — file the photo you're looking at into a folder with one

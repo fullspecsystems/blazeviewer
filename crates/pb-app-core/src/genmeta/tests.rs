@@ -191,7 +191,7 @@ fn a_linked_prompt_is_unresolved_and_carries_no_text() {
     // "not stored literally" preamble only repeats what the presentation says.
     assert_eq!(
         pos.unresolved_reason().as_deref(),
-        Some("assembled by PromptCombinator")
+        Some("Assembled by PromptCombinator")
     );
     // The negative was literal and is unaffected — facts are independent.
     assert_eq!(m.negative, Some(PromptText::literal("blurry")));

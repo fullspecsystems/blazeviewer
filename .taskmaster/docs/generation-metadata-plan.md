@@ -465,30 +465,79 @@ Rejected: full p50/p95/p99 latency instrumentation for a parked panel operation
 
 ## Handoff
 
-**Verified**
+**Verified** (Windows session, 2026-08-04/05)
 
-- Corpus facts measured on Windows by direct chunk/JSON inspection (node 88
-  `mode: 4` and its absence from `prompt`; the seven-node ancestry chain; chunk
-  sizes). The ancestry trace is real output, not an estimate.
-- All code anchors in this rev were re-checked on Windows after the review.
+- Corpus facts measured by direct chunk/JSON inspection (node 88 `mode: 4` and
+  its absence from `prompt`; the seven-node ancestry chain; chunk sizes). The
+  ancestry trace is real output, not an estimate.
+- All code anchors in rev 2 were re-checked after the Codex review.
+- **Live in the app on Windows, owner-confirmed**, against the real corpus:
+  the Generation block renders in Inspector ▸ Details and in Copy Image Details
+  (the separate copy path), with seed 98767, base 35 steps / cfg 6.0 (**not** the
+  refiner's 30 / 5.5), dpmpp_2m_sde/karras, 832 × 1216, the checkpoint, the
+  literal negative prompt, and the positive correctly reported as *Assembled by
+  PromptCombinator* rather than invented. Copy JSON pastes the 24 KB workflow.
+- Subtasks 1–7 complete. 995 (pb-app-core) + 295 (pb-decode) + 80 (pb-app) tests
+  green; clippy `-D warnings` clean on all three; the **7 no-trace privacy tests
+  still pass**.
 
 **Not verified**
 
-- **No A1111 sample exists.** That arm is fixture-only.
-- **The macOS `kind: 2` rendering** — read from Windows, never run.
-- Whether the Generation block reads well at real panel width on either shell.
+- **No A1111 sample exists.** That whole arm — the `parameters` parser *and* the
+  EXIF `UserComment` path — is fixture-only and must not be claimed as working
+  until a real PNG and a real JPEG/WebP are checked.
+- **Nothing on macOS was run.** See the debt below.
+- The `PB_PERF` episode around Inspector-open is not wired, so the cost of the
+  extraction on that path is reasoned about (bounded by the caps above) but not
+  measured.
 
-**Cross-platform debt**
+**Cross-platform debt** — *landed for winit, still owed on the Mac*
 
-- Subtask 5 touches `pb-mac-ffi/src/lib.rs:463` and Swift, which a Windows session
-  **cannot compile** (`pb-mac-ffi` is `#![cfg(target_os = "macos")]` → empty
-  staticlib off-Mac, so errors there are invisible). Goes on this list when landed
-  from Windows.
-- Subtask 6 adds an `ItemDetails` field; `pb-app` uses a struct literal while
-  `pb-mac-ffi` uses `new_host`. Check both.
+1. **`DetailRow::Section` loses its buttons on macOS.** The flattened FFI row
+   tuple (`pb-mac-ffi/src/lib.rs`, the `DetailRow` → `(kind, a, b)` map) has no
+   room for actions, so a Section arrives as a plain `kind: 0` heading and the
+   Copy prompt / Copy JSON buttons vanish. **The fix:** carry `actions` across and
+   render them like the Describe tab's existing "Ask" button
+   (`InspectorPanel.swift:211`). The commands stay reachable from the Edit menu
+   meanwhile, so this is a missing affordance, not a broken feature.
+2. **`DetailRow::Note` loses its italics on macOS** — mapped to `kind: 1`, an
+   ordinary pair. Cosmetic only; the wording still reads correctly. Fix is a new
+   kind rendered italic + secondary.
+3. **`DetailRow::Body` rendering is unverified on macOS.** It maps to `kind: 2`,
+   which `InspectorPanel.swift:249`'s `default:` arm already renders, and Details
+   is tab 0 so it takes the literal `Text` branch rather than
+   `MarkdownBlocksView` — read from Windows, **never run**. Confirm a prompt
+   paragraph renders and wraps.
+4. **The Mac Edit menu does not offer the two commands.** Both are wired in
+   `pb-app`'s muda menus only; the Mac host needs its own entries. Dispatch is
+   generic (`menuAction("copy_gen_prompt")` / `"copy_gen_data"`), so no bespoke
+   FFI method is required.
+
+None of the above breaks the Mac build: every FFI change was a match arm using
+field access, never a struct literal, and `ContextMenuState` gained no field in
+the end (the context-menu items were dropped by owner decision, which removed
+that debt entirely).
 
 **Claimed**
 
 | item | machine | since |
 |---|---|---|
-| subtasks 1–4 (pure core) | Windows | 2026-08-04 |
+| subtasks 1–7 | Windows | 2026-08-04/05 (landed) |
+| the four Mac items above | *unclaimed* | — |
+
+**Decisions (owner, in session)**
+
+- **File Size sits above the Generation block** — it is an identity fact beside
+  dimensions and codec, and that group should not be split.
+- **The copy commands are buttons on the Generation heading, not context-menu
+  items.** They act on that section, and a context menu listing them for every
+  photo would offer two commands that fail on almost all of them. This also
+  deleted the `ContextMenuState.has_generation` field and the forced metadata
+  read on right-click that answering it required.
+- **Copy prompt appears only when a literal prompt exists** — a button whose only
+  outcome is a refusal toast is worse than no button, with the reason already on
+  screen beneath it.
+- **The payload button names the real format**: *Copy JSON* for ComfyUI, *Copy
+  parameters* for Automatic1111, whose block is not JSON.
+- **"Assembled by X"** — no "not stored literally" preamble, sentence-cased,
+  italic.
