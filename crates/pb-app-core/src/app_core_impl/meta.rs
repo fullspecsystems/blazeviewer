@@ -448,6 +448,7 @@ mod tests {
                     format!("[{text}]")
                 }
                 DetailRow::Pair { label, value } => format!("{label}: {value}"),
+                DetailRow::Note { label, text } => format!("{label}: {text}"),
                 DetailRow::Body { text } => text.clone(),
             })
             .collect()
@@ -637,6 +638,7 @@ mod tests {
             | DetailRow::Section { text, .. }
             | DetailRow::Body { text } => text.clone(),
             DetailRow::Pair { label, value } => format!("{label}: {value}"),
+            DetailRow::Note { label, text } => format!("{label}: {text}"),
         };
         let flat: Vec<String> = rows.iter().map(text).collect();
         let heading = flat

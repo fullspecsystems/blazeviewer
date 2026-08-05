@@ -42,6 +42,14 @@ pub enum DetailRow {
         text: String,
         actions: Vec<RowAction>,
     },
+    /// A label plus an **italic, muted note** — not a value, but an explanation of
+    /// why there is no value (task #137): *Prompt — assembled by PromptCombinator*.
+    ///
+    /// Distinct from [`Pair`](DetailRow::Pair) because the reader must be able to
+    /// tell a fact about the image from a fact about our *knowledge* of it at a
+    /// glance. Rendering it like every other value invites it being copied out and
+    /// pasted as if it were the prompt.
+    Note { label: String, text: String },
     /// A full-width **wrapped paragraph** — a generation prompt (task #137).
     ///
     /// Distinct from [`Span`](DetailRow::Span), which is a single heading line:
@@ -75,6 +83,7 @@ impl DetailsPanel {
             .map(|r| match r {
                 DetailRow::Span { text, .. } | DetailRow::Section { text, .. } => text.clone(),
                 DetailRow::Pair { label, value } => format!("{label}: {value}"),
+                DetailRow::Note { label, text } => format!("{label}: {text}"),
                 // Body text is already the value — a `label:` prefix would be
                 // inventing one, and a pasted prompt must be paste-ready.
                 DetailRow::Body { text } => text.clone(),

@@ -2809,6 +2809,34 @@ fn details_body(
                     );
                 });
             }
+            // A label + italic muted note (task #137): why a value is missing,
+            // styled so it cannot be mistaken for the value itself.
+            DetailRow::Note { label, text } => {
+                ui.horizontal_top(|ui| {
+                    ui.spacing_mut().item_spacing.x = 10.0;
+                    ui.allocate_ui(egui::vec2(PAIR_LABEL_W, 0.0), |ui| {
+                        ui.set_width(PAIR_LABEL_W);
+                        ui.add(
+                            egui::Label::new(
+                                RichText::new(label)
+                                    .size(DETAIL_SIZE)
+                                    .color(panel_secondary(p)),
+                            )
+                            .wrap(),
+                        );
+                    });
+                    ui.add(
+                        egui::Label::new(
+                            RichText::new(text)
+                                .size(DETAIL_SIZE)
+                                .color(panel_secondary(p))
+                                .italics(),
+                        )
+                        .wrap()
+                        .selectable(true),
+                    );
+                });
+            }
             // A section heading with inline buttons (task #137): the heading text
             // on the left, its actions right-aligned on the same line, so the
             // copy controls sit with the data they copy.

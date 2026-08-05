@@ -480,6 +480,12 @@ impl AppCoreHandle {
                         // The Mac fix: carry `actions` and render them like the
                         // Describe tab's "Ask" button (InspectorPanel.swift:211).
                         DetailRow::Section { text, .. } => rows.push((0, text, String::new())),
+                        // A Note is a label + italic muted explanation. The row
+                        // tuple carries no styling, so macOS shows it as an
+                        // ordinary pair — cosmetic only, and the wording still
+                        // reads correctly ("Prompt — assembled by X"). The Mac fix
+                        // is a kind 5 rendered in italic secondary.
+                        DetailRow::Note { label, text } => rows.push((1, label, text)),
                         // A wrapped paragraph (a generation prompt, task #137) is
                         // kind 2 — the body-paragraph row the Swift side already
                         // renders. On Details (tab 0) that takes the literal

@@ -95,6 +95,9 @@ fn hud_row(r: DetailRow) -> Row {
         // cannot exist here — it degrades to the bold heading it also is. The
         // commands remain on the Edit menu for this path.
         DetailRow::Section { text, .. } => Row::Span { text, bold: true },
+        // The HUD table has no italic run, so a note reads as an ordinary pair
+        // here. Same interim-path caveat as Section above.
+        DetailRow::Note { label, text } => Row::Pair { label, value: text },
         // The HUD table has no paragraph row — it lays every row out on one
         // line, sized to the widest column. A prompt therefore projects onto a
         // plain full-width span and will be clipped rather than wrapped. That is

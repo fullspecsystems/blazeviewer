@@ -135,6 +135,7 @@ impl AppCore {
                     lines.push(match row {
                         DetailRow::Span { text, .. } | DetailRow::Section { text, .. } => text,
                         DetailRow::Pair { label, value } => format!("{label}: {value}"),
+                        DetailRow::Note { label, text } => format!("{label}: {text}"),
                         DetailRow::Body { text } => text,
                     });
                 }
@@ -153,6 +154,7 @@ impl AppCore {
                     lines.push(match row {
                         DetailRow::Span { text, .. } | DetailRow::Section { text, .. } => text,
                         DetailRow::Pair { label, value } => format!("{label}: {value}"),
+                        DetailRow::Note { label, text } => format!("{label}: {text}"),
                         // Track rows never produce these, but the match stays
                         // exhaustive so a new row kind is a compile error here
                         // rather than a silently dropped line.

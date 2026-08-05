@@ -94,12 +94,14 @@ impl PromptText {
     }
 
     /// The one-line explanation shown in place of a prompt we could not read.
+    ///
+    /// Just "assembled by X" — the row is already labelled *Prompt* and rendered
+    /// as a note rather than a value, so a preamble explaining that this is not
+    /// the prompt only repeats what the presentation already says.
     pub fn unresolved_reason(&self) -> Option<String> {
         match &self.source {
             PromptSource::Literal => None,
-            PromptSource::Unresolved { via } => {
-                Some(format!("not stored literally — assembled by {via}"))
-            }
+            PromptSource::Unresolved { via } => Some(format!("assembled by {via}")),
         }
     }
 }
@@ -663,8 +665,15 @@ pub fn detail_rows(meta: &GenerationMeta) -> Vec<crate::panels::DetailRow> {
                 action: Action::CopyGenerationPrompt,
             });
         }
+        // Name the payload for what it actually is. ComfyUI's is always the
+        // `workflow` or `prompt` graph — genuinely JSON — while Automatic1111's is
+        // a flat text block that is not JSON at all, so one shared word would be
+        // wrong on one of them. The button is built per file, so it can be exact.
         actions.push(RowAction {
-            label: "Copy data".to_string(),
+            label: match meta.tool {
+                GenTool::ComfyUI => "Copy JSON".to_string(),
+                GenTool::Automatic1111 => "Copy parameters".to_string(),
+            },
             action: Action::CopyGenerationData,
         });
         DetailRow::Section { text, actions }
@@ -675,9 +684,9 @@ pub fn detail_rows(meta: &GenerationMeta) -> Vec<crate::panels::DetailRow> {
         // showing nothing, so the Copy command does not look like it does
         // nothing when the user reaches for it.
         rows.push(heading(format!("Generation ({})", meta.tool.name()), meta));
-        rows.push(DetailRow::Pair {
+        rows.push(DetailRow::Note {
             label: "Details".to_string(),
-            value: "present but not readable — copy it with the button above".to_string(),
+            text: "present but not readable — copy it with the button above".to_string(),
         });
         return rows;
     }
@@ -694,9 +703,11 @@ pub fn detail_rows(meta: &GenerationMeta) -> Vec<crate::panels::DetailRow> {
                 rows.push(span(heading.to_string(), true));
                 rows.push(DetailRow::Body { text: text.clone() });
             }
-            (None, Some(why)) => rows.push(DetailRow::Pair {
+            // A Note, not a Pair: this explains why there is no prompt, and must
+            // not be mistaken for one at a glance or pasted out as if it were.
+            (None, Some(why)) => rows.push(DetailRow::Note {
                 label: label.to_string(),
-                value: why,
+                text: why,
             }),
             (None, None) => {}
         };

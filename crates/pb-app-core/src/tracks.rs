@@ -978,6 +978,7 @@ mod tests {
                     format!("[{text}]")
                 }
                 DetailRow::Pair { label, value } => format!("{label}: {value}"),
+                DetailRow::Note { label, text } => format!("{label}: {text}"),
                 DetailRow::Body { text } => text.clone(),
             })
             .collect()

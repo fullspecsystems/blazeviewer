@@ -187,9 +187,11 @@ fn a_linked_prompt_is_unresolved_and_carries_no_text() {
             via: "PromptCombinator".into()
         }
     );
+    // Just the cause — the row is labelled "Prompt" and rendered as a note, so a
+    // "not stored literally" preamble only repeats what the presentation says.
     assert_eq!(
         pos.unresolved_reason().as_deref(),
-        Some("not stored literally — assembled by PromptCombinator")
+        Some("assembled by PromptCombinator")
     );
     // The negative was literal and is unaffected — facts are independent.
     assert_eq!(m.negative, Some(PromptText::literal("blurry")));
@@ -576,6 +578,27 @@ fn the_section_heading_offers_copy_buttons_that_can_actually_succeed() {
     assert_eq!(buttons(&payload_only), [Action::CopyGenerationData]);
 }
 
+/// The payload button names what the payload **actually is**. ComfyUI always
+/// copies a `workflow`/`prompt` graph, which is JSON; Automatic1111 copies a flat
+/// `parameters` block, which is not. One shared word would be wrong on one of
+/// them, and the button is built per file, so it can be exact.
+#[test]
+fn the_payload_button_is_named_for_the_payloads_actual_format() {
+    use crate::panels::DetailRow;
+    let label = |m: &GenerationMeta| match &detail_rows(m)[0] {
+        DetailRow::Section { actions, .. } => actions.last().unwrap().label.clone(),
+        other => panic!("expected a Section heading, got {other:?}"),
+    };
+    assert_eq!(label(&comfy(SIMPLE)), "Copy JSON");
+
+    let a1111 = parse(
+        &chunks(&[("parameters", "a cat\nSteps: 20, Seed: 1")]),
+        None,
+    )
+    .unwrap();
+    assert_eq!(label(&a1111), "Copy parameters");
+}
+
 #[test]
 fn an_unresolved_prompt_still_gets_a_row_saying_why() {
     use crate::panels::DetailRow;
@@ -588,12 +611,13 @@ fn an_unresolved_prompt_still_gets_a_row_saying_why() {
       "5": {"class_type": "SaveImage", "inputs": {"images": ["4", 0]}}
     }"#;
     let rows = detail_rows(&comfy(json));
-    // Blank space reads as a bug; naming the cause is the useful answer.
+    // Blank space reads as a bug; naming the cause is the useful answer. It is a
+    // Note rather than a Pair so it cannot be read — or pasted — as the prompt.
     assert!(
         rows.iter().any(|r| matches!(r,
-            DetailRow::Pair { label, value }
-                if label == "Prompt" && value.contains("PromptCombinator"))),
-        "an unresolved prompt must explain itself: {rows:?}"
+            DetailRow::Note { label, text }
+                if label == "Prompt" && text.contains("PromptCombinator"))),
+        "an unresolved prompt must explain itself as a note: {rows:?}"
     );
     // And the combinator's word list is still nowhere in the output.
     assert!(!format!("{rows:?}").contains("girl"));
@@ -606,7 +630,7 @@ fn an_unreadable_payload_says_so_rather_than_showing_nothing() {
     let rows = detail_rows(&m);
     assert!(
         rows.iter().any(|r| matches!(r,
-            DetailRow::Pair { value, .. } if value.contains("button above"))),
+            DetailRow::Note { text, .. } if text.contains("button above"))),
         "an unreadable payload must point at the copy button: {rows:?}"
     );
 }
