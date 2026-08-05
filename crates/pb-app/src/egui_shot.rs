@@ -41,8 +41,16 @@ pub fn write_settings_shot(out: &Path, dark: bool, tab: &str) -> Result<(), Stri
 async fn run_settings(out: &Path, dark: bool, tab: &str) -> Result<(), String> {
     let ppp = 2.0f32;
     // 560pt wide = the real Settings window; tall enough that the General tab lays out
-    // without scrolling (cropped afterward).
-    let (w, h) = (1120u32, 2600u32);
+    // without scrolling (cropped afterward). `PB_SHOT_H` raises the canvas for a tab that
+    // runs longer than that — Quick Sort's sixteen two-line slot rows push its footer well
+    // past the default, and a preview that cannot reach the bottom of the page cannot
+    // review it.
+    let h = std::env::var("PB_SHOT_H")
+        .ok()
+        .and_then(|v| v.parse::<u32>().ok())
+        .unwrap_or(2600)
+        .clamp(600, 16384);
+    let w = 1120u32;
 
     let instance = wgpu::Instance::default();
     let adapter = instance

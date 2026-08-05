@@ -1895,7 +1895,9 @@ pub(crate) fn settings_shot_body(ui: &mut egui::Ui, dark: bool, tab_name: &str) 
                         label: "Keepers".to_string(),
                         mode: pb_app_core::quick_sort::SortMode::Copy,
                     };
-                    let mut confirming = false;
+                    // Armed, so the shot previews the confirm row — the branch with three
+                    // widgets to center, which is the one worth eyeballing.
+                    let mut confirming = std::env::var("PB_SHOT_QS_CONFIRM").is_ok();
                     quick_sort_tab(ui, &p, &mut draft, &keymap, &mut confirming);
                 }
                 _ => general_tab(ui, &p, &mut draft),
@@ -2100,8 +2102,24 @@ fn quick_sort_tab(
         // heavier than the thing it guards, but sixteen configured folders is real work to
         // lose to a stray click.
         if *confirming_clear {
+            // egui has no "center this row", so measure the content and lead with half
+            // the slack. The two buttons are `BUTTON_W` by construction; only the prompt
+            // has to be measured.
+            let prompt = "Clear all 16 destinations?";
+            let prompt_w = ui
+                .painter()
+                .layout_no_wrap(
+                    prompt.to_owned(),
+                    egui::TextStyle::Body.resolve(ui.style()),
+                    egui::Color32::PLACEHOLDER,
+                )
+                .size()
+                .x;
+            let gap = ui.spacing().item_spacing.x;
+            let total = prompt_w + gap + pbui::BUTTON_W + gap + pbui::BUTTON_W;
             ui.horizontal(|ui| {
-                ui.label(egui::RichText::new("Clear all 16 destinations?").color(p.text_secondary));
+                ui.add_space(((ui.available_width() - total) * 0.5).max(0.0));
+                ui.label(egui::RichText::new(prompt).color(p.text_secondary));
                 if pbui::secondary_button(ui, "Cancel").clicked() {
                     *confirming_clear = false;
                 }
@@ -2112,20 +2130,14 @@ fn quick_sort_tab(
                     *confirming_clear = false;
                 }
             });
-        } else if pbui::secondary_button(ui, "Clear All Destinations\u{2026}").clicked() {
-            *confirming_clear = true;
+        } else {
+            // One widget, so egui's own centering is enough here.
+            ui.vertical_centered(|ui| {
+                if pbui::secondary_button(ui, "Clear All Destinations\u{2026}").clicked() {
+                    *confirming_clear = true;
+                }
+            });
         }
-        // Says the true thing rather than the reassuring one: the folders are saved,
-        // nothing about what was sorted ever is.
-        ui.add_space(pbui::SPACE_2);
-        ui.label(
-            egui::RichText::new(
-                "Blaze Viewer never records which photos you filed or where. \
-                 Clearing removes the saved folder names too.",
-            )
-            .size(12.5)
-            .color(p.text_secondary),
-        );
     });
 }
 
