@@ -373,7 +373,15 @@ pub fn style(dark: bool) -> egui::Style {
     let p = Palette::new(dark);
     let spacing = egui::style::Spacing {
         item_spacing: egui::vec2(SPACE_2, SPACE_2),
-        button_padding: egui::vec2(SPACE_3, SPACE_2),
+        // Vertical padding is deliberately **small**, and that is what makes [`CONTROL_H`]
+        // real. egui sizes a button or combo to `text + 2 * button_padding`, then raises it
+        // to at least `interact_size` — a *minimum*, never a cap. At the old SPACE_2 (8px)
+        // the natural height was ~35 at the 14.5px body face, so the minimum never bound
+        // and every control in the app quietly sat 3px past the token that documents
+        // itself as "the single biggest fix for every control being a different size".
+        // Nothing revealed it until a field stood beside a combo. Keep this low enough that
+        // the natural height stays under CONTROL_H and the minimum does the sizing.
+        button_padding: egui::vec2(SPACE_3, 5.0),
         interact_size: egui::vec2(40.0, CONTROL_H),
         indent: SPACE_6,
         // Track width; the value box is a separate, fixed-width box (see `slider`).
@@ -1150,5 +1158,30 @@ mod tests {
         let s = style(true);
         assert_eq!(s.spacing.interact_size.y, CONTROL_H);
         assert!(s.visuals.dark_mode);
+    }
+
+    /// `interact_size.y` is a **minimum**, not a cap: egui sizes a button or combo to
+    /// `text + 2 * button_padding` and only then raises it to at least `interact_size`. So
+    /// [`CONTROL_H`] governs the app's controls *only while* that natural height stays
+    /// under it — and when it doesn't, nothing fails, every control just quietly grows and
+    /// the token silently stops meaning anything. That is exactly what had happened: at
+    /// the old 8px padding controls sat ~35px, three past the token, unnoticed until a
+    /// field was placed beside a combo.
+    ///
+    /// This pins the invariant with a generous row-height allowance, so raising the
+    /// padding (or the body face) far enough to break it fails here instead of in
+    /// someone's eye months later.
+    #[test]
+    fn control_padding_leaves_control_h_in_charge() {
+        let s = style(true);
+        // A comfortable upper bound on the body face's row height (14.5px proportional
+        // measures ~19; 22 leaves room for a larger face or a fallback font).
+        const GENEROUS_ROW_H: f32 = 22.0;
+        assert!(
+            GENEROUS_ROW_H + 2.0 * s.spacing.button_padding.y <= CONTROL_H,
+            "button_padding.y = {} lets a control exceed CONTROL_H ({CONTROL_H}), so the \
+             interact_size minimum stops binding and control heights drift apart",
+            s.spacing.button_padding.y
+        );
     }
 }
