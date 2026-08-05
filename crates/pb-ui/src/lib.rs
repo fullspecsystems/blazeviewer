@@ -716,6 +716,38 @@ pub fn secondary_button(ui: &mut egui::Ui, text: &str) -> egui::Response {
     ui.add(egui::Button::new(text).min_size(egui::vec2(BUTTON_W, CONTROL_H)))
 }
 
+/// A **square icon-only button**, [`CONTROL_H`] on a side, for a control whose meaning a
+/// glyph carries better than a word — clearing a field, removing a row.
+///
+/// Same fill and hover/press feedback as [`secondary_button`], so it reads as a peer sitting
+/// beside one; it is only narrower. The icon is tinted with the button's own foreground so
+/// it tracks the theme, and `tooltip` is required — an icon-only control that cannot be
+/// hovered for its name is a guess, and a settings pane is exactly where a wrong guess
+/// costs the user their configuration.
+pub fn icon_button(
+    ui: &mut egui::Ui,
+    p: &Palette,
+    icon: crate::icon::Icon,
+    tooltip: &str,
+) -> egui::Response {
+    let side = CONTROL_H;
+    let resp = ui
+        .add(egui::Button::new("").min_size(egui::vec2(side, side)))
+        .on_hover_text(tooltip);
+    if ui.is_rect_visible(resp.rect) {
+        // A touch under the button so the glyph sits inside the fill rather than filling it.
+        let glyph =
+            egui::Rect::from_center_size(resp.rect.center(), egui::Vec2::splat(side * 0.44));
+        let color = if resp.hovered() {
+            p.text
+        } else {
+            p.text_secondary
+        };
+        crate::icon::paint_tinted(ui, glyph, icon, color);
+    }
+    resp
+}
+
 /// A [`secondary_button`] whose label is **dimmed** (the secondary text color) so it reads as
 /// a *placeholder* rather than a set value — e.g. the empty "Set" / "Add" chord slots in the
 /// shortcut editor. Same fill + hover/press as `secondary_button`; only the text is muted.

@@ -88,6 +88,11 @@ pub enum Icon {
     /// continuity beats matching a different platform's symbol set, which each
     /// shell draws from natively anyway.
     FolderArrowDown,
+    /// Clear / unset a value — the `xmark` glyph on an [`crate::icon_button`]. Names the
+    /// meaning: *remove this setting*, distinct from [`Icon::Trash`], which is reserved for
+    /// destroying a **file**. A settings row that borrowed the trash can would read as
+    /// deleting the folder it points at.
+    Xmark,
     /// Open-file action (the welcome screen's Open File button — matches SF `doc`).
     File,
     /// Play action (the play hint on an animated item — matches SF `play.fill`).
@@ -184,6 +189,7 @@ fn svg(icon: Icon, family: Family) -> &'static str {
         Icon::Keyboard => glyph!("keyboard"),
         Icon::Captions => glyph!("message-captions"),
         Icon::FolderArrowDown => glyph!("folder-arrow-down"),
+        Icon::Xmark => glyph!("xmark"),
         Icon::File => glyph!("file"),
         Icon::Play => glyph!("play"),
         Icon::Pause => glyph!("pause"),

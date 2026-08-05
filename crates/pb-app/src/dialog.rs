@@ -2006,9 +2006,13 @@ fn quick_sort_tab(
                             .color(p.text_secondary),
                     ),
                 );
+                // The pb-ui field, not a bare TextEdit: the component carries FIELD_MARGIN,
+                // which is what makes it exactly CONTROL_H and so the same height as the
+                // Move/Copy combo beside it. A hand-rolled TextEdit sizes to its font and
+                // sat visibly taller — the drift CONTROL_H exists to prevent.
                 ui.add_sized(
                     [150.0, pbui::CONTROL_H],
-                    egui::TextEdit::singleline(&mut s.label).hint_text("Name"),
+                    pbui::text_field(&mut s.label, "Name"),
                 );
                 let mut copy = s.mode == SortMode::Copy;
                 egui::ComboBox::from_id_salt(("qs_mode", slot))
@@ -2039,25 +2043,43 @@ fn quick_sort_tab(
                             dlg = dlg.set_directory(cur);
                         }
                         if let Some(dir) = dlg.pick_folder() {
+                            // Seed the name from the folder when the user hasn't typed
+                            // one. The pill has always fallen back to the folder name, but
+                            // leaving the field blank read as "this didn't take" — and a
+                            // visible default is also something to edit rather than
+                            // compose from nothing. Never overwrites a name already set.
+                            if s.label.trim().is_empty() {
+                                if let Some(name) = dir.file_name().and_then(|n| n.to_str()) {
+                                    s.label = name.to_string();
+                                }
+                            }
                             s.folder = Some(dir);
                         }
                     }
-                    if s.folder.is_some() && pbui::secondary_button(ui, "Clear").clicked() {
+                    if s.folder.is_some()
+                        && pbui::icon_button(ui, p, pbui::icon::Icon::Xmark, "Clear this folder")
+                            .clicked()
+                    {
                         s.folder = None;
                     }
-                    let shown = match &s.folder {
-                        Some(f) => elide_middle(&f.display().to_string(), 46),
-                        None => "No folder chosen".to_string(),
-                    };
-                    let color = if s.folder.is_some() {
-                        p.text
-                    } else {
-                        p.text_secondary
-                    };
-                    ui.add(
-                        egui::Label::new(egui::RichText::new(shown).size(12.5).color(color))
-                            .truncate(),
-                    );
+                    // The path fills what's left, left-aligned: right-aligned against the
+                    // buttons, the placeholder floated in the middle of the row with a gap
+                    // either side and read as stray text rather than a field's value.
+                    ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                        let shown = match &s.folder {
+                            Some(f) => elide_middle(&f.display().to_string(), 46),
+                            None => "No folder chosen".to_string(),
+                        };
+                        let color = if s.folder.is_some() {
+                            p.text
+                        } else {
+                            p.text_secondary
+                        };
+                        ui.add(
+                            egui::Label::new(egui::RichText::new(shown).size(12.5).color(color))
+                                .truncate(),
+                        );
+                    });
                 },
             );
             if slot + 1 < SLOT_COUNT {

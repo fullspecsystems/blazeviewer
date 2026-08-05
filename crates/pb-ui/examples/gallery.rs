@@ -150,6 +150,9 @@ impl Gallery {
         ui.horizontal(|ui| {
             let _ = pb_ui::primary_button(ui, p, "Primary");
             let _ = pb_ui::secondary_button(ui, "Secondary");
+            let _ = pb_ui::danger_button(ui, p, "Danger");
+            // Square, CONTROL_H on a side, so it reads as a peer of the buttons beside it.
+            let _ = pb_ui::icon_button(ui, p, pb_ui::icon::Icon::Xmark, "Clear");
         });
 
         pb_ui::section_label(ui, p, "Tab bar (pivot)");
