@@ -80,6 +80,14 @@ pub enum Icon {
     Keyboard,
     /// Settings ▸ Subtitles tab (matches the macOS pane's SF `captions.bubble`).
     Captions,
+    /// Settings ▸ Quick Sort tab (task #136) — a folder taking a file in.
+    ///
+    /// Deliberately **not** the macOS pane's SF `tray.full`: `pb-hud` already uses
+    /// this same glyph on the toast that flashes when a photo is filed, so the tab
+    /// you configure it in wears the icon you see it work with. Within-app
+    /// continuity beats matching a different platform's symbol set, which each
+    /// shell draws from natively anyway.
+    FolderArrowDown,
     /// Open-file action (the welcome screen's Open File button — matches SF `doc`).
     File,
     /// Play action (the play hint on an animated item — matches SF `play.fill`).
@@ -175,6 +183,7 @@ fn svg(icon: Icon, family: Family) -> &'static str {
         Icon::Brush => glyph!("brush"),
         Icon::Keyboard => glyph!("keyboard"),
         Icon::Captions => glyph!("message-captions"),
+        Icon::FolderArrowDown => glyph!("folder-arrow-down"),
         Icon::File => glyph!("file"),
         Icon::Play => glyph!("play"),
         Icon::Pause => glyph!("pause"),

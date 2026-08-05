@@ -77,6 +77,11 @@ enum SettingsTab {
     Display,
     Subtitles,
     Ai,
+    /// Quick Sort's sixteen destination-folder slots (task #136). Its own tab, matching
+    /// the macOS pane: sixteen folder rows are a screen's worth of content, and folding
+    /// them into General would blow that tab's height and bury a feature you configure
+    /// once then use for hours.
+    QuickSort,
     Shortcuts,
 }
 
@@ -144,6 +149,9 @@ struct SettingsDraft {
     picker_fixed: bool,
     /// The pinned folder (when `picker_fixed`); `None` until the user chooses one.
     picker_dir: Option<PathBuf>,
+    /// Quick Sort's destination slots (task #136). Always `SLOT_COUNT` long — the draft
+    /// pads a short saved list, so the tab can index every row without bounds checks.
+    quick_sort: Vec<pb_app_core::quick_sort::QuickSortSlot>,
     // --- AI descriptions (task #44) ---
     describe_backend: usize, // 0 = Auto, 1 = Apple on-device, 2 = Local endpoint
     describe_endpoint: String,
@@ -241,6 +249,13 @@ impl SettingsDraft {
             slideshow_interval: s.slideshow_interval_secs,
             picker_fixed: s.picker_dir.is_some(),
             picker_dir: s.picker_dir.clone(),
+            quick_sort: {
+                // Pad to the full slot count so the tab can index rows directly. A
+                // settings.toml written by an older build (or hand-edited) carries fewer.
+                let mut v = s.quick_sort.clone();
+                v.resize_with(pb_app_core::quick_sort::SLOT_COUNT, Default::default);
+                v
+            },
             describe_backend: match s.describe_backend {
                 settings::DescribeBackend::Auto => 0,
                 settings::DescribeBackend::AppleOnDevice => 1,
@@ -331,6 +346,7 @@ impl SettingsDraft {
         } else {
             None
         };
+        s.quick_sort = self.quick_sort.clone();
         s.describe_backend = match self.describe_backend {
             1 => settings::DescribeBackend::AppleOnDevice,
             2 => settings::DescribeBackend::LocalEndpoint,
@@ -449,6 +465,9 @@ pub struct DialogWindow {
     cap_logo: bool,
     /// A transient note for the keybinding editor (e.g. a "moved from …" message).
     keymap_note: Option<String>,
+    /// Quick Sort ▸ Clear All is armed (task #136) — the second step of its two-step
+    /// confirm. Dialog-local and transient: it resets whenever Settings is reopened.
+    qs_confirm_clear: bool,
     /// Which Settings tab (General / Appearance / Subtitles / AI / Shortcuts) is showing.
     settings_tab: SettingsTab,
     /// The AI tab's Test-connection state (probe runs off the UI thread).
@@ -716,6 +735,7 @@ impl DialogWindow {
             cap_logo: false,
             keymap_note: None,
             settings_tab: SettingsTab::default(),
+            qs_confirm_clear: false,
             conn_test: ConnTest::default(),
             describe_models: Vec::new(),
             subtitle_preview: None,
@@ -973,6 +993,7 @@ impl DialogWindow {
             note: &mut self.keymap_note,
         };
         let settings_tab = &mut self.settings_tab;
+        let qs_confirm_clear = &mut self.qs_confirm_clear;
         let conn_test = &mut self.conn_test;
         let describe_models = &mut self.describe_models;
         let mut preview = PreviewCtx {
@@ -1001,6 +1022,7 @@ impl DialogWindow {
                             conn_test,
                             describe_models,
                             &mut preview,
+                            qs_confirm_clear,
                         )
                     });
             }
@@ -1764,6 +1786,7 @@ fn settings_ui(
     conn_test: &mut ConnTest,
     models: &mut Vec<String>,
     preview: &mut PreviewCtx,
+    qs_confirm_clear: &mut bool,
 ) {
     let p = pbui::Palette::new(ui.visuals().dark_mode);
 
@@ -1793,6 +1816,9 @@ fn settings_ui(
                         SettingsTab::Display => display_tab(ui, &p, d),
                         SettingsTab::Subtitles => subtitles_tab(ui, &p, d, preview),
                         SettingsTab::Ai => ai_tab(ui, &p, d, conn_test, models),
+                        SettingsTab::QuickSort => {
+                            quick_sort_tab(ui, &p, d, kb.keymap, qs_confirm_clear)
+                        }
                         SettingsTab::Shortcuts => keybindings_ui(ui, &p, kb),
                     }
                 });
@@ -1812,6 +1838,7 @@ pub(crate) fn settings_shot_body(ui: &mut egui::Ui, dark: bool, tab_name: &str) 
         "appearance" => SettingsTab::Display,
         "shortcuts" => SettingsTab::Shortcuts,
         "subtitles" => SettingsTab::Subtitles,
+        "quicksort" => SettingsTab::QuickSort,
         _ => SettingsTab::General,
     };
     settings_tab_bar(ui, &mut tab);
@@ -1852,6 +1879,25 @@ pub(crate) fn settings_shot_body(ui: &mut egui::Ui, dark: bool, tab_name: &str) 
                     };
                     keybindings_ui(ui, &p, &mut kb);
                 }
+                SettingsTab::QuickSort => {
+                    // Two slots seeded so the shot shows a configured row (chord, name,
+                    // mode, a real path) beside the empty ones — the interesting case.
+                    let keymap = crate::keymap::Keymap::defaults();
+                    draft.quick_sort[0] = pb_app_core::quick_sort::QuickSortSlot {
+                        folder: Some(std::path::PathBuf::from(r"D:\Media\Pictures\Portraits")),
+                        label: "Portraits".to_string(),
+                        mode: pb_app_core::quick_sort::SortMode::Move,
+                    };
+                    draft.quick_sort[1] = pb_app_core::quick_sort::QuickSortSlot {
+                        folder: Some(std::path::PathBuf::from(
+                            r"\\beenas\Media\Pictures\2026\Keepers\Selects",
+                        )),
+                        label: "Keepers".to_string(),
+                        mode: pb_app_core::quick_sort::SortMode::Copy,
+                    };
+                    let mut confirming = false;
+                    quick_sort_tab(ui, &p, &mut draft, &keymap, &mut confirming);
+                }
                 _ => general_tab(ui, &p, &mut draft),
             }
         });
@@ -1885,12 +1931,191 @@ fn settings_tab_bar(ui: &mut egui::Ui, current: &mut SettingsTab) {
             ),
             (SettingsTab::Ai, "AI", Some(pbui::icon::Icon::Sparkles)),
             (
+                SettingsTab::QuickSort,
+                "Quick Sort",
+                Some(pbui::icon::Icon::FolderArrowDown),
+            ),
+            (
                 SettingsTab::Shortcuts,
                 "Shortcuts",
                 Some(pbui::icon::Icon::Keyboard),
             ),
         ],
     );
+}
+
+/// The **Quick Sort** tab (task #136): the sixteen destination-folder slots, mirroring the
+/// macOS pane so the two shells configure the same feature the same way.
+///
+/// Each slot renders on **two lines** — identity (chord, name, mode) over destination. One
+/// line does not fit: the Settings window is 560px and a destination path is arbitrarily
+/// long, so a single row squeezes the path to a stub like `C:\Users\j…nknown`, which is
+/// exactly the part you must read to know the slot points where you think. Giving the path
+/// its own full-width line buys that back.
+///
+/// Chords come from the **live keymap**, never from the slot index: they are remappable in
+/// Settings ▸ Shortcuts, and a hardcoded "1"–"7" here would quietly lie after a remap.
+fn quick_sort_tab(
+    ui: &mut egui::Ui,
+    p: &pbui::Palette,
+    d: &mut SettingsDraft,
+    keymap: &Keymap,
+    confirming_clear: &mut bool,
+) {
+    use pb_app_core::quick_sort::{SortMode, SLOT_COUNT};
+
+    // Two lines, not one wrapped paragraph: they say different things — what the keys do,
+    // and what comes along for the ride.
+    pbui::card(ui, p, |ui| {
+        ui.label(
+            egui::RichText::new(
+                "Press a slot's key while viewing a photo to file it into that folder.",
+            )
+            .color(p.text_secondary),
+        );
+        ui.label(
+            egui::RichText::new(
+                "Sidecar files (.xmp, .txt, .json) come along, and Undo puts everything back.",
+            )
+            .color(p.text_secondary),
+        );
+    });
+    ui.add_space(pbui::GAP);
+
+    pbui::group_card(ui, p, Some("Slots"), |ui| {
+        for slot in 0..SLOT_COUNT {
+            // The live chord for this slot's action, or a quiet placeholder for the last
+            // two, which ship unbound by design (no free chords left worth spending).
+            let chord = keymap
+                .slot(Action::QuickSort(slot as u8), 0)
+                .map(|c| c.to_string())
+                .unwrap_or_else(|| "\u{2014}".to_string());
+            let s = &mut d.quick_sort[slot];
+
+            ui.horizontal(|ui| {
+                // Wide enough for the longest default chord ("Shift+1"), so the name
+                // fields all start on the same x and the column reads as a column.
+                ui.add_sized(
+                    [62.0, pbui::CONTROL_H],
+                    egui::Label::new(
+                        egui::RichText::new(&chord)
+                            .font(egui::FontId::new(
+                                13.0,
+                                egui::FontFamily::Name(pbui::SEMIBOLD.into()),
+                            ))
+                            .color(p.text_secondary),
+                    ),
+                );
+                ui.add_sized(
+                    [150.0, pbui::CONTROL_H],
+                    egui::TextEdit::singleline(&mut s.label).hint_text("Name"),
+                );
+                let mut copy = s.mode == SortMode::Copy;
+                egui::ComboBox::from_id_salt(("qs_mode", slot))
+                    .selected_text(if copy { "Copy" } else { "Move" })
+                    .width(84.0)
+                    .show_ui(ui, |ui| {
+                        pbui::apply_to_ui(ui, ui.visuals().dark_mode);
+                        ui.selectable_value(&mut copy, false, "Move");
+                        ui.selectable_value(&mut copy, true, "Copy");
+                    });
+                s.mode = if copy { SortMode::Copy } else { SortMode::Move };
+            });
+
+            // Destination line. The full path, elided in the MIDDLE — the tail (the actual
+            // destination folder) is the part that identifies the slot, so a tail-truncating
+            // ellipsis would hide the only bit worth reading.
+            // Path reads first (it is the content); the controls that change it are
+            // right-aligned, so every row's buttons line up down the pane.
+            // Allocated to exactly one control row: a bare `with_layout` here takes the
+            // whole remaining height of the card and leaves a chasm between the two lines.
+            ui.allocate_ui_with_layout(
+                egui::vec2(ui.available_width(), pbui::CONTROL_H),
+                egui::Layout::right_to_left(egui::Align::Center),
+                |ui| {
+                    if pbui::secondary_button(ui, "Choose\u{2026}").clicked() {
+                        let mut dlg = rfd::FileDialog::new();
+                        if let Some(cur) = &s.folder {
+                            dlg = dlg.set_directory(cur);
+                        }
+                        if let Some(dir) = dlg.pick_folder() {
+                            s.folder = Some(dir);
+                        }
+                    }
+                    if s.folder.is_some() && pbui::secondary_button(ui, "Clear").clicked() {
+                        s.folder = None;
+                    }
+                    let shown = match &s.folder {
+                        Some(f) => elide_middle(&f.display().to_string(), 46),
+                        None => "No folder chosen".to_string(),
+                    };
+                    let color = if s.folder.is_some() {
+                        p.text
+                    } else {
+                        p.text_secondary
+                    };
+                    ui.add(
+                        egui::Label::new(egui::RichText::new(shown).size(12.5).color(color))
+                            .truncate(),
+                    );
+                },
+            );
+            if slot + 1 < SLOT_COUNT {
+                ui.add_space(pbui::SPACE_3);
+            }
+        }
+    });
+
+    ui.add_space(pbui::GAP);
+    pbui::card(ui, p, |ui| {
+        // Two-step rather than a modal: a confirmation dialog for a config reset would be
+        // heavier than the thing it guards, but sixteen configured folders is real work to
+        // lose to a stray click.
+        if *confirming_clear {
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new("Clear all 16 destinations?").color(p.text_secondary));
+                if pbui::secondary_button(ui, "Cancel").clicked() {
+                    *confirming_clear = false;
+                }
+                if pbui::danger_button(ui, p, "Clear All").clicked() {
+                    for s in &mut d.quick_sort {
+                        *s = Default::default();
+                    }
+                    *confirming_clear = false;
+                }
+            });
+        } else if pbui::secondary_button(ui, "Clear All Destinations\u{2026}").clicked() {
+            *confirming_clear = true;
+        }
+        // Says the true thing rather than the reassuring one: the folders are saved,
+        // nothing about what was sorted ever is.
+        ui.add_space(pbui::SPACE_2);
+        ui.label(
+            egui::RichText::new(
+                "Blaze Viewer never records which photos you filed or where. \
+                 Clearing removes the saved folder names too.",
+            )
+            .size(12.5)
+            .color(p.text_secondary),
+        );
+    });
+}
+
+/// Elide the **middle** of `s` so both ends stay readable — for a path, whose head names
+/// the volume and whose tail names the destination; a tail-cutting ellipsis would hide the
+/// half that identifies it.
+fn elide_middle(s: &str, max: usize) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    if chars.len() <= max {
+        return s.to_string();
+    }
+    let keep = max.saturating_sub(1);
+    let head = keep / 2;
+    let tail = keep - head;
+    let mut out: String = chars[..head].iter().collect();
+    out.push('\u{2026}');
+    out.extend(&chars[chars.len() - tail..]);
+    out
 }
 
 /// The **AI** tab (task #44): the image-description backend, model, prompt, and the

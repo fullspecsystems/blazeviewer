@@ -155,9 +155,16 @@ pub const TAB_INDICATOR_H: f32 = 2.0;
 /// How far the [`tab_bar`] underline extends past each edge of its label, so the indicator
 /// reads as a deliberate marker rather than a too-tight rule clipped to the glyphs.
 pub const TAB_INDICATOR_OVERHANG: f32 = SPACE_1;
-/// A [`tab_bar`] label's optional leading icon size — a touch under the `SECTION_SIZE` label
-/// so the glyph reads as a peer of the text, not heavier than it.
-const TAB_ICON_SIZE: f32 = 15.0;
+/// A [`tab_bar`] tab's icon size. The icon sits **above** its label and leads the cell, so
+/// it is comfortably larger than the text rather than a peer of it.
+const TAB_ICON_SIZE: f32 = 22.0;
+/// A [`tab_bar`] label's text size — the quiet description tier, deliberately smaller than
+/// the icon above it. Stacking is what lets six tabs fit a 560px Settings window: a cell is
+/// `max(icon, label)` wide instead of `icon + gap + label`, and the shorter label shrinks it
+/// further. See [`tab_label`].
+const TAB_LABEL_SIZE: f32 = 12.5;
+/// Gap between a [`tab_bar`] icon and the label beneath it.
+const TAB_ICON_GAP: f32 = 4.0;
 /// Stable minimum width for a slider's value box. egui sizes the box to the formatted
 /// number, so it jitters as the digit count changes (3.0 → 11.7 → 400); pinning a
 /// minimum wide enough for the widest value keeps it a fixed width. See [`slider`].
@@ -890,12 +897,21 @@ pub fn tab_bar<T: Copy + PartialEq>(
     changed
 }
 
-/// One [`tab_bar`] label: a click-sensing text cell with **no fill** that reserves room
-/// beneath the text for the underline the strip paints. Sized at [`SECTION_SIZE`] (the
-/// card-group heading tier) in the semibold face — section nav reads as a peer of the
-/// section headings below it. The face is **always semibold**; only the *color*
-/// distinguishes states (selected → full text color, hover → full text color, otherwise
-/// the quiet secondary tone) — so switching tabs never reflows the strip.
+/// One [`tab_bar`] tab: a click-sensing cell with **no fill**, its icon centered above a
+/// smaller label, reserving room beneath for the underline the strip paints.
+///
+/// **Stacked, not side-by-side, because of arithmetic.** A cell is `max(icon, label)` wide
+/// this way instead of `icon + gap + label`, and the label drops from [`SECTION_SIZE`] to
+/// the quieter [`TAB_LABEL_SIZE`]. Measured on the 560px Settings window: the five
+/// side-by-side tabs already ran to within ~24px of the right edge, so a sixth ("Quick
+/// Sort", task #136) overflowed by ~110px. Stacked, six fit with ~100px to spare. The cost
+/// is ~20px of strip height, paid once.
+///
+/// The face is **always semibold** and the icon size never changes; only the *color*
+/// distinguishes states (selected or hovered → full text color, otherwise the quiet
+/// secondary tone) — so switching tabs never reflows the strip. The selected tab is still
+/// marked by the strip's thin accent underline, never a filled pill, so it cannot be
+/// mistaken for a [`primary_button`].
 fn tab_label(
     ui: &mut egui::Ui,
     p: &Palette,
@@ -903,43 +919,44 @@ fn tab_label(
     label: &str,
     icon: Option<crate::icon::Icon>,
 ) -> egui::Response {
-    let font = FontId::new(SECTION_SIZE, FontFamily::Name(SEMIBOLD.into()));
+    let font = FontId::new(TAB_LABEL_SIZE, FontFamily::Name(SEMIBOLD.into()));
     // Lay out with a placeholder color so the real tint can be chosen after we know the
     // hover state (which needs the response, which needs the size — hence layout first).
     let galley = ui
         .painter()
         .layout_no_wrap(label.to_owned(), font, Color32::PLACEHOLDER);
     let text_size = galley.size();
-    // Optional leading icon (SF-Symbol-style tab glyph), tinted to match the label color.
-    let icon_w = if icon.is_some() { TAB_ICON_SIZE } else { 0.0 };
-    let icon_gap = if icon.is_some() { SPACE_2 - 2.0 } else { 0.0 };
+    let icon_h = if icon.is_some() { TAB_ICON_SIZE } else { 0.0 };
+    let icon_gap = if icon.is_some() { TAB_ICON_GAP } else { 0.0 };
     let pad_top = SPACE_2;
-    let gap_below = 3.0; // the text sits close to its underline (a tight pivot, not a tab box)
-    let height = pad_top + text_size.y + gap_below + TAB_INDICATOR_H;
-    let (rect, resp) = ui.allocate_exact_size(
-        egui::vec2(icon_w + icon_gap + text_size.x, height),
-        egui::Sense::click(),
-    );
+    let gap_below = 3.0; // the label sits close to its underline (a pivot, not a tab box)
+    let height = pad_top + icon_h + icon_gap + text_size.y + gap_below + TAB_INDICATOR_H;
+    // The cell is as wide as its widest element — usually the label, but the icon sets a
+    // floor so a very short name ("AI") still gets a square-ish, tappable cell.
+    let width = text_size.x.max(TAB_ICON_SIZE);
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::click());
     if ui.is_rect_visible(rect) {
         let color = if selected || resp.hovered() {
             p.text
         } else {
             p.text_secondary
         };
-        let mut x = rect.left();
         if let Some(ic) = icon {
-            // Center the icon on the text's vertical midline (a hair up, so the optically
-            // heavier glyph doesn't read low next to the cap-height label).
-            let cy = rect.top() + pad_top + text_size.y / 2.0 - 1.0;
             let irect = egui::Rect::from_center_size(
-                egui::pos2(x + icon_w / 2.0, cy),
-                egui::Vec2::splat(icon_w),
+                egui::pos2(rect.center().x, rect.top() + pad_top + icon_h / 2.0),
+                egui::Vec2::splat(icon_h),
             );
             crate::icon::paint_tinted(ui, irect, ic, color);
-            x += icon_w + icon_gap;
         }
-        ui.painter()
-            .galley(egui::pos2(x, rect.top() + pad_top), galley, color);
+        // Label centered under the icon.
+        ui.painter().galley(
+            egui::pos2(
+                rect.center().x - text_size.x / 2.0,
+                rect.top() + pad_top + icon_h + icon_gap,
+            ),
+            galley,
+            color,
+        );
     }
     resp
 }
