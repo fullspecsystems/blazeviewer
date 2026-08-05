@@ -836,24 +836,36 @@ pub fn slider_stepped<Num: egui::emath::Numeric>(
 /// full-width hairline; the rest are quiet [`text_secondary`](Palette::text_secondary)
 /// labels that brighten on hover. Holding the accent to a thin indicator (never a filled
 /// pill) is the whole point — it stops the active tab reading as a second
-/// [`primary_button`]. `left_inset` insets the labels to the page margin while the
-/// hairline still spans the strip's full width, so the active tab connects to the content
-/// column below it. Returns `true` if the selection changed this frame.
+/// [`primary_button`]. The strip is **centered** in the available width, with `min_inset`
+/// as a floor so a too-wide strip still lines up with the page's content column; the
+/// hairline always spans the full width, so the active tab connects to the content below
+/// it. Returns `true` if the selection changed this frame.
 pub fn tab_bar<T: Copy + PartialEq>(
     ui: &mut egui::Ui,
     p: &Palette,
     current: &mut T,
-    left_inset: f32,
+    min_inset: f32,
     tabs: &[(T, &str, Option<crate::icon::Icon>)],
 ) -> bool {
     let mut changed = false;
+    // Center the strip in the available width. Stacking freed real horizontal room (six
+    // tabs now leave ~100px spare in the Settings window), and a left-hugging strip under
+    // all that space reads as an accident rather than a decision. `min_inset` becomes a
+    // floor, so a strip too wide to center still lines up with the content column below.
+    let total: f32 = tabs
+        .iter()
+        .map(|(_, label, _)| tab_width(ui, label))
+        .sum::<f32>()
+        + TAB_GAP * tabs.len().saturating_sub(1) as f32;
+    let lead = ((ui.available_width() - total) * 0.5).max(min_inset);
+
     // Lay the labels out first, remembering each one's rect + state, so the indicators can
     // be painted *after* the hairline — they need to sit on top of it (connecting the tab
     // to its content), and egui paints in call order.
     let mut marks: Vec<(egui::Rect, bool, bool)> = Vec::with_capacity(tabs.len());
     let row = ui
         .horizontal(|ui| {
-            ui.add_space(left_inset);
+            ui.add_space(lead);
             ui.spacing_mut().item_spacing.x = TAB_GAP;
             for &(value, label, icon) in tabs {
                 let selected = *current == value;
@@ -897,6 +909,22 @@ pub fn tab_bar<T: Copy + PartialEq>(
     changed
 }
 
+/// The [`tab_bar`] label font — one definition, so the width [`tab_bar`] measures for
+/// centering and the width [`tab_label`] lays out can never disagree.
+fn tab_font() -> FontId {
+    FontId::new(TAB_LABEL_SIZE, FontFamily::Name(SEMIBOLD.into()))
+}
+
+/// One tab cell's width: as wide as its widest element — usually the label, but the icon
+/// sets a floor so a very short name ("AI") still gets a square-ish, tappable cell.
+fn tab_width(ui: &egui::Ui, label: &str) -> f32 {
+    ui.painter()
+        .layout_no_wrap(label.to_owned(), tab_font(), Color32::PLACEHOLDER)
+        .size()
+        .x
+        .max(TAB_ICON_SIZE)
+}
+
 /// One [`tab_bar`] tab: a click-sensing cell with **no fill**, its icon centered above a
 /// smaller label, reserving room beneath for the underline the strip paints.
 ///
@@ -919,7 +947,7 @@ fn tab_label(
     label: &str,
     icon: Option<crate::icon::Icon>,
 ) -> egui::Response {
-    let font = FontId::new(TAB_LABEL_SIZE, FontFamily::Name(SEMIBOLD.into()));
+    let font = tab_font();
     // Lay out with a placeholder color so the real tint can be chosen after we know the
     // hover state (which needs the response, which needs the size — hence layout first).
     let galley = ui
@@ -931,9 +959,7 @@ fn tab_label(
     let pad_top = SPACE_2;
     let gap_below = 3.0; // the label sits close to its underline (a pivot, not a tab box)
     let height = pad_top + icon_h + icon_gap + text_size.y + gap_below + TAB_INDICATOR_H;
-    // The cell is as wide as its widest element — usually the label, but the icon sets a
-    // floor so a very short name ("AI") still gets a square-ish, tappable cell.
-    let width = text_size.x.max(TAB_ICON_SIZE);
+    let width = tab_width(ui, label);
     let (rect, resp) = ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::click());
     if ui.is_rect_visible(rect) {
         let color = if selected || resp.hovered() {
