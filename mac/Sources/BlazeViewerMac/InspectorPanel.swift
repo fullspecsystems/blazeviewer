@@ -29,6 +29,16 @@ struct InspectorRow: Identifiable {
     let kind: Int
     let a: String
     let b: String
+    /// Inline actions rendered as buttons on a heading (task #137): a generation Section's
+    /// Copy prompt / Copy JSON|parameters. Empty for every other row.
+    var actions: [InspectorRowAction] = []
+}
+
+/// One inline action button on an Inspector heading (task #137): a display label and the stable
+/// Action id it dispatches through `CoreModel.menuAction`.
+struct InspectorRowAction: Identifiable {
+    let id: String // the Action id, e.g. "copy_gen_prompt" — unique within a heading
+    let label: String
 }
 
 /// The floating Inspector card: a custom icon+text tab bar (Details / Text / Describe)
@@ -205,6 +215,8 @@ struct InspectorPanelView: View {
             // A bold heading (the filename, or a Details section title). On the Describe tab
             // the heading is the always-present "Description" title, so it carries the Ask
             // button — a stable spot (the tab bar resized as the button showed/hid per tab).
+            // A Details Section can carry its own inline buttons (the generation block's Copy
+            // prompt / Copy JSON|parameters, task #137) — rendered the same way, right-aligned.
             HStack(alignment: .firstTextBaseline, spacing: 8) {
                 Text(row.a)
                     .font(.headline)
@@ -217,6 +229,17 @@ struct InspectorPanelView: View {
                     }
                     .buttonStyle(.plain)
                     .help("Ask a question about this image")
+                } else if !row.actions.isEmpty {
+                    Spacer(minLength: 8)
+                    ForEach(row.actions) { action in
+                        Button(action: { model.menuAction(action.id) }) {
+                            Text(action.label)
+                                .font(.callout)
+                                .foregroundStyle(Color.accentColor)
+                        }
+                        .buttonStyle(.plain)
+                        .help(action.label)
+                    }
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -246,6 +269,20 @@ struct InspectorPanelView: View {
                 .font(.callout)
                 .foregroundStyle(Color.panelSecondary)
                 .frame(maxWidth: .infinity, alignment: .leading)
+        case 5:
+            // An italic muted note (task #137): a label and an italic explanation of why a
+            // value is what it is ("assembled by X"), styled so it can't read as the value.
+            HStack(alignment: .firstTextBaseline, spacing: 10) {
+                Text(row.a)
+                    .font(.callout)
+                    .foregroundStyle(Color.panelSecondary)
+                    .frame(width: 116, alignment: .leading)
+                Text(row.b)
+                    .font(.callout)
+                    .italic()
+                    .foregroundStyle(Color.panelSecondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
         default:
             // A body paragraph. Describe = AI text → block-level Markdown (headings, lists,
             // emphasis); Text/OCR stays literal.

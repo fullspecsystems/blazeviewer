@@ -854,12 +854,23 @@ final class CoreModel {
         rows.reserveCapacity(n)
         for i in 0..<n {
             let idx = UInt(i)
+            // Inline heading actions (task #137) — usually none; a generation Section carries 1–2.
+            var actions: [InspectorRowAction] = []
+            let ac = Int(core.inspector_row_action_count(idx))
+            for j in 0..<ac {
+                actions.append(
+                    InspectorRowAction(
+                        id: core.inspector_row_action_id(idx, UInt(j)).toString(),
+                        label: core.inspector_row_action_label(idx, UInt(j)).toString()
+                    ))
+            }
             rows.append(
                 InspectorRow(
                     id: i,
                     kind: Int(core.inspector_row_kind(idx)),
                     a: core.inspector_row_a(idx).toString(),
-                    b: core.inspector_row_b(idx).toString()
+                    b: core.inspector_row_b(idx).toString(),
+                    actions: actions
                 ))
         }
         inspectorRows = rows

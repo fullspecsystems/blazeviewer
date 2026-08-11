@@ -647,7 +647,6 @@ pub fn detail_rows(meta: &GenerationMeta) -> Vec<crate::panels::DetailRow> {
     use crate::action::Action;
     use crate::panels::{DetailRow, RowAction};
     let mut rows = Vec::new();
-    let span = |text: String, bold: bool| DetailRow::Span { text, bold };
 
     // The section heading's buttons. **Copy prompt only appears when there is a
     // literal prompt to copy** — offering a button whose sole outcome is a
@@ -693,30 +692,28 @@ pub fn detail_rows(meta: &GenerationMeta) -> Vec<crate::panels::DetailRow> {
     }
 
     rows.push(heading(format!("Generation ({})", meta.tool.name()), meta));
-    // A prompt we HAVE gets a bold heading over a full-width paragraph; a prompt we
-    // do not gets a label/value pair, because the value is a short note rather than
-    // content and belongs in the facts table. Both are labelled either way — an
-    // unlabelled paragraph under "Generation" leaves the reader guessing which
-    // prompt they are looking at, and the two are not interchangeable.
-    let mut prompt_rows =
-        |heading: &str, label: &str, p: &PromptText| match (&p.text, p.unresolved_reason()) {
-            (Some(text), _) => {
-                rows.push(span(heading.to_string(), true));
-                rows.push(DetailRow::Body { text: text.clone() });
-            }
-            // A Note, not a Pair: this explains why there is no prompt, and must
-            // not be mistaken for one at a glance or pasted out as if it were.
-            (None, Some(why)) => rows.push(DetailRow::Note {
-                label: label.to_string(),
-                text: why,
-            }),
-            (None, None) => {}
-        };
+    // Both prompts sit in the label/value column like every other fact (owner call
+    // 2026-08-07), so positive and negative read consistently and line up with
+    // Model / Seed / …: a prompt we HAVE is a Pair whose text wraps in the value
+    // column (the wide majority of the panel, selectable in both shells); a prompt
+    // we do NOT is a Note — the italic "why", which must never be mistaken for a
+    // real value or pasted out as one. Both are labelled either way.
+    let mut prompt_rows = |label: &str, p: &PromptText| match (&p.text, p.unresolved_reason()) {
+        (Some(text), _) => rows.push(DetailRow::Pair {
+            label: label.to_string(),
+            value: text.clone(),
+        }),
+        (None, Some(why)) => rows.push(DetailRow::Note {
+            label: label.to_string(),
+            text: why,
+        }),
+        (None, None) => {}
+    };
     if let Some(p) = &meta.positive {
-        prompt_rows("Prompt", "Prompt", p);
+        prompt_rows("Prompt", p);
     }
     if let Some(n) = &meta.negative {
-        prompt_rows("Negative prompt", "Negative", n);
+        prompt_rows("Negative", n);
     }
     let mut pair = |label: &str, value: String| {
         rows.push(DetailRow::Pair {

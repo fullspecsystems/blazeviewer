@@ -477,7 +477,7 @@ fn a1111_without_a_parameter_record_is_all_prompt() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn detail_rows_lead_with_a_heading_and_put_prompts_in_body_rows() {
+fn detail_rows_lead_with_a_heading_and_put_prompts_in_the_value_column() {
     use crate::panels::DetailRow;
     let m = comfy(SIMPLE);
     let rows = detail_rows(&m);
@@ -486,56 +486,55 @@ fn detail_rows_lead_with_a_heading_and_put_prompts_in_body_rows() {
         "first row must be the section heading, got {:?}",
         rows[0]
     );
-    // A prompt is a wrapped paragraph, never a label/value pair — the pair
-    // renderer clips to a fixed label column.
+    // Prompts live in the labelled value column like every other fact (owner call 2026-08-07),
+    // so positive and negative read consistently: a Pair whose value wraps in the value column,
+    // not a bespoke full-width paragraph.
     assert!(
-        rows.iter()
-            .any(|r| matches!(r, DetailRow::Body { text } if text == "a red bird")),
-        "the positive prompt must be a Body row: {rows:?}"
+        rows.iter().any(|r| matches!(
+            r,
+            DetailRow::Pair { label, value } if label == "Prompt" && value == "a red bird"
+        )),
+        "the positive prompt must be a labelled Pair: {rows:?}"
     );
     assert!(
-        rows.iter()
-            .any(|r| matches!(r, DetailRow::Body { text } if text == "blurry")),
-        "the negative prompt must be a Body row: {rows:?}"
+        rows.iter().any(|r| matches!(
+            r,
+            DetailRow::Pair { label, value } if label == "Negative" && value == "blurry"
+        )),
+        "the negative prompt must be a labelled Pair: {rows:?}"
     );
 }
 
-/// Every prompt paragraph is introduced by a **bold** heading.
+/// Both prompts are clearly **labelled** in the value column, so neither is left to be guessed at.
 ///
-/// Regression (owner-reported, 2026-08-04): "Negative prompt" shipped as
-/// `bold: false`, which the presenters treat as a *sub-header* — the
-/// regular-weight style the folder path under a filename uses — so it read as
-/// stray body text rather than a label for the paragraph beneath it. The bold
-/// flag is the only thing distinguishing the two, so it needs pinning.
+/// Supersedes the old bold-heading regression (owner-reported 2026-08-04, where "Negative prompt"
+/// shipped `bold: false` and read as stray body text): with prompts now in the labelled Pair
+/// column (owner call 2026-08-07) there is no separate heading whose weight could go wrong — the
+/// label column names each prompt directly, and positive and negative render identically.
 #[test]
-fn every_prompt_paragraph_has_a_bold_heading_above_it() {
+fn both_prompts_are_labelled_in_the_value_column() {
     use crate::panels::DetailRow;
     let rows = detail_rows(&comfy(SIMPLE));
-    for (i, row) in rows.iter().enumerate() {
-        if matches!(row, DetailRow::Body { .. }) {
-            let above = i.checked_sub(1).map(|j| &rows[j]);
-            assert!(
-                matches!(
-                    above,
-                    Some(DetailRow::Span { bold: true, .. }) | Some(DetailRow::Section { .. })
-                ),
-                "a Body row must follow a bold heading, got {above:?} above {row:?}"
-            );
-        }
-    }
-    // And both are named, so neither paragraph is left to be guessed at.
-    let headings: Vec<&str> = rows
+    // The section heading still leads the block.
+    assert!(
+        matches!(&rows[0], DetailRow::Section { text, .. } if text == "Generation (ComfyUI)"),
+        "first row must be the section heading, got {:?}",
+        rows[0]
+    );
+    let labels: Vec<&str> = rows
         .iter()
         .filter_map(|r| match r {
-            DetailRow::Span { text, bold: true } | DetailRow::Section { text, .. } => {
-                Some(text.as_str())
-            }
+            DetailRow::Pair { label, .. } | DetailRow::Note { label, .. } => Some(label.as_str()),
             _ => None,
         })
         .collect();
-    assert_eq!(
-        headings,
-        ["Generation (ComfyUI)", "Prompt", "Negative prompt"]
+    assert!(
+        labels.contains(&"Prompt"),
+        "the positive prompt must be labelled: {rows:?}"
+    );
+    assert!(
+        labels.contains(&"Negative"),
+        "the negative prompt must be labelled: {rows:?}"
     );
 }
 
