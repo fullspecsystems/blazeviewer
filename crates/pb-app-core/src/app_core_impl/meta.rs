@@ -614,7 +614,10 @@ mod tests {
     }
 
     /// End to end (task #137): a generated PNG on disk reaches the Details table
-    /// as a Generation block, ahead of Dimensions, with the prompt as a Body row.
+    /// as a Generation block, ahead of Dimensions, with the prompt as a labelled
+    /// `Pair` — a prompt we *have* is a Pair (its text wraps in the value), while one
+    /// we do not is an italic `Note`. It was a bare `Body` until a73d6561, which
+    /// updated `genmeta/tests.rs` and missed this one.
     #[test]
     fn a_generated_png_lands_a_generation_block_in_the_details_table() {
         let dir = std::env::temp_dir().join(format!("pb-genmeta-{}", std::process::id()));
@@ -646,9 +649,12 @@ mod tests {
             .position(|r| r.contains("Generation"))
             .expect("a Generation heading");
         assert!(
-            rows.iter()
-                .any(|r| matches!(r, DetailRow::Body { text } if text == "a red bird on a wire")),
-            "the prompt must be a Body row: {flat:?}"
+            rows.iter().any(|r| matches!(
+                r,
+                DetailRow::Pair { label, value }
+                    if label == "Prompt" && value == "a red bird on a wire"
+            )),
+            "the prompt must be a labelled Pair row: {flat:?}"
         );
         assert!(flat.iter().any(|r| r == "Seed: 4242"), "{flat:?}");
         // Under the basic identity facts — dimensions, codec, file size — which
