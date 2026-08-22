@@ -324,6 +324,16 @@ pub enum CoreEvent {
     Pinch { delta: f32 },
     /// Double-tap / double-click (toggle 1:1 ↔ fit).
     DoubleTap,
+    /// A touch pan ended in a flick: keep panning, decaying, until it stops or reaches an
+    /// edge. Velocity is physical px/sec. **Touch only** — a trackpad's momentum already
+    /// arrives from the OS as more [`CoreEvent::Scroll`], so feeding this from scroll would
+    /// decelerate a Mac twice.
+    PanFling { vx: f32, vy: f32 },
+    /// A pinch was released while still changing scale: keep zooming, decaying, about the
+    /// last pointer position (the finger midpoint). `v_log` is in log space — e-folds per
+    /// second — because zoom is multiplicative. **Touch only**, and unconventional: see
+    /// [`ZoomInertia`](crate::ZoomInertia).
+    ZoomFling { v_log: f32 },
     /// Files dropped onto the window.
     DroppedPaths(Vec<PathBuf>),
     /// A menu item was chosen — routed through the same [`Action`] vocabulary as keys.

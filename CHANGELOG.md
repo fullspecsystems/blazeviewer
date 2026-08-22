@@ -18,6 +18,13 @@ with any pre-release suffix carried only by the tag.
   listening on the other side.
   - **Pinch and spread to zoom**, about the point between your fingers rather
     than wherever the mouse was left.
+  - **A flick keeps going.** Throw a zoomed-in picture and it glides to a stop
+    instead of halting dead the moment your finger leaves the glass. It stops
+    at once if you touch down again, comes to rest cleanly at the edges rather
+    than grinding against them, and holding still before you lift places the
+    picture instead of throwing it.
+  - A quick pinch carries a little past your fingers as well, then stops — a
+    light follow-through rather than a zoom that runs away on its own.
   - **Double-tap** toggles between fitting the window and 100% — as does a
     two-finger tap, matching the trackpad gesture.
   - **Press and hold** opens the photo's context menu, the way a right-click

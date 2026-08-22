@@ -85,6 +85,23 @@ fn ease_scroll_zoom() -> bool {
     *ON.get_or_init(|| std::env::var("PB_EASE_ZOOM").map_or(true, |v| v != "0"))
 }
 
+/// Is touch pan inertia on? Default on; `PB_PAN_INERTIA=0` stops a flick dead on lift
+/// (the revert lever + an A/B feel comparison). Read once and cached.
+fn pan_inertia_on() -> bool {
+    use std::sync::OnceLock;
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var("PB_PAN_INERTIA").map_or(true, |v| v != "0"))
+}
+
+/// Is touch zoom inertia on? Default on **for evaluation only** — no platform glides a
+/// pinch, so this is expected to be A/B'd and quite possibly defaulted off.
+/// `PB_ZOOM_INERTIA=0` restores the conventional stop-dead pinch.
+fn zoom_inertia_on() -> bool {
+    use std::sync::OnceLock;
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var("PB_ZOOM_INERTIA").map_or(true, |v| v != "0"))
+}
+
 /// Interim adapter (task #54 Phase 0): a core [`DetailRow`] to the HUD table row it
 /// projects onto. Retires with the HUD's Details tab.
 fn hud_row(r: DetailRow) -> Row {
@@ -206,6 +223,8 @@ impl AppCore {
             video_read_tx,
             video_read_rx,
             dragging: false,
+            pan_inertia: None,
+            zoom_inertia: None,
             rotations: std::collections::HashMap::new(),
             video_resume: std::collections::HashMap::new(),
             zoom_started: None,
@@ -779,6 +798,9 @@ impl AppCore {
                 self.pan_last = None;
                 self.pie_glow_started = None;
                 self.dragging = false;
+                // A glide is a gesture still in flight; losing focus ends it like a drag.
+                self.cancel_pan_inertia();
+                self.cancel_zoom_inertia();
             }
             CoreEvent::MenuAction(action) => self.dispatch_action(action),
             CoreEvent::KeymapSubmitted(keymap) => self.apply_keymap(keymap),
@@ -802,6 +824,10 @@ impl AppCore {
             }
             // Trackpad double-tap ("smart magnify"): toggle 100%, sharing the `0` / menu path.
             CoreEvent::DoubleTap => self.dispatch_action(Action::ToggleOriginal),
+            // A touch pan ended in a flick — glide on, decaying (see `PanInertia`).
+            CoreEvent::PanFling { vx, vy } => self.fling_pan(vx, vy),
+            // A pinch was released mid-scale — keep zooming, decaying (see `ZoomInertia`).
+            CoreEvent::ZoomFling { v_log } => self.fling_zoom(v_log),
             // The per-tick core loop (hold-to-blaze / slideshow / prefetch / animation), stamping
             // `now` from the event. Emits `SetWake` with the core's next deadline.
             CoreEvent::Tick(now) => {
@@ -1238,6 +1264,8 @@ impl AppCore {
     /// The anchor tracks the current cursor so the ease zooms toward wherever the
     /// pointer is. The tick's `apply_zoom_ease` does the actual per-frame motion.
     fn queue_zoom_ease(&mut self, factor: f32) {
+        // A wheel notch takes over from a touch glide rather than compounding with it.
+        self.cancel_zoom_inertia();
         let base = self.zoom_ease.map_or(self.view.zoom, |z| z.target);
         let target = (base * factor).clamp(MIN_ZOOM, MAX_ZOOM);
         let anchor = self.last_cursor.unwrap_or_else(|| {
@@ -1340,7 +1368,10 @@ impl AppCore {
         // 2. Continuous zoom/pan while their keys are held (accelerating ramp).
         // Also glide any eased scroll-zoom toward its target — OR'd into `transforming` so it
         // keeps the loop ticking + suppresses the info panel like a held ramp.
-        let transforming = self.apply_view_holds(now) | self.apply_zoom_ease(now);
+        let transforming = self.apply_view_holds(now)
+            | self.apply_zoom_ease(now)
+            | self.apply_pan_inertia(now)
+            | self.apply_zoom_inertia(now);
 
         // 3. Gated self-paced advance while a nav key (space/backspace) is held. The initial tap
         // delay gates *repeat*, not draining/presenting, so a first-press miss shows the moment

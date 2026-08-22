@@ -455,6 +455,158 @@ impl AppCore {
         }
         true
     }
+
+    /// Throw the photo: start a pan glide from the velocity a touch contact had when it
+    /// lifted. Replaces any glide in flight, so a second flick re-throws rather than
+    /// compounding into something uncontrollable. Below
+    /// [`PAN_FLING_MIN_SPEED`](crate::engine::PAN_FLING_MIN_SPEED) the lift was placing the
+    /// photo rather than throwing it, and nothing starts.
+    pub fn fling_pan(&mut self, vx: f32, vy: f32) {
+        if !super::pan_inertia_on() || vx.hypot(vy) < crate::engine::PAN_FLING_MIN_SPEED {
+            self.pan_inertia = None;
+            return;
+        }
+        self.pan_inertia = Some(crate::PanInertia { vx, vy, last: None });
+    }
+
+    /// Stop any glide dead — the user grabbed the photo again, or focus was lost. A new
+    /// contact must take control instantly; a photo still drifting under a resting finger
+    /// is the single worst way this can feel.
+    pub fn cancel_pan_inertia(&mut self) {
+        self.pan_inertia = None;
+    }
+
+    /// Drive the touch pan glide set up by [`fling_pan`](Self::fling_pan). Each tick moves
+    /// by `v · dt` and then decays `v` by
+    /// [`pan_inertia_decay`](crate::engine::pan_inertia_decay) — the UIKit rate, so a flick
+    /// here decays like the momentum macOS produces for a trackpad. Returns whether it
+    /// advanced, so the tick keeps polling + redrawing exactly like a held pan ramp.
+    ///
+    /// Two behaviours worth keeping: a live drag always wins (it owns `view.pan`, so an
+    /// in-flight glide is dropped rather than fighting it), and **hitting the pan clamp
+    /// zeroes that axis** — otherwise the glide grinds invisibly against the edge for the
+    /// rest of its decay and the next flick feels dead. The axes are killed independently,
+    /// so a diagonal throw that reaches the left edge keeps sliding down.
+    pub fn apply_pan_inertia(&mut self, now: Instant) -> bool {
+        let Some(mut glide) = self.pan_inertia else {
+            return false;
+        };
+        if self.dragging {
+            self.pan_inertia = None;
+            return false;
+        }
+
+        let last = glide.last.unwrap_or(now);
+        let dt = (now - last).as_secs_f32().min(0.1);
+        glide.last = Some(now);
+
+        if dt > 0.0 {
+            let before = self.view.pan;
+            self.pan_by_pixels(glide.vx * dt, glide.vy * dt);
+            let after = self.view.pan;
+            if glide.vx != 0.0 && (after[0] - before[0]).abs() < f32::EPSILON {
+                glide.vx = 0.0;
+            }
+            if glide.vy != 0.0 && (after[1] - before[1]).abs() < f32::EPSILON {
+                glide.vy = 0.0;
+            }
+            let decay = crate::engine::pan_inertia_decay(dt);
+            glide.vx *= decay;
+            glide.vy *= decay;
+        }
+
+        if glide.vx.hypot(glide.vy) < crate::engine::PAN_INERTIA_MIN_SPEED {
+            self.pan_inertia = None;
+        } else {
+            self.pan_inertia = Some(glide);
+        }
+        true
+    }
+
+    /// Throw the zoom: start a glide from the log-space scale velocity a pinch had when it
+    /// was released. Replaces any glide in flight.
+    ///
+    /// Unlike [`fling_pan`](Self::fling_pan) this matches no platform convention — iOS and
+    /// macOS both stop a pinch dead — so it is gated behind `PB_ZOOM_INERTIA` and meant to
+    /// be judged by feel.
+    pub fn fling_zoom(&mut self, v_log: f32) {
+        if !super::zoom_inertia_on() || v_log.abs() < crate::engine::ZOOM_FLING_MIN_SPEED {
+            self.zoom_inertia = None;
+            return;
+        }
+        let Some((_, _, sw, sh)) = self.screen_and_image() else {
+            self.zoom_inertia = None;
+            return;
+        };
+        // Anchor exactly where `zoom_about_cursor` would: each pinch sample fed
+        // `last_cursor` the finger midpoint, so this is the point between them at release.
+        let anchor = self
+            .last_cursor
+            .unwrap_or([sw as f32 / 2.0, sh as f32 / 2.0]);
+        self.zoom_inertia = Some(crate::ZoomInertia {
+            // Capped: total travel is roughly `v₀ · τ`, so an uncapped fast pinch keeps
+            // zooming for several more e-folds after release — a second gesture.
+            v_log: v_log.clamp(
+                -crate::engine::ZOOM_FLING_MAX_SPEED,
+                crate::engine::ZOOM_FLING_MAX_SPEED,
+            ),
+            anchor,
+            last: None,
+        });
+    }
+
+    /// Stop any zoom glide dead — a new contact, a wheel notch, or lost focus.
+    pub fn cancel_zoom_inertia(&mut self) {
+        self.zoom_inertia = None;
+    }
+
+    /// Drive the zoom glide set up by [`fling_zoom`](Self::fling_zoom). Each tick applies
+    /// `e^(v_log · dt)` about the stored anchor, then decays `v_log` by
+    /// [`zoom_inertia_decay`](crate::engine::zoom_inertia_decay) — log space throughout,
+    /// because zoom is multiplicative and a linear velocity would tear away at high zoom
+    /// and crawl at low. Returns whether it advanced, so the tick keeps redrawing.
+    ///
+    /// A held zoom key or an in-flight eased scroll-zoom wins (both own `view.zoom`), and
+    /// reaching `MIN_ZOOM`/`MAX_ZOOM` ends the glide rather than grinding at the limit.
+    pub fn apply_zoom_inertia(&mut self, now: Instant) -> bool {
+        let Some(mut glide) = self.zoom_inertia else {
+            return false;
+        };
+        if self.zoom_held().is_some() || self.zoom_ease.is_some() {
+            self.zoom_inertia = None;
+            return false;
+        }
+        let Some((iw, ih, sw, sh)) = self.screen_and_image() else {
+            self.zoom_inertia = None;
+            return false;
+        };
+
+        let last = glide.last.unwrap_or(now);
+        let dt = (now - last).as_secs_f32().min(0.1);
+        glide.last = Some(now);
+
+        if dt > 0.0 {
+            let before = self.view.zoom;
+            self.view
+                .zoom_about((glide.v_log * dt).exp(), glide.anchor, iw, ih, sw, sh);
+            // #124: reconcile AFTER `zoom_about` — it reads the bound texture's dims.
+            self.reconcile_zoom_rep();
+            self.push_view();
+            self.draw();
+            self.refresh_cursor();
+            if (self.view.zoom - before).abs() < f32::EPSILON {
+                glide.v_log = 0.0; // pinned at MIN_ZOOM / MAX_ZOOM
+            }
+            glide.v_log = crate::engine::zoom_inertia_step(glide.v_log, dt);
+        }
+
+        if glide.v_log.abs() < crate::engine::ZOOM_INERTIA_MIN_SPEED {
+            self.zoom_inertia = None;
+        } else {
+            self.zoom_inertia = Some(glide);
+        }
+        true
+    }
 }
 
 #[cfg(test)]

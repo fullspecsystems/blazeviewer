@@ -264,6 +264,40 @@ pub struct ZoomEase {
     pub last: Option<Instant>,
 }
 
+/// A pan glide continuing after a touch flick — the pan twin of [`ZoomEase`].
+///
+/// Windows contributes nothing here: the shell's window is registered for native touch, so
+/// the OS runs no gesture arbitration and produces no momentum of its own. macOS is the
+/// opposite — it keeps emitting scroll events right through the momentum phase — so this is
+/// deliberately **touch-only** and must never be fed from `Scroll`, or a Mac trackpad would
+/// decelerate twice. The decay rate is borrowed from UIKit so both platforms *feel* alike
+/// even though only one of them is hand-rolled. Toggle off with `PB_PAN_INERTIA=0`.
+#[derive(Debug, Clone, Copy)]
+pub struct PanInertia {
+    /// Horizontal velocity in physical px/sec, decaying each tick.
+    pub vx: f32,
+    /// Vertical velocity in physical px/sec, decaying each tick.
+    pub vy: f32,
+    /// The last tick the glide advanced, for a frame-rate-independent `dt`.
+    pub last: Option<Instant>,
+}
+
+/// A zoom glide continuing after a pinch is released — the zoom twin of [`PanInertia`].
+///
+/// Unlike the pan glide this matches **no** platform convention: iOS and macOS both stop a
+/// pinch dead on lift (they rubber-band at the limits, but never glide). It exists to be
+/// A/B'd by feel — `PB_ZOOM_INERTIA=0` restores the conventional stop-dead behaviour.
+#[derive(Debug, Clone, Copy)]
+pub struct ZoomInertia {
+    /// Zoom velocity in **log space** (e-folds per second). Zoom is multiplicative, so a
+    /// linear velocity would tear away at high zoom and crawl at low.
+    pub v_log: f32,
+    /// Screen-space point kept fixed across the glide (the finger midpoint at release).
+    pub anchor: [f32; 2],
+    /// The last tick the glide advanced, for a frame-rate-independent `dt`.
+    pub last: Option<Instant>,
+}
+
 pub struct AppCore {
     /// The injected wall-clock "now" for this event/tick — **the core never calls
     /// `Instant::now()`** (NS0 5.5 / Phase 0.3). The shell stamps it at each event-loop entry
@@ -342,6 +376,10 @@ pub struct AppCore {
     pub zoom_last: Option<Instant>,
     /// The in-flight eased scroll-zoom, if any (see [`ZoomEase`]).
     pub zoom_ease: Option<ZoomEase>,
+    /// The in-flight touch pan glide, if any (see [`PanInertia`]).
+    pub pan_inertia: Option<PanInertia>,
+    /// The in-flight touch zoom glide, if any (see [`ZoomInertia`]).
+    pub zoom_inertia: Option<ZoomInertia>,
     /// Two-finger pan gesture timing accumulators (start + last event).
     pub pan_started: Option<Instant>,
     pub pan_last: Option<Instant>,

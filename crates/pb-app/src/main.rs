@@ -373,6 +373,11 @@ const TOUCH_DOUBLE_TAP_SLOP_PX: f64 = 48.0;
 /// resting on the glass can't creep the zoom.
 const TOUCH_PINCH_MIN_DELTA: f64 = 0.002;
 
+/// How far back the lift velocity is measured for a fling. A single frame's delta is far
+/// too noisy to throw with — it is the usual reason hand-rolled inertia feels erratic —
+/// while ~80 ms is short enough to still be the flick the user just made.
+const TOUCH_FLING_WINDOW: Duration = Duration::from_millis(80);
+
 /// `PB_TOUCH_DIAG=1` — stderr trace of the gesture recognizer below (the house
 /// targeted-diag pattern; see *Instrumentation* in CLAUDE.md). Off by default.
 fn touch_diag(msg: &str) {
@@ -414,6 +419,11 @@ struct TouchState {
     /// The opening contact landed on a folder-tree row, so this gesture is a tree
     /// click — never a photo tap, and never half of a double-tap.
     tree_hit: bool,
+    /// Recent positions of the primary contact, for the lift velocity estimate. Trimmed by
+    /// [`TOUCH_FLING_WINDOW`] when read, capped by length as it grows.
+    samples: Vec<(Instant, (f64, f64))>,
+    /// Recent contact separations during a pinch, for the release zoom velocity.
+    pinch_samples: Vec<(Instant, f64)>,
     /// Contacts the egui overlay claimed on their `Started`, and therefore owns until
     /// they lift. Deliberately kept *out* of `points`: a panel-owned finger must never
     /// be able to masquerade as a second contact on the photo (which is what turned a
@@ -444,6 +454,50 @@ impl TouchState {
 
     /// When this gesture's long-press comes due, if one is still possible. Folded into
     /// the event loop's wake calc so a resting finger actually wakes the loop.
+    /// Velocity of the primary contact in physical px/sec, measured across the last
+    /// [`TOUCH_FLING_WINDOW`] rather than from the final delta.
+    ///
+    /// Measured against `now` (the lift) rather than the newest sample, which gives the
+    /// rest-then-lift case for free: hold the photo still for a moment before letting go
+    /// and every sample falls outside the window, so it reads as a placement — zero
+    /// velocity — instead of throwing at whatever speed the finger last happened to have.
+    fn fling_velocity(&self, now: Instant) -> (f32, f32) {
+        let Some(&(_, last_pos)) = self.samples.last() else {
+            return (0.0, 0.0);
+        };
+        let cutoff = now.checked_sub(TOUCH_FLING_WINDOW).unwrap_or(now);
+        let Some(&(t0, p0)) = self.samples.iter().find(|(t, _)| *t >= cutoff) else {
+            return (0.0, 0.0);
+        };
+        let dt = now.saturating_duration_since(t0).as_secs_f32();
+        if dt <= 0.0 {
+            return (0.0, 0.0);
+        }
+        (
+            ((last_pos.0 - p0.0) as f32) / dt,
+            ((last_pos.1 - p0.1) as f32) / dt,
+        )
+    }
+
+    /// Zoom velocity at release in **log space** (e-folds/sec), from the recent pinch
+    /// separations. Same window and same rest-then-lift semantics as
+    /// [`fling_velocity`](Self::fling_velocity): settle on a size before letting go and the
+    /// samples age out, so it reads as a placement rather than a throw.
+    fn zoom_fling_velocity(&self, now: Instant) -> f32 {
+        let Some(&(_, last_spread)) = self.pinch_samples.last() else {
+            return 0.0;
+        };
+        let cutoff = now.checked_sub(TOUCH_FLING_WINDOW).unwrap_or(now);
+        let Some(&(t0, s0)) = self.pinch_samples.iter().find(|(t, _)| *t >= cutoff) else {
+            return 0.0;
+        };
+        let dt = now.saturating_duration_since(t0).as_secs_f32();
+        if dt <= 0.0 || s0 <= 1.0 || last_spread <= 1.0 {
+            return 0.0;
+        }
+        (last_spread / s0).ln() as f32 / dt
+    }
+
     fn long_press_due(&self) -> Option<Instant> {
         if self.long_fired || self.slipped || self.multi || self.points.len() != 1 {
             return None;
@@ -921,6 +975,8 @@ impl App {
             zoom_started: None,
             zoom_last: None,
             zoom_ease: None,
+            pan_inertia: None,
+            zoom_inertia: None,
             pan_started: None,
             pan_last: None,
             resize_settle_at: None,
@@ -4225,6 +4281,13 @@ impl ApplicationHandler for App {
                             });
                             match self.touch.points.len() {
                                 1 => {
+                                    // A new contact takes control instantly — a photo still
+                                    // drifting under a resting finger is the worst way this
+                                    // can feel.
+                                    self.core.cancel_pan_inertia();
+                                    self.core.cancel_zoom_inertia();
+                                    self.touch.samples.clear();
+                                    self.touch.samples.push((now, loc));
                                     self.touch.started = Some(now);
                                     self.touch.slipped = false;
                                     self.touch.multi = false;
@@ -4255,6 +4318,10 @@ impl ApplicationHandler for App {
                                     self.core.dragging = false;
                                     self.core.refresh_cursor();
                                     self.touch.pinch_base = self.touch.spread();
+                                    self.touch.pinch_samples.clear();
+                                    if let Some(s) = self.touch.spread() {
+                                        self.touch.pinch_samples.push((now, s));
+                                    }
                                     touch_diag(&format!(
                                         "second finger id={} spread={:?}",
                                         touch.id, self.touch.pinch_base
@@ -4279,11 +4346,29 @@ impl ApplicationHandler for App {
                             let dy = loc.1 - p.origin.1;
                             slipped_now = dx * dx + dy * dy >= TOUCH_SLOP_PX * TOUCH_SLOP_PX;
                         }
+                        // Sample the primary contact whether or not it has cleared the slop
+                        // yet, so a fast flick that starts and ends inside one window still
+                        // has a history to measure.
+                        if self.touch.points.first().is_some_and(|p| p.id == touch.id) {
+                            self.touch.samples.push((now, loc));
+                            if self.touch.samples.len() > 32 {
+                                self.touch.samples.remove(0);
+                            }
+                        }
                         if slipped_now {
                             self.touch.slipped = true;
                         }
 
                         if self.touch.multi {
+                            // Sample the separation every move, not only when it clears the
+                            // pinch threshold below, so the release velocity has a history
+                            // even for a fast flick that never lingers.
+                            if let Some(s) = self.touch.spread() {
+                                self.touch.pinch_samples.push((now, s));
+                                if self.touch.pinch_samples.len() > 32 {
+                                    self.touch.pinch_samples.remove(0);
+                                }
+                            }
                             // Pinch: hand the core the same relative magnification the
                             // macOS trackpad path produces, anchored at the finger
                             // midpoint so the photo zooms about the gesture, not the
@@ -4342,6 +4427,31 @@ impl ApplicationHandler for App {
                             // Two fingers down and up, still and quick: the same "smart
                             // magnify" intent as a trackpad two-finger double-tap, so it
                             // rides the core's existing `DoubleTap` (toggle 1:1 ↔ fit).
+                            // A pan still moving when it lifted throws the photo. Pinches,
+                            // long-presses and tree clicks are excluded — none of them is a
+                            // throw — and the contact must actually have travelled, since a
+                            // tap has no velocity worth honouring.
+                            let fling = self.touch.slipped
+                                && !self.touch.multi
+                                && !self.touch.long_fired
+                                && !self.touch.tree_hit
+                                && touch.phase == TouchPhase::Ended;
+                            let (vx, vy) = if fling {
+                                self.touch.fling_velocity(now)
+                            } else {
+                                (0.0, 0.0)
+                            };
+                            // A pinch released while still changing scale throws the zoom.
+                            // Mutually exclusive with the pan fling above (that one requires
+                            // `!multi`), so at most one glide ever starts.
+                            let zoom_fling = self.touch.multi
+                                && !self.touch.long_fired
+                                && touch.phase == TouchPhase::Ended;
+                            let v_log = if zoom_fling {
+                                self.touch.zoom_fling_velocity(now)
+                            } else {
+                                0.0
+                            };
                             let two_finger_tap = self.touch.multi
                                 && !self.touch.slipped
                                 && !self.touch.long_fired
@@ -4388,6 +4498,14 @@ impl ApplicationHandler for App {
                             self.core.refresh_cursor();
                             if two_finger_tap || double_tap {
                                 self.core.handle(contract::CoreEvent::DoubleTap);
+                            } else if fling {
+                                // After `dragging = false` above, so the glide isn't
+                                // cancelled by its own drag on the very next tick.
+                                touch_diag(&format!("fling vx={vx:.0} vy={vy:.0} px/s"));
+                                self.core.handle(contract::CoreEvent::PanFling { vx, vy });
+                            } else if zoom_fling && v_log != 0.0 {
+                                touch_diag(&format!("zoom fling v_log={v_log:+.2} e-folds/s"));
+                                self.core.handle(contract::CoreEvent::ZoomFling { v_log });
                             }
                         } else {
                             // One finger of a pinch lifted. Don't resume panning with the
@@ -4405,6 +4523,11 @@ impl ApplicationHandler for App {
                 ..
             } => {
                 let pressed = state == ElementState::Pressed;
+                if pressed {
+                    // Grabbing with the mouse stops a touch glide, same as a new contact.
+                    self.core.cancel_pan_inertia();
+                    self.core.cancel_zoom_inertia();
+                }
                 // The interactive on-image controls (welcome Open buttons, play hint, scan-pill
                 // Cancel) are all egui buttons handled in the overlay now — a press over any egui
                 // panel is swallowed before this event by `overlay_consumed`. So here only the

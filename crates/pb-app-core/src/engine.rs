@@ -219,6 +219,79 @@ pub const WHEEL_PAN_STEP: f32 = 80.0;
 /// flip to `-1.0` to invert.
 pub const GESTURE_PAN_DIR: f32 = 1.0;
 
+/// Pan-inertia deceleration: the fraction of the current velocity surviving each
+/// millisecond. `0.998` is UIKit's `UIScrollView.DecelerationRate.normal` — a time constant
+/// of ~500 ms — deliberately borrowed so a flick on a Windows touchscreen decays like the
+/// momentum macOS generates for a trackpad, rather than like a constant we invented.
+/// (UIKit's `.fast` is `0.99`, ~100 ms, if this ever feels floaty.)
+pub const PAN_INERTIA_DECAY_PER_MS: f32 = 0.998;
+/// Below this speed (physical px/sec) the glide is over — ends the asymptotic tail.
+pub const PAN_INERTIA_MIN_SPEED: f32 = 24.0;
+/// A lift slower than this (physical px/sec) was placing the photo, not throwing it, and
+/// starts no glide at all.
+pub const PAN_FLING_MIN_SPEED: f32 = 120.0;
+
+/// Zoom-inertia deceleration, per millisecond. Deliberately faster than
+/// [`PAN_INERTIA_DECAY_PER_MS`] (~250 ms vs ~500 ms): a pinch is a *precision* act — the
+/// user pinches to a size — so a long glide overshoots the size they chose. Note that
+/// neither iOS nor macOS glides zoom at all; this exists to be A/B'd, not because a
+/// platform does it.
+pub const ZOOM_INERTIA_DECAY_PER_MS: f32 = 0.988;
+/// Constant deceleration (e-folds/sec²) applied *on top of* the viscous decay above.
+///
+/// Exponential decay alone has an asymptotic tail — it never actually stops, it only gets
+/// cut off at a floor — and that tail is what made the first version of the zoom glide
+/// overrun. A constant friction term brings it to a **definite** stop, which is what makes
+/// it read as controlled rather than merely slow.
+pub const ZOOM_INERTIA_FRICTION: f32 = 4.0;
+/// Ceiling on the launch velocity. Total travel is roughly `v₀ · τ`, so an uncapped fast
+/// pinch adds *several* e-folds of zoom after release — a second gesture, not a follow
+/// through. Capped, the glide contributes at most ~1.2×.
+pub const ZOOM_FLING_MAX_SPEED: f32 = 2.5;
+/// Below this |log-zoom| speed (e-folds/sec) the zoom glide is over.
+pub const ZOOM_INERTIA_MIN_SPEED: f32 = 0.20;
+/// A pinch releasing slower than this (e-folds/sec) was settling on a size, not throwing.
+pub const ZOOM_FLING_MIN_SPEED: f32 = 0.60;
+
+/// Fraction of the **log-space** zoom velocity surviving a tick of `dt` seconds, at the
+/// [`ZOOM_INERTIA_DECAY_PER_MS`] rate. Same shape as [`pan_inertia_decay`], separate
+/// constant so the two tune independently — they want different curves.
+pub fn zoom_inertia_decay(dt: f32) -> f32 {
+    if dt <= 0.0 {
+        1.0
+    } else {
+        ZOOM_INERTIA_DECAY_PER_MS.powf(dt * 1000.0)
+    }
+}
+
+/// One tick of zoom-glide friction: the viscous decay above, plus [`ZOOM_INERTIA_FRICTION`]
+/// as a constant deceleration so the glide reaches zero instead of asymptotically
+/// approaching it. Never crosses zero — friction stops motion, it doesn't reverse it.
+pub fn zoom_inertia_step(v_log: f32, dt: f32) -> f32 {
+    if dt <= 0.0 {
+        return v_log;
+    }
+    let decayed = v_log * zoom_inertia_decay(dt);
+    let drop = ZOOM_INERTIA_FRICTION * dt;
+    if decayed.abs() <= drop {
+        0.0
+    } else {
+        decayed - decayed.signum() * drop
+    }
+}
+
+/// Fraction of the pan velocity surviving a tick of `dt` seconds, at the
+/// [`PAN_INERTIA_DECAY_PER_MS`] rate. Frame-rate independent (driven by real `dt`);
+/// `dt <= 0` returns `1.0`, so a zero-length tick latches the clock and slows nothing —
+/// the mirror of [`zoom_ease_alpha`]'s `0.0`.
+pub fn pan_inertia_decay(dt: f32) -> f32 {
+    if dt <= 0.0 {
+        1.0
+    } else {
+        PAN_INERTIA_DECAY_PER_MS.powf(dt * 1000.0)
+    }
+}
+
 /// Hold-to-pan curve: pan speed (px/sec) ramps from a gentle start to a fast max
 /// over `PAN_RAMP_SECS`, along the same [`hold_ramp`] ease-in as zoom (per the
 /// owner's note). Time-based, frame-rate independent. `MIN_SPEED` is the **tap**
@@ -1367,6 +1440,84 @@ mod tests {
             assert!(e >= prev, "monotonic non-decreasing");
             assert!(e <= (t / 0.9) + 1e-6, "eased ≤ linear");
             prev = e;
+        }
+    }
+
+    /// A zero-length tick must latch the clock without slowing the glide, or a burst of
+    /// same-instant ticks would decay the throw for free.
+    #[test]
+    fn pan_inertia_decay_is_neutral_on_a_zero_tick() {
+        assert_eq!(pan_inertia_decay(0.0), 1.0);
+        assert_eq!(
+            pan_inertia_decay(-1.0),
+            1.0,
+            "a negative dt is treated as zero"
+        );
+    }
+
+    /// Frame-rate independence is the whole point: decaying once over 100 ms must equal
+    /// decaying ten times over 10 ms, or the glide would depend on the refresh rate.
+    #[test]
+    fn pan_inertia_decay_is_frame_rate_independent() {
+        let one_shot = pan_inertia_decay(0.1);
+        let stepped = (0..10).fold(1.0_f32, |v, _| v * pan_inertia_decay(0.01));
+        assert!(
+            (one_shot - stepped).abs() < 1e-4,
+            "one 100ms step ({one_shot}) should match ten 10ms steps ({stepped})"
+        );
+    }
+
+    /// The borrowed UIKit rate: ~500 ms time constant, so roughly 1/e of the throw survives
+    /// half a second. This pins the *feel* against the trackpad, which is why it's borrowed
+    /// rather than tuned.
+    #[test]
+    fn pan_inertia_decay_matches_the_uikit_time_constant() {
+        let after_500ms = pan_inertia_decay(0.5);
+        let one_over_e = 1.0_f32 / std::f32::consts::E;
+        assert!(
+            (after_500ms - one_over_e).abs() < 0.02,
+            "expected ~{one_over_e} of the velocity left after 500ms, got {after_500ms}"
+        );
+        assert!(
+            pan_inertia_decay(2.0) < 0.02,
+            "a throw is spent within a couple of seconds"
+        );
+    }
+
+    /// Zoom settles faster than pan, deliberately: a pinch aims at a size, so a long glide
+    /// would overshoot it. If this ever inverts, the feel rationale has been lost.
+    #[test]
+    fn zoom_inertia_settles_faster_than_pan() {
+        assert_eq!(zoom_inertia_decay(0.0), 1.0);
+        assert!(
+            zoom_inertia_decay(0.25) < pan_inertia_decay(0.25),
+            "a zoom throw must decay quicker than a pan throw"
+        );
+    }
+
+    /// Friction must bring the glide to a *definite* stop and never reverse it. The
+    /// asymptotic tail of pure exponential decay is exactly what made the first zoom glide
+    /// overrun, so this pins the fix.
+    #[test]
+    fn zoom_inertia_step_stops_dead_and_never_reverses() {
+        for launch in [ZOOM_FLING_MAX_SPEED, -ZOOM_FLING_MAX_SPEED] {
+            let mut v = launch;
+            let mut ticks = 0;
+            while v != 0.0 && ticks < 1000 {
+                let next = zoom_inertia_step(v, 0.008); // ~120 Hz
+                assert!(next.abs() <= v.abs(), "friction must never speed it up");
+                assert!(
+                    next == 0.0 || next.signum() == launch.signum(),
+                    "friction must never reverse the direction"
+                );
+                v = next;
+                ticks += 1;
+            }
+            assert_eq!(v, 0.0, "the glide must reach zero, not merely approach it");
+            assert!(
+                ticks < 40,
+                "a throw should be spent in well under a third of a second (got {ticks} ticks)"
+            );
         }
     }
 
