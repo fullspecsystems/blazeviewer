@@ -111,6 +111,12 @@ pub struct AppCoreHandle {
     /// `inspector_refresh` on a `PanelsChanged` marker, read by the indexed
     /// `inspector_row_*` accessors — same pull pattern as `help_snapshot`.
     inspector_snapshot: Vec<(u8, String, String)>,
+    /// Per-row inline actions for `inspector_snapshot` (task #137): `(row_index, label,
+    /// action_id)`, populated only for a Section heading that carries Copy buttons (the
+    /// generation block's Copy prompt / Copy JSON|parameters). The flattened row tuple has no
+    /// room for them, so they ride here and are read by the `inspector_row_action_*` accessors.
+    /// Rebuilt with the snapshot each `inspector_refresh`.
+    inspector_actions: Vec<(usize, String, String)>,
     /// Flattened folder-tree rows (task #54): the Finder tree ([`FsTree`]) for disk decks,
     /// or the v1 `folder_tree_panel` for archive/empty decks — snapshotted by `tree_refresh`
     /// on a `PanelsChanged` marker so the indexed accessors + actions share one stable view.
@@ -180,6 +186,7 @@ impl AppCoreHandle {
             subtitle_picker_snapshot: Vec::new(),
             audio_picker_snapshot: Vec::new(),
             inspector_snapshot: Vec::new(),
+            inspector_actions: Vec::new(),
             tree_snapshot: Vec::new(),
             pending_launch_paths: Vec::new(),
             launch_paths_record: Vec::new(),
@@ -420,6 +427,7 @@ impl AppCoreHandle {
         use pb_app_core::overlay::InspectorTab;
         use pb_app_core::panels::{DescribeBody, DetailRow, TextBody};
         let mut rows: Vec<(u8, String, String)> = Vec::new();
+        self.inspector_actions.clear();
         match self.core.panels.inspector {
             // Text / Describe don't repeat a title row — the tab bar already labels them;
             // Details leads with the filename (its first Span).
@@ -469,23 +477,26 @@ impl AppCoreHandle {
                             rows.push((if bold { 0 } else { 4 }, text, String::new()))
                         }
                         DetailRow::Pair { label, value } => rows.push((1, label, value)),
-                        // ⚠ CROSS-PLATFORM DEBT (task #137): a Section is a bold
-                        // heading that carries inline buttons (Copy prompt / Copy
-                        // data). The flattened row tuple has no room for them, so
-                        // macOS gets the heading as a plain kind 0 and loses the
-                        // buttons. Chosen deliberately over a blind Swift change a
-                        // Windows session cannot compile — `pb-mac-ffi` builds to an
-                        // empty staticlib off Mac, so an error here is invisible.
-                        // The commands stay reachable from the Edit menu meanwhile.
-                        // The Mac fix: carry `actions` and render them like the
-                        // Describe tab's "Ask" button (InspectorPanel.swift:211).
-                        DetailRow::Section { text, .. } => rows.push((0, text, String::new())),
-                        // A Note is a label + italic muted explanation. The row
-                        // tuple carries no styling, so macOS shows it as an
-                        // ordinary pair — cosmetic only, and the wording still
-                        // reads correctly ("Prompt — assembled by X"). The Mac fix
-                        // is a kind 5 rendered in italic secondary.
-                        DetailRow::Note { label, text } => rows.push((1, label, text)),
+                        // A Section is a bold kind-0 heading whose inline buttons (Copy prompt /
+                        // Copy JSON|parameters, task #137) can't fit the flattened row tuple, so
+                        // they ride the parallel `inspector_actions` channel keyed by row index —
+                        // read back by the `inspector_row_action_*` accessors and rendered on the
+                        // heading like the Describe tab's "Ask" button.
+                        DetailRow::Section { text, actions } => {
+                            let idx = rows.len();
+                            for a in actions {
+                                self.inspector_actions.push((
+                                    idx,
+                                    a.label,
+                                    a.action.id().to_string(),
+                                ));
+                            }
+                            rows.push((0, text, String::new()));
+                        }
+                        // A Note is a label + italic muted explanation ("Prompt — assembled by
+                        // X"): kind 5, rendered label + italic secondary so it can't be mistaken
+                        // for the value itself.
+                        DetailRow::Note { label, text } => rows.push((5, label, text)),
                         // A wrapped paragraph (a generation prompt, task #137) is
                         // kind 2 — the body-paragraph row the Swift side already
                         // renders. On Details (tab 0) that takes the literal
@@ -505,7 +516,8 @@ impl AppCoreHandle {
     }
 
     /// Row kind: 0 header, 1 label/value pair, 2 body paragraph, 3 status/muted,
-    /// 4 sub-header (regular-weight span under a header, e.g. the folder path).
+    /// 4 sub-header (regular-weight span under a header, e.g. the folder path),
+    /// 5 italic note (label + italic secondary explanation, task #137).
     fn inspector_row_kind(&self, i: usize) -> u8 {
         self.inspector_snapshot.get(i).map(|r| r.0).unwrap_or(0)
     }
@@ -523,6 +535,35 @@ impl AppCoreHandle {
         self.inspector_snapshot
             .get(i)
             .map(|r| r.2.clone())
+            .unwrap_or_default()
+    }
+
+    /// How many inline actions row `i` carries (task #137) — non-zero only on a generation
+    /// Section heading (Copy prompt / Copy JSON|parameters).
+    fn inspector_row_action_count(&self, i: usize) -> usize {
+        self.inspector_actions
+            .iter()
+            .filter(|(r, _, _)| *r == i)
+            .count()
+    }
+
+    /// The label of row `i`'s `j`-th inline action.
+    fn inspector_row_action_label(&self, i: usize, j: usize) -> String {
+        self.inspector_actions
+            .iter()
+            .filter(|(r, _, _)| *r == i)
+            .nth(j)
+            .map(|(_, l, _)| l.clone())
+            .unwrap_or_default()
+    }
+
+    /// The stable action id of row `i`'s `j`-th inline action — dispatch via `menu_action`.
+    fn inspector_row_action_id(&self, i: usize, j: usize) -> String {
+        self.inspector_actions
+            .iter()
+            .filter(|(r, _, _)| *r == i)
+            .nth(j)
+            .map(|(_, _, id)| id.clone())
             .unwrap_or_default()
     }
 
@@ -4764,6 +4805,10 @@ mod ffi {
         fn inspector_row_kind(&self, i: usize) -> u8;
         fn inspector_row_a(&self, i: usize) -> String;
         fn inspector_row_b(&self, i: usize) -> String;
+        // Per-row inline actions (task #137) — a generation Section heading's Copy buttons.
+        fn inspector_row_action_count(&self, i: usize) -> usize;
+        fn inspector_row_action_label(&self, i: usize, j: usize) -> String;
+        fn inspector_row_action_id(&self, i: usize, j: usize) -> String;
 
         // The native folder tree (⇧F, task #54) — Finder browser (disk) / v1 flat (archive).
         fn tree_visible(&self) -> bool;

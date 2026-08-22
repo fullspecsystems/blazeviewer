@@ -50,12 +50,15 @@ pub enum DetailRow {
     /// glance. Rendering it like every other value invites it being copied out and
     /// pasted as if it were the prompt.
     Note { label: String, text: String },
-    /// A full-width **wrapped paragraph** — a generation prompt (task #137).
+    /// A full-width **wrapped paragraph** with no label column.
     ///
-    /// Distinct from [`Span`](DetailRow::Span), which is a single heading line:
-    /// this is body text that may run to thousands of characters and must wrap
-    /// rather than be clipped to a column. It deliberately has no label; the
-    /// heading above it says what it is.
+    /// Currently **unused**: generation prompts moved to the labelled [`Pair`](DetailRow::Pair)
+    /// column for consistency with the rest of the Details table (owner call 2026-08-07). The
+    /// variant + its per-shell renderers are retained as the reusable full-width-paragraph
+    /// primitive — and because dropping it would mean editing the winit `panels_ui.rs` arm, which
+    /// a macOS session can't compile-check (the cross-platform trap). `#[allow(dead_code)]` rather
+    /// than a blind delete; a Windows session can remove it wholesale if it stays unwanted.
+    #[allow(dead_code)]
     Body { text: String },
 }
 

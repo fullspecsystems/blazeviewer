@@ -364,6 +364,12 @@ final class MenuBar: NSObject {
             // Owner request: also reachable here, not just the photo context menu
             // (copies filename/dimensions/codec/size + all non-blob EXIF as text).
             item("copy_image_details", "Copy Image Details"),
+            // AI-generation metadata (task #137): also on the Details "Generation" heading as
+            // buttons, but a menu home makes them discoverable + keyboard-reachable. Generic
+            // dispatch (menuAction id → Action), so no bespoke FFI. No-op on non-AI images,
+            // matching the winit Edit menu.
+            item("copy_gen_prompt", "Copy Generation Prompt"),
+            item("copy_gen_data", "Copy Generation Data"),
             // On-device OCR (Apple Vision) + QR payloads (task #45). Unbound by default; the
             // core keymap owns any user binding (`T` shows the same text in the HUD panel).
             item("copy_text", "Copy Text from Image"),
