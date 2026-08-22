@@ -42,7 +42,9 @@ use std::time::{Duration, Instant};
 
 use winit::application::ApplicationHandler;
 use winit::dpi::{PhysicalPosition, PhysicalSize};
-use winit::event::{ElementState, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent};
+use winit::event::{
+    ElementState, KeyEvent, MouseButton, MouseScrollDelta, TouchPhase, WindowEvent,
+};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{CursorIcon, Icon, Window, WindowId};
@@ -341,6 +343,115 @@ fn collect_monitor_rects(
         .collect()
 }
 
+/// How far a touch contact must travel before it counts as a drag rather than a tap,
+/// in physical pixels. Real hardware reports a pixel or two of jitter inside even a
+/// deliberate 70 ms tap (measured on a SiS `VID_0457` panel), and forwarding that as
+/// pointer motion micro-pans the photo out from under the finger.
+const TOUCH_SLOP_PX: f64 = 8.0;
+
+/// How long one still finger must rest before it opens the photo context menu — the
+/// touch stand-in for a right-click. Windows' own press-and-hold never fires here:
+/// the window is registered for native touch, so the OS does no gesture arbitration
+/// on our behalf at all.
+const TOUCH_LONG_PRESS: Duration = Duration::from_millis(500);
+
+/// The longest a two-finger contact can last and still read as a tap rather than a
+/// pinch that happened to end near where it started.
+const TOUCH_TWO_FINGER_TAP_MAX: Duration = Duration::from_millis(300);
+
+/// The longest a single still contact can rest and still count as a tap.
+const TOUCH_TAP_MAX: Duration = Duration::from_millis(300);
+
+/// The longest gap between two taps for the second to read as a double-tap.
+const TOUCH_DOUBLE_TAP_GAP: Duration = Duration::from_millis(300);
+
+/// How far apart two taps may land and still be one double-tap, in physical pixels.
+/// Generous next to [`TOUCH_SLOP_PX`]: a finger rarely returns to the same pixel.
+const TOUCH_DOUBLE_TAP_SLOP_PX: f64 = 48.0;
+
+/// Relative separation change below which a pinch sample is discarded, so two fingers
+/// resting on the glass can't creep the zoom.
+const TOUCH_PINCH_MIN_DELTA: f64 = 0.002;
+
+/// `PB_TOUCH_DIAG=1` — stderr trace of the gesture recognizer below (the house
+/// targeted-diag pattern; see *Instrumentation* in CLAUDE.md). Off by default.
+fn touch_diag(msg: &str) {
+    if std::env::var_os("PB_TOUCH_DIAG").is_some() {
+        eprintln!("[touch] {msg}");
+    }
+}
+
+/// One live touch contact.
+#[derive(Clone, Copy)]
+struct TouchPoint {
+    id: u64,
+    /// Where it landed, in physical window pixels — the anchor for the slop test.
+    origin: (f64, f64),
+    /// Where it is now.
+    pos: (f64, f64),
+}
+
+/// State for the touch gesture in progress.
+///
+/// Windows hands us every finger as an independent contact and — because winit
+/// registers the window for native touch — performs **no** gesture arbitration for
+/// us: no tap, no press-and-hold, no pinch. Every gesture is recognized here.
+#[derive(Default)]
+struct TouchState {
+    /// Live contacts in landing order; only the first two drive anything.
+    points: Vec<TouchPoint>,
+    /// When the first contact of this gesture landed — the long-press clock.
+    started: Option<Instant>,
+    /// Set once any contact clears [`TOUCH_SLOP_PX`]. Kills both the long-press and
+    /// the two-finger tap, since each requires stillness.
+    slipped: bool,
+    /// A second finger joined: this gesture is a pinch and can never become a pan.
+    multi: bool,
+    /// Contact separation at the last pinch sample.
+    pinch_base: Option<f64>,
+    /// The long-press already fired; don't fire it twice in one gesture.
+    long_fired: bool,
+    /// The opening contact landed on a folder-tree row, so this gesture is a tree
+    /// click — never a photo tap, and never half of a double-tap.
+    tree_hit: bool,
+    /// Contacts the egui overlay claimed on their `Started`, and therefore owns until
+    /// they lift. Deliberately kept *out* of `points`: a panel-owned finger must never
+    /// be able to masquerade as a second contact on the photo (which is what turned a
+    /// one-finger swipe into a pinch).
+    overlay_ids: HashSet<u64>,
+}
+
+impl TouchState {
+    /// Separation between the first two contacts, if both are down.
+    fn spread(&self) -> Option<f64> {
+        match self.points.as_slice() {
+            [a, b, ..] => {
+                let dx = a.pos.0 - b.pos.0;
+                let dy = a.pos.1 - b.pos.1;
+                Some((dx * dx + dy * dy).sqrt())
+            }
+            _ => None,
+        }
+    }
+
+    /// Midpoint of the first two contacts — the anchor a pinch zooms about.
+    fn midpoint(&self) -> Option<(f64, f64)> {
+        match self.points.as_slice() {
+            [a, b, ..] => Some(((a.pos.0 + b.pos.0) / 2.0, (a.pos.1 + b.pos.1) / 2.0)),
+            _ => None,
+        }
+    }
+
+    /// When this gesture's long-press comes due, if one is still possible. Folded into
+    /// the event loop's wake calc so a resting finger actually wakes the loop.
+    fn long_press_due(&self) -> Option<Instant> {
+        if self.long_fired || self.slipped || self.multi || self.points.len() != 1 {
+            return None;
+        }
+        self.started.map(|s| s + TOUCH_LONG_PRESS)
+    }
+}
+
 struct App {
     /// The winit window (NS0: shell-owned — `WinitShell` in the eventual crate split).
     /// `None` until `resumed` creates it; always in lockstep with `core.renderer`, which
@@ -501,6 +612,13 @@ struct App {
     /// The last pointer position in **physical** window pixels (for the cursor resolve's
     /// geometric resize-zone hit-test). `None` until the first move / after the pointer leaves.
     last_pointer: Option<(f64, f64)>,
+    /// The touch gesture in progress. See [`TouchState`] — and the
+    /// `WindowEvent::Touch` arm for why touch needs handling here at all.
+    touch: TouchState,
+    /// When and where the last single-finger tap lifted. Lives on the shell rather than
+    /// in [`TouchState`], which is reset at the end of every gesture — a double-tap is
+    /// by definition two gestures.
+    last_tap: Option<(Instant, (f64, f64))>,
     /// The core's most-recent desired photo cursor (from `SetCursor`). Stored, not applied
     /// directly — `resolve_cursor` composes it with egui's want each frame so the two never
     /// fight over the window cursor (the resize-handle flicker).
@@ -1040,6 +1158,8 @@ impl App {
             inspector_width: 360.0,
             pointer_over_panel: false,
             last_pointer: None,
+            touch: TouchState::default(),
+            last_tap: None,
             core_cursor: contract::CursorKind::Default,
             applied_cursor: None,
             left_pane_edge: None,
@@ -3756,6 +3876,11 @@ impl ApplicationHandler for App {
         // so egui needs no keyboard focus.
         let panel_open = self.overlay_panel_visible();
         let mut overlay_consumed = false;
+        // Whether a touch contact landed on panel chrome. Decided *geometrically* rather
+        // than from egui's `consumed`, which is unreliable for a first touch: touch has no
+        // hover, so egui only learns the position at the press while `wants_pointer_input`
+        // is still answering from the previous frame's layout.
+        let mut touch_over_panel = false;
         if let (Some(ov), Some(win)) = (self.egui_overlay.as_mut(), self.window.clone()) {
             let pointer = matches!(
                 &event,
@@ -3763,6 +3888,7 @@ impl ApplicationHandler for App {
                     | WindowEvent::CursorLeft { .. }
                     | WindowEvent::MouseInput { .. }
                     | WindowEvent::MouseWheel { .. }
+                    | WindowEvent::Touch(..)
             );
             let track = matches!(
                 &event,
@@ -3789,10 +3915,26 @@ impl ApplicationHandler for App {
                     self.pointer_over_panel = false;
                     self.last_pointer = None;
                 }
+                // Touch gets the same exact, lag-free hit-test. This also keeps
+                // `resolve_cursor` honest, which until now only ever heard about the mouse.
+                WindowEvent::Touch(t) => {
+                    let over =
+                        panel_open && ov.physical_point_over_area(t.location.x, t.location.y);
+                    self.last_pointer = Some((t.location.x, t.location.y));
+                    self.pointer_over_panel = over;
+                    touch_over_panel = over;
+                }
                 _ => {}
             }
         }
-        if overlay_consumed {
+        // Touch deliberately never takes this early return. The recognizer in the
+        // `WindowEvent::Touch` arm must observe *every* phase of *every* contact or its
+        // contact list goes stale: a swallowed `Ended` leaves a phantom finger down, and
+        // the next real finger then reads as a *second* contact — i.e. a pinch. That is
+        // exactly the "opening the thumbnail strip makes a one-finger swipe zoom, then
+        // kills touch entirely" bug. Ownership is decided once, at `Started`, and
+        // remembered per contact id in `TouchState::overlay_ids` instead.
+        if overlay_consumed && !matches!(&event, WindowEvent::Touch(..)) {
             self.drain_effects(event_loop);
             return;
         }
@@ -4032,6 +4174,228 @@ impl ApplicationHandler for App {
             WindowEvent::CursorLeft { .. } => {
                 self.core.last_cursor = None;
                 self.core.update_tree_hover();
+            }
+
+            // Touchscreen contacts (Windows/Linux). winit calls `RegisterTouchWindow` on
+            // every window it creates whenever the system reports a ready digitizer —
+            // `platform_impl/windows/window.rs`, gated only on `SM_DIGITIZER & NID_READY`,
+            // with no way to decline through winit's API. That call tells Windows "this
+            // window handles touch natively", so Windows stops synthesizing mouse messages
+            // for it. A finger therefore arrives *only* here, with no mouse fallback: left
+            // unhandled, touch does literally nothing (it did, until now).
+            //
+            // `location` is already client physical pixels — the same space as
+            // `CursorMoved`'s `position` — so this drives exactly the core events the mouse
+            // path drives, and a tap acts on press like a left-click does.
+            WindowEvent::Touch(touch) => {
+                let loc = (touch.location.x, touch.location.y);
+                // Deliberately `Instant::now()` and not the injected `core.now`: that
+                // clock is stamped once per tick in `about_to_wait`, so after an idle
+                // `ControlFlow::Wait` it can be seconds stale — which would make the very
+                // first contact look like an instant long-press.
+                let now = Instant::now();
+                match touch.phase {
+                    TouchPhase::Started => {
+                        // Stale-contact net: seeing an id we already track means a previous
+                        // gesture lost an `Ended` somewhere. Drop the ghost rather than
+                        // build a phantom pinch on top of it.
+                        if self.touch.points.iter().any(|p| p.id == touch.id)
+                            || self.touch.overlay_ids.contains(&touch.id)
+                        {
+                            touch_diag(&format!("stale id={} reused - resetting", touch.id));
+                            self.touch = TouchState::default();
+                            self.core.dragging = false;
+                        }
+                        // Geometry is the primary test; `overlay_consumed` alone would let a
+                        // first tap on a thumbnail fall through and count as a photo tap —
+                        // and so, on a second one, toggle the zoom.
+                        if overlay_consumed || touch_over_panel {
+                            // egui took this press, so the panel owns the contact for its
+                            // whole life — its moves and its lift must not reach the photo.
+                            self.touch.overlay_ids.insert(touch.id);
+                            touch_diag(&format!(
+                                "down id={} -> overlay owns it (consumed={overlay_consumed} over_panel={touch_over_panel})",
+                                touch.id
+                            ));
+                        } else {
+                            self.touch.points.push(TouchPoint {
+                                id: touch.id,
+                                origin: loc,
+                                pos: loc,
+                            });
+                            match self.touch.points.len() {
+                                1 => {
+                                    self.touch.started = Some(now);
+                                    self.touch.slipped = false;
+                                    self.touch.multi = false;
+                                    self.touch.long_fired = false;
+                                    self.touch.pinch_base = None;
+                                    self.core.handle(contract::CoreEvent::PointerMoved {
+                                        x: loc.0 as f32,
+                                        y: loc.1 as f32,
+                                    });
+                                    // Same precedence as the left button below: a folder-tree
+                                    // row wins, otherwise the contact begins a drag-to-pan.
+                                    let tree = self.core.folder_tree_click();
+                                    self.touch.tree_hit = tree;
+                                    if !tree {
+                                        self.core.dragging = true;
+                                        self.core.refresh_cursor();
+                                    }
+                                    touch_diag(&format!(
+                                        "down id={} at ({:.0},{:.0}) tree_click={tree} dragging={}",
+                                        touch.id, loc.0, loc.1, self.core.dragging
+                                    ));
+                                }
+                                2 => {
+                                    // A second finger makes this a pinch. Abandon the pan the
+                                    // first finger started, so the photo doesn't slide out from
+                                    // under the gesture while it zooms.
+                                    self.touch.multi = true;
+                                    self.core.dragging = false;
+                                    self.core.refresh_cursor();
+                                    self.touch.pinch_base = self.touch.spread();
+                                    touch_diag(&format!(
+                                        "second finger id={} spread={:?}",
+                                        touch.id, self.touch.pinch_base
+                                    ));
+                                }
+                                n => touch_diag(&format!("contact #{n} ignored")),
+                            }
+                        }
+                    }
+
+                    TouchPhase::Moved if self.touch.overlay_ids.contains(&touch.id) => {
+                        // Panel-owned contact: egui already received the event above.
+                    }
+
+                    TouchPhase::Moved => {
+                        // Scoped so the `&mut self.touch.points` borrow ends before the
+                        // `self.touch` writes below.
+                        let mut slipped_now = false;
+                        if let Some(p) = self.touch.points.iter_mut().find(|p| p.id == touch.id) {
+                            p.pos = loc;
+                            let dx = loc.0 - p.origin.0;
+                            let dy = loc.1 - p.origin.1;
+                            slipped_now = dx * dx + dy * dy >= TOUCH_SLOP_PX * TOUCH_SLOP_PX;
+                        }
+                        if slipped_now {
+                            self.touch.slipped = true;
+                        }
+
+                        if self.touch.multi {
+                            // Pinch: hand the core the same relative magnification the
+                            // macOS trackpad path produces, anchored at the finger
+                            // midpoint so the photo zooms about the gesture, not the
+                            // stale cursor.
+                            if let (Some(spread), Some(base), Some(mid)) = (
+                                self.touch.spread(),
+                                self.touch.pinch_base,
+                                self.touch.midpoint(),
+                            ) {
+                                let delta = spread / base - 1.0;
+                                if base > 1.0 && delta.abs() >= TOUCH_PINCH_MIN_DELTA {
+                                    self.touch.pinch_base = Some(spread);
+                                    self.core.handle(contract::CoreEvent::PointerMoved {
+                                        x: mid.0 as f32,
+                                        y: mid.1 as f32,
+                                    });
+                                    self.core.handle(contract::CoreEvent::Pinch {
+                                        delta: delta as f32,
+                                    });
+                                    touch_diag(&format!(
+                                        "pinch spread={spread:.1} delta={delta:+.4}"
+                                    ));
+                                }
+                            }
+                        } else if self.touch.slipped
+                            && self.touch.points.first().is_some_and(|p| p.id == touch.id)
+                        {
+                            self.core.handle(contract::CoreEvent::PointerMoved {
+                                x: loc.0 as f32,
+                                y: loc.1 as f32,
+                            });
+                            touch_diag(&format!(
+                                "pan to ({:.0},{:.0}) dragging={}",
+                                loc.0, loc.1, self.core.dragging
+                            ));
+                        }
+                    }
+
+                    // `Cancelled` is the palm-rejection / gesture-stolen path: end the
+                    // gesture the same way a lift does, leaving the photo where it got to.
+                    TouchPhase::Ended | TouchPhase::Cancelled
+                        if self.touch.overlay_ids.contains(&touch.id) =>
+                    {
+                        self.touch.overlay_ids.remove(&touch.id);
+                        touch_diag(&format!("up id={} (overlay-owned)", touch.id));
+                    }
+
+                    TouchPhase::Ended | TouchPhase::Cancelled => {
+                        self.touch.points.retain(|p| p.id != touch.id);
+                        if self.touch.points.is_empty() {
+                            let held = self
+                                .touch
+                                .started
+                                .map(|s| now.saturating_duration_since(s))
+                                .unwrap_or_default();
+                            // Two fingers down and up, still and quick: the same "smart
+                            // magnify" intent as a trackpad two-finger double-tap, so it
+                            // rides the core's existing `DoubleTap` (toggle 1:1 ↔ fit).
+                            let two_finger_tap = self.touch.multi
+                                && !self.touch.slipped
+                                && !self.touch.long_fired
+                                && held <= TOUCH_TWO_FINGER_TAP_MAX
+                                && touch.phase == TouchPhase::Ended;
+                            // One finger, still, quick, and not on a tree row: a photo
+                            // tap. Two of those in quick succession and near each other
+                            // are the reflex "zoom in on this" gesture, which rides the
+                            // same `DoubleTap` the trackpad's smart-magnify uses.
+                            let single_tap = !self.touch.multi
+                                && !self.touch.slipped
+                                && !self.touch.long_fired
+                                && !self.touch.tree_hit
+                                && held <= TOUCH_TAP_MAX
+                                && touch.phase == TouchPhase::Ended;
+                            let mut double_tap = false;
+                            if single_tap {
+                                if let Some((at, pos)) = self.last_tap {
+                                    let dx = loc.0 - pos.0;
+                                    let dy = loc.1 - pos.1;
+                                    double_tap = now.saturating_duration_since(at)
+                                        <= TOUCH_DOUBLE_TAP_GAP
+                                        && dx * dx + dy * dy
+                                            <= TOUCH_DOUBLE_TAP_SLOP_PX * TOUCH_DOUBLE_TAP_SLOP_PX;
+                                }
+                                // Consume the pair so a third tap starts fresh rather than
+                                // firing a second toggle.
+                                self.last_tap = if double_tap { None } else { Some((now, loc)) };
+                            }
+                            touch_diag(&format!(
+                                "up id={} held={}ms multi={} slipped={} two_finger_tap={two_finger_tap} double_tap={double_tap}",
+                                touch.id,
+                                held.as_millis(),
+                                self.touch.multi,
+                                self.touch.slipped
+                            ));
+                            // Preserve panel-owned contacts across the reset: they are
+                            // still down, and forgetting them would let their lift fall
+                            // through to the photo path.
+                            let keep = std::mem::take(&mut self.touch.overlay_ids);
+                            self.touch = TouchState::default();
+                            self.touch.overlay_ids = keep;
+                            self.core.dragging = false;
+                            self.core.refresh_cursor();
+                            if two_finger_tap || double_tap {
+                                self.core.handle(contract::CoreEvent::DoubleTap);
+                            }
+                        } else {
+                            // One finger of a pinch lifted. Don't resume panning with the
+                            // survivor — re-anchor and wait for a clean gesture.
+                            self.touch.pinch_base = None;
+                        }
+                    }
+                }
             }
 
             // Left button toggles drag-to-pan (the cross-platform pan gesture).
@@ -4351,6 +4715,19 @@ impl ApplicationHandler for App {
         // (single writer — the two used to fight and flicker on the resize handle).
         self.resolve_cursor();
 
+        // One still finger resting past `TOUCH_LONG_PRESS` opens the photo context menu —
+        // the touch stand-in for a right-click. It fires from here, not from an input
+        // event, precisely because the defining feature of the gesture is that nothing is
+        // moving: no further `WindowEvent::Touch` arrives while the finger rests. The
+        // deadline joins the wake calc below so the loop wakes up to notice.
+        if self.touch.long_press_due().is_some_and(|due| now >= due) {
+            self.touch.long_fired = true;
+            self.core.dragging = false;
+            self.core.refresh_cursor();
+            self.core.show_context_menu();
+            touch_diag("long press -> context menu");
+        }
+
         // The event loop's next wake: the earliest of the core's requested wake, the shell's
         // own dialog-repaint deadline, and the overlay's egui repaint; `None` = idle.
         let wake = [
@@ -4360,6 +4737,8 @@ impl ApplicationHandler for App {
             self.play_hint_wake,
             // The delayed fullscreen hint's fire time (already-due ones fired above).
             self.pending_toast.as_ref().map(|(at, _)| *at),
+            // A resting finger's long-press deadline.
+            self.touch.long_press_due(),
         ]
         .into_iter()
         .flatten()
@@ -6002,5 +6381,142 @@ mod tests {
             None,
         );
         assert_ne!(a, changed);
+    }
+}
+
+/// The touch gesture recognizer's pure state helpers.
+///
+/// The recognizer itself lives inline in the winit event loop and isn't reachable from a
+/// test, but every decision it makes is a question these three answer — and it has already
+/// produced two subtle state bugs (a phantom contact turning a one-finger swipe into a
+/// pinch, and a long-press that fired mid-drag), so they earn coverage.
+#[cfg(test)]
+mod touch_gesture_tests {
+    use super::*;
+
+    fn contact(id: u64, x: f64, y: f64) -> TouchPoint {
+        TouchPoint {
+            id,
+            origin: (x, y),
+            pos: (x, y),
+        }
+    }
+
+    fn resting(points: Vec<TouchPoint>, started: Instant) -> TouchState {
+        TouchState {
+            points,
+            started: Some(started),
+            ..TouchState::default()
+        }
+    }
+
+    #[test]
+    fn spread_needs_two_contacts() {
+        assert_eq!(TouchState::default().spread(), None);
+        let one = resting(vec![contact(1, 10.0, 10.0)], Instant::now());
+        assert_eq!(one.spread(), None, "one finger can never be a pinch");
+    }
+
+    #[test]
+    fn spread_is_the_distance_between_the_first_two_contacts() {
+        let s = resting(
+            vec![contact(1, 0.0, 0.0), contact(2, 3.0, 4.0)],
+            Instant::now(),
+        );
+        assert_eq!(s.spread(), Some(5.0));
+    }
+
+    #[test]
+    fn spread_ignores_a_third_finger() {
+        // Only the first two contacts drive a pinch — a palm landing late must not
+        // silently jump the zoom.
+        let two = resting(
+            vec![contact(1, 0.0, 0.0), contact(2, 3.0, 4.0)],
+            Instant::now(),
+        );
+        let three = resting(
+            vec![
+                contact(1, 0.0, 0.0),
+                contact(2, 3.0, 4.0),
+                contact(3, 900.0, 900.0),
+            ],
+            Instant::now(),
+        );
+        assert_eq!(two.spread(), three.spread());
+    }
+
+    #[test]
+    fn midpoint_sits_between_the_first_two_contacts() {
+        let s = resting(
+            vec![contact(1, 10.0, 20.0), contact(2, 30.0, 60.0)],
+            Instant::now(),
+        );
+        assert_eq!(s.midpoint(), Some((20.0, 40.0)));
+        assert_eq!(TouchState::default().midpoint(), None);
+    }
+
+    #[test]
+    fn long_press_comes_due_one_interval_after_a_single_contact_lands() {
+        let t0 = Instant::now();
+        let s = resting(vec![contact(1, 5.0, 5.0)], t0);
+        assert_eq!(s.long_press_due(), Some(t0 + TOUCH_LONG_PRESS));
+    }
+
+    #[test]
+    fn long_press_needs_a_contact() {
+        let s = TouchState {
+            started: Some(Instant::now()),
+            ..TouchState::default()
+        };
+        assert_eq!(s.long_press_due(), None, "nothing is resting on the glass");
+    }
+
+    #[test]
+    fn moving_past_the_slop_cancels_the_long_press() {
+        let mut s = resting(vec![contact(1, 5.0, 5.0)], Instant::now());
+        assert!(s.long_press_due().is_some());
+        s.slipped = true;
+        assert_eq!(
+            s.long_press_due(),
+            None,
+            "a drag must not also open the context menu"
+        );
+    }
+
+    #[test]
+    fn a_second_finger_cancels_the_long_press() {
+        let mut s = resting(
+            vec![contact(1, 0.0, 0.0), contact(2, 40.0, 0.0)],
+            Instant::now(),
+        );
+        s.multi = true;
+        assert_eq!(
+            s.long_press_due(),
+            None,
+            "a pinch must not also open the context menu"
+        );
+    }
+
+    #[test]
+    fn the_long_press_fires_only_once_per_gesture() {
+        let mut s = resting(vec![contact(1, 5.0, 5.0)], Instant::now());
+        s.long_fired = true;
+        assert_eq!(s.long_press_due(), None);
+    }
+
+    #[test]
+    fn a_panel_owned_contact_never_joins_the_photo_contacts() {
+        // The thumbnail-strip regression: a panel contact that leaked into `points` left a
+        // phantom finger down, so the next real finger read as a second contact — i.e. a
+        // pinch on a one-finger swipe. Panel-owned ids are tracked separately for exactly
+        // this reason.
+        let mut s = TouchState::default();
+        s.overlay_ids.insert(7);
+        assert!(s.points.is_empty());
+        assert_eq!(
+            s.spread(),
+            None,
+            "a panel-owned contact must not be able to form a pinch"
+        );
     }
 }
