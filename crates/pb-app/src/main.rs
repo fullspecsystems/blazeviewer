@@ -247,6 +247,20 @@ fn esc_quits(guard: Option<Instant>, now: Instant) -> bool {
     }
 }
 
+/// Whether a key event is a press winit fabricated because the window just gained focus. winit
+/// (Windows and X11) replays every physically held key as a new press on focus gain, marked
+/// `is_synthetic` but with `repeat: false`, so nothing downstream can tell it from a real press.
+/// It is not a key going down, which is all `CoreEvent::KeyDown` is meant to report.
+///
+/// How it bites (#138): egui fires a focused button on key *press*, so the Enter that confirms a
+/// delete closes the dialog while the key is still down. Focus returns to the main window, the
+/// dialog guard is already off, and the replayed Enter ran `Action::Random` on top of the delete.
+///
+/// Presses only: the fabricated *release* on focus loss is part of the held-key release net.
+fn is_focus_replay_press(is_synthetic: bool, state: ElementState) -> bool {
+    is_synthetic && state == ElementState::Pressed
+}
+
 /// `PB_DOOR_DIAG=1` → shell-side overlay/door diagnostics to stderr (dev-only; zero cost when
 /// off). Same env as the core's `door_diag`, so the shell's overlay lines interleave with the
 /// core's deck/draw lines in one capture when chasing the "door card stuck over a photo" bug.
@@ -3894,6 +3908,18 @@ impl ApplicationHandler for App {
     fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
         // Stamp the injected clock once per event (NS0 5.5); the core reads `self.core.now`.
         self.core.now = Instant::now();
+        // Drop focus-gain key replays before any routing, so one check covers the viewer, the
+        // dialog's egui, and the keybinding capture (see `is_focus_replay_press`).
+        if let WindowEvent::KeyboardInput {
+            event: KeyEvent { state, .. },
+            is_synthetic,
+            ..
+        } = &event
+        {
+            if is_focus_replay_press(*is_synthetic, *state) {
+                return;
+            }
+        }
         // Events for our egui dialog window go to egui, not the photo viewer.
         if self.dialog.as_ref().map(|d| d.id()) == Some(id) {
             self.dialog_event(event);
@@ -4136,6 +4162,8 @@ impl ApplicationHandler for App {
                         // window would; every other key is swallowed here rather than driving
                         // navigation. (Esc is handled above; Password/Ask/Settings need typing,
                         // which reaches them only when the dialog window actually has focus.)
+                        // This only covers the main window keeping focus. When the dialog had it,
+                        // the same keypress returns as a replay: see `is_focus_replay_press`.
                         let is_message = self.dialog.as_ref().map(|d| d.kind())
                             == Some(dialog::DialogKind::Message);
                         if is_message
@@ -5722,6 +5750,17 @@ mod tests {
         assert!(esc_quits(None, now)); // no guard -> quits
         assert!(!esc_quits(Some(now + Duration::from_millis(100)), now)); // guarded
         assert!(esc_quits(Some(now), now)); // guard already expired -> quits
+    }
+
+    /// #138: only a press winit fabricated on focus gain is dropped. The fabricated *release*
+    /// has to keep flowing (it is part of the held-key release net), and a real press is the
+    /// user's own and must never be filtered.
+    #[test]
+    fn only_a_synthetic_press_counts_as_a_focus_replay() {
+        assert!(is_focus_replay_press(true, ElementState::Pressed));
+        assert!(!is_focus_replay_press(true, ElementState::Released));
+        assert!(!is_focus_replay_press(false, ElementState::Pressed));
+        assert!(!is_focus_replay_press(false, ElementState::Released));
     }
 
     /// Recursively snapshot a directory tree for the no-trace before/after diff:

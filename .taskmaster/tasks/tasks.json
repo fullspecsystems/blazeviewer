@@ -1860,12 +1860,40 @@
             "status": "in-progress"
           }
         ]
+      },
+      {
+        "id": 138,
+        "title": "Enter on the delete confirm also jumps to a random image (winit replays held keys on focus)",
+        "description": "Owner report 2026-11-05: confirming a permanent delete (Shift+Del) with Enter deletes the photo and then also jumps to a random one. The dialog is not handling the key twice. ROOT CAUSE, traced through source but NOT yet reproduced at runtime: (1) egui 0.29.1 fires a focused button on key PRESS (egui src/context.rs:1249), so the dialog answers and closes while Enter is still down. (2) drain_effects sets self.dialog = None (pb-app/src/main.rs:3374) and dropping the winit window only posts its destruction (winit 0.30.13 src/platform_impl/windows/window.rs:1113), so the modal guard at main.rs:4127 is already off when focus moves. (3) When the main window regains focus, winit replays every physically held key as a new press: WM_SETFOCUS -> synthesize_kbd_state(Pressed) (windows/keyboard.rs:94-98), marked is_synthetic: true and repeat: false (keyboard.rs:446, 456). (4) Our key arm ignores is_synthetic (main.rs:4072-4080; nothing in the repo reads it) and repeat: false passes the auto-repeat gate (pb-app-core/src/contract.rs:667), so Enter resolves to Action::Random (keymap.rs:589). A tap released before focus moves escapes the bug, so it can look timing-dependent. Holding Enter starts hold-to-blaze through the deck right after a permanent delete. SAME CLASS, SAME FIX: Space on the Delete button (egui treats it like Enter, and Space = Next); Enter/Space on Message OK or any other focused button when the dialog window has focus (the guard at main.rs:4127 only covers the case where the main window kept focus); the keybinding capture path (dialog_event, main.rs:2993), which could record a replayed key as a binding; a replay into a dialog as it opens, e.g. Enter held when the delete confirm appears with Delete default-focused (dialog.rs:1437), which could confirm a permanent delete with no new keypress; probably also the Enter that accepts the file picker, where finish_picker's held.clear() (main.rs:2926) looks too early to help (verify). PROPOSED FIX: drop replayed presses at the top of App::window_event (main.rs:3894), before the dialog route at main.rs:3898, so one check covers both windows, using a pure helper is_focus_replay_press(is_synthetic, state) = is_synthetic && state == Pressed. A replayed press is not a physical key going down, which is what CoreEvent::KeyDown promises (contract.rs:293), so this is winit-shell input normalization and the core does not change. Synthetic RELEASES must keep flowing: they are part of the held-key release net, and a stuck blaze is the worst outcome here. Real OS auto-repeat after the dialog closes is already harmless because repeat: true is ignored. REJECTED: a 300 ms guard like esc_guard_until (eats real presses, and a long hold outlasts it); closing the dialog on key release (fixes one dialog and leaves the rest of the class). PLATFORMS: winit documents the replay on Windows and X11, so both get the fix. macOS should be unaffected (read, not run): the key monitor is gated while the NSAlert is up (CoreModel.swift:353), AppKit does not replay keys on focus, and repeats are ignored by the same core gate. No shared code changes, so no cross-platform debt. esc_guard_until stays; whether winit still needs it once this lands is a separate question.",
+        "status": "review",
+        "priority": "high",
+        "dependencies": [],
+        "subtasks": [
+          {
+            "id": 1,
+            "title": "Reproduce on the unfixed build, then write the failing test",
+            "description": "Confirm the diagnosis first: run the unfixed app (pwsh scripts/build-windows.ps1 -Run) and do Shift+Del, Enter; a temporary eprintln in the key arm should show is_synthetic: true for the Enter that navigates. If it does not, stop and re-diagnose. Then add a test beside esc_quits_unless_the_picker_guard_is_active (main.rs:5720) for is_focus_replay_press: synthetic press = true; synthetic release, real press, real release = false. The helper takes plain values because winit's KeyEvent cannot be constructed outside winit (pub(crate) platform_specific, winit src/event.rs:655). || 2026-11-05: test written and seen failing against a stub, now passing. It pins the predicate only, not the wiring in window_event. The runtime reproduction and eprintln check were NOT done; subtask 3 case (a) is the evidence for the diagnosis.",
+            "status": "done"
+          },
+          {
+            "id": 2,
+            "title": "Filter replayed presses at the top of window_event",
+            "description": "Add is_focus_replay_press next to esc_quits (main.rs:243) and call it first thing in App::window_event, before the dialog route, returning early on a match. The comment must name the mechanism, because the current comments at main.rs:2922 and main.rs:4128 describe the symptom as a stray key or a focus refusal. Add a user-facing line under Fixed in CHANGELOG.md [Unreleased], e.g. 'Pressing Enter to confirm a delete no longer also jumps to a random image.' || 2026-11-05: done, uncommitted. pb-app tests (91), clippy -D warnings and fmt pass on Windows.",
+            "status": "done"
+          },
+          {
+            "id": 3,
+            "title": "Verify in the real app on Windows, with a Linux X11 and macOS check",
+            "description": "Windows, real desktop session: (a) Shift+Del, tap Enter: photo deleted, lands on the item delete normally advances to, not a random one. (b) Shift+Del, hold Enter 2 s: no blaze. (c) Shift+Del, Space: same as (a). (d) Shift+Del, Tab to Cancel, Enter: nothing deleted, no navigation. (e) Empty archive Message dialog, Enter on OK: no navigation. (f) Settings > Shortcuts capture still records real key presses. (g) Accept the file picker with Enter: lands on the expected first item. (h) Hold Space to blaze, Alt+Tab away and back: blaze stops and does not resume until a new press. (i) A fresh Enter after the dialog closes still goes to a random image. Linux X11: (a) only. macOS: confirm (a) with Return on the NSAlert; no code change expected. || 2026-11-05: owner confirmed the random jump after Enter on the delete confirm is gone on Windows, which also supports the diagnosis. The other Windows cases, Linux X11 and macOS are not reported yet.",
+            "status": "in-progress"
+          }
+        ]
       }
     ],
     "metadata": {
       "version": "1.0.0",
       "lastModified": "2026-07-27T22:23:07.735Z",
-      "taskCount": 58,
+      "taskCount": 59,
       "completedCount": 7,
       "tags": [
         "master"

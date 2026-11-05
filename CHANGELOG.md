@@ -121,6 +121,10 @@ with any pre-release suffix carried only by the tag.
   ahead in RAM (nothing is written to disk), so network hiccups are absorbed
   instead of freezing the picture. `PB_READAHEAD_MB` tunes the budget
   (`0` disables).
+- Pressing Enter or Space to answer a dialog no longer also acts on the viewer
+  behind it. Confirming a permanent delete with Enter used to jump to a random
+  image as well, and holding the key could keep going. A key you were already
+  holding when the window regains focus is no longer treated as a new press.
 
 ## [0.3.1] - 2026-07-22
 
