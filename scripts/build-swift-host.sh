@@ -78,6 +78,23 @@ echo "==> cargo build -p pb-mac-ffi ($PROFILE, aarch64-apple-darwin)"
 # 3.2 under `set -u` (see the CI note above); Homebrew paths have no spaces.
 FEATURE_ARGS=""
 FF_LINK_ARGS=""
+FF_SOURCE="Homebrew, dev-only build"
+if [[ "$BUNDLE_FFMPEG" == "1" ]]; then
+	# --bundle-ffmpeg must COMPILE against the same FFmpeg it bundles. ffmpeg-sys-next finds
+	# FFmpeg through pkg-config, so without this it bound to whatever Homebrew had — fine
+	# while Homebrew and the pin were both 8.x, broken the day Homebrew moved to 9.0
+	# (libavcodec 63 vs the pin's 62): headers from one major, dylibs from another. Point
+	# pkg-config at the pin ONLY (PKG_CONFIG_LIBDIR replaces the default search path, so
+	# Homebrew cannot leak back in), and build the pin first if this machine lacks it.
+	FF_PREFIX="$REPO_ROOT/third_party/ffmpeg/$(uname -m)"
+	if [[ ! -e "$FF_PREFIX/lib/libavcodec.dylib" ]]; then
+		echo "==> Building pinned LGPL FFmpeg (first run; ~10-20 min)"
+		"$REPO_ROOT/scripts/build-ffmpeg-macos.sh"
+	fi
+	export PKG_CONFIG_LIBDIR="$FF_PREFIX/lib/pkgconfig"
+	unset PKG_CONFIG_PATH
+	FF_SOURCE="pinned LGPL build, bundled"
+fi
 if [[ "$FFVIDEO" == "1" ]]; then
 	FF_LIBDIR="$(pkg-config --variable=libdir libavcodec 2>/dev/null || true)"
 	if [[ -z "$FF_LIBDIR" ]]; then
@@ -92,7 +109,7 @@ if [[ "$FFVIDEO" == "1" ]]; then
 	else
 		FEATURE_ARGS="--features ffvideo"
 		FF_LINK_ARGS="-Xlinker -L$FF_LIBDIR -Xlinker -lavcodec -Xlinker -lavformat -Xlinker -lavutil -Xlinker -lswscale -Xlinker -lswresample"
-		echo "==> ffvideo: linking FFmpeg from $FF_LIBDIR (dev-only build)"
+		echo "==> ffvideo: linking FFmpeg from $FF_LIBDIR ($FF_SOURCE)"
 	fi
 fi
 
