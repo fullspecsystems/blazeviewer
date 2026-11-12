@@ -138,7 +138,12 @@ fn decoder_for(
         .map_err(|e| DecodeError::Corrupt(format!("FFmpeg decoder: {e}")))
 }
 
-#[cfg(test)]
+// `ffvideo`-gated like `demux`/`poster`/`video_producer`: every test here goes through
+// `ff_probe_video_details`, which needs a video *decoder*. The Windows build (`ffprobe`
+// only) is demuxers-only by design, so there it fails "Decoder not found" — correctly,
+// since Windows calls `ff_probe_tracks` instead. Ungated, this was red on every Windows
+// CI run from July to November 2026.
+#[cfg(all(test, feature = "ffvideo"))]
 mod tests {
     use super::*;
 
