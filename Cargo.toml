@@ -86,6 +86,17 @@ codegen-units = 1
 panic = "unwind"
 strip = "debuginfo"
 
+# Never strip the build-time tools (proc-macro dylibs, build scripts) — they run on the
+# build host and never ship, so stripping them buys nothing, and on macOS 27 it breaks
+# the build outright. Xcode 27's `strip`, given MACOSX_DEPLOYMENT_TARGET=14.0 (which
+# build-swift-host.sh sets, ADR-021), leaves the string table at a 4-byte-aligned file
+# offset; macOS 27's dyld now rejects that ("mis-aligned LINKEDIT string pool"), so every
+# proc-macro fails to load and rustc reports a wall of `can't find crate for serde_derive`.
+# Measured 2026-11-12 on a minimal workspace: strip=debuginfo + DT 14.0 fails (stroff
+# mod 8 = 4); strip=none + DT 14.0, or no DT at all, loads fine.
+[profile.release.build-override]
+strip = "none"
+
 # A profiling profile: release-grade codegen but keep debug symbols so Tracy /
 # Superluminal can attribute time to source lines.
 [profile.profiling]
