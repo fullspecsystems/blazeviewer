@@ -41,7 +41,7 @@ rawloader = "0.37.1"
 # Optional so the pure-Rust core has zero native build risk without it (ADR-015).
 # `software-resampling` pulls libswresample for the ffvideo audio decoder (plan §7).
 # (NOT `resampling` — that one maps to the long-removed libavresample.)
-ffmpeg-next = { version = "8.1", default-features = false, features = ["codec", "format", "software-scaling", "software-resampling"], optional = true }
+ffmpeg-next = { version = "9.1", default-features = false, features = ["codec", "format", "software-scaling", "software-resampling"], optional = true }
 # Photoshop .psd is decoded in-crate (`src/psd.rs`): the merged composite in the
 # final image-data section is a small, well-specified format (planar channels, raw
 # or PackBits/RLE), and both `psd` (panicked on real files) and `zune-psd` (no
