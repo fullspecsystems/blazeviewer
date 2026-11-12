@@ -137,8 +137,12 @@ pub mod video;
 // FFmpeg (`ffmpeg::video_producer`) producers drive, so the ~180-line
 // credit/generation/seek machinery lives once instead of twice. Cfg-neutral (the
 // protocol types are); compiled wherever a backend exists, plus under `test` so
-// the deterministic mock-backend loop test runs on every platform.
-#[cfg(any(windows, feature = "ffmpeg", test))]
+// the deterministic mock-backend loop test runs on every platform. The FFmpeg
+// backend is `ffvideo`, NOT `ffmpeg`: `livephoto` and `ffprobe` also enable
+// `ffmpeg` but have no producer, so gating on `ffmpeg` left the loop dead on a
+// Linux (`livephoto`) or `ffprobe`-only build — a -D warnings failure in the
+// Linux gate from #130 (2026-07-20) until it was caught on 2026-11-12.
+#[cfg(any(windows, feature = "ffvideo", test))]
 mod video_producer_loop;
 #[cfg(windows)]
 mod wic;
