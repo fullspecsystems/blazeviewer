@@ -222,6 +222,72 @@ The lane needs Xcode CLTs + rustup, which the machine has. Until this runner is
 registered, `mac-swift` jobs queue for up to 24 h and then fail — expected, not a code
 failure.
 
+## Orphaned `Runner.Worker` processes (2026-08-11)
+
+_Why: found nine of them on the Mac runner, 8–20 days old, each pinning a core at ~90%.
+About 5.9 of 12 cores gone, load average 89, and no obvious culprit — the machine was
+just slow, and Blaze Viewer hadn't been touched in days. Total burn: ~145 CPU-days._
+
+**A cancelled job can leak one spinning process, permanently.** The count was exactly one
+per `haven't exit within cancellation timout` line in the listener log — 9 for 9, so treat
+this as systemic rather than bad luck. Both a `timeout-minutes` expiry and a
+`cancel-in-progress` supersede reach the same cancellation path.
+
+**Recognizing one.** It is *not* the worker, which is why the runner's own cleanup misses it.
+It's the `fork()` half of .NET's `Process.Start` (fork + execve) that never finished its exec,
+frozen where it still carries the parent's argv:
+
+| Tell | Orphan stub | Real `Runner.Worker` |
+| --- | --- | --- |
+| `PPID` | `1` (launchd) | the `Runner.Listener` pid |
+| threads | **1** | dozens |
+| footprint | ~2 MB | 100+ MB |
+| argv | `Runner.Worker spawnclient <fd> <fd>` | same (indistinguishable by argv alone) |
+| `_diag` log | holds the real worker's FDs, never writes | writes its own |
+
+```bash
+# Anything with PPID 1 here is debris:
+ps -Ao pid,ppid,%cpu,etime,args | grep 'Runner\.Worker' | grep -v grep
+```
+
+**Why three supervisors all miss it.** `timeout-minutes` is enforced server → listener →
+worker, and the stub is off that chain. The listener's force-kill targets the *worker's*
+process tree, so the stub survives the SIGKILL that does land on the worker (exit 137, visible
+in the listener log). launchd adopts it as an orphan, and adopting is all launchd does. Nothing
+in the runner will ever clean this up.
+
+**Killing by hand** needs `-9`. These ignore cancel and terminate by construction; the
+listener's log says so itself before it resorts to a tree kill. Plain `pkill` does nothing:
+
+```bash
+pkill -9 -f 'Runner\.Worker spawnclient'   # leaves runsvc.sh + Runner.Listener alive
+```
+
+**The standing fix** is a 5-minute LaunchAgent, because the fork/exec race is an upstream
+runner bug that config can't close:
+
+```bash
+scripts/reap-orphan-runner-workers.sh --install     # every 300 s, logs only when it acts
+scripts/reap-orphan-runner-workers.sh --dry-run     # what would it kill right now
+scripts/reap-orphan-runner-workers.sh --status
+scripts/reap-orphan-runner-workers.sh --uninstall
+```
+
+Log: `~/Library/Logs/blazeviewer-runner-reaper.log` (silent on a clean sweep on purpose — at
+288 sweeps a day a heartbeat line would bury the entries that matter). It only kills a process
+that is *all* of: `PPID 1`, named `Runner.Worker`, under `~/actions-runner`, and older than
+`MIN_AGE_SECONDS` (120). A live worker is a child of the listener and can never match. If the
+listener genuinely died mid-job, that worker's job is unrecoverable anyway.
+
+**The trigger, fixed separately.** All nine traced to `linux-gate` hanging on a
+stopped/half-booted OrbStack: `check-linux.sh` gated on `command -v docker`, which only proves
+OrbStack's CLI shim is installed, not that its VM is up. A half-up socket makes the CLI *block*
+rather than error, so the job printed zero bytes for 44 minutes and rode its full 45-minute
+timeout into the cancellation path. `scripts/docker-preflight.sh` now probes the daemon under a
+hard 10 s cap (both `check-linux.sh` and `release-linux-docker.sh` use it), turning that hang
+into an actionable failure. Keep both fixes: the preflight cuts the rate, the reaper closes the
+class.
+
 ## Cutting a release locally (both installers)
 
 1. Roll `CHANGELOG.md`, bump `crates/pb-app/Cargo.toml`, tag + push as usual

@@ -23,6 +23,7 @@
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
+ROOT="$(pwd)"
 
 ARCH_ARG="amd64"
 UPLOAD=0
@@ -41,10 +42,12 @@ case "$ARCH_ARG" in
 esac
 
 ENGINE="${DOCKER:-docker}"   # OrbStack provides the `docker` CLI; override for podman/etc.
-if ! command -v "$ENGINE" >/dev/null 2>&1; then
-  echo "!! '$ENGINE' not found. Start OrbStack (or set DOCKER=<engine>)." >&2
-  exit 1
-fi
+# Same gate as the Linux CI lane: `command -v` only proves OrbStack's CLI shim is installed,
+# not that its VM is up, so a stopped/half-booted OrbStack used to surface as a silent hang
+# in the first `docker build` instead of a message here. See docker-preflight.sh.
+# shellcheck source=scripts/docker-preflight.sh
+source "$ROOT/scripts/docker-preflight.sh"
+docker_preflight "$ENGINE" || exit 1
 
 VERSION="$(grep -m1 '^version' crates/pb-app/Cargo.toml | sed -E 's/.*"(.*)".*/\1/')"
 

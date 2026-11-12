@@ -16,6 +16,7 @@
 #         DOCKER=podman scripts/check-linux.sh
 set -euo pipefail
 cd "$(dirname "$0")/.."
+ROOT="$(pwd)"
 
 ARCH="${1:-amd64}"
 case "$ARCH" in
@@ -27,10 +28,13 @@ PLATFORM="linux/$ARCH"
 IMAGE="blazeviewer-appimage-builder:$ARCH"
 ENGINE="${DOCKER:-docker}" # OrbStack provides the `docker` CLI; override for podman/etc.
 
-command -v "$ENGINE" >/dev/null 2>&1 || {
-  echo "!! '$ENGINE' not found. Start OrbStack (or set DOCKER=<engine>)." >&2
-  exit 1
-}
+# Gate on the DAEMON answering, not just the CLI existing. OrbStack's `docker` shim stays on
+# PATH while its VM is down, so the old `command -v` check passed and the `docker build` below
+# was left to block on a dead socket — silently, for the job's whole 45-minute timeout, leaking
+# a spinning orphan runner worker each time. docker-preflight.sh carries the full story.
+# shellcheck source=scripts/docker-preflight.sh
+source "$ROOT/scripts/docker-preflight.sh"
+docker_preflight "$ENGINE" || exit 1
 
 echo ">> Linux gate  ($PLATFORM, via $ENGINE)"
 
