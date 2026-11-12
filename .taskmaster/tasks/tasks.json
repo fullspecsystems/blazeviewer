@@ -1888,6 +1888,34 @@
             "status": "in-progress"
           }
         ]
+      },
+      {
+        "id": 139,
+        "title": "iPhone slow-motion clips play at real time and seem to skip their start",
+        "description": "Owner report 2026-11-12 (macOS SwiftUI build, MOV -> AVPlayer route): a short iPhone clip appears to skip its first second when played, and again on replay (P / space). Probe of the clip: HEVC + AAC, 240 fps, 220 frames, 1.28 s total, start_time 0 (the edit list trims only the usual ~54 ms B-frame lead), and it carries com.apple.quicktime.full-frame-rate-playback-intent = 0 -- the iPhone slow-motion marker telling the player NOT to play at full frame rate. Leading hypothesis: we play the 240 fps capture in real time, so the whole clip is over in ~1.3 s and its start reads as skipped, while QuickTime/Photos honour the intent and play it slowed (Photos additionally applies its slo-mo ramp). Second suspect to rule out: start latency (the playback clock running before the first frame is presented), which on a 1.3 s clip would eat most of it. Never commit the owner file as a fixture -- it carries GPS location metadata; generate a synthetic one.",
+        "status": "pending",
+        "priority": "medium",
+        "dependencies": [],
+        "subtasks": [
+          {
+            "id": 1,
+            "title": "Confirm the diagnosis",
+            "description": "Play the same clip in QuickTime Player and compare; measure first-frame latency on our AVPlayer route to rule the start-latency suspect in or out.",
+            "status": "pending"
+          },
+          {
+            "id": 2,
+            "title": "Decide + implement the behaviour",
+            "description": "Honour full-frame-rate-playback-intent = 0 (play high-frame-rate captures slowed, e.g. at a 30 fps-equivalent rate) in pb-app-core so every route agrees; the Photos-style ramp is likely out of scope. Check the macOS Session (FFmpeg) route and the Windows MF route read the same tag.",
+            "status": "pending"
+          },
+          {
+            "id": 3,
+            "title": "Synthetic fixture + test",
+            "description": "Generate a small 240 fps clip carrying the intent tag (no location metadata) and pin the chosen playback rate with a test.",
+            "status": "pending"
+          }
+        ]
       }
     ],
     "metadata": {
