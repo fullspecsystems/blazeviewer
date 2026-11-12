@@ -7,6 +7,24 @@ with any pre-release suffix carried only by the tag.
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-11-12
+
+### Highlights
+
+**Quick Sort: file photos with one keypress.** Set up to sixteen destination folders, then press
+`1`–`7` (or `Shift+1`–`Shift+7`) to move or copy the photo you're looking at and go straight on to
+the next. Built for long culling and sorting sessions.
+
+**See how an AI image was made.** The details panel (`Shift+I`) now shows the prompt, model, seed
+and settings saved in ComfyUI and Automatic1111 images, with buttons to copy the prompt or the
+whole workflow.
+
+**Touchscreens work on Windows** — tap, pan, pinch to zoom, flick, double-tap and press-and-hold.
+
+**Better video.** Long videos no longer eat your memory, playback from a network share stays
+smooth, Space pauses a playing video, and short iPhone clips on the Mac play from their very first
+frame.
+
 ### Added
 
 - **Touch works.** On a touchscreen, tapping the picture now does what tapping
@@ -1525,7 +1543,8 @@ Initial beta — a fast, keyboard-driven Windows photo viewer.
 - Signed WiX/MSI installer with file associations and an "Open with PhotoBlaze"
   folder verb.
 
-[Unreleased]: https://github.com/fullspecsystems/blazeviewer/compare/v0.3.1...HEAD
+[Unreleased]: https://github.com/fullspecsystems/blazeviewer/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/fullspecsystems/blazeviewer/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/fullspecsystems/blazeviewer/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/fullspecsystems/blazeviewer/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/fullspecsystems/blazeviewer/compare/v0.2.0...v0.2.1
