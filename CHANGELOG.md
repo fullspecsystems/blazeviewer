@@ -109,6 +109,13 @@ with any pre-release suffix carried only by the tag.
 
 ### Fixed
 
+- **Short iPhone clips play from the very beginning on the Mac.** Some videos —
+  high-frame-rate (slow-motion) iPhone captures especially — started most of the
+  way through, and pressing `P` to replay skipped the same stretch again: a
+  1.3-second clip began at 0.93 s. macOS was quietly starting playback at the
+  clip's first full keyframe instead of its first frame; Blaze Viewer now checks
+  where playback really starts and puts it back at the start (a few
+  milliseconds, only for the clips that need it).
 - **Watching a long video no longer eats all your memory.** Every FFmpeg-backed
   playback path (video, audio, posters, subtitles) leaked each compressed
   packet it read — roughly the file's bitrate per open stream, gigabytes over a

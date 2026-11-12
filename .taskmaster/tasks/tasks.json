@@ -1891,29 +1891,29 @@
       },
       {
         "id": 139,
-        "title": "iPhone slow-motion clips play at real time and seem to skip their start",
-        "description": "Owner report 2026-11-12 (macOS SwiftUI build, MOV -> AVPlayer route): a short iPhone clip appears to skip its first second when played, and again on replay (P / space). Probe of the clip: HEVC + AAC, 240 fps, 220 frames, 1.28 s total, start_time 0 (the edit list trims only the usual ~54 ms B-frame lead), and it carries com.apple.quicktime.full-frame-rate-playback-intent = 0 -- the iPhone slow-motion marker telling the player NOT to play at full frame rate. Leading hypothesis: we play the 240 fps capture in real time, so the whole clip is over in ~1.3 s and its start reads as skipped, while QuickTime/Photos honour the intent and play it slowed (Photos additionally applies its slo-mo ramp). Second suspect to rule out: start latency (the playback clock running before the first frame is presented), which on a 1.3 s clip would eat most of it. Never commit the owner file as a fixture -- it carries GPS location metadata; generate a synthetic one.",
-        "status": "pending",
+        "title": "Mac AVPlayer starts some clips at their first in-edit keyframe, skipping the start",
+        "description": "Owner report 2026-11-12: a 1.28 s iPhone 240 fps clip skipped its first second on play and on replay (P). Root cause (measured): the clip's only early I-frame sits in the edit list's trimmed lead-in (pts -0.054, flagged discard) and its next keyframe is at 0.929 s. A bare AVPlayer readies such an item at 0.000, but attaching an AVPlayerLayer makes AVFoundation ready it at the first in-edit keyframe, 0.933 s; NativeVideoPlayer then played from there. Replay had the same bug: a default-tolerance seek(to: .zero) snaps back to 0.933. NOT the slow-motion metadata: stripping all metadata (incl. full-frame-rate-playback-intent), audio and rotation left the 0.929 start unchanged. Fix: PbSeek OpenStartPolicy (pure, 6 XCTests) decides on first-frame-ready whether to reveal at once or seek EXACTLY (zero tolerance) to the start first (~4-7 ms, behind the poster, only for clips that need it); resume() replays with an exact seek. Verified on macOS 27 with PB_TRACE: first play and replay both start at 0.000 and play to EOS; an ordinary clip takes the no-seek path; owner confirmed visually. Diagnostics left in: PB_TRACE logs the ready position + chosen action, PB_TRACE=1 PB_VIDEO_DIAG=1 adds a 20 Hz playhead trace. Not checked: the Windows MF route and the FFmpeg Session route on the same kind of clip (FFmpeg decodes from the discarded I-frame and honours the edit list, so it is expected to start at 0).",
+        "status": "done",
         "priority": "medium",
         "dependencies": [],
         "subtasks": [
           {
             "id": 1,
             "title": "Confirm the diagnosis",
-            "description": "Play the same clip in QuickTime Player and compare; measure first-frame latency on our AVPlayer route to rule the start-latency suspect in or out.",
-            "status": "pending"
+            "description": "Done: traced the AVPlayer route (ready at 0.933 with startSecs 0 and no seek from app code), reproduced in a bare AVPlayer + AVPlayerLayer, bisected with stream-copied variants to the keyframe/edit-list layout.",
+            "status": "done"
           },
           {
             "id": 2,
-            "title": "Decide + implement the behaviour",
-            "description": "Honour full-frame-rate-playback-intent = 0 (play high-frame-rate captures slowed, e.g. at a 30 fps-equivalent rate) in pb-app-core so every route agrees; the Photos-style ramp is likely out of scope. Check the macOS Session (FFmpeg) route and the Windows MF route read the same tag.",
-            "status": "pending"
+            "title": "Fix the start and the replay",
+            "description": "Done: OpenStartPolicy + exact seek on open when the item readies past its start; exact seek to zero on replay.",
+            "status": "done"
           },
           {
             "id": 3,
-            "title": "Synthetic fixture + test",
-            "description": "Generate a small 240 fps clip carrying the intent tag (no location metadata) and pin the chosen playback rate with a test.",
-            "status": "pending"
+            "title": "Pin it with a test",
+            "description": "Done: OpenStartPolicyTests (PbSeek) pins the decision table; the AVFoundation behaviour itself is not unit-testable, so the trace is the end-to-end check.",
+            "status": "done"
           }
         ]
       }

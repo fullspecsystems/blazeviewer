@@ -1,6 +1,7 @@
 import AVFoundation
 import AppKit
 import PbMacFfi
+import PbSeek
 
 /// The native macOS video player (task 79.9). On macOS the whole media pipeline is
 /// `AVPlayer` + `AVPlayerLayer` — system decode, color, HDR, audio, timing, buffering,
@@ -38,6 +39,10 @@ final class NativeVideoPlayer {
     private var revealed = false
     private var reportedOpened = false
     private var ended = false
+    /// `PB_TRACE=1 PB_VIDEO_DIAG=1` (task #139): trace the playhead on every progress tick
+    /// (~20 Hz), so wall time can be read against media time — the way to tell a clip whose
+    /// start is genuinely skipped from one that merely plays fast. Off by default.
+    private static let playheadDiag = ProcessInfo.processInfo.environment["PB_VIDEO_DIAG"] == "1"
     /// Session-only resume position (task #94.2): seek here before the first reveal so
     /// returning to a video lands where you left off, with no frame-0 flash (the poster
     /// holds until the seek lands). `0` = play from the start.
@@ -126,28 +131,42 @@ final class NativeVideoPlayer {
             MainActor.assumeIsolated {
                 guard let self, layer.isReadyForDisplay, !self.revealed else { return }
                 self.revealed = true
-                // Resume position (task #94.2): seek FIRST, reveal + play on the seek's
-                // completion so the layer shows the resume frame, not frame 0 — the wgpu
-                // poster holds until then, so there's no jump. `<= 0.5` plays from the start.
-                if self.startSecs > 0.5 {
+                let readyAt = CMTimeGetSeconds(self.player.currentTime())
+                let action = OpenStartPolicy.action(startSecs: self.startSecs, readyAt: readyAt)
+                pbTrace("native video \(self.sessionId): first frame ready at "
+                    + String(format: "%.3f", readyAt) + " startSecs=\(self.startSecs) -> \(action)")
+                // Any seek happens FIRST, with reveal + play on its completion, so the layer
+                // shows the right frame — the wgpu poster holds until then, so there's no
+                // jump. Two reasons to seek: a remembered position (task #94.2, tolerant),
+                // or AVFoundation having readied the item past its start (task #139, exact
+                // — a tolerant seek to zero snaps straight back to the same keyframe).
+                // `self.playerLayer` in the completions, not the `layer` the KVO handed us:
+                // the same object, but `seek`'s completion is @Sendable and escaping, so
+                // capturing a bare AVPlayerLayer there crosses a concurrency boundary with
+                // a non-Sendable type (a hard error in Swift 6). Reaching it through `self`
+                // keeps the crossing to the one thing that is already isolated.
+                switch action {
+                case .revealNow:
+                    self.revealAndPlay(layer)
+                case .seekExactlyToStart:
+                    self.player.seek(to: .zero, toleranceBefore: .zero, toleranceAfter: .zero) {
+                        [weak self] _ in
+                        MainActor.assumeIsolated {
+                            guard let self else { return }
+                            self.revealAndPlay(self.playerLayer)
+                        }
+                    }
+                case .seekToResume(let secs):
                     self.player.seek(
-                        to: CMTime(seconds: self.startSecs, preferredTimescale: 600),
+                        to: CMTime(seconds: secs, preferredTimescale: 600),
                         toleranceBefore: CMTime(seconds: 0.25, preferredTimescale: 600),
                         toleranceAfter: CMTime(seconds: 0.25, preferredTimescale: 600)
                     ) { [weak self] _ in
                         MainActor.assumeIsolated {
                             guard let self else { return }
-                            // `self.playerLayer`, not the `layer` the KVO handed us — they
-                            // are the same object, but `seek`'s completion is @Sendable and
-                            // escaping, so capturing a bare AVPlayerLayer there crosses a
-                            // concurrency boundary with a non-Sendable type (a hard error
-                            // in Swift 6). Reaching it through `self` keeps the crossing to
-                            // the one thing that is already isolated.
                             self.revealAndPlay(self.playerLayer)
                         }
                     }
-                } else {
-                    self.revealAndPlay(layer)
                 }
             }
         }
@@ -174,7 +193,10 @@ final class NativeVideoPlayer {
         timeControlObs = player.observe(\.timeControlStatus, options: [.new]) {
             [weak self] player, _ in
             MainActor.assumeIsolated {
-                guard let self, self.revealed else { return }
+                guard let self else { return }
+                pbTrace("native video \(self.sessionId): timeControl=\(player.timeControlStatus.rawValue) "
+                    + "at=\(String(format: "%.3f", CMTimeGetSeconds(player.currentTime()))) revealed=\(self.revealed)")
+                guard self.revealed else { return }
                 self.model?.nativeVideoStateChanged(self.sessionId, state: stateCode(player))
             }
         }
@@ -199,7 +221,8 @@ final class NativeVideoPlayer {
             MainActor.assumeIsolated { self?.publishProgress() }
         }
         let src = resourceLoader == nil ? "file" : "archive-bytes"
-        pbTrace("native video \(sessionId): opening (\(src)) muted=\(muted)")
+        pbTrace("native video \(sessionId): opening (\(src)) muted=\(muted) startSecs=\(startSecs) "
+            + "itemAt=\(String(format: "%.3f", CMTimeGetSeconds(item.currentTime())))")
     }
 
     /// Unhide the layer (poster → video, no black flash) and start playback. Called
@@ -208,7 +231,8 @@ final class NativeVideoPlayer {
         layer.isHidden = false
         canvas?.revealVideoLayer()
         player.play()
-        pbTrace("native video \(sessionId): revealed + playing")
+        pbTrace("native video \(sessionId): revealed + playing from "
+            + String(format: "%.3f", CMTimeGetSeconds(player.currentTime())))
     }
 
     /// Push the current position/duration/playing to the model for the scrubber row.
@@ -216,6 +240,10 @@ final class NativeVideoPlayer {
         let dur = item.duration
         let total = dur.isNumeric ? max(0, CMTimeGetSeconds(dur)) : 0
         let pos = max(0, CMTimeGetSeconds(player.currentTime()))
+        if Self.playheadDiag {
+            pbTrace("native video \(sessionId): playhead=\(String(format: "%.3f", pos)) "
+                + "status=\(player.timeControlStatus.rawValue) rate=\(player.rate)")
+        }
         model?.updateVideoProgress(
             sessionId,
             elapsed: pos.isFinite ? pos : 0,
@@ -226,6 +254,7 @@ final class NativeVideoPlayer {
     /// Seek to `fraction` (0…1) of the duration — the info-line scrubber. Precise enough
     /// for scrubbing; AVPlayer coalesces a rapid series (a new seek supersedes a pending).
     func seek(toFraction fraction: Double) {
+        pbTrace("native video \(sessionId): seek(toFraction: \(fraction)) at \(String(format: "%.3f", CMTimeGetSeconds(player.currentTime())))")
         let dur = item.duration
         guard dur.isNumeric, CMTimeGetSeconds(dur) > 0 else { return }
         ended = false
@@ -243,6 +272,7 @@ final class NativeVideoPlayer {
     /// `finished == false`) is told apart from a clean landing, keeping the proxy's
     /// in-flight bookkeeping honest. A small tolerance keeps rapid held seeks responsive.
     func seek(byMilliseconds deltaMs: Int64, generation: UInt64) {
+        pbTrace("native video \(sessionId): seek(byMilliseconds: \(deltaMs)) at \(String(format: "%.3f", CMTimeGetSeconds(player.currentTime())))")
         let dur = item.duration
         guard dur.isNumeric else { return }
         let total = CMTimeGetSeconds(dur)
@@ -266,6 +296,7 @@ final class NativeVideoPlayer {
     /// Frame-step one frame (`,`/`.`). Stepping is scrubbing, not playback: pause first (the
     /// `AVPlayerItem` steps only while paused), then no-op when the item can't step that way.
     func step(forward: Bool) {
+        pbTrace("native video \(sessionId): step(forward: \(forward)) at \(String(format: "%.3f", CMTimeGetSeconds(player.currentTime())))")
         if player.timeControlStatus != .paused { player.pause() }
         ended = false
         guard forward ? item.canStepForward : item.canStepBackward else { return }
@@ -350,6 +381,7 @@ final class NativeVideoPlayer {
     /// item with no reader rebuild, no format to re-describe, and no re-seek — AVPlayer
     /// re-primes internally and owns the clock throughout.
     func selectAudioTrack(row: Int) {
+        pbTrace("native video \(sessionId): selectAudioTrack(row: \(row)) at \(String(format: "%.3f", CMTimeGetSeconds(player.currentTime())))")
         guard let model else { return }
         guard let group = audibleGroup,
             let plist = model.audioRowAvPlist(row),
@@ -465,11 +497,14 @@ final class NativeVideoPlayer {
         player.pause()
     }
 
-    /// Resume — or replay when parked at EOS (seek to zero first, then play).
+    /// Resume — or replay when parked at EOS (seek to zero first, then play). The seek is
+    /// EXACT: a default-tolerance `seek(to: .zero)` is free to snap to the nearest keyframe,
+    /// and on a clip whose only early I-frame sits in the edit list's trimmed lead-in that
+    /// is 0.933 s in — every replay skipped the start (task #139, see `OpenStartPolicy`).
     func resume() {
         if ended {
             ended = false
-            player.seek(to: .zero)
+            player.seek(to: .zero, toleranceBefore: .zero, toleranceAfter: .zero)
         }
         player.play()
     }
