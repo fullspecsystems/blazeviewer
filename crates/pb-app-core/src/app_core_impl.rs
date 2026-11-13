@@ -776,6 +776,7 @@ impl AppCore {
                         self.held.insert(key, act);
                     }
                     KeyResolution::FrameStepStart(act) => self.frame_step_press(key, act),
+                    KeyResolution::RepeatStart(act) => self.slideshow_adjust_press(key, act),
                 }
             }
             CoreEvent::KeyUp { key } => {
@@ -1418,12 +1419,20 @@ impl AppCore {
                     | crate::video::VideoSessionState::Stopped
             )
         });
-        let slideshow_running =
-            self.slideshow.on && self.held_nav().is_none() && !self.dialog_open && !video_playing;
+        // A held `[` / `]` steps the interval here (task #140) and pauses the advance while it
+        // is down; on release the current slide's dwell restarts at the new speed (the dwell
+        // counts from `dwell_anchor`, the later of the present and the last adjustment).
+        let adjusting = self.tick_slideshow_adjust(now);
+        let slideshow_running = self.slideshow.on
+            && self.held_nav().is_none()
+            && !adjusting
+            && !self.dialog_open
+            && !video_playing;
         if slideshow_running {
             let caught_up = self.target_caught_up();
             let since_shown = self
-                .last_present
+                .slideshow
+                .dwell_anchor(self.last_present)
                 .map(|t| now.saturating_duration_since(t))
                 .unwrap_or(Duration::ZERO);
             if caught_up && self.slideshow.is_due(since_shown) {
@@ -1799,6 +1808,7 @@ impl AppCore {
             || resizing
             || sharpen_pending
             || framestep_active
+            || adjusting
             || self.pending_delete.is_some()
             // Keep ticking until the debounced windowed-geometry save fires (#1).
             || self.geometry_save_at.is_some()
@@ -1808,7 +1818,8 @@ impl AppCore {
             // Sleep until the next slide is due; clamp into the future so a just-passed deadline
             // still schedules a wake (we advance on the following tick).
             Some(
-                self.last_present
+                self.slideshow
+                    .dwell_anchor(self.last_present)
                     .map(|t| t + self.slideshow.interval)
                     .unwrap_or(now + self.frame_interval)
                     .max(now + Duration::from_millis(1)),

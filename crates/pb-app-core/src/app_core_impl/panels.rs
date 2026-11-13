@@ -140,7 +140,7 @@ impl AppCore {
                     row("Previous random", sc(Action::RandomPrev)),
                     row("Slideshow", sc(Action::SlideshowToggle)),
                     row(
-                        "Slideshow faster / slower",
+                        "Slideshow faster / slower (hold)",
                         two(Action::SlideshowFaster, Action::SlideshowSlower),
                     ),
                 ],

@@ -20,6 +20,9 @@ pub enum ActionKind {
     /// Animation frame-step — steps one frame on press, then repeats while held to
     /// scrub through an animation's frames (`about_to_wait`): `,` / `.`.
     FrameStep,
+    /// Steps once on press, then repeats on an accelerating schedule while held: the
+    /// slideshow interval `[` / `]` (task #140, `slideshow::HOLD_CURVE`).
+    Repeat,
 }
 
 /// Every user-invokable action. The `id` strings (stable snake_case) are the
@@ -523,6 +526,7 @@ impl Action {
             | Action::ZoomIn
             | Action::ZoomOut => ActionKind::Held,
             Action::FrameNext | Action::FramePrev => ActionKind::FrameStep,
+            Action::SlideshowFaster | Action::SlideshowSlower => ActionKind::Repeat,
             _ => ActionKind::OneShot,
         }
     }
@@ -579,5 +583,8 @@ mod tests {
         assert_eq!(Action::PlayPause.kind(), ActionKind::OneShot);
         assert_eq!(Action::FrameNext.kind(), ActionKind::FrameStep);
         assert_eq!(Action::FramePrev.kind(), ActionKind::FrameStep);
+        assert_eq!(Action::SlideshowFaster.kind(), ActionKind::Repeat);
+        assert_eq!(Action::SlideshowSlower.kind(), ActionKind::Repeat);
+        assert_eq!(Action::SlideshowToggle.kind(), ActionKind::OneShot);
     }
 }

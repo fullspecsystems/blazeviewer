@@ -7,6 +7,15 @@ with any pre-release suffix carried only by the tag.
 
 ## [Unreleased]
 
+### Changed
+
+- **Finer slideshow timing.** `[` and `]` now change the slideshow interval by a
+  tenth of a second below 10 seconds, half a second up to 30, and a second above
+  that. Hold either key to move faster: the steps grow to half a second, then one
+  second, then five, the longer you hold, and drop back to tenths below one second.
+  The slideshow waits while you adjust, then gives the current photo a full
+  interval at the new speed.
+
 ### Security
 
 - **Mac: the built-in video library (FFmpeg) is updated to 8.1.3**, picking up upstream fixes

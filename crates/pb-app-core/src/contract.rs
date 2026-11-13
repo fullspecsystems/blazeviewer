@@ -647,6 +647,9 @@ pub enum KeyResolution {
     /// Begin an animation frame-step: step one frame now, then repeat while held to
     /// scrub through the frames (`,` / `.`).
     FrameStepStart(Action),
+    /// Step once now, then repeat on an accelerating schedule while held: the slideshow
+    /// interval `[` / `]` (task #140).
+    RepeatStart(Action),
 }
 
 /// Resolve a physical key-down against the loaded keymap — the pure heart of the input
@@ -674,6 +677,7 @@ pub fn resolve_key_down(
             ActionKind::Nav => KeyResolution::NavStart(action),
             ActionKind::Held => KeyResolution::HeldStart(action),
             ActionKind::FrameStep => KeyResolution::FrameStepStart(action),
+            ActionKind::Repeat => KeyResolution::RepeatStart(action),
         },
     }
 }
@@ -771,6 +775,15 @@ mod tests {
         assert_eq!(
             resolve_key_down(&km, PbKey::Period, m, false),
             KeyResolution::FrameStepStart(Action::FrameNext),
+        );
+        // Repeat: `[` / `]` → the slideshow interval, stepping on press then accelerating.
+        assert_eq!(
+            resolve_key_down(&km, PbKey::BracketLeft, m, false),
+            KeyResolution::RepeatStart(Action::SlideshowFaster),
+        );
+        assert_eq!(
+            resolve_key_down(&km, PbKey::BracketRight, m, false),
+            KeyResolution::RepeatStart(Action::SlideshowSlower),
         );
     }
 

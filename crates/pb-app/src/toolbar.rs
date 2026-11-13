@@ -387,7 +387,8 @@ pub fn toolbar(
                     actions.push(PanelAction::ToolbarAction(Action::PlayPause));
                 }
                 // Compact decisecond label: whole seconds → "4s", otherwise one decimal → "2.5s"
-                // (the slideshow interval is settable in 0.5s steps, so it can be non-integer).
+                // (`[` / `]` step the slideshow interval by tenths and half seconds, so it
+                // can be non-integer).
                 let deci = (st.slideshow_interval.as_secs_f64() * 10.0).round() as u64;
                 let interval = if deci.is_multiple_of(10) {
                     format!("{}s", deci / 10)

@@ -1916,6 +1916,52 @@
             "status": "done"
           }
         ]
+      },
+      {
+        "id": 140,
+        "title": "Slideshow interval: size-scaled [ / ] taps + hold-to-accelerate",
+        "description": "Owner request 2026-11-12: [ / ] should adjust the slideshow interval in 0.1s steps, and holding either key should accelerate through coarser steps (0.1s, then 0.5s, then 1s, ...) rather than just repeating 0.1s fast. Before: [ / ] were OneShot (holding did nothing past the first step; OS auto-repeat is dropped by the core), stepping 0.5s at/above 0.5s and 0.1s below. Design: the curve is one data table (slideshow::HOLD_CURVE: stage = held-for threshold, step size, repeat cadence) plus slideshow::ZONES, step sizes by magnitude (owner follow-up 2026-11-12 after the first feel test: a tap is 0.1s under 10s, 0.5s from 10s to 30s, 1s from 30s; each zone also caps a held step, 0.1s below 1s and 1s below 10s); each step snaps to its own grid in the direction of travel so values stay clean (5.1 -> 5.5 -> 6.0). Constants, not a user setting (owner call: tune it once, nobody needs to adjust it). While [ or ] is held the slideshow does not advance; on release the current slide gets a fresh interval at the new speed (a slideshow-only anchor, not last_present, which also paces hold-to-blaze and the eager animation prep). All logic in pb-app-core; the shells already forward clean KeyDown/KeyUp (no menu accelerators on either). Plan + Handoff: .taskmaster/plans/140-slideshow-hold-adjust.md.",
+        "status": "in-progress",
+        "priority": "medium",
+        "dependencies": [],
+        "subtasks": [
+          {
+            "id": 1,
+            "title": "Pure curve + step math with trajectory tests",
+            "description": "slideshow.rs: HOLD_CURVE, ZONES (tap size + step cap by magnitude), grid-snapped stepping in whole deciseconds, hold rung = later of time held and the zone's tap size. Property tests (tap up/down cancel across the whole range, grids, limits) plus an #[ignore] curve_report for tuning.",
+            "status": "done"
+          },
+          {
+            "id": 2,
+            "title": "Wire [ / ] as a held, repeating action in the core",
+            "description": "New ActionKind::Repeat + KeyResolution::RepeatStart; step once on press, then tick-driven repeats after initial_delay at the stage's cadence; keep the loop polling while held. Menu clicks are single taps.",
+            "status": "done"
+          },
+          {
+            "id": 3,
+            "title": "Pause the slideshow while adjusting; fresh interval on release",
+            "description": "Gate the slideshow advance while an adjust key is held; on release re-anchor the current slide's timer (slideshow-only anchor).",
+            "status": "done"
+          },
+          {
+            "id": 4,
+            "title": "Help text, stale comments, CHANGELOG",
+            "description": "Help row mentions hold; toolbar.rs '0.5s steps' comment; CHANGELOG [Unreleased] Changed entry.",
+            "status": "done"
+          },
+          {
+            "id": 5,
+            "title": "Owner feel test on Windows; tune HOLD_CURVE / ZONES",
+            "description": "Owner holds and taps [ / ] in the real app and adjusts the tables until it feels right. Round 1 (2026-11-12): hold felt good; flat 0.1s taps too slow at large intervals, so taps now scale (ZONES). Round 2 (2026-11-12): owner approved the scaled taps.",
+            "status": "done"
+          },
+          {
+            "id": 6,
+            "title": "Mac: refresh the toolbar interval label after a held adjust",
+            "description": "CoreModel.swift only re-syncs the toolbar on a non-repeat keyDown, but held steps now land on tick, so the label goes stale until the next key. Re-sync on keyUp too. Mac-only; cannot be compiled from Windows. Claimed by the Mac session (Buzz) 2026-11-12, after the push.",
+            "status": "pending"
+          }
+        ]
       }
     ],
     "metadata": {
