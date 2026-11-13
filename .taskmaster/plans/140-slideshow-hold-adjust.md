@@ -7,7 +7,7 @@ accelerate through coarser steps instead of just repeating 0.1s quickly.
 
 - **Taps scale with the interval** via `slideshow::ZONES` (rows of `from`, `tap`,
   `max`): 0.1s under 10s, 0.5s from 10s to 30s, 1s from 30s (was 0.5s at/above 0.5s,
-  0.1s below). Menu clicks (View ▸ Slideshow Faster / Slower) are taps too. Zones are
+  0.1s below). Zones are
   directional (going down, a boundary belongs to the zone below), and a step stops on
   a boundary rather than crossing it, so a tap up and a tap down always cancel out
   (9.9 → 10.0 → 10.5 → 10.0 → 9.9; pinned by `taps_walk_the_same_ladder_both_ways`).
@@ -21,6 +21,13 @@ accelerate through coarser steps instead of just repeating 0.1s quickly.
   forcing 0.5s steps onto the 80 ms rung, which would run fast then slow down at 1 s.
 - **`Zone::max`** caps a held step by magnitude: 0.1s below 1s, 1s below 10s, 5s
   above. Keeps the low end fine and stops a coarse rung leaping the floor.
+- **Menu clicks jump between round values** (#140.7, owner 2026-11-13): View ▸
+  Slideshow Faster / Slower steps through `slideshow::MENU_STOPS` (0.1, 0.2, 0.5, 1,
+  2, 3, 4, 5, 7, 10, 15, 20, 30, 45, 60s), so 4s → 30s is six clicks, not 26. A value
+  the keys left between stops snaps to the nearest stop in the click's direction; at
+  either end a click stays put. Same route on both shells: `CoreEvent::MenuAction` →
+  `dispatch_action` → `AppCore::slideshow_menu_step`. Keys never take this path (they
+  resolve to `RepeatStart`).
 - **Grid snapping:** each step snaps to its own size in the direction of travel
   (5.1 → 5.5 → 6.0). Math in whole deciseconds, so no float drift.
 - **Pause while held:** the slideshow does not advance while `[` or `]` is down. Any
@@ -35,7 +42,7 @@ accelerate through coarser steps instead of just repeating 0.1s quickly.
   actions, and both forward clean KeyDown/KeyUp with OS repeat flagged.
 - **Constants, not settings** (owner call 2026-11-12): tune once, users don't need it.
 
-Tuning: edit `HOLD_CURVE` / `ZONES`, then
+Tuning: edit `HOLD_CURVE` / `ZONES` / `MENU_STOPS`, then
 `cargo test -p pb-app-core curve_report -- --ignored --nocapture` prints the
 value-over-time trajectory. The pinned tests check properties (tap = one step,
 monotonic, half-second grid on coarse steps, reaches both limits, fine run into
@@ -65,7 +72,19 @@ property changes on purpose.
 - **Owner feel test on the Mac, 2026-11-13:** held and tapped `[` / `]` in the rebuilt app
   and signed off ("working well"). 140.6 and #140 closed.
 
-**Not verified:** nothing outstanding for #140.
+**Verified (Windows, 2026-11-13, #140.7 menu stops):**
+- `cargo test -p pb-app-core`: 1027 passed, 4 ignored. That includes 4 new pure
+  `MENU_STOPS` tests and 2 core tests: a `MenuAction` click jumps to the next stop
+  and restarts the slide, and a key tap after a click still moves a tenth.
+- `cargo clippy -p pb-app-core -p pb-app --all-targets -- -D warnings` and
+  `cargo fmt --all -- --check` clean.
+
+**Not verified:**
+- #140.7 on macOS: pb-app-core + pb-mac-ffi tests, clippy (mac set) and the Swift
+  host build. Expected to need no Swift change: the Mac session traced
+  `MenuBar.swift` → `CoreModel.menuAction` → `pb-mac-ffi menu_action` (lib.rs:939) →
+  `CoreEvent::MenuAction`, and the Mac toolbar has no faster/slower buttons.
+- #140.7 by hand on either platform: clicking the menu items in a running app.
 
 **Cross-platform debt:**
 - ~~**Mac toolbar interval label goes stale during/after a hold.**
@@ -83,5 +102,15 @@ property changes on purpose.
   (`ZONES`: 0.1s / 0.5s from 10s / 1s from 30s). Round 2, same day: owner approved
   ("looking good"). Feel on Windows is signed off; tune the tables only if it starts
   to grate.
+- 2026-11-13, owner: stepping by tenths from the menu "would take forever", so menu
+  clicks now jump between round values (`MENU_STOPS`, #140.7). The alternative was a
+  Slideshow ▸ Speed submenu listing the values with a checkmark. It was deferred:
+  it needs menu work in both shells and an action that carries a value, and the
+  step-through gets most of the benefit with a core-only change.
+- 2026-11-13: the winit menu keeps its `[` / `]` hints ("Slideshow Faster\t[",
+  pb-app/src/menu.rs) even though a click now jumps further than a key tap. The key
+  goes the same direction, and the hint is how a menu user learns the faster, finer
+  path. The Mac menu shows no key hint (unchanged). The Mac session flagged this.
 
-**Claimed:** nothing — #140 is done (the Mac session's subtask 6 landed in 0d3db2f4).
+**Claimed:** the Mac session (Buzz) will pull #140.7 and record the Mac verification
+above. Subtask 6 landed in 0d3db2f4.

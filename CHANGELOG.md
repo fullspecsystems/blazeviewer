@@ -15,6 +15,9 @@ with any pre-release suffix carried only by the tag.
   second, then five, the longer you hold, and drop back to tenths below one second.
   The slideshow waits while you adjust, then gives the current photo a full
   interval at the new speed.
+- **Quicker slideshow speed from the menu.** View ▸ Slideshow Faster and Slower
+  now jump between round values like 1, 2, 5, 10, 30 and 60 seconds, instead of
+  creeping a tenth at a time.
 
 ### Security
 

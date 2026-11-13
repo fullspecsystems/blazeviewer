@@ -29,14 +29,13 @@ impl AppCore {
         self.show_toast(if on { "Slideshow" } else { "Slideshow Stopped" });
     }
 
-    /// Change the slideshow interval by `steps` taps (`-1` shortens, `+1` lengthens; each
-    /// sized by `slideshow::ZONES`, 0.1s under 10s), clamped, and flash the new value
-    /// (e.g. `2.0s`). This is the
-    /// View ▸ Slideshow Faster / Slower path; the keys go through
-    /// [`Self::slideshow_adjust_press`] so they can accelerate while held. Either way the
-    /// current slide's dwell restarts at the new speed (task #140).
-    pub fn adjust_slideshow(&mut self, steps: i32) {
-        let interval = self.slideshow.adjust(steps);
+    /// A View ▸ Slideshow Faster / Slower click (`-1` faster, `+1` slower): jump to the
+    /// next round value in [`crate::slideshow::MENU_STOPS`] and flash it (e.g. `5.0s`).
+    /// The keys go through [`Self::slideshow_adjust_press`] instead, for fine taps that
+    /// accelerate while held. Either way the current slide's dwell restarts at the new
+    /// speed (task #140).
+    pub fn slideshow_menu_step(&mut self, dir: i32) {
+        let interval = self.slideshow.menu_step(dir);
         self.slideshow.adjusted_at = Some(self.now);
         self.show_toast(&format_interval(interval));
     }
@@ -246,14 +245,24 @@ mod tests {
     }
 
     #[test]
-    fn a_menu_click_is_one_tap_and_restarts_the_slide() {
+    fn a_menu_click_jumps_to_the_next_stop_and_restarts_the_slide() {
         let mut core = core();
         core.handle(CoreEvent::MenuAction(Action::SlideshowSlower));
-        assert_eq!(core.slideshow.interval, secs(4.1));
+        assert_eq!(core.slideshow.interval, secs(5.0));
         assert_eq!(core.slideshow.adjusted_at, Some(core.now));
         assert_eq!(core.slideshow.hold, None, "a click never starts a hold");
         core.handle(CoreEvent::MenuAction(Action::SlideshowFaster));
-        assert_eq!(core.slideshow.interval, secs(4.0));
+        core.handle(CoreEvent::MenuAction(Action::SlideshowFaster));
+        assert_eq!(core.slideshow.interval, secs(3.0));
+    }
+
+    #[test]
+    fn keys_still_tap_in_tenths_after_a_menu_click() {
+        let mut core = core();
+        core.handle(CoreEvent::MenuAction(Action::SlideshowSlower)); // 4.0 -> 5.0
+        down(&mut core, PbKey::BracketLeft);
+        up(&mut core, PbKey::BracketLeft);
+        assert_eq!(core.slideshow.interval, secs(4.9));
     }
 
     #[test]

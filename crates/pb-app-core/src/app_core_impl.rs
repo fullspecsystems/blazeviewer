@@ -573,8 +573,10 @@ impl AppCore {
             Action::PrevFolder => self.open_sibling_cmd(-1),
             Action::NextFolder => self.open_sibling_cmd(1),
             Action::SlideshowToggle => self.toggle_slideshow(),
-            Action::SlideshowFaster => self.adjust_slideshow(-1),
-            Action::SlideshowSlower => self.adjust_slideshow(1),
+            // Menu clicks jump between round values; the keys never get here (they
+            // resolve to `RepeatStart` for fine taps + hold-to-accelerate).
+            Action::SlideshowFaster => self.slideshow_menu_step(-1),
+            Action::SlideshowSlower => self.slideshow_menu_step(1),
             Action::PlayPause => self.toggle_play_pause(),
             // A menu click is a single step; the keyboard's hold-to-scrub goes through
             // `frame_step_press` (the FrameStep press arm) instead.

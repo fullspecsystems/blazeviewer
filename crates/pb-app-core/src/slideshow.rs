@@ -11,7 +11,8 @@
 //! [`ZONES`] sizes steps by how long the interval already is: a `[` / `]` tap moves
 //! 0.1s under 10s, 0.5s up to 30s, 1s above that, and caps how big a held step may
 //! get (fine below 1s, so a hold slows into the floor). [`HOLD_CURVE`] is how a held
-//! key accelerates over time. Every step snaps to its own grid in the direction of
+//! key accelerates over time. Menu clicks skip both and jump between round values
+//! ([`MENU_STOPS`]). Every step snaps to its own grid in the direction of
 //! travel, so the values you see stay clean (5.1 → 5.5 → 6.0, never 5.6 → 6.1). The
 //! math runs in whole deciseconds, so repeated steps can't drift.
 //!
@@ -64,8 +65,8 @@ pub const HOLD_CURVE: &[Stage] = &[
     Stage { after: ms(5000), step: ms(5000), every: ms(200) }, // then 5s, so 60s is reachable
 ];
 
-/// A band of interval sizes, from `from` up to the next zone's `from`. Within it a tap
-/// (and each menu click) moves `tap`, and a held step is never larger than `max`.
+/// A band of interval sizes, from `from` up to the next zone's `from`. Within it a key
+/// tap moves `tap`, and a held step is never larger than `max`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Zone {
     pub from: Duration,
@@ -85,6 +86,17 @@ pub const ZONES: &[Zone] = &[
     Zone { from: ms(1000),   tap: ms(100),  max: ms(1000) }, // 1s to 10s
     Zone { from: ms(10_000), tap: ms(500),  max: ms(5000) }, // 10s to 30s
     Zone { from: ms(30_000), tap: ms(1000), max: ms(5000) }, // 30s and up
+];
+
+/// **Where a View ▸ Slideshow Faster / Slower click goes.** A menu is for picking, not
+/// nudging: a click jumps to the next of these round values (4s → 30s is six clicks,
+/// not 26), and a value the keys left between stops (4.3s) snaps to the nearest stop in
+/// the click's direction. The keys keep their fine taps and the hold curve. Sorted
+/// ascending, from [`MIN_INTERVAL`] to [`MAX_INTERVAL`] (a test enforces both).
+#[rustfmt::skip] // one compact row, so the stops read at a glance
+pub const MENU_STOPS: &[Duration] = &[
+    ms(100), ms(200), ms(500), ms(1000), ms(2000), ms(3000), ms(4000), ms(5000),
+    ms(7000), ms(10_000), ms(15_000), ms(20_000), ms(30_000), ms(45_000), ms(60_000),
 ];
 
 /// A `[` / `]` key hold in progress.
@@ -151,6 +163,13 @@ impl Slideshow {
         for _ in 0..steps.unsigned_abs() {
             self.interval = tap_interval(self.interval, dir);
         }
+        self.interval
+    }
+
+    /// A View ▸ Slideshow Faster / Slower click: jump to the next [`MENU_STOPS`] stop
+    /// toward `dir` (`-1` faster, `+1` slower). Returns the new interval.
+    pub fn menu_step(&mut self, dir: i32) -> Duration {
+        self.interval = menu_stop(self.interval, dir);
         self.interval
     }
 
@@ -265,6 +284,18 @@ pub fn zone_for(cur: Duration, dir: i32) -> Zone {
         })
         .copied()
         .unwrap_or(ZONES[0])
+}
+
+/// The [`MENU_STOPS`] stop one menu click from `cur` lands on: the nearest stop above it
+/// (`dir > 0`, slower) or below it (`dir < 0`, faster). Past either end it stays put.
+pub fn menu_stop(cur: Duration, dir: i32) -> Duration {
+    let cur = to_ds(cur);
+    let next = match dir.signum() {
+        1 => MENU_STOPS.iter().find(|s| to_ds(**s) > cur),
+        -1 => MENU_STOPS.iter().rev().find(|s| to_ds(**s) < cur),
+        _ => None,
+    };
+    clamp_interval(next.copied().unwrap_or(from_ds(cur)))
 }
 
 /// One tap from `cur` in direction `dir`: a step of the current zone's `tap` size.
@@ -390,6 +421,54 @@ mod tests {
         assert_eq!(s.adjust(1), secs(25.5), "half seconds from 10s");
         let mut s = at(45.0);
         assert_eq!(s.adjust(-1), secs(44.0), "whole seconds from 30s");
+    }
+
+    #[test]
+    fn the_menu_stops_run_floor_to_ceiling_in_order() {
+        assert_eq!(MENU_STOPS[0], MIN_INTERVAL);
+        assert_eq!(MENU_STOPS[MENU_STOPS.len() - 1], MAX_INTERVAL);
+        for pair in MENU_STOPS.windows(2) {
+            assert!(pair[0] < pair[1], "stops sorted ascending: {pair:?}");
+        }
+        for &stop in MENU_STOPS {
+            assert_eq!(from_ds(to_ds(stop)), stop, "{stop:?} on the tenth grid");
+        }
+    }
+
+    #[test]
+    fn a_menu_click_jumps_to_the_next_stop() {
+        let mut s = Slideshow::default(); // 4.0s
+        assert_eq!(s.menu_step(1), secs(5.0));
+        assert_eq!(s.menu_step(1), secs(7.0));
+        assert_eq!(s.menu_step(-1), secs(5.0));
+        assert_eq!(s.menu_step(-1), secs(4.0));
+        assert_eq!(s.menu_step(-1), secs(3.0));
+        // Six clicks from the default to 30s, where tenths would take 26 even with
+        // the scaled taps.
+        let mut s = Slideshow::default();
+        let clicks = std::iter::repeat_with(|| s.menu_step(1))
+            .position(|d| d == secs(30.0))
+            .map(|i| i + 1);
+        assert_eq!(clicks, Some(6));
+    }
+
+    #[test]
+    fn a_menu_click_from_between_stops_lands_on_the_nearest_one_that_way() {
+        // Values the keys leave between stops snap in the click's direction.
+        assert_eq!(at(4.3).menu_step(1), secs(5.0));
+        assert_eq!(at(4.3).menu_step(-1), secs(4.0));
+        assert_eq!(at(12.5).menu_step(1), secs(15.0));
+        assert_eq!(at(12.5).menu_step(-1), secs(10.0));
+        assert_eq!(at(0.3).menu_step(-1), secs(0.2));
+    }
+
+    #[test]
+    fn a_menu_click_at_either_end_stays_put() {
+        assert_eq!(at(60.0).menu_step(1), MAX_INTERVAL);
+        assert_eq!(at(0.1).menu_step(-1), MIN_INTERVAL);
+        // A step back in from the end still works.
+        assert_eq!(at(60.0).menu_step(-1), secs(45.0));
+        assert_eq!(at(0.1).menu_step(1), secs(0.2));
     }
 
     #[test]
