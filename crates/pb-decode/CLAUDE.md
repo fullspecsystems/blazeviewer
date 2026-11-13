@@ -148,7 +148,11 @@ parse work, not bytes (matroskadec reads payloads before the check).
 ## Known v1 limitations (deliberate)
 
 Radiance-HDR / OpenEXR (image-crate, not WIC) still clamped to SDR; CMYK JPEG
-mis-colored; first frame only (GIF/animated-WebP/Live-Photo/multipage-TIFF).
+mis-colored; multipage TIFF shows page 1 only; single-file HEIC image sequences (`msf1`, rare —
+*not* Live Photos, which are a HEIC + `.mov` pair) stay a still on Windows (dav1d is
+AV1-only). *Not* limits: animated GIF / APNG / WebP / AVIF and
+Live Photo motion all **play** on `P` (`animation.rs`) — browsing
+decodes only frame 1, by design.
 LUT/CLUT & gray/CMYK ICC profiles → sRGB passthrough (the `lcms2`-behind-a-flag
 escalation). SDR-white level is a 200-nit default (real value via DisplayConfig =
 TODO). ⚠ On an **HDR desktop**, GDI screen capture of the flip swapchain returns

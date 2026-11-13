@@ -559,8 +559,11 @@ video decode), `crates/pb-source/CLAUDE.md` (archive internals),
   holds). ⚠️ **A new `LibraryItemKind` must opt *out* of byte reads, not into
   them** — read guards are positive (`Image` reads), kind matches exhaustive.
 - **Known v1 limits** (deliberate): Radiance-HDR/EXR clamp to SDR; CMYK JPEG
-  mis-colored; GIF/animated-WebP first-frame only; exotic ICC → sRGB
-  passthrough. ⚠ On an HDR desktop, GDI capture of the flip swapchain is
+  mis-colored; multipage TIFF shows page 1 only; single-file HEIC image
+  sequences (`msf1`, rare — *not* Live Photos) stay a still on Windows; exotic
+  ICC → sRGB passthrough. (Animated GIF / APNG /
+  WebP / AVIF and Live Photo motion are *not* limits — they play on `P`, see
+  `pb-decode::animation`.) ⚠ On an HDR desktop, GDI capture of the flip swapchain is
   all-white — a Windows limit, not a render bug (`offscreen_png` verifies).
 ## Build, test, bench
 

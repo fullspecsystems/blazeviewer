@@ -386,8 +386,10 @@ pragmatic crate choices differ from the table above and are the current baseline
   `ZipSource::needs_password`) but in-app password **entry is a TODO**. Crates: `zip` +
   `sevenz-rust2` (both pure Rust, no C build risk).
 - **Known v1 limitations** (deliberate): Radiance-HDR / OpenEXR (image-crate, not WIC) still
-  clamped to SDR; CMYK JPEG mis-colored; first frame only (GIF/animated-WebP/Live-Photo/
-  multipage-TIFF). LUT/CLUT & gray/CMYK ICC profiles → sRGB passthrough (the `lcms2`-behind-a-
+  clamped to SDR; CMYK JPEG mis-colored; multipage TIFF shows page 1 only; single-file HEIC image
+  sequences (`msf1`, rare — *not* Live Photos, which are a HEIC + `.mov` pair and play everywhere)
+  stay a still on Windows (dav1d is AV1-only). *Not* limits: animated GIF / APNG /
+  WebP / AVIF and Live Photo motion all play on `P` (`pb-decode::animation`). LUT/CLUT & gray/CMYK ICC profiles → sRGB passthrough (the `lcms2`-behind-a-
   flag escalation). SDR-white level is a 200-nit default (real value via DisplayConfig = TODO).
   ⚠ On an **HDR desktop**, GDI screen capture of the flip swapchain returns all-white — a
   Windows limit, not a render bug (use the `offscreen_png` example to verify rendering).
