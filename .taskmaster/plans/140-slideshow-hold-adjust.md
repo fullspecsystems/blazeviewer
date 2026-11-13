@@ -79,12 +79,20 @@ property changes on purpose.
 - `cargo clippy -p pb-app-core -p pb-app --all-targets -- -D warnings` and
   `cargo fmt --all -- --check` clean.
 
-**Not verified:**
-- #140.7 on macOS: pb-app-core + pb-mac-ffi tests, clippy (mac set) and the Swift
-  host build. Expected to need no Swift change: the Mac session traced
-  `MenuBar.swift` → `CoreModel.menuAction` → `pb-mac-ffi menu_action` (lib.rs:939) →
+**Verified (macOS, Buzz, 2026-11-13, #140.7 menu stops, at 19cff206, clean tree):**
+- `cargo clippy --all-targets` on the mac-swift set (`pb-mac-ffi pb-app-core pb-core
+  pb-decode pb-source pb-render pb-hud`) with `-D warnings`: clean.
+- `cargo test -p pb-app-core -p pb-mac-ffi`: 1023 + 39 passed, 4 ignored. That is +5 on
+  the 1018 at 0d3db2f4: the 6 new tests, less the one renamed. The slideshow filter is 33
+  passed, 1 ignored, and all 6 new menu tests are among them.
+- `build-swift-host.sh --release --bundle-ffmpeg` builds, and the FFmpeg audit is OK. No
+  Swift change was needed. The menu reaches the core through `MenuBar.swift` →
+  `CoreModel.menuAction` → `pb-mac-ffi menu_action` (lib.rs:939) →
   `CoreEvent::MenuAction`, and the Mac toolbar has no faster/slower buttons.
-- #140.7 by hand on either platform: clicking the menu items in a running app.
+
+**Not verified:**
+- #140.7 by hand on either platform: clicking the menu items in a running app. Close
+  140.7 and #140 once the owner has clicked through them.
 
 **Cross-platform debt:**
 - ~~**Mac toolbar interval label goes stale during/after a hold.**
@@ -112,5 +120,5 @@ property changes on purpose.
   goes the same direction, and the hint is how a menu user learns the faster, finer
   path. The Mac menu shows no key hint (unchanged). The Mac session flagged this.
 
-**Claimed:** the Mac session (Buzz) will pull #140.7 and record the Mac verification
-above. Subtask 6 landed in 0d3db2f4.
+**Claimed:** nothing. The Mac verification of #140.7 is recorded above. Subtask 6
+landed in 0d3db2f4.
