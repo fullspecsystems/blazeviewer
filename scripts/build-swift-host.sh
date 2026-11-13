@@ -86,10 +86,21 @@ if [[ "$BUNDLE_FFMPEG" == "1" ]]; then
 	# (libavcodec 63 vs the pin's 62): headers from one major, dylibs from another. Point
 	# pkg-config at the pin ONLY (PKG_CONFIG_LIBDIR replaces the default search path, so
 	# Homebrew cannot leak back in), and build the pin first if this machine lacks it.
+	# "Lacks it" includes holding an OLDER pin: build-ffmpeg-macos.sh stamps its install
+	# with FF_VERSION, and a mismatch (or a pre-stamp install) rebuilds from clean — else
+	# bumping the pin would silently keep bundling the previous version's dylibs.
 	FF_PREFIX="$REPO_ROOT/third_party/ffmpeg/$(uname -m)"
-	if [[ ! -e "$FF_PREFIX/lib/libavcodec.dylib" ]]; then
-		echo "==> Building pinned LGPL FFmpeg (first run; ~10-20 min)"
+	FF_WANT="$(sed -n 's/^FF_VERSION="\(.*\)"$/\1/p' "$REPO_ROOT/scripts/build-ffmpeg-macos.sh")"
+	FF_HAVE="$(cat "$FF_PREFIX/.ffmpeg-version" 2>/dev/null || true)"
+	if [[ -z "$FF_WANT" ]]; then
+		echo "error: could not read FF_VERSION from scripts/build-ffmpeg-macos.sh" >&2
+		exit 1
+	elif [[ ! -e "$FF_PREFIX/lib/libavcodec.dylib" ]]; then
+		echo "==> Building pinned LGPL FFmpeg $FF_WANT (first run; ~10-20 min)"
 		"$REPO_ROOT/scripts/build-ffmpeg-macos.sh"
+	elif [[ "$FF_HAVE" != "$FF_WANT" ]]; then
+		echo "==> Pinned FFmpeg is ${FF_HAVE:-unstamped}, pin says $FF_WANT — rebuilding (~10-20 min)"
+		"$REPO_ROOT/scripts/build-ffmpeg-macos.sh" --clean
 	fi
 	export PKG_CONFIG_LIBDIR="$FF_PREFIX/lib/pkgconfig"
 	unset PKG_CONFIG_PATH

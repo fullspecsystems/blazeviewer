@@ -39,12 +39,14 @@ libheif/libde265 static link (task #77), and the two must be solved together.
 
 Pinned in `scripts/build-ffmpeg-macos.sh`:
 
-- **Version:** FFmpeg **8.1.1** (soname majors libavcodec.62 / libavformat.62 / libavutil.60 /
-  libswscale.9 / libswresample.6). This **must** match `ffmpeg-sys-next` 8.1's ABI — the Rust
-  crate is bindgen'd against these headers. Bumping `ffmpeg-sys-next` means re-pinning here.
-- **Source integrity:** the upstream `ffmpeg-8.1.1.tar.xz` sha256 is recorded in the script and
-  verified on fetch (`b6863add…edf3`). Re-verify against FFmpeg's PGP release signature before a
-  public ship.
+- **Version:** FFmpeg **8.1.3** (soname majors libavcodec.62 / libavformat.62 / libavutil.60 /
+  libswscale.9 / libswresample.6). `ffmpeg-sys-next` 9.1 binds to whatever FFmpeg pkg-config
+  finds, and `build-swift-host.sh --bundle-ffmpeg` points pkg-config at this pin, so the Rust
+  side is always bindgen'd against the headers of the dylibs it bundles. The install is stamped
+  (`.ffmpeg-version`); a stamp that differs from the pin forces a clean rebuild.
+- **Source integrity:** the upstream `ffmpeg-8.1.3.tar.xz` sha256 is recorded in the script and
+  verified on fetch (`7138d28c…78a3`), and the tarball was checked against FFmpeg's detached PGP
+  signature (good signature, release key `FCF9 86EA … D676 58D8`) when pinned (2026-11-12).
 - **Configure flags** (rationale):
   - `--enable-shared --disable-static` — shared libs are the LGPL relink mechanism (below).
   - `--disable-programs --disable-doc` — no `ffmpeg`/`ffplay`/`ffprobe` binaries.

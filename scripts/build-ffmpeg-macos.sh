@@ -20,10 +20,17 @@
 #     to point the app binary at them (the .app already carries an
 #     `@executable_path/../Frameworks` rpath for Sparkle).
 #
-# The soname majors it emits (libavcodec.62, libavformat.62, libavutil.60,
-# libswscale.9, libswresample.6) MUST match `ffmpeg-sys-next` 8.1's ABI — hence
-# the FFmpeg 8.1.1 pin (== the Homebrew version the Rust side is bindgen'd
-# against). Bumping ffmpeg-sys-next means re-pinning here in lockstep.
+# The pin is FFmpeg 8.1.x (soname majors libavcodec.62, libavformat.62,
+# libavutil.60, libswscale.9, libswresample.6). `ffmpeg-sys-next` 9.1 binds to
+# whichever FFmpeg pkg-config finds (it supports 3.4 through 9.x, keyed by version
+# cfgs), and `build-swift-host.sh --bundle-ffmpeg` points pkg-config at THIS pin —
+# so headers and bundled dylibs always come from the same build. A patch bump
+# (8.1.x → 8.1.y) is just FF_VERSION + FF_SHA256 below; moving to 9.x is a soname
+# major bump and needs a full cross-platform retest.
+#
+# Rebuild-on-bump: the install writes $PREFIX/.ffmpeg-version, and
+# build-swift-host.sh rebuilds (--clean) whenever that stamp differs from
+# FF_VERSION here — so a bumped pin can never ship stale dylibs from an old build.
 #
 # Output: third_party/ffmpeg/<arch>/{lib,include} (git-ignored, reproducible).
 # Prereqs: `brew install nasm`, Xcode CLT. Run time ~10–20 min (first build).
@@ -31,11 +38,15 @@
 # Usage: scripts/build-ffmpeg-macos.sh [--arch arm64|x86_64] [--clean]
 set -euo pipefail
 
-FF_VERSION="8.1.1"
+FF_VERSION="8.1.3"
 # sha256 of ffmpeg-${FF_VERSION}.tar.xz from https://ffmpeg.org/releases/ — computed from
 # the official HTTPS download and pinned here (a mismatch aborts, catching a tampered/wrong
-# file). Re-verify against the FFmpeg PGP release signature before a public ship.
-FF_SHA256="b6863adde98898f42602017462871b5f6333e65aec803fdd7a6308639c52edf3"
+# file). 8.1.3's tarball was also checked against its detached PGP signature
+# (ffmpeg-8.1.3.tar.xz.asc): good signature from the FFmpeg release signing key
+# FCF9 86EA 15E6 E293 A564 4F10 B432 2F04 D676 58D8. Repeat that check on every re-pin:
+#   export GNUPGHOME=$(mktemp -d); curl -fsSL https://ffmpeg.org/ffmpeg-devel.asc | gpg --import
+#   gpg --verify ffmpeg-X.tar.xz.asc ffmpeg-X.tar.xz   # "Good signature" + that fingerprint
+FF_SHA256="7138d28c96d9d3e3af4ee3d8cad72741f8ffb40da90c1112235dea3ecd3178a3"
 
 ARCH="$(uname -m)"   # arm64 on Apple Silicon; override with --arch
 CLEAN=0
@@ -136,6 +147,10 @@ if [[ $STRAY == 1 ]]; then
 	exit 1
 fi
 echo "==> Clean: every dependency is a system lib or an @rpath sibling"
+
+# 6) Stamp the install with the pinned version, written LAST so an interrupted build
+# leaves no stamp and build-swift-host.sh retries it.
+echo "$FF_VERSION" >"$PREFIX/.ffmpeg-version"
 
 echo
 echo "==> Installed to $PREFIX"

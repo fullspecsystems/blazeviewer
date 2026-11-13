@@ -480,7 +480,7 @@ A release .app must reference FFmpeg **only** via `@rpath/…` out of
 
 ### How each platform stays clean
 
-- **macOS** — `scripts/build-ffmpeg-macos.sh` builds a pinned FFmpeg 8.1.1 from
+- **macOS** — `scripts/build-ffmpeg-macos.sh` builds a pinned FFmpeg 8.1.3 from
   source: no `--enable-gpl`, no `--enable-nonfree`, `--disable-encoders
   --disable-muxers`, `--install-name-dir=@rpath`. It **asserts** LGPL at the end
   (belt-and-suspenders against a flag leaking in). `bundle-ffmpeg-macos.sh` copies

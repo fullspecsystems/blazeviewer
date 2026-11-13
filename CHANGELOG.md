@@ -7,6 +7,12 @@ with any pre-release suffix carried only by the tag.
 
 ## [Unreleased]
 
+### Security
+
+- **Mac: the built-in video library (FFmpeg) is updated to 8.1.3**, picking up upstream fixes
+  for crashes and memory-safety bugs that a damaged or deliberately malformed video file could
+  trigger.
+
 ## [0.4.0] - 2026-11-12
 
 ### Highlights

@@ -21,7 +21,7 @@ missing rather than shipping a binary without them:
 | libheif | 1.23.0 | vcpkg commit `a0400024` (`scripts/setup-libheif.ps1 -VcpkgRef`) |
 | libde265 | 1.1.1 | same vcpkg commit |
 | dav1d | 1.5.3 | same vcpkg commit |
-| FFmpeg | **8.1.2** on Windows (vcpkg) · **8.1.1** on macOS (pinned tarball + sha256 in `scripts/build-ffmpeg-macos.sh`) | as noted |
+| FFmpeg | **8.1.2** on Windows (vcpkg) · **8.1.3** on macOS (pinned tarball + sha256 in `scripts/build-ffmpeg-macos.sh`) | as noted |
 | Sparkle (macOS only) | 2.9.4 | `mac/Package.resolved` (SwiftPM) |
 
 Linux takes libheif/FFmpeg from the build distro and bundles the resulting shared objects, so
