@@ -381,8 +381,11 @@ final class CoreModel {
             self.drainEffects()
             // Keep the toolbar in step with keyboard-driven state the effect markers don't
             // cover — notably the slideshow interval (`[` / `]`), which only toasts. Discrete
-            // presses only (skip OS auto-repeat) to stay off any held-key fast path.
-            if event.type == .keyDown, !event.isARepeat { self.syncToolbar() }
+            // presses only (skip OS auto-repeat) to stay off any held-key fast path — plus
+            // every key-up: a held `[` / `]` accelerates on the core's *tick* (task #140), not
+            // on these events, so its later steps would otherwise leave the label stale. The
+            // toast shows the live value during the hold; the label catches up on release.
+            if event.type == .keyUp || !event.isARepeat { self.syncToolbar() }
             // ⌘ chords are passed on rather than eaten, or the menu's own ⌘O / ⌘Q / ⌘, would
             // never fire — *unless* the keymap binds this one. ⌘↓ (Open, the Finder chord —
             // task #105) is bound here and in no menu, so forwarding it would act AND then

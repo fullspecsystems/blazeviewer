@@ -1958,8 +1958,8 @@
           {
             "id": 6,
             "title": "Mac: refresh the toolbar interval label after a held adjust",
-            "description": "CoreModel.swift only re-syncs the toolbar on a non-repeat keyDown, but held steps now land on tick, so the label goes stale until the next key. Re-sync on keyUp too. Mac-only; cannot be compiled from Windows. Claimed by the Mac session (Buzz) 2026-11-12, after the push.",
-            "status": "pending"
+            "description": "CoreModel.swift only re-syncs the toolbar on a non-repeat keyDown, but held steps now land on tick, so the label goes stale until the next key. Re-sync on keyUp too. Mac-only; cannot be compiled from Windows. Claimed by the Mac session (Buzz) 2026-11-12, after the push. DONE in code on the Mac 2026-11-12: also syncToolbar() on keyUp. Clippy, 1018 pb-app-core + 39 pb-mac-ffi tests and the Swift host build all pass. Only the owner's feel test of the hold on macOS remains; then set this and #140 to done.",
+            "status": "review"
           }
         ]
       }

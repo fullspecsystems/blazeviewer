@@ -52,17 +52,31 @@ property changes on purpose.
 - Ship-feature build of the winit shell compiles, and the owner held and tapped
   `[` / `]` in it (two rounds, signed off).
 
+**Verified (macOS, Buzz, 2026-11-12):**
+- `cargo clippy --all-targets -p pb-mac-ffi -p pb-app-core -p pb-core -p pb-decode
+  -p pb-source -p pb-render -p pb-hud -- -D warnings` clean (the CI mac-swift set).
+- `cargo test -p pb-app-core -p pb-mac-ffi`: 1018 + 39 passed (4 ignored, the same
+  1022 as Windows), including all 28 slideshow tests.
+- The Swift host builds against this change (`build-swift-host.sh --release
+  --bundle-ffmpeg`) with the keyUp `syncToolbar()` fix below.
+- Menu double-fire ruled out by reading the code: `item("slideshow_faster"/"_slower")` has no
+  key equivalent, and the key monitor swallows a plain `[` / `]` before AppKit's menu
+  could see it.
+
 **Not verified:**
-- **macOS** at all: core-only change, but the Mac shell has not been built against it.
-  Expected to work unchanged for input (the Mac forwards `isARepeat` and has no key
-  equivalent on these menu items).
+- **macOS feel:** the owner hasn't yet held or tapped `[` / `]` in the Mac app, so the
+  toolbar label catching up on release is unchecked. The UI driver here can only tap, not
+  hold, a key. Close 140.6 and #140 once the owner confirms.
 
 **Cross-platform debt:**
-- **Mac toolbar interval label goes stale during/after a hold.**
+- ~~**Mac toolbar interval label goes stale during/after a hold.**
   `mac/Sources/BlazeViewerMac/CoreModel.swift` (~line 385) re-syncs the toolbar only on
   a non-repeat keyDown, but held steps now land on `tick`. Fix: also `syncToolbar()` on
   keyUp (or on any `[`/`]` keyUp). The Windows toolbar reads `slideshow.interval` live
-  and needs nothing. Owed by: Mac. Subtask 6.
+  and needs nothing. Owed by: Mac. Subtask 6.~~ **Fixed on the Mac 2026-11-12:**
+  `CoreModel.swift` now re-syncs on every keyUp as well as a non-repeat keyDown. The toast
+  shows the live value during a hold, and the label catches up on release. Build and tests
+  pass; owner feel test pending (see *Not verified*).
 
 **Decisions / corrections:**
 - 2026-11-12, owner feel test of the first build: the hold is "pretty good", but a
