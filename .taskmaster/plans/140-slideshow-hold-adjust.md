@@ -62,11 +62,10 @@ property changes on purpose.
 - Menu double-fire ruled out by reading the code: `item("slideshow_faster"/"_slower")` has no
   key equivalent, and the key monitor swallows a plain `[` / `]` before AppKit's menu
   could see it.
+- **Owner feel test on the Mac, 2026-11-13:** held and tapped `[` / `]` in the rebuilt app
+  and signed off ("working well"). 140.6 and #140 closed.
 
-**Not verified:**
-- **macOS feel:** the owner hasn't yet held or tapped `[` / `]` in the Mac app, so the
-  toolbar label catching up on release is unchecked. The UI driver here can only tap, not
-  hold, a key. Close 140.6 and #140 once the owner confirms.
+**Not verified:** nothing outstanding for #140.
 
 **Cross-platform debt:**
 - ~~**Mac toolbar interval label goes stale during/after a hold.**
@@ -76,7 +75,7 @@ property changes on purpose.
   and needs nothing. Owed by: Mac. Subtask 6.~~ **Fixed on the Mac 2026-11-12:**
   `CoreModel.swift` now re-syncs on every keyUp as well as a non-repeat keyDown. The toast
   shows the live value during a hold, and the label catches up on release. Build and tests
-  pass; owner feel test pending (see *Not verified*).
+  pass; owner signed off on the Mac 2026-11-13.
 
 **Decisions / corrections:**
 - 2026-11-12, owner feel test of the first build: the hold is "pretty good", but a
@@ -85,6 +84,4 @@ property changes on purpose.
   ("looking good"). Feel on Windows is signed off; tune the tables only if it starts
   to grate.
 
-**Claimed:** the Mac session (Buzz) took subtask 6, the `CoreModel.swift` keyUp
-`syncToolbar()`, plus building pb-mac-ffi and the Swift host against this change,
-once it is pushed.
+**Claimed:** nothing — #140 is done (the Mac session's subtask 6 landed in 0d3db2f4).
