@@ -21,6 +21,9 @@ with any pre-release suffix carried only by the tag.
 
 ### Fixed
 
+- **Mac: HDR videos look right before you press play.** Parked on an HDR MP4 or MOV, the
+  preview frame now shows in full HDR, as MKVs already did, instead of a flat SDR frame
+  that brightened once playback started.
 - **The menu shows the right keys while a video plays.** Space pauses a playing video
   and Shift+Space moves on to the next item, so the menu now says so: Next shows
   Shift+Space and Play/Pause shows Space until the video ends.

@@ -215,6 +215,22 @@ fn downscale_to_fit_f32(
     allow(dead_code)
 )]
 pub(crate) fn rotate_rgba(src: Vec<u8>, w: u32, h: u32, deg: i32) -> (Vec<u8>, u32, u32) {
+    rotate_pixels(src, w, h, deg, 4)
+}
+
+/// [`rotate_rgba`] for any pixel size: `bpp` bytes per pixel (4 = RGBA8, 8 = RGBA16F —
+/// the macOS HDR poster, task #144). Clockwise quadrants only, like `rotate_rgba`.
+#[cfg_attr(
+    not(any(target_os = "macos", all(unix, feature = "livephoto"))),
+    allow(dead_code)
+)]
+pub(crate) fn rotate_pixels(
+    src: Vec<u8>,
+    w: u32,
+    h: u32,
+    deg: i32,
+    bpp: usize,
+) -> (Vec<u8>, u32, u32) {
     let (w, h) = (w as usize, h as usize);
     let d = deg.rem_euclid(360);
     if d == 0 || w == 0 || h == 0 {
@@ -222,7 +238,11 @@ pub(crate) fn rotate_rgba(src: Vec<u8>, w: u32, h: u32, deg: i32) -> (Vec<u8>, u
     }
     // 90°/270° swap the axes; 180° keeps them.
     let (nw, nh) = if d == 180 { (w, h) } else { (h, w) };
-    let mut out = vec![0u8; nw * nh * 4];
+    let mut out = vec![0u8; nw * nh * bpp];
+    assert!(
+        src.len() >= w * h * bpp,
+        "rotate_pixels: buffer smaller than {w}x{h}x{bpp}"
+    );
     let sp = src.as_ptr();
     let dp = out.as_mut_ptr();
     for dy in 0..nh {
@@ -233,12 +253,12 @@ pub(crate) fn rotate_rgba(src: Vec<u8>, w: u32, h: u32, deg: i32) -> (Vec<u8>, u
                 180 => (w - 1 - dx, h - 1 - dy),
                 _ => (nh - 1 - dy, dx), // 270 (nh == w)
             };
-            let si = (y * w + x) * 4;
-            let di = (dy * nw + dx) * 4;
-            // SAFETY: by construction x<w, y<h ⇒ si+4 ≤ w·h·4 = src.len(); dx<nw, dy<nh ⇒
-            // di+4 ≤ nw·nh·4 = out.len(). Ranges never overlap the ends.
+            let si = (y * w + x) * bpp;
+            let di = (dy * nw + dx) * bpp;
+            // SAFETY: by construction x<w, y<h ⇒ si+bpp ≤ w·h·bpp = src.len() (asserted
+            // below); dx<nw, dy<nh ⇒ di+bpp ≤ nw·nh·bpp = out.len(). Ranges never overlap.
             unsafe {
-                std::ptr::copy_nonoverlapping(sp.add(si), dp.add(di), 4);
+                std::ptr::copy_nonoverlapping(sp.add(si), dp.add(di), bpp);
             }
         }
     }
@@ -483,6 +503,18 @@ mod tests {
         assert_eq!(r_at(&out, 3, 2, 0), 5);
         assert_eq!(r_at(&out, 3, 0, 1), 0);
         assert_eq!(r_at(&out, 3, 2, 1), 4);
+    }
+
+    #[test]
+    fn rotate_pixels_moves_whole_8_byte_pixels() {
+        // 2×1, pixel A = bytes 0..8, pixel B = 8..16; 90° CW → 1×2 with A on top.
+        let src: Vec<u8> = (0u8..16).collect();
+        let (out, w, h) = rotate_pixels(src.clone(), 2, 1, 90, 8);
+        assert_eq!((w, h), (1, 2));
+        assert_eq!(&out[0..8], &src[0..8], "A stays a whole pixel, on top");
+        assert_eq!(&out[8..16], &src[8..16]);
+        let (back, _, _) = rotate_pixels(out, 1, 2, 270, 8);
+        assert_eq!(back, src, "90 then 270 round-trips");
     }
 
     #[test]

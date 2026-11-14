@@ -68,6 +68,11 @@ const CM_TIME_VALID: u32 = 1;
 /// always supports.
 const PIXEL_BGRA: u32 = 0x4247_5241;
 
+/// `kCVPixelFormatType_64RGBAHalf` — fourcc `'RGhA'`: R,G,B,A half-floats. The HDR poster
+/// path (task #144) asks for it with no color conversion, so values stay in the source's
+/// own transfer curve and primaries (PQ/HLG, BT.2020) for our shared EOTF to decode.
+const PIXEL_RGBA_HALF: u32 = 0x5247_6841;
+
 /// `kCVPixelBufferLock_ReadOnly`.
 const LOCK_READ_ONLY: u64 = 1;
 
@@ -136,6 +141,8 @@ extern "C" {
     static AVMediaCharacteristicTranscribesSpokenDialogForAccessibility: Id;
     static AVMediaCharacteristicDescribesMusicAndSoundForAccessibility: Id;
     static AVMediaCharacteristicDescribesVideoForAccessibility: Id;
+    /// Whether a track carries HDR (PQ/HLG) video — the poster's HDR branch (task #144).
+    static AVMediaCharacteristicContainsHDRVideo: Id;
 }
 
 /// `NSPropertyListBinaryFormat_v1_0`.
@@ -834,6 +841,226 @@ fn codec_name_from_fourcc(fourcc: u32) -> &'static str {
     }
 }
 
+// --- HDR poster frames (task #144) ---------------------------------------------------
+//
+// The 8-bit BGRA stream above asks AVFoundation to tone-map HDR to SDR, which left HDR
+// MP4/MOV posters flat on an XDR display while their MKV twins (FFmpeg, 10-bit) were
+// bright. For the poster only, an HDR track is read as `PIXEL_RGBA_HALF` with no color
+// conversion, and `av_poster` decodes PQ/HLG with the shared `crate::color` curves — the
+// same math as the FFmpeg poster, so an MP4 and MKV of one stream get the same poster.
+
+/// The fixed facts of an HDR stream, from its first decoded buffer.
+pub(crate) struct HdrStreamInfo {
+    /// CICP transfer: 16 (PQ) or 18 (HLG) — anything else is refused.
+    pub transfer: u8,
+    /// CICP primaries (9 = BT.2020 for HDR10 / HLG).
+    pub primaries: u8,
+    /// Clockwise display rotation still to apply (`AVAssetReader` doesn't).
+    pub rotation: i32,
+}
+
+/// One decoded HDR frame: tight R,G,B,A half-floats (little-endian, 8 bytes/pixel),
+/// still **transfer-encoded** in the source's own curve and primaries, at native size.
+pub(crate) struct HdrFrame {
+    pub f16: Vec<u8>,
+    pub width: u32,
+    pub height: u32,
+}
+
+/// Largest frame the HDR poster reader will copy out (8K UHD); a guard against a hostile
+/// track header, not a real limit (an 8K frame is ~265 MB as RGBA16F).
+const MAX_HDR_FRAME_PIXELS: usize = 7680 * 4320;
+
+/// Whether `path`'s first video track carries HDR video, per AVFoundation's own
+/// `AVMediaCharacteristicContainsHDRVideo`. Header read only, no decode. `false` on any
+/// failure, which keeps the caller on the SDR poster path.
+pub(crate) fn video_track_is_hdr(path: &Path) -> bool {
+    let Ok(cpath) = CString::new(path.as_os_str().as_bytes()) else {
+        return false;
+    };
+    let _pool = Pool::new();
+    unsafe {
+        let Ok(asset) = make_asset(&cpath) else {
+            return false;
+        };
+        let Some(track) = first_video_track(asset) else {
+            return false;
+        };
+        send_id_ret_bool(
+            track,
+            sel(c"hasMediaCharacteristic:"),
+            AVMediaCharacteristicContainsHDRVideo,
+        )
+    }
+}
+
+/// Decode `path`'s HDR video frames in presentation order, at native size, handing each
+/// to `on_frame` with its display duration until `on_frame` returns `false`, `cancel` is
+/// set, or the clip ends (all three are `Ok`).
+///
+/// The reader asks for [`PIXEL_RGBA_HALF`] and **no** color conversion, so values stay
+/// in the source's transfer curve (checked 2026-11-13: an HDR10 HEVC MP4 comes back
+/// tagged PQ / BT.2020, encoded values 0–1 with slight YCbCr overshoot). It requests no
+/// scaling either — AVFoundation doesn't promise scaling for high-bit-depth formats — so
+/// the caller downscales the one frame it keeps. Errors if the first buffer isn't PQ or
+/// HLG, so the caller can fall back to the SDR path.
+pub(crate) fn stream_hdr_frames(
+    path: &Path,
+    cancel: &AtomicBool,
+    on_frame: &mut dyn FnMut(&HdrStreamInfo, HdrFrame, Duration) -> bool,
+) -> Result<(), DecodeError> {
+    let cpath = CString::new(path.as_os_str().as_bytes())
+        .map_err(|_| DecodeError::Corrupt("video path has an interior NUL".into()))?;
+    let _pool = Pool::new();
+    unsafe { stream_hdr_inner(&cpath, cancel, on_frame) }
+}
+
+unsafe fn stream_hdr_inner(
+    cpath: &CStr,
+    cancel: &AtomicBool,
+    on_frame: &mut dyn FnMut(&HdrStreamInfo, HdrFrame, Duration) -> bool,
+) -> Result<(), DecodeError> {
+    let corrupt = |m: String| DecodeError::Corrupt(m);
+    if cancel.load(Ordering::Relaxed) {
+        return Ok(());
+    }
+    let asset = make_asset(cpath)?;
+    let track =
+        first_video_track(asset).ok_or_else(|| corrupt("HDR poster: no video track".into()))?;
+    let rotation = track_rotation(track);
+    let raw_fps = send_f32(track, sel(c"nominalFrameRate"));
+    let fallback_delay =
+        Duration::from_secs_f64(1.0 / if raw_fps > 0.1 { raw_fps as f64 } else { 30.0 });
+
+    // Exactly the pixel format: no color properties (keep the source curve) and no
+    // width/height (see the doc). A combination checked on this OS before shipping —
+    // an invalid dictionary is an uncatchable Objective-C exception.
+    let dict = send(class(c"NSMutableDictionary"), sel(c"dictionary"));
+    if dict.is_null() {
+        return Err(corrupt("HDR poster: NSMutableDictionary failed".into()));
+    }
+    send_void_id2(
+        dict,
+        sel(c"setObject:forKey:"),
+        send_u32(
+            class(c"NSNumber"),
+            sel(c"numberWithUnsignedInt:"),
+            PIXEL_RGBA_HALF,
+        ),
+        kCVPixelBufferPixelFormatTypeKey as Id,
+    );
+    let (reader, output) = make_track_reader(asset, track, dict).map_err(corrupt)?;
+    if cancel.load(Ordering::Relaxed) {
+        return Ok(());
+    }
+    if !send_ret_bool(reader.0, sel(c"startReading")) {
+        let e = send(reader.0, sel(c"error"));
+        return Err(corrupt(format!(
+            "HDR poster: startReading failed: {}",
+            error_desc(e)
+        )));
+    }
+
+    let copy_sel = sel(c"copyNextSampleBuffer");
+    let cancel_sel = sel(c"cancelReading");
+    let mut info: Option<HdrStreamInfo> = None;
+    loop {
+        let _fp = Pool::new();
+        if cancel.load(Ordering::Relaxed) {
+            send_void(reader.0, cancel_sel);
+            return Ok(());
+        }
+        let sbuf = send(output.0, copy_sel); // +1 (copy rule)
+        if sbuf.is_null() {
+            break; // EOF or error — classified below
+        }
+        let sbuf = OwnedCf(sbuf);
+        let img = CMSampleBufferGetImageBuffer(sbuf.0);
+        if img.is_null() {
+            continue; // not a video sample
+        }
+        let (pw, ph) = (CVPixelBufferGetWidth(img), CVPixelBufferGetHeight(img));
+        let fmt = CVPixelBufferGetPixelFormatType(img);
+        if pw == 0
+            || ph == 0
+            || fmt != PIXEL_RGBA_HALF
+            || pw.saturating_mul(ph) > MAX_HDR_FRAME_PIXELS
+        {
+            send_void(reader.0, cancel_sel);
+            return Err(corrupt(format!(
+                "HDR poster: unexpected pixel buffer ({pw}x{ph}, format {fmt:#x})"
+            )));
+        }
+        let stream = match &info {
+            Some(i) => i,
+            None => {
+                let transfer = attachment_code(img, kCVImageBufferTransferFunctionKey, true);
+                let primaries = attachment_code(img, kCVImageBufferColorPrimariesKey, false);
+                match (transfer, primaries) {
+                    (Some(t @ (16 | 18)), Some(p)) => info.insert(HdrStreamInfo {
+                        transfer: t,
+                        primaries: p,
+                        rotation,
+                    }),
+                    (t, p) => {
+                        send_void(reader.0, cancel_sel);
+                        return Err(corrupt(format!(
+                            "HDR poster: not a PQ/HLG stream (transfer {t:?}, primaries {p:?})"
+                        )));
+                    }
+                }
+            }
+        };
+
+        // Copy out (row-padded) → tight half-float RGBA.
+        let f16 = {
+            if CVPixelBufferLockBaseAddress(img, LOCK_READ_ONLY) != 0 {
+                send_void(reader.0, cancel_sel);
+                return Err(corrupt("HDR poster: pixel buffer lock failed".into()));
+            }
+            let _lock = PixelLock(img);
+            let base = CVPixelBufferGetBaseAddress(img) as *const u8;
+            let stride = CVPixelBufferGetBytesPerRow(img);
+            let row = pw * 8;
+            if base.is_null() || stride < row {
+                send_void(reader.0, cancel_sel);
+                return Err(corrupt("HDR poster: bad pixel buffer layout".into()));
+            }
+            let mut out = vec![0u8; row * ph];
+            for (y, dst) in out.chunks_exact_mut(row).enumerate() {
+                // SAFETY: the buffer is locked; each row starts at y·stride and holds at
+                // least `row` bytes (stride ≥ row checked above), within ph rows.
+                let src = std::slice::from_raw_parts(base.add(y * stride), row);
+                dst.copy_from_slice(src);
+            }
+            out
+        };
+        let delay = sample_delay(sbuf.0, fallback_delay);
+        let frame = HdrFrame {
+            f16,
+            width: pw as u32,
+            height: ph as u32,
+        };
+        if !on_frame(stream, frame, delay) {
+            send_void(reader.0, cancel_sel);
+            return Ok(());
+        }
+    }
+    match send_ret_isize(reader.0, sel(c"status")) {
+        READER_COMPLETED | READER_CANCELLED => Ok(()),
+        READER_FAILED => {
+            let e = send(reader.0, sel(c"error"));
+            Err(corrupt(format!(
+                "HDR poster decode failed: {}",
+                error_desc(e)
+            )))
+        }
+        other => Err(corrupt(format!(
+            "HDR poster: reader in unexpected state {other}"
+        ))),
+    }
+}
+
 /// Decode the Live Photo motion `.mov` at `path` into a whole [`Animation`], capping each
 /// frame's long edge to `max_long_edge` px. A collector over the streaming decoder (which
 /// also validates the chunk contract) — kept for the batch callers (`decode_motion_job`,
@@ -903,20 +1130,7 @@ unsafe fn stream_inner(
     let fps = if raw_fps > 0.1 { raw_fps as f64 } else { 30.0 };
     let fallback_delay = Duration::from_secs_f64(1.0 / fps);
 
-    // AVAssetReader does not apply preferredTransform — snap it to a rotate_rgba quadrant.
-    let t = send_ret_transform(track, sel(c"preferredTransform"));
-    let rotation = match transform_to_quadrant(t.a, t.b, t.c, t.d) {
-        Some(deg) => deg,
-        None => {
-            // Accepted degradation: play untransformed (e.g. a mirrored front-camera clip
-            // shows un-mirrored) rather than refuse the clip entirely.
-            eprintln!(
-                "Blaze Viewer: Live Photo preferredTransform [{} {} {} {}] isn't a rotation — playing untransformed",
-                t.a, t.b, t.c, t.d
-            );
-            0
-        }
-    };
+    let rotation = track_rotation(track);
 
     // Ask VideoToolbox to decode-to-fit (long edge ≤ cap, never upscale). The first
     // decoded buffer is the source of truth — if the request is ignored, a CPU fallback
@@ -962,36 +1176,10 @@ unsafe fn stream_inner(
         );
     }
 
-    // Reader + track output (+1 each — RAII-released).
-    let mut err: Id = std::ptr::null_mut();
-    let reader = Owned(send_id_err(
-        send(class(c"AVAssetReader"), sel(c"alloc")),
-        sel(c"initWithAsset:error:"),
-        asset,
-        &mut err,
-    ));
-    if reader.0.is_null() {
-        fail!(
-            emit,
-            "Live Photo motion: AVAssetReader init failed: {}",
-            error_desc(err)
-        );
-    }
-    let output = Owned(send_id2(
-        send(class(c"AVAssetReaderTrackOutput"), sel(c"alloc")),
-        sel(c"initWithTrack:outputSettings:"),
-        track,
-        dict,
-    ));
-    if output.0.is_null() {
-        fail!(emit, "Live Photo motion: track output init failed");
-    }
-    // We copy each buffer into a tight RGBA Vec ourselves — no defensive copy needed.
-    send_bool(output.0, sel(c"setAlwaysCopiesSampleData:"), false);
-    if !send_id_ret_bool(reader.0, sel(c"canAddOutput:"), output.0) {
-        fail!(emit, "Live Photo motion: reader rejected the track output");
-    }
-    send_void_id(reader.0, sel(c"addOutput:"), output.0);
+    let (reader, output) = match make_track_reader(asset, track, dict) {
+        Ok(pair) => pair,
+        Err(e) => fail!(emit, "{e}"),
+    };
 
     if cancel.load(Ordering::Relaxed) {
         return;
@@ -1101,14 +1289,7 @@ unsafe fn stream_inner(
             }
         };
 
-        // Real per-sample duration when the container carries one; nominal fps otherwise.
-        let dur = CMSampleBufferGetDuration(sbuf.0);
-        let delay = if dur.flags & CM_TIME_VALID != 0 && dur.value > 0 && dur.timescale > 0 {
-            Duration::from_secs_f64(dur.value as f64 / dur.timescale as f64)
-                .clamp(Duration::from_millis(1), Duration::from_secs(2))
-        } else {
-            fallback_delay
-        };
+        let delay = sample_delay(sbuf.0, fallback_delay);
 
         // Optional CPU decode-to-fit fallback, then the container rotation.
         let (rgba, fw, fh) = match cpu_fit {
@@ -1181,6 +1362,83 @@ unsafe fn stream_inner(
     }
 }
 
+/// A sample's display duration: the container's real per-sample timing when it carries
+/// one (clamped to sane bounds), the nominal-rate `fallback` otherwise.
+unsafe fn sample_delay(sbuf: *const c_void, fallback: Duration) -> Duration {
+    let dur = CMSampleBufferGetDuration(sbuf);
+    if dur.flags & CM_TIME_VALID != 0 && dur.value > 0 && dur.timescale > 0 {
+        Duration::from_secs_f64(dur.value as f64 / dur.timescale as f64)
+            .clamp(Duration::from_millis(1), Duration::from_secs(2))
+    } else {
+        fallback
+    }
+}
+
+/// The asset's first video track, if it has one (autoreleased — alive for the pool).
+unsafe fn first_video_track(asset: Id) -> Option<Id> {
+    let tracks = send_id(asset, sel(c"tracksWithMediaType:"), AVMediaTypeVideo);
+    if tracks.is_null() {
+        return None;
+    }
+    let track = send(tracks, sel(c"firstObject"));
+    (!track.is_null()).then_some(track)
+}
+
+/// The track's `preferredTransform` snapped to a clockwise quadrant for `rotate_rgba` /
+/// `rotate_pixels` — `AVAssetReader` does not apply it. A non-quadrant transform (a
+/// mirrored front-camera clip) plays untransformed: an accepted degradation, chosen over
+/// refusing the clip.
+unsafe fn track_rotation(track: Id) -> i32 {
+    let t = send_ret_transform(track, sel(c"preferredTransform"));
+    match transform_to_quadrant(t.a, t.b, t.c, t.d) {
+        Some(deg) => deg,
+        None => {
+            eprintln!(
+                "Blaze Viewer: Live Photo preferredTransform [{} {} {} {}] isn't a rotation — playing untransformed",
+                t.a, t.b, t.c, t.d
+            );
+            0
+        }
+    }
+}
+
+/// An `AVAssetReader` on `asset` with one track output for `track` using `settings`
+/// (+1 each, RAII-released), added and ready for `startReading`. Shared by the Live Photo
+/// stream and the HDR poster path (task #144). ⚠ `settings` must be a combination already
+/// known to work: an invalid one raises an Objective-C exception in the track-output
+/// initializer, which Rust cannot catch.
+unsafe fn make_track_reader(asset: Id, track: Id, settings: Id) -> Result<(Owned, Owned), String> {
+    let mut err: Id = std::ptr::null_mut();
+    let reader = Owned(send_id_err(
+        send(class(c"AVAssetReader"), sel(c"alloc")),
+        sel(c"initWithAsset:error:"),
+        asset,
+        &mut err,
+    ));
+    if reader.0.is_null() {
+        return Err(format!(
+            "Live Photo motion: AVAssetReader init failed: {}",
+            error_desc(err)
+        ));
+    }
+    let output = Owned(send_id2(
+        send(class(c"AVAssetReaderTrackOutput"), sel(c"alloc")),
+        sel(c"initWithTrack:outputSettings:"),
+        track,
+        settings,
+    ));
+    if output.0.is_null() {
+        return Err("Live Photo motion: track output init failed".into());
+    }
+    // We copy each buffer into a tight Vec ourselves — no defensive copy needed.
+    send_bool(output.0, sel(c"setAlwaysCopiesSampleData:"), false);
+    if !send_id_ret_bool(reader.0, sel(c"canAddOutput:"), output.0) {
+        return Err("Live Photo motion: reader rejected the track output".into());
+    }
+    send_void_id(reader.0, sel(c"addOutput:"), output.0);
+    Ok((reader, output))
+}
+
 /// `NSError` → its localized description (lossy), or a placeholder.
 unsafe fn error_desc(err: Id) -> String {
     if !err.is_null() {
@@ -1195,30 +1453,27 @@ unsafe fn error_desc(err: Id) -> String {
     "(no error description)".into()
 }
 
+/// The CICP code point for one colorimetry attachment of a pixel buffer (`transfer` picks
+/// which CoreVideo mapper to use), or `None` if the attachment is absent/out of range.
+unsafe fn attachment_code(img: *const c_void, key: *const c_void, transfer: bool) -> Option<u8> {
+    let s = OwnedCf(CVBufferCopyAttachment(img, key, std::ptr::null_mut()));
+    if s.0.is_null() {
+        return None;
+    }
+    let code = if transfer {
+        CVTransferFunctionGetIntegerCodePointForString(s.0)
+    } else {
+        CVColorPrimariesGetIntegerCodePointForString(s.0)
+    };
+    u8::try_from(code).ok()
+}
+
 /// Map the pixel buffer's CoreVideo colorimetry attachments to a [`ColorTransform`] via
 /// honest CICP code points. Real Live Photos are BT.709 (transfer 1 → ≈sRGB passthrough)
 /// or P3-primaries/709-transfer; missing or unknown attachments fall back to sRGB
 /// passthrough (as does anything `from_cicp`/moxcms can't build — including HLG/PQ, which
 /// this 8-bit path SDR-clamps by design).
 unsafe fn buffer_color(img: *const c_void) -> ColorTransform {
-    /// The CICP code point for one colorimetry attachment (`transfer` picks which
-    /// CoreVideo mapper to use), or `None` if the attachment is absent/out of range.
-    unsafe fn attachment_code(
-        img: *const c_void,
-        key: *const c_void,
-        transfer: bool,
-    ) -> Option<u8> {
-        let s = OwnedCf(CVBufferCopyAttachment(img, key, std::ptr::null_mut()));
-        if s.0.is_null() {
-            return None;
-        }
-        let code = if transfer {
-            CVTransferFunctionGetIntegerCodePointForString(s.0)
-        } else {
-            CVColorPrimariesGetIntegerCodePointForString(s.0)
-        };
-        u8::try_from(code).ok()
-    }
     let (Some(primaries), Some(transfer)) = (
         attachment_code(img, kCVImageBufferColorPrimariesKey, false),
         attachment_code(img, kCVImageBufferTransferFunctionKey, true),
