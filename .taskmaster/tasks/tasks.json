@@ -141,8 +141,8 @@
           {
             "id": 5,
             "title": "Apple Foundation Models backend (Swift + FFI)",
-            "description": "Availability check (macOS 27+, Apple Intelligence on), FM session with image input (file URL handoff for on-disk stills), password-flow-style effect out / result FFI back. || OWNER DECISION (2026-07-19): Private Cloud Compute is NOT precluded (revises the earlier never-PCC reading of ADR-018). When/if PCC is integrated (macOS/iOS 27 feature; those OSes still in beta), it must be OPT-IN behind a clear warning like any other network egress, per CLAUDE.md's Second Directive - never a default, but not forbidden. || BUILT 2026-11-14 (macOS 27.2): design revised — the core prepares the image exactly as for the endpoint (frame capture/rotation/tone-map/≤1024 JPEG, so video frames + archive members work) and hands it to describe::HostDescriber, installed by pb-mac-ffi as on_device::AppleOnDevice, which calls the Swift @objc(PBOnDeviceDescriber) shim via the ObjC runtime (objc2) — no swift-bridge surface/effects. Policy: Auto → on-device when available else endpoint; Apple → on-device only; Endpoint → endpoint only. FoundationModels weak-linked (deploy target 14). On-device only (no PCC). Details + Handoff: .taskmaster/docs/ai-descriptions-plan.md. Owner in-app check pending.",
-            "status": "review",
+            "description": "Availability check (macOS 27+, Apple Intelligence on), FM session with image input (file URL handoff for on-disk stills), password-flow-style effect out / result FFI back. || OWNER DECISION (2026-07-19): Private Cloud Compute is NOT precluded (revises the earlier never-PCC reading of ADR-018). When/if PCC is integrated (macOS/iOS 27 feature; those OSes still in beta), it must be OPT-IN behind a clear warning like any other network egress, per CLAUDE.md's Second Directive - never a default, but not forbidden. || BUILT 2026-11-14 (macOS 27.2): design revised — the core prepares the image exactly as for the endpoint (frame capture/rotation/tone-map/≤1024 JPEG, so video frames + archive members work) and hands it to describe::HostDescriber, installed by pb-mac-ffi as on_device::AppleOnDevice, which calls the Swift @objc(PBOnDeviceDescriber) shim via the ObjC runtime (objc2) — no swift-bridge surface/effects. Policy: Auto → on-device when available else endpoint; Apple → on-device only; Endpoint → endpoint only. FoundationModels weak-linked (deploy target 14). On-device only (no PCC). Details + Handoff: .taskmaster/docs/ai-descriptions-plan.md. Owner in-app check pending. || Owner on the Mac 2026-11-14: \"things are looking good and working well\".",
+            "status": "done",
             "parentId": "undefined"
           },
           {
@@ -606,8 +606,8 @@
           {
             "id": 6,
             "title": "Follow-up: D on an open Describe panel re-describes a new frame",
-            "description": "Owner report 2026-11-14: after describing a video frame and playing on, D / Describe Image closed the panel (the Mac Inspector has no other describe-again control). AppCore::describe_is_stale: when the panel shows a description (or scan) of a different frame_key, or the idle 'Press D' invitation, D describes instead of closing; same frame still closes. Core-only, unit-tested (d_on_an_open_panel_describes_a_new_frame_instead_of_closing, d_on_an_open_idle_panel_describes). Owner hand check on the Mac pending; Windows inherits it from the core.",
-            "status": "review"
+            "description": "Owner report 2026-11-14: after describing a video frame and playing on, D / Describe Image closed the panel (the Mac Inspector has no other describe-again control). AppCore::describe_is_stale: when the panel shows a description (or scan) of a different frame_key, or the idle 'Press D' invitation, D describes instead of closing; same frame still closes. Core-only, unit-tested (d_on_an_open_panel_describes_a_new_frame_instead_of_closing, d_on_an_open_idle_panel_describes). Owner hand check on the Mac pending; Windows inherits it from the core. || Owner on the Mac 2026-11-14: \"things are looking good and working well\".",
+            "status": "done"
           }
         ]
       },
@@ -2258,7 +2258,7 @@
         "id": 149,
         "title": "AI describe fails on thinking models (\"Couldn't read the endpoint's reply\") + endpoint /v1 + clearer errors",
         "description": "Owner report 2026-11-14: describe against LM Studio with qwen3.6-35b-a3b failed with \"Couldn't read the endpoint's reply\". Cause (measured): LM Studio counts reasoning_content against max_tokens; the thinking model spent the whole cap thinking (268/300; 820 reasoning + 132 answer for the default prompt, which fails at Standard's 512) and returned empty content with finish_reason=length, which the parser reported as 'empty description'. Not an LM Studio API change; the model changed. Fix in pb-app-core/src/describe.rs (owner call: thinking is the model's/user's choice, so Blaze makes room rather than turning it off): the length preset budgets the answer; a model seen thinking gets +4096 tokens (REASONING_HEADROOM); one that runs out while thinking is retried once with the headroom and remembered per endpoint+model in RAM. (reasoning_effort:\"none\" is the only skip-thinking switch LM Studio honours — tried and deliberately not used.) Specific error messages (the server's own error text from 4xx bodies, ThoughtTooLong, EmptyReply, 404 → check /v1, not-a-chat-completion). normalize_base adds /v1 (and http://) when the URL has no path; Test connection says 'using …/v1'. Test-connection summary moved to core (describe::probe_report), used by both shells.",
-        "status": "review",
+        "status": "in-progress",
         "priority": "medium",
         "dependencies": [
           44
@@ -2273,8 +2273,8 @@
           {
             "id": 2,
             "title": "Mac: owner hand check in the app",
-            "description": "Describe a photo + a video frame with the thinking model loaded; Settings ▸ AI: enter the endpoint without /v1 → Test & list models says 'using …/v1'.",
-            "status": "review"
+            "description": "Describe a photo + a video frame with the thinking model loaded; Settings ▸ AI: enter the endpoint without /v1 → Test & list models says 'using …/v1'. || Owner on the Mac 2026-11-14: \"things are looking good and working well\".",
+            "status": "done"
           },
           {
             "id": 3,
