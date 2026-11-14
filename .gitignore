@@ -40,6 +40,11 @@ Thumbs.db
 
 # Local scratch/smoke-test image sets (generated, not the pinned benchmark corpus)
 scratch-corpus/
+# Per-machine private notes: repro file paths on the owner's NAS, local network details, and
+# anything else that shouldn't land in this PUBLIC repo. A tracked task says "see
+# .taskmaster/local/notes.md" instead of quoting the path. Not shared between machines; each
+# box keeps its own. Ignored here (not globally) for the same clean-tree reason as below.
+/.taskmaster/local/
 
 # Per-machine Claude Code settings (tool permissions), written by the tool as you work.
 # Ignored HERE rather than relying on a user's global excludesfile, because the clean-tree
