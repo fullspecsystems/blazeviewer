@@ -6,24 +6,31 @@
 //! - [`prepare`] — source → encoder-ready [`ExportImage`]: un-premultiply, HDR → SDR P3,
 //!   colour resolution (incl. the ICC sanitizer), rotation, cleared transparency.
 //! - [`icc`] — the profile sanitizer behind *Strip metadata* and the profiles we synthesize.
-//! - Encoders behind features: [`png`] (rung 0c) and [`jpeg`] (moved from `pb-decode`).
+//! - [`encoder`] — the `Encoder` seam + [`Caps`] (rung 2); [`ExportFormat`] picks a codec.
+//! - Encoders behind features: [`png`] (rung 0c) and [`jpeg`] (rung 2; Describe's helper moved
+//!   from `pb-decode`).
+//! - [`resize`] — linear-light Lanczos downscaling for `prepare` (rung 2).
 //!
 //! Everything is pure — no I/O, no threads, no platform code — so it is unit-tested here and
 //! the export worker in `pb-app-core` stays a thin orchestration layer.
 
+pub mod encoder;
 pub mod icc;
 #[cfg(feature = "jpeg")]
 pub mod jpeg;
 #[cfg(feature = "png")]
 pub mod png;
 pub mod prepare;
+pub mod resize;
 pub mod types;
 
+pub use encoder::{Caps, Encoder, ExportFormat};
 #[cfg(feature = "jpeg")]
-pub use jpeg::encode_jpeg_rgba8;
+pub use jpeg::{encode_jpeg, encode_jpeg_rgba8, JpegEncoder};
 #[cfg(feature = "png")]
-pub use png::{encode_png, PngEffort};
+pub use png::{encode_png, PngEffort, PngEncoder};
 pub use prepare::{prepare, PrepareError, PrepareSpec};
+pub use resize::Resize;
 pub use types::{
     AlphaMode, Channels, Cicp, ColorDesc, ExportImage, ExportNote, ExportSource, OutputColor,
     Provenance, SampleEncoding, Samples,

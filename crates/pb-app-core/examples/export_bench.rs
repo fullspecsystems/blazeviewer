@@ -2,17 +2,19 @@
 //! PNG default from corpus numbers — encode p50/p95 and bytes per megapixel").
 //!
 //! For every image in a folder: the export decode → `prepare` → PNG at each effort, then a
-//! decode-back check (dimensions survive, the file is valid). Prints one line per file and a
-//! p50/p95 summary per effort. Read-only on the input folder; PNGs go to `--out` if given.
+//! decode-back check (dimensions survive, the file is valid). With `--jpeg`, also the rung 2
+//! path: `ExportFormat::Jpeg` through the `Encoder` seam, resized to a 2048 px long edge
+//! (flattened, 8-bit, profile embedded). Prints one line per file and a p50/p95 summary per
+//! effort. Read-only on the input folder; outputs go to `--out` if given.
 //!
-//!     cargo run --release -p pb-app-core --example export_bench -- <folder> [--out <dir>]
+//!     cargo run --release -p pb-app-core --example export_bench -- <folder> [--out <dir>] [--jpeg]
 //!
 //! Dev tool only — prints file names to the terminal, never persists anything.
 
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use pb_encode::{encode_png, prepare, PngEffort, PrepareSpec};
+use pb_encode::{encode_png, prepare, ExportFormat, PngEffort, PrepareSpec, Resize};
 
 fn pct(v: &mut [f64], p: f64) -> f64 {
     if v.is_empty() {
@@ -86,13 +88,8 @@ fn main() {
             src.provenance.path,
             src.is_hdr(),
         );
-        let img = match prepare(
-            src,
-            &PrepareSpec {
-                rotation_cw: 0,
-                strip_metadata: true,
-            },
-        ) {
+        let jpeg_src = args.iter().any(|a| a == "--jpeg").then(|| src.clone());
+        let img = match prepare(src, &PrepareSpec::full(0, true)) {
             Ok(i) => i,
             Err(e) => {
                 println!("FAIL     {name}: prepare: {e}");
@@ -135,6 +132,42 @@ fn main() {
         }
         if !img.notes.is_empty() {
             line.push_str(&format!(" notes {:?}", img.notes));
+        }
+        if let Some(jsrc) = jpeg_src {
+            let enc = ExportFormat::Jpeg { quality: 85 }.encoder();
+            let spec = PrepareSpec {
+                caps: enc.caps(),
+                resize: Some(Resize::LongEdge(2048)),
+                ..PrepareSpec::full(0, true)
+            };
+            let t = Instant::now();
+            let small = prepare(jsrc, &spec).expect("prepare jpeg");
+            let jpg = enc.encode(&small).expect("encode jpeg");
+            let et = t.elapsed().as_secs_f64() * 1e3;
+            let back =
+                pb_decode::decode_named_bytes("x.jpg", &jpg, None, false).expect("jpeg back");
+            assert_eq!(
+                (back.width, back.height),
+                (small.width, small.height),
+                "{name}: jpeg dims"
+            );
+            assert!(small.width.max(small.height) <= 2048, "{name}: resized");
+            let tagged = matches!(small.color, pb_encode::OutputColor::Icc(_));
+            line.push_str(&format!(
+                " | JPEG2048 {}x{} {et:.0}ms {:.2}MB{}",
+                small.width,
+                small.height,
+                jpg.len() as f64 / 1e6,
+                if tagged { " +icc" } else { "" }
+            ));
+            if let Some(o) = &out {
+                let stem = Path::new(&name)
+                    .file_stem()
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned();
+                std::fs::write(o.join(format!("{stem}.jpg")), &jpg).expect("write");
+            }
         }
         println!("{line}");
         ok += 1;

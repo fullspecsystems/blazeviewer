@@ -655,6 +655,20 @@ macOS; exFAT / SMB / TCC hand checks pass.
 
 ## Rung 2 — The Export mode panel
 
+**Progress (session 2, 2026-11-14) — the pb-encode core is in; nothing user-visible yet:**
+`encoder.rs` (`Encoder` trait + `Caps` + `ExportFormat { Png(effort), Jpeg { quality } }`),
+`JpegEncoder` (8-bit, no alpha, profile embedded via `image`'s `set_icc_profile`; 4:2:2),
+`PngEncoder`, and `prepare` gained `caps` (flatten onto `flatten_onto` — output-space encoded,
+composited in encoded space — and 16 → 8-bit narrowing) and `resize: Option<Resize>`
+(`LongEdge` / `Fit`, **as displayed** — the box swaps for a quarter turn; downscale-only; Lanczos3 in
+**linear light** with premultiplied alpha, via `fast_image_resize` on borrowed f32 buffers).
+`PrepareSpec::full(rotation, strip)` is rung 1's spec; the export worker still writes PNG through
+`encode_png` directly — **switching it to `dyn Encoder` is the first step of the wiring**. Corpus:
+`export_bench -- <folder> --jpeg` sends all 31 files through JPEG q85 at a 2048 px long edge
+(p50 ≈ 8 ms for 1 MP sources, 120–390 ms for 20–36 MP; P3 keeps its profile, HDR tone-maps, alpha
+flattens). Still to do in rung 2: 2.0 input routing, the view model + `export_set_*`, the mode ×
+action table, the metadata allowlist, both shells' panels.
+
 **2.0 Input routing** (*3.11*): `ExportCommit`, `E` toggle, `Esc` unchanged, `[`/`]` contextual,
 `Tab` suspend, optional macOS Tab-focus arbitration; tests for the release net in every focus state.
 Build the Export-mode bindings as a **contextual keymap layer** so the pinned `Enter`/`Esc` revisit
@@ -921,8 +935,9 @@ confirmed directly). **All accepted.**
 
 **Status (2026-11-14, implementation session 2):** rungs **0b, 0c and 1 are built** — Export as PNG
 end to end on macOS, compile-checked for Windows. Session 2 closed rung 1's gaps (right-click item,
-Q6) and ran the macOS half of the HDR brightness audit (#146, rung 5's prerequisite). Manual test
-script: `.taskmaster/docs/export-rung1-manual-test.md` (sections 1–11). Rung 0a (#81) not started.
+Q6), ran the macOS half of the HDR brightness audit (#146, rung 5's prerequisite), fixed HDR PNG
+decode, and landed **rung 2's pure pb-encode core** (not wired to any UI yet — see Rung 2). Manual
+test script: `.taskmaster/docs/export-rung1-manual-test.md`. Rung 0a (#81) not started.
 
 **Verified** (on the dev Mac, macOS)
 

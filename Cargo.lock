@@ -4161,6 +4161,8 @@ dependencies = [
 name = "pb-encode"
 version = "0.1.0"
 dependencies = [
+ "bytemuck",
+ "fast_image_resize",
  "image 0.25.10",
  "moxcms",
  "png 0.18.1",

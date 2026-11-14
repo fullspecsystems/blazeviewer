@@ -180,10 +180,8 @@ fn run_stages(job: &ExportJob, t: &mut ExportTimings) -> Result<ExportOutcome, S
     t.decode = s.elapsed();
 
     let s = Instant::now();
-    let spec = pb_encode::PrepareSpec {
-        rotation_cw: job.rotation_cw,
-        strip_metadata: true,
-    };
+    // Rung 1: PNG at full resolution (PNG's caps are everything `prepare` produces).
+    let spec = pb_encode::PrepareSpec::full(job.rotation_cw, true);
     let image = pb_encode::catch_panics(|| {
         pb_encode::prepare(src, &spec).map_err(|e| pb_encode::EncodeError::Codec(e.to_string()))
     })

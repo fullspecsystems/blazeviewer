@@ -14,6 +14,9 @@ jpeg = ["dep:image"]
 
 [dependencies]
 moxcms = "0.8"
+# Export resize (rung 2): Lanczos3 on borrowed f32 buffers. Both already in the tree via pb-decode.
+fast_image_resize = "5"
+bytemuck = "1"
 png = { version = "0.18", optional = true }
 image = { version = "0.25.10", default-features = false, features = ["jpeg"], optional = true }
 

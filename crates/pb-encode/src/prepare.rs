@@ -4,12 +4,15 @@
 //! In order: un-premultiply, resolve float samples (HDR is tone-mapped to SDR Display P3;
 //! encoded floats are quantized to 16-bit), resolve the colour tag (sanitize the profile
 //! under *Strip metadata*, synthesize one for CICP, fall back to sRGB when a profile can't
-//! describe these pixels), bake the RAM rotation, then clear the hidden colour under fully
-//! transparent pixels when stripping. Resize and alpha flattening arrive with rung 2.
+//! describe these pixels), resize (rung 2, linear light), reduce to the target's [`Caps`]
+//! (flatten alpha, narrow to 8-bit — rung 2), bake the RAM rotation, then clear the hidden
+//! colour under fully transparent pixels when stripping.
 
 use std::sync::Arc;
 
+use crate::encoder::Caps;
 use crate::icc;
+use crate::resize::Resize;
 use crate::types::{
     AlphaMode, Channels, ColorDesc, ExportImage, ExportNote, ExportSource, OutputColor,
     SampleEncoding, Samples,
@@ -22,6 +25,27 @@ pub struct PrepareSpec {
     pub rotation_cw: u8,
     /// *Strip metadata*: sanitize the profile and clear colour under transparency.
     pub strip_metadata: bool,
+    /// What the output format can carry — from its `Encoder::caps`.
+    pub caps: Caps,
+    /// Downscale to this size (as displayed, after rotation); `None` keeps full resolution.
+    pub resize: Option<Resize>,
+    /// The background a format without alpha flattens onto, as **output-space encoded** 8-bit
+    /// RGB (white and black mean the same in every space). Composited in encoded space, as a
+    /// browser or image editor shows the image over that colour.
+    pub flatten_onto: [u8; 3],
+}
+
+impl PrepareSpec {
+    /// Full resolution, every capability, white background — rung 1's PNG export.
+    pub const fn full(rotation_cw: u8, strip_metadata: bool) -> PrepareSpec {
+        PrepareSpec {
+            rotation_cw,
+            strip_metadata,
+            caps: Caps::ALL,
+            resize: None,
+            flatten_onto: [255, 255, 255],
+        }
+    }
 }
 
 /// Why preparation failed.
@@ -117,12 +141,38 @@ pub fn prepare(src: ExportSource, spec: &PrepareSpec) -> Result<ExportImage, Pre
         &mut notes,
     )?;
 
+    // Resize: the target is "as displayed", so a quarter-turned image swaps the box.
+    let turns = spec.rotation_cw % 4;
+    let (mut width, mut height) = (width, height);
+    if let Some(resize) = spec.resize {
+        let (dw, dh) = if turns % 2 == 1 {
+            (height, width)
+        } else {
+            (width, height)
+        };
+        if let Some((tw, th)) = resize.target(dw, dh) {
+            let (tw, th) = if turns % 2 == 1 { (th, tw) } else { (tw, th) };
+            samples = crate::resize::resize(&samples, width, height, channels, tw, th);
+            (width, height) = (tw, th);
+        }
+    }
+
+    // Reduce to what the format can carry.
+    if !spec.caps.alpha && channels.has_alpha() {
+        flatten(&mut samples, &mut channels, spec.flatten_onto);
+    }
+    if !spec.caps.sixteen_bit {
+        if let Samples::U16(v) = &samples {
+            samples = Samples::U8(v.iter().map(|&s| ((s as u32 + 128) / 257) as u8).collect());
+        }
+    }
+
     let (samples, w, h) = rotate(
         samples,
         width as usize,
         height as usize,
         channels.count(),
-        spec.rotation_cw % 4,
+        turns,
     );
 
     let mut samples = samples;
@@ -141,6 +191,53 @@ pub fn prepare(src: ExportSource, spec: &PrepareSpec) -> Result<ExportImage, Pre
         color: output,
         notes,
     })
+}
+
+/// Composite straight-alpha samples over `bg` (encoded 8-bit, scaled to the sample type) and
+/// drop the alpha channel. Gray composites over the background's Rec. 709 luma.
+fn flatten(samples: &mut Samples, channels: &mut Channels, bg: [u8; 3]) {
+    let n = channels.count();
+    let gray = channels.is_gray();
+    let luma = (0.2126 * bg[0] as f32 + 0.7152 * bg[1] as f32 + 0.0722 * bg[2] as f32) / 255.0;
+    let bg: Vec<f32> = if gray {
+        vec![luma]
+    } else {
+        bg.iter().map(|&c| c as f32 / 255.0).collect()
+    };
+    fn go<T: Copy>(
+        v: &[T],
+        n: usize,
+        bg: &[f32],
+        to: impl Fn(T) -> f32,
+        from: impl Fn(f32) -> T,
+    ) -> Vec<T> {
+        let mut out = Vec::with_capacity(v.len() / n * (n - 1));
+        for px in v.chunks_exact(n) {
+            let a = to(px[n - 1]).clamp(0.0, 1.0);
+            for (c, b) in px[..n - 1].iter().zip(bg) {
+                out.push(from(to(*c) * a + b * (1.0 - a)));
+            }
+        }
+        out
+    }
+    *samples = match samples {
+        Samples::U8(v) => Samples::U8(go(
+            v,
+            n,
+            &bg,
+            |s| s as f32 / 255.0,
+            |f| (f * 255.0 + 0.5) as u8,
+        )),
+        Samples::U16(v) => Samples::U16(go(
+            v,
+            n,
+            &bg,
+            |s| s as f32 / 65535.0,
+            |f| (f * 65535.0 + 0.5) as u16,
+        )),
+        Samples::F32(v) => Samples::F32(go(v, n, &bg, |s| s, |f| f)),
+    };
+    *channels = channels.without_alpha();
 }
 
 fn unpremultiply(samples: &mut Samples, channels: Channels) {
@@ -450,10 +547,94 @@ mod tests {
         }
     }
 
-    const STRIP: PrepareSpec = PrepareSpec {
-        rotation_cw: 0,
-        strip_metadata: true,
+    const STRIP: PrepareSpec = PrepareSpec::full(0, true);
+
+    /// JPEG's caps: no alpha, 8-bit.
+    const JPEG: PrepareSpec = PrepareSpec {
+        caps: Caps {
+            alpha: false,
+            sixteen_bit: false,
+        },
+        ..STRIP
     };
+
+    /// A format without alpha flattens onto the background and narrows to 8-bit.
+    #[test]
+    fn jpeg_caps_flatten_onto_the_background_and_narrow_to_8_bit() {
+        // 25 % red over white → pink; opaque blue unchanged; transparent → pure background.
+        let s = src(
+            3,
+            1,
+            Channels::Rgba,
+            Samples::U16(vec![65535, 0, 0, 16384, 0, 0, 65535, 65535, 1, 2, 3, 0]),
+        );
+        let out = prepare(s.clone(), &JPEG).unwrap();
+        assert_eq!(out.channels, Channels::Rgb);
+        assert_eq!(
+            out.samples,
+            Samples::U8(vec![255, 191, 191, 0, 0, 255, 255, 255, 255])
+        );
+        // A black background, and gray composites over its luma.
+        let black = PrepareSpec {
+            flatten_onto: [0, 0, 0],
+            ..JPEG
+        };
+        let out = prepare(s, &black).unwrap();
+        assert_eq!(
+            &out.samples,
+            &Samples::U8(vec![64, 0, 0, 0, 0, 255, 0, 0, 0])
+        );
+        let g = src(1, 1, Channels::GrayAlpha, Samples::U8(vec![0, 0]));
+        let out = prepare(g, &JPEG).unwrap();
+        assert_eq!(
+            (out.channels, out.samples),
+            (Channels::Gray, Samples::U8(vec![255]))
+        );
+        // PNG's caps keep both alpha and 16 bits.
+        let deep = src(1, 1, Channels::Rgba, Samples::U16(vec![1, 2, 3, 4]));
+        assert_eq!(
+            prepare(deep, &PrepareSpec::full(0, false)).unwrap().samples,
+            Samples::U16(vec![1, 2, 3, 4])
+        );
+    }
+
+    /// The resize box applies to the image **as displayed**, after the RAM rotation.
+    #[test]
+    fn resize_targets_the_displayed_orientation() {
+        let s = src(8, 4, Channels::Rgb, Samples::U8(vec![90; 8 * 4 * 3]));
+        let fit = PrepareSpec {
+            resize: Some(Resize::Fit {
+                width: 2,
+                height: 4,
+            }),
+            ..STRIP
+        };
+        // Unrotated, 8×4 into 2×4 → 2×1.
+        let out = prepare(s.clone(), &fit).unwrap();
+        assert_eq!((out.width, out.height), (2, 1));
+        // Turned 90°, it displays 4×8: into 2×4 → 2×4, which is 4×2 before the turn.
+        let out = prepare(
+            s.clone(),
+            &PrepareSpec {
+                rotation_cw: 1,
+                ..fit
+            },
+        )
+        .unwrap();
+        assert_eq!((out.width, out.height), (2, 4));
+        assert_eq!(
+            out.samples,
+            Samples::U8(vec![90; 2 * 4 * 3]),
+            "flat stays flat"
+        );
+        // Never upscaled.
+        let big = PrepareSpec {
+            resize: Some(Resize::LongEdge(100)),
+            ..STRIP
+        };
+        let out = prepare(s, &big).unwrap();
+        assert_eq!((out.width, out.height), (8, 4));
+    }
 
     #[test]
     fn untagged_8bit_passes_through_untouched_and_tags_srgb() {

@@ -7,6 +7,7 @@
 
 use std::borrow::Cow;
 
+use crate::encoder::{Caps, Encoder};
 use crate::types::{Channels, ExportImage, OutputColor, Samples};
 use crate::EncodeError;
 
@@ -18,6 +19,24 @@ pub enum PngEffort {
     #[default]
     Balanced,
     High,
+}
+
+/// The PNG export format: everything `prepare` produces (alpha, 16-bit, gray).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PngEncoder {
+    pub effort: PngEffort,
+}
+
+impl Encoder for PngEncoder {
+    fn caps(&self) -> Caps {
+        Caps::ALL
+    }
+    fn extension(&self) -> &'static str {
+        "png"
+    }
+    fn encode(&self, img: &ExportImage) -> Result<Vec<u8>, EncodeError> {
+        encode_png(img, self.effort)
+    }
 }
 
 /// Encode `img` as a PNG.
