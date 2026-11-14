@@ -59,6 +59,11 @@ let package = Package(
                 // VNRecognizeTextRequest — the class symbols live in Vision.framework.
                 .linkedFramework("Vision"),
                 .linkedLibrary("objc"),
+                // Apple's on-device model for AI describe (OnDeviceDescriber.swift, task
+                // #44.5). WEAK: FoundationModels doesn't exist before macOS 26 and we deploy
+                // to 14, so a strong load command would stop the app launching there. The
+                // code itself is behind `#available(macOS 27, *)`.
+                .unsafeFlags(["-Xlinker", "-weak_framework", "-Xlinker", "FoundationModels"]),
                 // Sparkle.framework is embedded into Contents/Frameworks by
                 // build-swift-host.sh; this rpath lets the executable resolve its
                 // `@rpath/Sparkle.framework/...` install name at runtime. `-rpath` is a

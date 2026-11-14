@@ -1029,6 +1029,8 @@ impl App {
             descriptions: HashMap::new(),
             describe_scan: None,
             describe_gen: 0,
+            // Windows/Linux have no OS-provided on-device model; describe uses the endpoint.
+            host_describer: None,
             pool,
             results,
             ring: ResidentRing::new(0),

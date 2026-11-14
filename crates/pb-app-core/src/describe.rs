@@ -180,6 +180,48 @@ pub trait Describer: Send + Sync {
     fn describe(&self, image: &PreparedImage, prompt: &str) -> Result<String, DescribeError>;
 }
 
+/// A describe backend **the host shell provides** — on macOS 27+, Apple's on-device
+/// Foundation Model (`pb-mac-ffi` → the Swift host; installed on
+/// [`AppCore::host_describer`](crate::AppCore::host_describer)). Absent on Windows/Linux.
+///
+/// It receives the same [`PreparedImage`] the endpoint does, so the frame capture,
+/// rotation, HDR tone-map and downscale stay shared, and it runs on the same describe
+/// worker thread — `describe` may block for seconds.
+///
+/// Privacy (ADR-018): an implementation must run **on this device**. Apple's Private Cloud
+/// Compute model is cloud, so it may only ever arrive as its own opt-in backend behind a
+/// warning (owner decision 2026-07-19) — never behind this seam.
+pub trait HostDescriber: Send + Sync {
+    /// `Ok(())` when it can describe right now; otherwise the user-facing reason it can't
+    /// (this Mac isn't eligible, Apple Intelligence is off, the model is still downloading).
+    /// Cheap — called on the event loop when a describe starts.
+    fn availability(&self) -> Result<(), String>;
+    /// Describe `image` per `prompt`, answering in at most `max_tokens` (the length preset).
+    fn describe(
+        &self,
+        image: &PreparedImage,
+        prompt: &str,
+        max_tokens: u32,
+    ) -> Result<String, DescribeError>;
+}
+
+/// A [`HostDescriber`] with the settings' length preset bound, as a [`Describer`].
+pub struct OnHost {
+    pub host: std::sync::Arc<dyn HostDescriber>,
+    pub max_tokens: u32,
+}
+
+impl Describer for OnHost {
+    fn describe(&self, image: &PreparedImage, prompt: &str) -> Result<String, DescribeError> {
+        let max_tokens = if self.max_tokens == 0 {
+            MAX_TOKENS
+        } else {
+            self.max_tokens
+        };
+        self.host.describe(image, prompt, max_tokens)
+    }
+}
+
 /// Downscale display-oriented RGBA8 to [`MAX_EDGE`] and JPEG-encode it for the endpoint.
 pub fn prepare_image(rgba: Vec<u8>, w: u32, h: u32) -> Result<PreparedImage, DescribeError> {
     let (rgba, w, h) = if w > MAX_EDGE || h > MAX_EDGE {

@@ -349,12 +349,15 @@ struct SettingsView: View {
                     Text("Local endpoint").tag(2)
                 }
                 .pickerStyle(.segmented)
-                if draft.describeBackend == 1 {
-                    // Apple Foundation Models isn't wired yet (needs macOS 27 + subtask 5).
-                    Text("Apple's on-device model needs macOS 27 + Apple Intelligence — not "
-                        + "available yet. Choose Auto or Local endpoint.")
+                // Which model Auto / Apple will actually use, and why not when it can't —
+                // asked fresh on each render (a cheap property read), so turning Apple
+                // Intelligence on shows up without reopening Settings.
+                if let status = onDeviceStatusLine {
+                    Text(status)
                         .font(.caption).foregroundStyle(.secondary)
-                } else {
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                if draft.describeBackend != 1 {
                     // Rounded border so it doesn't read as a borderless label next to the
                     // native-bezeled ComboBox below (same reasoning as the slideshow field).
                     TextField(
@@ -408,11 +411,11 @@ struct SettingsView: View {
                     .font(.caption).foregroundStyle(.secondary)
             }
             Section {
-                Text("Images are sent to the model server you set above, so keep it local "
-                    + "(this Mac or your own network) and one you trust — with auto-describe "
-                    + "on, each image is sent automatically. Online services may keep images "
-                    + "and use them to train. Apple's on-device model (coming later) will run "
-                    + "here with no server.")
+                Text("Apple's on-device model runs on this Mac — nothing is sent anywhere. "
+                    + "With a model server, images are sent to the address you set above, so "
+                    + "keep it local (this Mac or your own network) and one you trust — with "
+                    + "auto-describe on, each image is sent automatically. Online services may "
+                    + "keep images and use them to train.")
                     .font(.caption).foregroundStyle(.secondary)
             }
         }
@@ -431,6 +434,25 @@ struct SettingsView: View {
             guard !retriedModelsOnActivate else { return }
             retriedModelsOnActivate = true
             autoListModelsIfNeeded()
+        }
+    }
+
+    /// The caption under the Backend picker: what Auto / Apple on-device uses on this Mac,
+    /// mirroring the core's policy (`describer_from_settings`). `nil` for Local endpoint.
+    private var onDeviceStatusLine: String? {
+        let reason = OnDeviceDescriber.unavailableReason()
+        switch draft.describeBackend {
+        case 1:
+            return reason
+                ?? "Descriptions come from Apple's on-device model. Images never leave this Mac."
+        case 0:
+            if let reason {
+                return reason + " Auto uses the model server below."
+            }
+            return "Auto uses Apple's on-device model, so images never leave this Mac. Choose "
+                + "Local endpoint to use the model server below instead."
+        default:
+            return nil
         }
     }
 

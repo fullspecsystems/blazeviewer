@@ -472,6 +472,11 @@ pub struct AppCore {
     /// Describe generation: bumped with `text_gen` on index reassignment so a late
     /// describe result can't cache under a recycled index.
     pub describe_gen: u64,
+    /// The host shell's own describe backend, if it has one — macOS: Apple's on-device
+    /// Foundation Model (`pb-mac-ffi` installs it). `None` on Windows/Linux and in tests
+    /// unless a test installs a fake. The policy that picks it is
+    /// `AppCore::describer_from_settings`.
+    pub host_describer: Option<Arc<dyn crate::describe::HostDescriber>>,
 
     // --- Prefetch / decode / residency (NS0 5.3) ---
     /// Off-thread priority decode pool — decode + I/O never block the event loop.

@@ -2170,7 +2170,7 @@ fn ai_tab(
             p,
             None,
             "Backend",
-            Some("Auto uses Apple's on-device model when available, else your endpoint."),
+            Some("Auto uses the model server below (Apple's on-device model is Mac-only)."),
             |ui| {
                 egui::ComboBox::from_id_salt("describe_backend")
                     .width(160.0)
@@ -2180,13 +2180,14 @@ fn ai_tab(
                     .show_ui(ui, |ui| {
                         pbui::apply_to_ui(ui, p.dark);
                         ui.selectable_value(&mut d.describe_backend, 0, "Auto");
-                        // Apple FM is not wired yet (needs macOS 27 + subtask 5) — offered
-                        // but disabled so the choice is honest and forward-compatible.
+                        // Apple's on-device model is the Mac host's (task #44.5); this shell
+                        // runs on Windows/Linux, so it's shown but disabled — a settings file
+                        // shared with a Mac keeps its choice, and describe says why it can't.
                         ui.add_enabled_ui(false, |ui| {
                             ui.selectable_value(&mut d.describe_backend, 1, "Apple on-device");
                         })
                         .response
-                        .on_hover_text("Requires macOS 27 + Apple Intelligence");
+                        .on_hover_text("Mac only: macOS 27 or later with Apple Intelligence");
                         ui.selectable_value(&mut d.describe_backend, 2, "Local endpoint");
                     });
             },
@@ -2327,10 +2328,10 @@ fn ai_tab(
     // Privacy note (ADR-018): the honest caveat — images go to the configured endpoint.
     ui.label(
         egui::RichText::new(
-            "Images are sent to the model server you set above, so keep it local (this Mac or \
-             your own network) and one you trust — with auto-describe on, each photo is sent \
-             automatically. Online services may keep images and use them to train. Apple's \
-             on-device model (coming later) will run here with no server.",
+            "Images are sent to the model server you set above, so keep it local (this \
+             computer or your own network) and one you trust — with auto-describe on, each \
+             photo is sent automatically. Online services may keep images and use them to \
+             train.",
         )
         .color(p.text_secondary)
         .size(12.5),

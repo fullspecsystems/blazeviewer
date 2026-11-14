@@ -25,6 +25,8 @@
 // the lint crate-wide rather than fail `clippy -D warnings`.
 #![allow(clippy::unnecessary_cast)]
 
+mod on_device;
+
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -172,6 +174,9 @@ impl AppCoreHandle {
         core.native_toast = true;
         core.native_info = true;
         core.native_play = true;
+        // AI describe / Ask can use Apple's on-device model (macOS 27+, task #44.5); the
+        // core's policy asks it whether it's available each time.
+        core.host_describer = Some(std::sync::Arc::new(on_device::AppleOnDevice));
         AppCoreHandle {
             core,
             pending_clipboard: None,

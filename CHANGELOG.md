@@ -21,6 +21,11 @@ with any pre-release suffix carried only by the tag.
   where you export is kept after you quit. On a Mac, click the "Exported …"
   confirmation to show the file in Finder; File ▸ Show Last Export in Finder (or
   File Explorer) does the same at any time.
+- **Mac: AI descriptions with Apple's on-device model.** On macOS 27 with Apple
+  Intelligence turned on, Describe and Ask can use Apple's built-in model: no setup, no
+  server, and nothing leaves your Mac. Auto uses it whenever it's available and your model
+  server otherwise. Settings ▸ AI shows which one is in use, or why Apple's model isn't
+  available.
 - **Copy, read text from, describe and export the video frame you're looking at.**
   Pause a video (or let it play) and Copy, Copy Text from Image, Describe, Ask and
   Export as PNG now use the frame on screen, at full resolution, instead of the

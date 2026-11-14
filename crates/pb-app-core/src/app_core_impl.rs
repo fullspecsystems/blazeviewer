@@ -253,6 +253,7 @@ impl AppCore {
             descriptions: std::collections::HashMap::new(),
             describe_scan: None,
             describe_gen: 0,
+            host_describer: None,
             pool,
             results,
             ring: ResidentRing::new(0),

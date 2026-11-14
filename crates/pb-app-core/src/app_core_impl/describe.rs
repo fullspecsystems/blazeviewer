@@ -139,13 +139,13 @@ impl AppCore {
         // A description of a different frame is stale: drop it so the panel shows the
         // describing state, not the old frame's text.
         self.descriptions.remove(&item);
-        let Some(describer) = self.describer_from_settings() else {
-            self.descriptions.insert(
-                item,
-                Err("No description backend is set up (Settings ▸ AI Descriptions).".to_string()),
-            );
-            self.frame_capture.described.insert(item, key);
-            return;
+        let describer = match self.describer_from_settings() {
+            Ok(describer) => describer,
+            Err(why) => {
+                self.descriptions.insert(item, Err(why));
+                self.frame_capture.described.insert(item, key);
+                return;
+            }
         };
         let prompt = prompt_override.unwrap_or_else(|| self.default_describe_prompt(item));
         let frame = self.frame_target(item);
@@ -222,26 +222,59 @@ impl AppCore {
         }
     }
 
-    /// Build the describer from settings. Apple Foundation Models (Auto-when-available /
-    /// AppleOnDevice) is delegated to the Swift host via a `CoreEffect` (subtask 5), so on
-    /// this build the local endpoint is the only in-core backend and `Auto` resolves to it.
-    /// `None` when no endpoint is configured — the caller surfaces the "set up a backend"
-    /// message.
-    fn describer_from_settings(&self) -> Option<Box<dyn crate::describe::Describer>> {
+    /// Build the describer from settings (task #44, the owner-accepted policy):
+    ///
+    /// - **Auto** → the host's on-device model ([`AppCore::host_describer`] — Apple's on
+    ///   macOS 27+) when it's available, since it is private by construction and needs no
+    ///   setup; else the configured endpoint.
+    /// - **Apple on-device** → only the host's model; never falls through to a server.
+    /// - **Local endpoint** → only the endpoint.
+    ///
+    /// `Err` is the one-line message the panel shows instead (no backend, or why Apple's
+    /// model can't be used right now).
+    fn describer_from_settings(&self) -> Result<Box<dyn crate::describe::Describer>, String> {
+        use crate::describe::{Describer, LocalEndpoint, OnHost};
         use crate::settings::DescribeBackend;
-        match self.settings.describe_backend {
-            // Apple-only with no FM host wired yet → nothing in-core can serve it.
-            DescribeBackend::AppleOnDevice => None,
-            DescribeBackend::Auto | DescribeBackend::LocalEndpoint => {
-                let url = self.settings.describe_endpoint.trim();
-                if url.is_empty() {
-                    return None;
-                }
-                Some(Box::new(crate::describe::LocalEndpoint::new(
+        const NO_BACKEND: &str = "No description backend is set up (Settings ▸ AI Descriptions).";
+        let on_host = |host: &Arc<dyn crate::describe::HostDescriber>| -> Box<dyn Describer> {
+            Box::new(OnHost {
+                host: Arc::clone(host),
+                max_tokens: self.settings.describe_max_tokens,
+            })
+        };
+        let endpoint = || -> Option<Box<dyn Describer>> {
+            let url = self.settings.describe_endpoint.trim();
+            (!url.is_empty()).then(|| -> Box<dyn Describer> {
+                Box::new(LocalEndpoint::new(
                     url.to_string(),
                     self.settings.describe_model.clone(),
                     self.settings.describe_max_tokens,
-                )))
+                ))
+            })
+        };
+        let host = self.host_describer.as_ref();
+        match self.settings.describe_backend {
+            DescribeBackend::AppleOnDevice => match host {
+                Some(h) => h.availability().map(|()| on_host(h)),
+                None => Err(
+                    "Apple's on-device model needs a Mac with macOS 27 or later and \
+                             Apple Intelligence."
+                        .to_string(),
+                ),
+            },
+            DescribeBackend::LocalEndpoint => endpoint().ok_or_else(|| NO_BACKEND.to_string()),
+            DescribeBackend::Auto => {
+                let host_status = host.map(|h| (h, h.availability()));
+                if let Some((h, Ok(()))) = host_status {
+                    return Ok(on_host(h));
+                }
+                endpoint().ok_or_else(|| match host_status {
+                    // Say why the on-device model is out, rather than only "set something up".
+                    Some((_, Err(why))) => {
+                        format!("{why} Or set up a model server in Settings ▸ AI Descriptions.")
+                    }
+                    _ => NO_BACKEND.to_string(),
+                })
             }
         }
     }
@@ -373,6 +406,111 @@ mod tests {
         assert!(
             prompt.contains("Canon"),
             "the EXIF camera fact should still reach the describer: {prompt}"
+        );
+    }
+
+    /// A stand-in for Apple's on-device model: `availability` as given; `describe` answers
+    /// "on-device" and records the length cap it was handed.
+    struct FakeHost {
+        availability: Result<(), String>,
+        asked_max_tokens: std::sync::Mutex<Option<u32>>,
+    }
+
+    impl crate::describe::HostDescriber for FakeHost {
+        fn availability(&self) -> Result<(), String> {
+            self.availability.clone()
+        }
+        fn describe(
+            &self,
+            _image: &crate::describe::PreparedImage,
+            _prompt: &str,
+            max_tokens: u32,
+        ) -> Result<String, crate::describe::DescribeError> {
+            *self.asked_max_tokens.lock().unwrap() = Some(max_tokens);
+            Ok("on-device".to_string())
+        }
+    }
+
+    fn with_host(availability: Result<(), String>) -> (AppCore, Arc<FakeHost>) {
+        let mut core = test_core();
+        let host = Arc::new(FakeHost {
+            availability,
+            asked_max_tokens: Default::default(),
+        });
+        core.host_describer = Some(host.clone());
+        // A configured endpoint nothing listens on: refused at once, so a test can tell
+        // which backend the policy picked without a network round trip.
+        core.settings.describe_endpoint = "http://127.0.0.1:1/v1".to_string();
+        (core, host)
+    }
+
+    /// Run whichever describer the policy picked on an empty image.
+    fn describe_with_policy(core: &AppCore) -> Result<Result<String, DescribeError>, String> {
+        let image = crate::describe::PreparedImage { jpeg: Vec::new() };
+        core.describer_from_settings()
+            .map(|d| d.describe(&image, "Describe it."))
+    }
+
+    use crate::describe::DescribeError;
+    use crate::settings::DescribeBackend;
+
+    #[test]
+    fn auto_prefers_the_on_device_model_when_it_is_available() {
+        let (mut core, host) = with_host(Ok(()));
+        core.settings.describe_max_tokens = 1024;
+        assert_eq!(describe_with_policy(&core), Ok(Ok("on-device".to_string())));
+        assert_eq!(
+            *host.asked_max_tokens.lock().unwrap(),
+            Some(1024),
+            "the length preset reaches the on-device model"
+        );
+    }
+
+    #[test]
+    fn auto_falls_back_to_the_endpoint_when_the_on_device_model_is_out() {
+        let (core, _) = with_host(Err("Apple Intelligence is turned off.".to_string()));
+        assert_eq!(
+            describe_with_policy(&core),
+            Ok(Err(DescribeError::Unreachable)),
+            "the endpoint was tried"
+        );
+        // …and with no endpoint either, the panel says why the on-device model is out.
+        let (mut core, _) = with_host(Err("Apple Intelligence is turned off.".to_string()));
+        core.settings.describe_endpoint = String::new();
+        let why = describe_with_policy(&core).unwrap_err();
+        assert!(
+            why.starts_with("Apple Intelligence is turned off."),
+            "{why}"
+        );
+        assert!(why.contains("model server"), "{why}");
+    }
+
+    #[test]
+    fn the_apple_backend_never_falls_through_to_a_server() {
+        let (mut core, _) = with_host(Err("The model is still downloading.".to_string()));
+        core.settings.describe_backend = DescribeBackend::AppleOnDevice;
+        assert_eq!(
+            describe_with_policy(&core),
+            Err("The model is still downloading.".to_string())
+        );
+        // No host at all (Windows, Linux, or a hand-edited settings file).
+        let mut core = test_core();
+        core.settings.describe_backend = DescribeBackend::AppleOnDevice;
+        let why = describe_with_policy(&core).unwrap_err();
+        assert!(why.contains("macOS 27"), "{why}");
+        // Available: it's used.
+        let (mut core, _) = with_host(Ok(()));
+        core.settings.describe_backend = DescribeBackend::AppleOnDevice;
+        assert_eq!(describe_with_policy(&core), Ok(Ok("on-device".to_string())));
+    }
+
+    #[test]
+    fn the_endpoint_backend_ignores_the_on_device_model() {
+        let (mut core, _) = with_host(Ok(()));
+        core.settings.describe_backend = DescribeBackend::LocalEndpoint;
+        assert_eq!(
+            describe_with_policy(&core),
+            Ok(Err(DescribeError::Unreachable))
         );
     }
 

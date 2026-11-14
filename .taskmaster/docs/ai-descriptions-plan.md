@@ -196,17 +196,55 @@ placeholder substitution, template override.
 - Error taxonomy → user-facing: connect-refused ("Can't reach the endpoint — is
   LM Studio running?"), HTTP 404/400 (bad path/model), timeout, malformed reply.
 
-### Apple Foundation Models (Swift, macOS 27+ — subtask 5)
+### Apple Foundation Models (Swift, macOS 27+ — subtask 5) — BUILT 2026-11-14
 
-- Availability: gate on `#available(macOS 27, *)` + the FM availability API
-  (Apple Intelligence enabled); host reports it via a pulled FFI
-  (`fm_available() -> bool`) the policy reads.
-- Session per request with the image (file URL for on-disk stills — no pixel
-  marshaling) + prompt; await text; `describe_finished`/`describe_failed` back in.
-- **Build note:** requires the macOS 27 SDK (Xcode beta) while the deployment
-  target stays 14.0 — all FM code behind availability checks; the build script's
-  toolchain needs verifying before this subtask starts. If the SDK isn't on the
-  dev machine yet, subtasks 1–4 + 6–8 are all buildable without it.
+**Design revised at implementation** (the sketch above — `CoreEffect::BeginDescribe { path }`
++ `describe_finished` FFI — predates task #81). Since #81, describe acts on video frames,
+animation frames and archive members, none of which has a file path, and on HDR stills
+that need the tone-map. So the Apple backend takes **the same prepared image as the
+endpoint** (frame capture → rotation → tone-map → ≤1024 px JPEG) and is just another
+`Describer` on the same worker thread:
+
+- **Core seam:** `describe::HostDescriber` (`availability() -> Result<(), String>`,
+  `describe(image, prompt, max_tokens)`), installed by the host on
+  `AppCore::host_describer` (`None` on Windows/Linux — the `pb-app` struct literal says so).
+  `OnHost` binds the length preset. Policy in `describer_from_settings`: **Auto** → the
+  host model when available, else the endpoint (the error says why the host model is out);
+  **Apple on-device** → host only, never a server; **Local endpoint** → endpoint only.
+  Unit-tested with a fake host (`auto_prefers_the_on_device_model_when_it_is_available`, …).
+- **No swift-bridge surface.** Foundation Models is Swift-only, so the Swift host carries
+  an `@objc(PBOnDeviceDescriber)` shim (`mac/…/OnDeviceDescriber.swift`) and
+  `pb-mac-ffi/src/on_device.rs` calls it **by class name through the ObjC runtime** with
+  objc2 (`unavailableReason`, `describeJPEG:prompt:maxTokens:error:`) — the way the core's
+  OCR calls Vision. The shim blocks the describe worker on a semaphore around
+  `LanguageModelSession.respond { prompt; Attachment(cgImage) }` (fresh session per
+  request, `GenerationOptions(maximumResponseTokens:)`). A binary without the shim (tests)
+  reads as unavailable, never a crash.
+- **Owner confirmed 2026-11-14:** Apple's model is the right **default** (Auto prefers it
+  even when an endpoint is configured) — most people won't have the wherewithal to set up
+  or specify a local endpoint. Local endpoint stays an explicit choice for those who do.
+- **On-device only:** `SystemLanguageModel.default`; `PrivateCloudComputeLanguageModel`
+  is not referenced (owner decision 2026-07-19: PCC only ever as its own opt-in backend).
+- **Linking:** `FoundationModels` is weak-linked (`-weak_framework` in `mac/Package.swift`)
+  because the deployment target is macOS 14 and the framework only exists from 26; all
+  use is behind `#available(macOS 27, *)`.
+- **Measured** (2026-11-14, macOS 27.2 on the dev Mac, scratch probe): availability
+  `.available`, `capabilities.contains(.vision)` true, `.reasoning` false, context 8192
+  tokens; a 1024×646 JPEG described in 2.5 s.
+- **Settings ▸ AI (Mac):** the caption under Backend says what Auto / Apple uses on this
+  Mac, or why Apple's model is out (asked live). The egui (Windows/Linux) tab keeps Apple
+  disabled with "Mac only".
+
+## Handoff
+
+- **Verified (Mac):** core policy + `on_device` unit tests; clippy; the shim compiles in
+  the app build; FM image describe works on this Mac (probe, 2.5 s).
+- **Not verified:** the app end to end (owner: Describe and Ask a photo, a paused video
+  frame, and a photo inside a zip with Backend = Auto and = Apple; turn Apple Intelligence
+  off → the caption and the panel say so, and Auto falls back to the endpoint); the app on
+  macOS 14/15 still launches (weak link — checked with `otool -l`, not run on those OSes).
+- **Cross-platform debt:** none in behaviour — Windows/Linux pass `host_describer: None`
+  and keep the endpoint; the egui wording change is compile-checked from the Mac only.
 
 ### TTS (subtask 7)
 

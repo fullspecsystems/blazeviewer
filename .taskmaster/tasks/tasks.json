@@ -141,8 +141,8 @@
           {
             "id": 5,
             "title": "Apple Foundation Models backend (Swift + FFI)",
-            "description": "Availability check (macOS 27+, Apple Intelligence on), FM session with image input (file URL handoff for on-disk stills), password-flow-style effect out / result FFI back. || OWNER DECISION (2026-07-19): Private Cloud Compute is NOT precluded (revises the earlier never-PCC reading of ADR-018). When/if PCC is integrated (macOS/iOS 27 feature; those OSes still in beta), it must be OPT-IN behind a clear warning like any other network egress, per CLAUDE.md's Second Directive - never a default, but not forbidden.",
-            "status": "pending",
+            "description": "Availability check (macOS 27+, Apple Intelligence on), FM session with image input (file URL handoff for on-disk stills), password-flow-style effect out / result FFI back. || OWNER DECISION (2026-07-19): Private Cloud Compute is NOT precluded (revises the earlier never-PCC reading of ADR-018). When/if PCC is integrated (macOS/iOS 27 feature; those OSes still in beta), it must be OPT-IN behind a clear warning like any other network egress, per CLAUDE.md's Second Directive - never a default, but not forbidden. || BUILT 2026-11-14 (macOS 27.2): design revised — the core prepares the image exactly as for the endpoint (frame capture/rotation/tone-map/≤1024 JPEG, so video frames + archive members work) and hands it to describe::HostDescriber, installed by pb-mac-ffi as on_device::AppleOnDevice, which calls the Swift @objc(PBOnDeviceDescriber) shim via the ObjC runtime (objc2) — no swift-bridge surface/effects. Policy: Auto → on-device when available else endpoint; Apple → on-device only; Endpoint → endpoint only. FoundationModels weak-linked (deploy target 14). On-device only (no PCC). Details + Handoff: .taskmaster/docs/ai-descriptions-plan.md. Owner in-app check pending.",
+            "status": "review",
             "parentId": "undefined"
           },
           {

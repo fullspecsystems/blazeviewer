@@ -46,6 +46,16 @@ pb-source = { workspace = true }
 # macOS-target-only like swift-bridge (it's only used inside the cfg'd ffi module).
 pb-cli = { workspace = true }
 swift-bridge = "0.1"
+# Apple's on-device Foundation Model (task #44.5): `on_device.rs` calls the Swift host's
+# `@objc` PBOnDeviceDescriber shim through the Objective-C runtime — the same typed objc2
+# bindings (and versions) pb-app-core's Vision OCR uses.
+objc2 = { version = "0.6", default-features = false, features = ["std"] }
+objc2-foundation = { version = "0.3", default-features = false, features = [
+    "std",
+    "NSData",
+    "NSError",
+    "NSString",
+] }
 swift-bridge-build = { version = "0.1", optional = true }
 
 [target.'cfg(target_os = "macos")'.build-dependencies]
