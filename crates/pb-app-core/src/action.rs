@@ -107,9 +107,13 @@ pub enum Action {
     /// on-disk files can be revealed (an archive entry / the empty deck cannot).
     RevealInFileManager,
     SaveRotation,
-    /// Export the current image to a file (task #89). Rung 1: PNG via the native save
-    /// dialog; rung 2 turns this into the Export-mode toggle.
+    /// File ▸ Export… (task #89): enter Export mode, or — in it — export the item on screen
+    /// with the panel's settings (the save dialog follows). `⇧⌘E` on the Mac menu,
+    /// `Ctrl+Enter` (`⌘↩`) as keys.
     Export,
+    /// Enter / leave Export mode (task #89, rung 2) — `E`. The mode puts the export panel
+    /// (format, quality, size, metadata) in the Inspector's place.
+    ExportMode,
     /// Show the most recent export in the OS file manager (File menu, task #89) — the menu
     /// route to the export notice's click. Remembered in RAM only; no default key.
     RevealLastExport,
@@ -234,6 +238,7 @@ const BASE_ACTIONS: &[Action] = &[
     Action::RevealInFileManager,
     Action::SaveRotation,
     Action::Export,
+    Action::ExportMode,
     Action::RevealLastExport,
     Action::Delete,
     Action::DeletePermanent,
@@ -387,6 +392,7 @@ impl Action {
             Action::RevealInFileManager => "reveal",
             Action::SaveRotation => "save_rotation",
             Action::Export => "export",
+            Action::ExportMode => "export_mode",
             Action::RevealLastExport => "reveal_last_export",
             Action::Delete => "delete",
             Action::DeletePermanent => "delete_permanent",
@@ -483,7 +489,8 @@ impl Action {
                 }
             }
             Action::SaveRotation => "Save rotation",
-            Action::Export => "Export as PNG",
+            Action::Export => "Export…",
+            Action::ExportMode => "Export mode",
             Action::RevealLastExport => {
                 #[cfg(target_os = "macos")]
                 {

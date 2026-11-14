@@ -22,6 +22,7 @@ mod delete;
 mod describe;
 mod dir_scan;
 mod export;
+mod export_panel;
 mod frame_capture;
 mod image_text;
 mod item_kind;
@@ -563,7 +564,8 @@ impl AppCore {
             Action::ComparePin => self.compare_pin_cmd(),
             Action::CompareToggle => self.compare_toggle_cmd(),
             Action::Copy => self.copy_image(),
-            Action::Export => self.export_cmd(),
+            Action::Export => self.export_enter_or_commit(),
+            Action::ExportMode => self.toggle_export_mode(),
             Action::RevealLastExport => self.reveal_last_export(),
             Action::CopyPath => self.copy_path(),
             Action::CopyImageDetails => self.copy_image_details(),
@@ -784,7 +786,12 @@ impl AppCore {
         match ev {
             CoreEvent::KeyDown { key, mods, repeat } => {
                 self.mods = mods;
-                match contract::resolve_key_down(&self.keymap, key, mods, repeat) {
+                let res = contract::resolve_key_down(&self.keymap, key, mods, repeat);
+                // Export mode's contextual layer (`[` / `]` = quality) comes first.
+                if self.export_key(res) {
+                    return;
+                }
+                match res {
                     KeyResolution::Ignore => {}
                     KeyResolution::OneShot(act) => self.dispatch_action(act),
                     KeyResolution::NavStart(act) => self.nav_press(key, act),
@@ -1339,6 +1346,7 @@ impl AppCore {
         // land finished writes (toast + remembered folder). No-op until the first export.
         self.poll_export();
         self.tick_export_notice();
+        self.tick_export_prefs();
         // 1. Absorb finished decodes (uploads; presents the target if it arrived).
         self.drain_results();
         // 1'. macOS archive video (off the event loop): land a finished playback byte read
@@ -1597,6 +1605,13 @@ impl AppCore {
                 self.last_inspector_snap = snap;
                 self.emit_panels_changed();
             }
+        }
+        // Export mode's panel (task #89): both shells draw it natively — re-signal when what
+        // it shows changes (navigation, rotation, a video pausing), via a cheap key.
+        let key = self.export_panel_key();
+        if key != self.export.last_panel_key {
+            self.export.last_panel_key = key;
+            self.emit_panels_changed();
         }
         if self.native_tree {
             if self.tree_panel_visible() {

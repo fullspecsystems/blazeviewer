@@ -119,6 +119,9 @@ pub struct AppCoreHandle {
     /// room for them, so they ride here and are read by the `inspector_row_action_*` accessors.
     /// Rebuilt with the snapshot each `inspector_refresh`.
     inspector_actions: Vec<(usize, String, String)>,
+    /// Export mode's panel model (task #89, rung 2), snapshotted by `export_refresh` on a
+    /// `PanelsChanged` marker so the getters below read one consistent view.
+    export_snapshot: Option<pb_app_core::export_panel::ExportPanel>,
     /// Flattened folder-tree rows (task #54): the Finder tree ([`FsTree`]) for disk decks,
     /// or the v1 `folder_tree_panel` for archive/empty decks — snapshotted by `tree_refresh`
     /// on a `PanelsChanged` marker so the indexed accessors + actions share one stable view.
@@ -192,6 +195,7 @@ impl AppCoreHandle {
             audio_picker_snapshot: Vec::new(),
             inspector_snapshot: Vec::new(),
             inspector_actions: Vec::new(),
+            export_snapshot: None,
             tree_snapshot: Vec::new(),
             pending_launch_paths: Vec::new(),
             launch_paths_record: Vec::new(),
@@ -1734,6 +1738,176 @@ impl AppCoreHandle {
         self.core.reveal_last_export();
     }
 
+    // ── Export mode's panel (task #89, rung 2): the same pull pattern as the Inspector —
+    // `PanelsChanged` → `export_refresh` → the getters. Edits go back through the setters;
+    // the host drains effects after each (the core re-signals `PanelsChanged`). ──
+
+    /// Whether the Export panel should show (the mode on, not `Tab`-hidden or under Help).
+    fn export_panel_visible(&self) -> bool {
+        self.core.export_panel_visible()
+    }
+
+    /// Snapshot the panel model for the getters below.
+    fn export_refresh(&mut self) {
+        self.export_snapshot = Some(self.core.export_panel());
+    }
+
+    /// The item's file name ("" on the empty deck).
+    fn export_source_name(&self) -> String {
+        self.export_src()
+            .map(|s| s.name.clone())
+            .unwrap_or_default()
+    }
+
+    /// What exactly is exported when it isn't the file's own image ("Frame at 1:23"), or "".
+    fn export_source_frame(&self) -> String {
+        self.export_src()
+            .and_then(|s| s.frame.clone())
+            .unwrap_or_default()
+    }
+
+    /// The source size as displayed ("4000 × 3000"), or "" when unknown.
+    fn export_source_dims(&self) -> String {
+        self.export_src()
+            .and_then(|s| s.dims)
+            .map(pb_app_core::export_panel::dims_label)
+            .unwrap_or_default()
+    }
+
+    /// The output size ("2048 × 1536"), or "" when unknown.
+    fn export_output_dims(&self) -> String {
+        self.export_snapshot
+            .as_ref()
+            .and_then(|p| p.output_dims)
+            .map(pb_app_core::export_panel::dims_label)
+            .unwrap_or_default()
+    }
+
+    /// Why this item can't be exported, or "".
+    fn export_blocked(&self) -> String {
+        self.export_src()
+            .and_then(|s| s.blocked.clone())
+            .unwrap_or_default()
+    }
+
+    fn export_can_export(&self) -> bool {
+        self.export_snapshot.as_ref().is_some_and(|p| p.can_export)
+    }
+
+    /// 0 PNG, 1 JPEG.
+    fn export_format(&self) -> u8 {
+        self.export_settings().format.code()
+    }
+
+    fn export_jpeg_quality(&self) -> u8 {
+        self.export_settings().jpeg_quality
+    }
+
+    /// 0 Faster, 1 Balanced, 2 Smallest.
+    fn export_png_compression(&self) -> u8 {
+        self.export_settings().png.code()
+    }
+
+    /// The size choice: 0 = full size, else the long edge.
+    fn export_size(&self) -> u32 {
+        self.export_settings().size.code()
+    }
+
+    fn export_size_count(&self) -> usize {
+        self.export_snapshot.as_ref().map_or(0, |p| p.sizes.len())
+    }
+
+    fn export_size_code_at(&self, index: usize) -> u32 {
+        self.export_size_at(index).map_or(0, |o| o.choice.code())
+    }
+
+    fn export_size_label_at(&self, index: usize) -> String {
+        self.export_size_at(index)
+            .map(|o| o.label.clone())
+            .unwrap_or_default()
+    }
+
+    fn export_size_enabled_at(&self, index: usize) -> bool {
+        self.export_size_at(index).is_some_and(|o| o.enabled)
+    }
+
+    fn export_strip_metadata(&self) -> bool {
+        self.export_settings().strip_metadata
+    }
+
+    fn export_note_count(&self) -> usize {
+        self.export_snapshot.as_ref().map_or(0, |p| p.notes.len())
+    }
+
+    fn export_note_at(&self, index: usize) -> String {
+        self.export_snapshot
+            .as_ref()
+            .and_then(|p| p.notes.get(index).cloned())
+            .unwrap_or_default()
+    }
+
+    fn export_set_format(&mut self, code: u8) {
+        if let Some(f) = pb_app_core::export_panel::FormatChoice::from_code(code) {
+            self.core.now = Instant::now();
+            self.core.export_set_format(f);
+        }
+    }
+
+    fn export_set_jpeg_quality(&mut self, quality: u8) {
+        self.core.now = Instant::now();
+        self.core.export_set_jpeg_quality(quality);
+    }
+
+    fn export_set_png_compression(&mut self, code: u8) {
+        if let Some(c) = pb_app_core::export_panel::PngCompression::from_code(code) {
+            self.core.now = Instant::now();
+            self.core.export_set_png_compression(c);
+        }
+    }
+
+    fn export_set_size(&mut self, code: u32) {
+        self.core.now = Instant::now();
+        self.core
+            .export_set_size(pb_app_core::export_panel::SizeChoice::from_code(code));
+    }
+
+    fn export_set_strip_metadata(&mut self, strip: bool) {
+        self.core.now = Instant::now();
+        self.core.export_set_strip_metadata(strip);
+    }
+
+    /// The panel's ✕.
+    fn export_close(&mut self) {
+        self.core.now = Instant::now();
+        self.core.export_close();
+    }
+
+    /// The panel's Export… button — the save sheet follows (a `ShowSavePanel` effect once the
+    /// name suggestion lands; the host keeps pumping).
+    fn export_commit(&mut self) {
+        self.core.now = Instant::now();
+        self.core.export_commit();
+    }
+
+    // (Rust-side helpers for the getters above — not bridged.)
+    fn export_src(&self) -> Option<&pb_app_core::export_panel::PanelSource> {
+        self.export_snapshot
+            .as_ref()
+            .and_then(|p| p.source.as_ref())
+    }
+
+    fn export_settings(&self) -> pb_app_core::export_panel::ExportSettings {
+        self.export_snapshot
+            .as_ref()
+            .map_or(self.core.export.draft, |p| p.settings)
+    }
+
+    fn export_size_at(&self, index: usize) -> Option<&pb_app_core::export_panel::SizeOption> {
+        self.export_snapshot
+            .as_ref()
+            .and_then(|p| p.sizes.get(index))
+    }
+
     // ── The native one-line info readout (`i`): the last HUD element to go native. The core
     // owns the toggle + the content; the host draws a small bottom-corner SwiftUI pill. ──
 
@@ -2579,7 +2753,7 @@ impl AppCoreHandle {
             self.core.compare_pin,
         );
         // File ▸ Export… (task #89): set here, like `space_toggles_video`.
-        next.export_enabled = self.core.can_export();
+        next.export_enabled = self.core.export_menu_enabled();
         next.reveal_last_export_enabled = self.core.export.last_export.is_some();
         // Show Archives (task #104) is a setting, defaulted off by the pure choke point, so
         // override it here the way the winit shell does (`current_menu_state`).
@@ -3404,10 +3578,12 @@ fn map_effect(e: contract::CoreEffect) -> ffi::CoreEffectFfi {
             request_id,
             start_dir,
             suggested_name,
+            extension,
         } => E::ShowSavePanel(
             request_id,
             start_dir.to_string_lossy().into_owned(),
             suggested_name,
+            extension.to_string(),
         ),
         // Pointer cursor, by kind name — the host maps to NSCursor (hover feedback for the
         // on-canvas controls, the pan hand, the hidden viewer cursor).
@@ -4360,9 +4536,10 @@ mod ffi {
         // via open_paths (files+archives / folders respectively).
         OpenFilePanel(String),
         OpenFolderPanel(String),
-        // Image export (task #89): run NSSavePanel (request_id, start_dir, suggested_name),
-        // PNG only; answer via save_panel_resolved(request_id, path) — "" = cancelled.
-        ShowSavePanel(u64, String, String),
+        // Image export (task #89): run NSSavePanel (request_id, start_dir, suggested_name,
+        // extension — "png" / "jpg", the one type allowed); answer via
+        // save_panel_resolved(request_id, path) — "" = cancelled.
+        ShowSavePanel(u64, String, String, String),
         // Pointer cursor by kind: "default" | "hidden" | "grab" | "grabbing" | "pointer".
         SetCursor(String),
         // A clipboard write is pending — pull it via take_clipboard_text() /
@@ -4958,6 +5135,32 @@ mod ffi {
         fn export_notice_seq(&self) -> u64;
         fn export_notice_hover(&mut self, hovering: bool);
         fn export_notice_click(&mut self);
+        fn export_panel_visible(&self) -> bool;
+        fn export_refresh(&mut self);
+        fn export_source_name(&self) -> String;
+        fn export_source_frame(&self) -> String;
+        fn export_source_dims(&self) -> String;
+        fn export_output_dims(&self) -> String;
+        fn export_blocked(&self) -> String;
+        fn export_can_export(&self) -> bool;
+        fn export_format(&self) -> u8;
+        fn export_jpeg_quality(&self) -> u8;
+        fn export_png_compression(&self) -> u8;
+        fn export_size(&self) -> u32;
+        fn export_size_count(&self) -> usize;
+        fn export_size_code_at(&self, index: usize) -> u32;
+        fn export_size_label_at(&self, index: usize) -> String;
+        fn export_size_enabled_at(&self, index: usize) -> bool;
+        fn export_strip_metadata(&self) -> bool;
+        fn export_note_count(&self) -> usize;
+        fn export_note_at(&self, index: usize) -> String;
+        fn export_set_format(&mut self, code: u8);
+        fn export_set_jpeg_quality(&mut self, quality: u8);
+        fn export_set_png_compression(&mut self, code: u8);
+        fn export_set_size(&mut self, code: u32);
+        fn export_set_strip_metadata(&mut self, strip: bool);
+        fn export_close(&mut self);
+        fn export_commit(&mut self);
         fn info_line_visible(&self) -> bool;
         fn info_line_text(&self) -> String;
         fn info_line_codec(&self) -> String;

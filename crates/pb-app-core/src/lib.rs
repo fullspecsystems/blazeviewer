@@ -65,6 +65,7 @@ pub mod describe;
 pub mod dir_scan;
 pub mod engine;
 pub mod export;
+pub mod export_panel;
 pub mod export_worker;
 pub mod folder_tree;
 pub mod follow;

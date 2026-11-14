@@ -48,17 +48,19 @@ pub enum LeftTab {
     Thumbnails,
 }
 
-/// What the rich layer contributes to the shared HUD overlay slot: Help, or the
-/// Inspector's active tab. (The basic `i` info line is the ephemeral layer's —
+/// What the rich layer contributes to the shared HUD overlay slot: Help, Export mode's
+/// panel, or the Inspector's active tab. (The basic `i` info line is the ephemeral layer's —
 /// see [`SlotContent`].)
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum PanelContent {
     Help,
+    /// Export mode (task #89, rung 2): its panel takes the Inspector's place.
+    Export,
     Tab(InspectorTab),
 }
 
 /// What the single **rich-panel** overlay slot shows, priority-resolved by
-/// `AppCore::slot_content` (help > inspector tab). The basic `i` info line is NOT
+/// `AppCore::slot_content` (help > export > inspector tab). The basic `i` info line is NOT
 /// here — it is a separate permanent layer (task #54), so it can coexist with a
 /// rich panel rather than replace it.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -67,6 +69,8 @@ pub enum SlotContent {
     Text,
     Describe,
     Help,
+    /// Export mode's panel (task #89) — always presented natively (SwiftUI / egui).
+    Export,
 }
 
 /// Rich-panel open/visibility state (task #54, owner decisions 2026-07-05). Pure
@@ -75,10 +79,14 @@ pub enum SlotContent {
 /// - The **Inspector** (tabbed content panel) and **Help** are mutually exclusive
 ///   *on screen* for now — they share the single HUD overlay slot until the
 ///   egui/native presenters land — so opening one closes the other.
+/// - **Export mode** (task #89, rung 2) takes the Inspector's place without closing it:
+///   leaving the mode shows the Inspector tab that was open before. Help overlays the
+///   mode (the mode stays on underneath); opening an Inspector tab leaves it.
 /// - `hidden` is the Photoshop-style `Tab` master switch: **hidden ≠ closed** (the
 ///   open set survives), any panel toggle while hidden **reveals first** and only
 ///   ever *shows* (otherwise the keypress would appear to do nothing), and `Tab`
-///   with nothing open is a no-op.
+///   with nothing open is a no-op. Hiding *suspends* Export mode: its panel and its
+///   contextual keys go away until `Tab` brings them back.
 /// - The basic `i` info line is deliberately NOT here: it is the ephemeral HUD
 ///   layer (`AppCore::info_line`), and opening/closing it never touches a rich
 ///   panel (or vice versa). It shares only `hidden` — `Tab` is a "declutter to see
@@ -91,6 +99,8 @@ pub struct Panels {
     pub inspector: Option<InspectorTab>,
     /// The keyboard-help panel (`/` / `?`).
     pub help: bool,
+    /// Export mode (task #89, rung 2): its panel holds the slot, over the Inspector.
+    pub export: bool,
     /// The `Tab` master visibility flag: panels stay open but draw nothing.
     pub hidden: bool,
 }
@@ -100,6 +110,15 @@ impl Panels {
     /// Inspector is open on another tab, close the Inspector if already on it.
     /// While hidden: reveal + ensure open — never close (the reveal rule).
     pub fn toggle_inspector(&mut self, tab: InspectorTab) {
+        if self.export {
+            // The tab was under the Export panel: the press means "show me that tab" —
+            // it leaves the mode and shows the tab, never closes it.
+            self.hidden = false;
+            self.export = false;
+            self.inspector = Some(tab);
+            self.help = false;
+            return;
+        }
         if self.hidden {
             self.hidden = false;
             self.inspector = Some(tab);
@@ -117,6 +136,22 @@ impl Panels {
         self.hidden = false;
         self.inspector = Some(tab);
         self.help = false;
+        self.export = false;
+    }
+
+    /// `E`: enter or leave Export mode. While hidden: reveal + ensure on, never leave (the
+    /// reveal rule). Help closes on entry (the mode is what you asked to see); the Inspector
+    /// tab underneath is kept for when you leave.
+    pub fn toggle_export(&mut self) {
+        if self.hidden {
+            self.hidden = false;
+            self.export = true;
+        } else {
+            self.export = !self.export;
+        }
+        if self.export {
+            self.help = false;
+        }
     }
 
     /// `/` / `?`: toggle Help. While hidden: reveal + ensure open, never close.
@@ -127,8 +162,10 @@ impl Panels {
         } else {
             self.help = !self.help;
         }
-        if self.help {
-            self.inspector = None; // shared HUD slot: Help replaces the Inspector
+        // Shared HUD slot: Help replaces the Inspector. Over Export mode it only overlays —
+        // the mode (and the Inspector tab it covers) is still there when Help closes.
+        if self.help && !self.export {
+            self.inspector = None;
         }
     }
 
@@ -154,7 +191,7 @@ impl Panels {
     /// Whether any rich panel — or the basic info line — is open (regardless of
     /// `hidden`).
     pub fn any_open(&self, tree_open: bool, info_line: bool) -> bool {
-        self.inspector.is_some() || self.help || tree_open || info_line
+        self.inspector.is_some() || self.help || self.export || tree_open || info_line
     }
 
     /// What the rich layer shows in the shared HUD slot right now (`None` when
@@ -165,6 +202,9 @@ impl Panels {
         }
         if self.help {
             return Some(PanelContent::Help);
+        }
+        if self.export {
+            return Some(PanelContent::Export);
         }
         self.inspector.map(PanelContent::Tab)
     }
@@ -285,6 +325,65 @@ mod tests {
         assert_eq!(p.inspector, None);
     }
 
+    /// Export mode takes the Inspector's place and gives it back (task #89, rung 2).
+    #[test]
+    fn export_mode_covers_the_inspector_and_restores_it() {
+        let mut p = Panels::default();
+        p.toggle_inspector(Text);
+        p.toggle_export();
+        assert_eq!(p.content(), Some(PanelContent::Export));
+        assert_eq!(p.inspector, Some(Text), "the tab underneath is kept");
+        p.toggle_export();
+        assert_eq!(
+            p.content(),
+            Some(PanelContent::Tab(Text)),
+            "leaving the mode shows the tab that was open before"
+        );
+        // Help overlays the mode; closing Help returns to it, the tab still underneath.
+        p.toggle_export();
+        p.toggle_help();
+        assert_eq!(p.content(), Some(PanelContent::Help));
+        p.toggle_help();
+        assert_eq!(p.content(), Some(PanelContent::Export));
+        assert_eq!(p.inspector, Some(Text));
+        // Entering the mode closes Help.
+        p.toggle_help();
+        p.toggle_export(); // leave
+        assert!(!p.export);
+        p.toggle_help();
+        p.toggle_export();
+        assert!(!p.help && p.export);
+    }
+
+    #[test]
+    fn an_inspector_key_in_export_mode_shows_that_tab() {
+        let mut p = Panels::default();
+        p.toggle_inspector(Details);
+        p.toggle_export();
+        // The Details tab was open underneath: pressing its key must show it, not close it.
+        p.toggle_inspector(Details);
+        assert!(!p.export);
+        assert_eq!(p.content(), Some(PanelContent::Tab(Details)));
+        p.toggle_export();
+        p.open_inspector(Describe);
+        assert!(!p.export, "a describe result leaves the mode too");
+    }
+
+    #[test]
+    fn tab_suspends_export_mode_and_e_reveals_it() {
+        let mut p = Panels::default();
+        p.toggle_export();
+        assert!(p.any_open(false, false), "the mode alone counts as open");
+        assert!(p.toggle_hidden(false, false));
+        assert_eq!(p.content(), None, "suspended: nothing drawn");
+        assert!(p.export, "hidden ≠ closed");
+        p.toggle_export();
+        assert!(
+            p.export && !p.hidden,
+            "E while hidden reveals, never leaves"
+        );
+    }
+
     #[test]
     fn tab_hides_without_closing_and_is_a_noop_when_nothing_open() {
         let mut p = Panels::default();
@@ -356,14 +455,17 @@ mod tests {
     }
 
     #[test]
-    fn content_priority_is_help_over_inspector() {
+    fn content_priority_is_help_over_export_over_inspector() {
         let mut p = Panels {
             inspector: Some(Details),
             help: true,    // not reachable via the toggles (they're exclusive), but the
             hidden: false, // priority must still be deterministic if state ever allows it
+            export: true,
         };
         assert_eq!(p.content(), Some(PanelContent::Help));
         p.help = false;
+        assert_eq!(p.content(), Some(PanelContent::Export));
+        p.export = false;
         assert_eq!(p.content(), Some(PanelContent::Tab(Details)));
     }
 }

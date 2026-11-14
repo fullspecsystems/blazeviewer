@@ -188,7 +188,8 @@ impl AppCore {
                     row("Copy image", sc(Action::Copy)),
                     row("Copy file path", sc(Action::CopyPath)),
                     row("Save rotation", sc(Action::SaveRotation)),
-                    row("Export as PNG", sc(Action::Export)),
+                    row("Export mode", sc(Action::ExportMode)),
+                    row("Export…", sc(Action::Export)),
                     row("Undo", sc(Action::Undo)),
                     row(trash, sc(Action::Delete)),
                     row("Delete permanently", sc(Action::DeletePermanent)),
@@ -223,6 +224,7 @@ impl AppCore {
         use crate::overlay::PanelContent;
         match self.panels.content() {
             Some(PanelContent::Help) => Some(SlotContent::Help),
+            Some(PanelContent::Export) => Some(SlotContent::Export),
             Some(PanelContent::Tab(InspectorTab::Details)) => Some(SlotContent::Details),
             Some(PanelContent::Tab(InspectorTab::Text)) => Some(SlotContent::Text),
             Some(PanelContent::Tab(InspectorTab::Describe)) => Some(SlotContent::Describe),
@@ -239,6 +241,8 @@ impl AppCore {
             Some(SlotContent::Details | SlotContent::Text | SlotContent::Describe) => {
                 self.native_inspector
             }
+            // Export mode has no HUD rendition: both shells draw it (SwiftUI / egui).
+            Some(SlotContent::Export) => true,
             None => false,
         }
     }
@@ -247,7 +251,13 @@ impl AppCore {
     /// mac host reads (via FFI) to show/hide its SwiftUI Inspector: the Inspector is open
     /// on some tab, not `Tab`-hidden, and the host presents it natively.
     pub fn inspector_panel_visible(&self) -> bool {
-        self.native_inspector && self.panels.inspector.is_some() && !self.panels.hidden
+        // `content()` rather than `inspector.is_some()`: Export mode (task #89) covers an
+        // open Inspector without closing it.
+        self.native_inspector
+            && matches!(
+                self.panels.content(),
+                Some(crate::overlay::PanelContent::Tab(_))
+            )
     }
 
     /// A content snapshot of the Inspector's active tab (task #54) — for the tick's
@@ -410,6 +420,8 @@ impl AppCore {
                 };
                 hud.render_paragraph(&lines, px, pad, info_bg, para_max_w, max_h)
             }
+            // Never reached (the slot is always native), but a HUD has nothing to draw here.
+            Some(SlotContent::Export) => return,
             Some(SlotContent::Describe) => {
                 if self.current.is_none() {
                     return;

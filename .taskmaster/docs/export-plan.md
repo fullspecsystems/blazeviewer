@@ -696,6 +696,39 @@ macOS; exFAT / SMB / TCC hand checks pass.
 
 ## Rung 2 — The Export mode panel
 
+**Progress (session 6, 2026-11-14) — Export mode is in, end to end, on both shells:**
+- **Core** — `export_panel.rs` (pure: `ExportSettings` = format / JPEG quality / PNG compression
+  / size / Strip; `ExportPrefs` = the persisted part, `[export]` in settings.toml, read **field
+  by field** so one bad value falls back alone (F16); `SIZE_PRESETS` 3840…800 long edge, greyed
+  at or above the source's long edge (F20); the `ExportPanel` view model + plain-language notes;
+  `PanelKey`, the cheap per-tick change key; and **the contextual key layer**
+  `export_key_override` — today `[`/`]` = quality, and the pinned `Enter`/`Esc` revisit is one
+  more arm there). `app_core_impl/export_panel.rs` (enter/leave, setters, commit, prefs saved
+  when the mode closes / at Export… / at quit — never per slider tick; `export_menu_enabled`).
+- **Slot model** — `Panels.export`: the mode covers the Inspector without closing it (leaving
+  shows the tab that was open), Help overlays it, an Inspector key leaves it (and shows that
+  tab), `Tab` suspends it (panel and keys), `E` while hidden reveals.
+- **Actions** — `Action::ExportMode` (`E`, new) toggles; `Action::Export` (File ▸ Export…,
+  ⇧⌘E; keys **⌘↩** on macOS, **Ctrl+Enter** elsewhere — never Win+Enter, Narrator) enters the
+  mode, or exports in it. Requests freeze `ExportSettings`; the worker runs `dyn Encoder` with
+  `PrepareSpec { caps, resize, strip }`; `ShowSavePanel` carries the extension (`png`/`jpg`) and
+  both dialogs allow only that type; `.jpeg` is accepted for JPEG.
+- **Shells** — macOS: `ExportPanel.swift` (native segmented pickers, a stepped slider, a
+  pop-up with disabled presets, a checkbox, a prominent Export… button) in the Inspector's
+  top-trailing slot, over per-call FFI getters/setters (`export_refresh` + `export_*`). winit:
+  `panels_ui::export_panel` (pb-ui combos, `slider_stepped`, `toggle`, `primary_button`) via
+  `PanelAction::Export*`.
+- **Mode × action rows tested** (one test each): entering stops a slideshow and `[`/`]` become
+  quality; navigation keeps the mode and settings; `Tab` suspends; a door says why and refuses;
+  Help overlays; an Inspector tab leaves and leaving restores it; `Esc`/`Enter` unchanged. Plus
+  an end-to-end JPEG export (rotated, 2048 long edge, `.jpg` enforced).
+- **Not yet (rest of rung 2):** the metadata allowlist + categories when Strip is unchecked —
+  **today unchecking Strip only keeps the original colour-profile bytes** (no EXIF is written
+  either way); the *Custom…* size dialog; the HDR note before export (the toast still says
+  "HDR as SDR" after); compare-pin suspension (rung 3, with `Y`); menu-hint context for
+  `[`/`]` (the Slideshow Faster/Slower items still advertise them while the mode re-means
+  them); a View-menu "Export Mode" check item; macOS Tab-focus into the panel (Q9).
+
 **Progress (session 2, 2026-11-14) — the pb-encode core is in; nothing user-visible yet:**
 `encoder.rs` (`Encoder` trait + `Caps` + `ExportFormat { Png(effort), Jpeg { quality } }`),
 `JpegEncoder` (8-bit, no alpha, profile embedded via `image`'s `set_icc_profile`; 4:2:2),
@@ -972,6 +1005,13 @@ confirmed directly). **All accepted.**
 
 ## Handoff
 
+**Status (2026-11-14, session 6):** **rung 2's Export mode is built** — see Rung 2's session-6
+note. Verified on the Mac: pb-app-core 1,100 tests (+4 ignored) incl. the mode × action rows
+and an end-to-end JPEG export; pb-encode 37; clippy `-D warnings` on pb-app-core / pb-encode /
+pb-mac-ffi; the Swift host builds. **The Mac GUI was not driven** (the panel's look, the controls,
+⌘↩, the save sheet's JPEG type) — manual test § 12. winit: **compile-checked only** (Windows
+clippy cross-check, all targets, clean) — manual test W18.
+
 **Status (2026-11-14, session 3):** **rung 0a (#81) is built** — Copy / Copy Text / Describe / Ask /
 Export act on the video or animation frame on screen (Mac verified by tests; GUI and Windows not
 driven). See Rung 0a's "Built" note. Session 2's status follows.
@@ -1055,6 +1095,9 @@ test script: `.taskmaster/docs/export-rung1-manual-test.md`. Rung 0a (#81) not s
 
 **Cross-platform debt**
 
+- **Windows (session 6, rung 2):** the egui Export panel (`panels_ui::export_panel`), its
+  `PanelAction`s, Ctrl+Enter, the format-aware `IFileSaveDialog` (`save_export`: JPEG filter +
+  default extension) are compile-checked only. Manual test W18.
 - **Windows: export is compile-checked only** — `save_dialog.rs` (IFileSaveDialog), the menu item,
   `export_worker::lower_thread_priority` (`THREAD_MODE_BACKGROUND_BEGIN`). The Windows machine
   must run manual-test section W. Strike this line once it does.

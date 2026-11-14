@@ -309,6 +309,20 @@ struct ContentView: View {
                     .padding(.trailing, edge)
                     .padding(.top, edge)
                     .transition(.opacity)
+                } else if model.exportVisible {
+                    // Export mode (task #89) takes the Inspector's slot — the core shows one
+                    // or the other, never both.
+                    ExportPanelView(model: model, maxHeight: panelMaxHeight(inspectorFrame))
+                        .onGeometryChange(for: CGRect.self) {
+                            $0.frame(in: .named(Self.contentSpace))
+                        } action: { inspectorFrame = $0 }
+                        .frame(
+                            maxWidth: .infinity, maxHeight: .infinity,
+                            alignment: .topTrailing
+                        )
+                        .padding(.trailing, edge)
+                        .padding(.top, edge)
+                        .transition(.opacity)
                 }
             }
             // The folder tree rides the leading edge (where the HUD tree sat), top-aligned.

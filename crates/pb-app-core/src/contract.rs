@@ -408,13 +408,15 @@ pub enum CoreEffect {
     /// Open the native folder picker at `start_dir`.
     OpenFolderPanel { start_dir: PathBuf },
     /// Run the native **save** dialog for an export (task #89): start in `start_dir`, offer
-    /// `suggested_name`, PNG only. The shell answers via `AppCore::save_panel_resolved` with
-    /// the same `request_id` (`None`/empty = cancelled). OS recent-file history must be
-    /// suppressed where the platform allows (export-plan.md § 3.6).
+    /// `suggested_name`, and allow only `extension`'s file type (`"png"` / `"jpg"`, no dot).
+    /// The shell answers via `AppCore::save_panel_resolved` with the same `request_id`
+    /// (`None`/empty = cancelled). OS recent-file history must be suppressed where the
+    /// platform allows (export-plan.md § 3.6).
     ShowSavePanel {
         request_id: u64,
         start_dir: PathBuf,
         suggested_name: String,
+        extension: &'static str,
     },
     /// Start opening an archive off the event loop (NS0 5.6 Step 3): the host spawns the worker
     /// (a `.zip` is synchronous; a `.7z` decompresses on a thread after a RAM pre-flight), holds

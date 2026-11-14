@@ -320,6 +320,15 @@ pub struct Settings {
     /// action ([`crate::quick_sort::cleared_slots`]) for when you'd rather the folder names
     /// weren't on disk at all.
     pub quick_sort: Vec<crate::quick_sort::QuickSortSlot>,
+    /// **Export mode's preferences** (task #89, rung 2): format, JPEG quality, PNG
+    /// compression, size. Preferences only (privacy #2) — never what was exported or where;
+    /// *Strip metadata* is deliberately absent (it starts checked at every entry).
+    ///
+    /// Read **leniently, field by field** ([`crate::export_panel::lenient_prefs`], review
+    /// F16): an unknown format from a later build or a mistyped value falls back alone and
+    /// never resets the rest of `settings.toml`.
+    #[serde(deserialize_with = "crate::export_panel::lenient_prefs")]
+    pub export: crate::export_panel::ExportPrefs,
 }
 
 impl Default for Settings {
@@ -379,6 +388,7 @@ impl Default for Settings {
             // Sixteen empty slots — Quick Sort does nothing until the user points a slot at a
             // folder, so the digit keys stay inert on a fresh install (task #136).
             quick_sort: crate::quick_sort::cleared_slots(),
+            export: crate::export_panel::ExportPrefs::default(),
         }
     }
 }

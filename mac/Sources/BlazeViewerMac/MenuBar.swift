@@ -363,9 +363,10 @@ final class MenuBar: NSObject {
             system("Close Window", #selector(NSWindow.performClose(_:)), key: "w"),
             sep(),
             item("save_rotation", "Save Rotation", key: "s", enabled: false),
-            // Image export (task #89, rung 1: PNG). ⇧⌘E is Photos' Export shortcut; bare E
-            // also works through the keymap.
-            item("export", "Export as PNG…", key: "e", mods: [.command, .shift], enabled: false),
+            // Image export (task #89). ⇧⌘E is Photos' Export shortcut: it enters Export mode,
+            // or — in it — exports (⌘↩ does the same through the keymap); bare E toggles the
+            // mode.
+            item("export", "Export…", key: "e", mods: [.command, .shift], enabled: false),
             // The menu route to the export notice's click — works after the pill is gone.
             item("reveal_last_export", "Show Last Export in Finder", enabled: false),
             item("reveal", "Show in Finder", enabled: false),

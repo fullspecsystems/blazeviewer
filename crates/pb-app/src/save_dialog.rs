@@ -8,13 +8,28 @@
 //! - **Linux:** `rfd` (GTK). Whether GTK records the file in `recently-used.xbel` is an open
 //!   verification item (plan § 3.6); if it does and can't be prevented, that's an owner call.
 //!
-//! Both are modal on the main thread, exactly like the existing Open dialogs.
+//! Both are modal on the main thread, exactly like the existing Open dialogs. Each offers
+//! exactly one file type — the format chosen in the Export panel (rung 2).
 
 use std::path::{Path, PathBuf};
 
-/// Run the save dialog. `None` = cancelled (or the dialog couldn't be shown).
+/// The dialog's filter name and title for a format's extension (`"png"` / `"jpg"`).
+fn kind_of(extension: &str) -> (&'static str, &'static str) {
+    match extension {
+        "jpg" => ("JPEG image", "Export as JPEG"),
+        _ => ("PNG image", "Export as PNG"),
+    }
+}
+
+/// Run the save dialog for `extension`'s file type. `None` = cancelled (or the dialog
+/// couldn't be shown).
 #[cfg(windows)]
-pub fn save_png(owner: Option<isize>, start_dir: &Path, suggested_name: &str) -> Option<PathBuf> {
+pub fn save_export(
+    owner: Option<isize>,
+    start_dir: &Path,
+    suggested_name: &str,
+    extension: &str,
+) -> Option<PathBuf> {
     use windows::core::{w, HSTRING};
     use windows::Win32::Foundation::HWND;
     use windows::Win32::System::Com::{
@@ -46,13 +61,15 @@ pub fn save_png(owner: Option<isize>, start_dir: &Path, suggested_name: &str) ->
                         | FOS_DONTADDTORECENT,
                 )
                 .ok()?;
+            let (kind, title) = kind_of(extension);
+            let (kind, spec) = (HSTRING::from(kind), HSTRING::from(format!("*.{extension}")));
             let filters = [COMDLG_FILTERSPEC {
-                pszName: w!("PNG image"),
-                pszSpec: w!("*.png"),
+                pszName: windows::core::PCWSTR(kind.as_ptr()),
+                pszSpec: windows::core::PCWSTR(spec.as_ptr()),
             }];
             dialog.SetFileTypes(&filters).ok()?;
-            dialog.SetDefaultExtension(w!("png")).ok()?;
-            let _ = dialog.SetTitle(w!("Export as PNG"));
+            dialog.SetDefaultExtension(&HSTRING::from(extension)).ok()?;
+            let _ = dialog.SetTitle(&HSTRING::from(title));
             let _ = dialog.SetOkButtonLabel(w!("Export"));
             let _ = dialog.SetFileName(&HSTRING::from(suggested_name));
             if let Ok(folder) = SHCreateItemFromParsingName::<_, _, IShellItem>(
@@ -78,11 +95,17 @@ pub fn save_png(owner: Option<isize>, start_dir: &Path, suggested_name: &str) ->
 
 /// Run the save dialog. `None` = cancelled.
 #[cfg(not(windows))]
-pub fn save_png(_owner: Option<isize>, start_dir: &Path, suggested_name: &str) -> Option<PathBuf> {
+pub fn save_export(
+    _owner: Option<isize>,
+    start_dir: &Path,
+    suggested_name: &str,
+    extension: &str,
+) -> Option<PathBuf> {
+    let (kind, title) = kind_of(extension);
     rfd::FileDialog::new()
-        .set_title("Export as PNG")
+        .set_title(title)
         .set_directory(start_dir)
         .set_file_name(suggested_name)
-        .add_filter("PNG image", &["png"])
+        .add_filter(kind, &[extension])
         .save_file()
 }

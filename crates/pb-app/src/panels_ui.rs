@@ -1,5 +1,6 @@
 //! The **egui rich panels** for the winit shell (task #54 Phase 4): Help, the Inspector
-//! (Details / Text / Describe), and the folder tree, laid out over the photo by the
+//! (Details / Text / Describe), Export mode's panel (task #89), and the folder tree, laid
+//! out over the photo by the
 //! [`egui_overlay`](crate::egui_overlay). These consume the same shell-neutral panel
 //! models the macOS SwiftUI panels do (`pb_app_core::panels` / `fs_tree`), so the two
 //! shells render one design in two skins — this file is the Windows/egui skin, aiming
@@ -10,6 +11,9 @@
 //! into a [`PanelAction`] list the shell applies afterward.
 
 use egui::{Align2, Color32, FontFamily, FontId, RichText, Rounding, Stroke};
+use pb_app_core::export_panel::{
+    dims_label, ExportPanel, FormatChoice, PngCompression, SizeChoice,
+};
 use pb_app_core::panels::{
     DescribeBody, DescribePanel, DetailRow, DetailsPanel, HelpPanel, InspectorSnapshot, TextBody,
     TextPanel,
@@ -146,6 +150,17 @@ pub enum PanelAction {
     /// The scan pill's **Cancel** button — stop the in-flight folder scan (keeps what's
     /// streamed in so far). Applied by the shell as `cancel_scan_command`.
     CancelScan,
+    /// Export mode's panel (task #89, rung 2): a control changed — applied through the
+    /// core's `export_set_*` setters (the core re-signals `PanelsChanged`).
+    ExportFormat(FormatChoice),
+    ExportJpegQuality(u8),
+    ExportPngCompression(PngCompression),
+    ExportSize(SizeChoice),
+    ExportStripMetadata(bool),
+    /// The panel's ✕ — leave Export mode.
+    ExportClose,
+    /// The panel's **Export…** button — export with its settings (the save dialog follows).
+    ExportCommit,
     /// The welcome screen's **Open File** / **Open Folder** buttons.
     OpenFile,
     OpenFolder,
@@ -297,6 +312,9 @@ pub struct ScanPill {
 pub struct PanelFrame {
     pub help: Option<HelpPanel>,
     pub inspector: Option<InspectorFrame>,
+    /// Export mode's panel (task #89) — in the Inspector's slot; the core shows one or the
+    /// other, never both.
+    pub export: Option<ExportPanel>,
     pub tree: Option<TreeFrame>,
     pub info: Option<InfoLine>,
     /// The folder-scan pill, when a directory scan is streaming in. Owned by the shell
@@ -391,6 +409,7 @@ impl PanelFrame {
         PanelFrame {
             help,
             inspector,
+            export: core.export_panel_visible().then(|| core.export_panel()),
             tree,
             info,
             // Scan state is shell-owned; the shell sets this in `render_overlay_frame`.
@@ -510,6 +529,10 @@ pub fn build(ctx: &egui::Context, frame: &PanelFrame, actions: &mut Vec<PanelAct
             frame.inspector_fade,
             actions,
         );
+    }
+    if let Some(ex) = &frame.export {
+        let r = duck(screen.right() - EDGE - EXPORT_WIDTH, screen.right() - EDGE);
+        export_panel(ctx, &p, alpha, top, r, ex, actions);
     }
     // The scan pill rides the top-center, above the corner panels but below Help
     // (SwiftUI z-order) — drawn before Help so Help composites over it.
@@ -2604,6 +2627,217 @@ fn inspector_panel(
             actions.push(PanelAction::InspectorResizeZone(zone));
         },
     );
+}
+
+// ── Export mode's panel (task #89, rung 2) ───────────────────────────────────
+
+/// The Export panel's fixed width (SwiftUI `ExportPanelView.width` is 300; egui's combos and
+/// stepped slider want a little more room).
+const EXPORT_WIDTH: f32 = 320.0;
+/// Its label column (SwiftUI `labelWidth`).
+const EXPORT_LABEL_W: f32 = 96.0;
+
+/// Export mode's panel: format, quality (or PNG compression), size and Strip metadata, then
+/// **Export…** — the egui skin of `ExportPanelView.swift`, drawn from the same core model.
+/// pb-ui controls throughout (themed combos, the stepped slider, the toggle switch, the
+/// primary button); every edit becomes a [`PanelAction`] the shell applies to the core.
+fn export_panel(
+    ctx: &egui::Context,
+    p: &Palette,
+    alpha: u8,
+    top_inset: f32,
+    duck: f32,
+    ex: &ExportPanel,
+    actions: &mut Vec<PanelAction>,
+) {
+    let max_h = panel_max_height(ctx, 200.0, top_inset, duck);
+    sdf_panel(
+        ctx,
+        p,
+        alpha,
+        "pb_export",
+        Align2::RIGHT_TOP,
+        egui::vec2(-EDGE, EDGE + top_inset),
+        max_h,
+        PANEL_RADIUS,
+        egui::Margin::ZERO,
+        1.0,
+        |ui| {
+            ui.set_width(EXPORT_WIDTH);
+            ui.set_max_width(EXPORT_WIDTH);
+            ui.spacing_mut().item_spacing.y = 0.0;
+            let (_, close) = panel_header(ui, p, "Export", None);
+            if close {
+                actions.push(PanelAction::ExportClose);
+            }
+            groove(ui, p);
+            scroll_body(ui, "export", max_h - HEADER_H, |ui| {
+                egui::Frame::none()
+                    .inner_margin(egui::Margin::symmetric(16.0, 14.0))
+                    .show(ui, |ui| {
+                        pb_ui::apply_to_ui(ui, p.dark);
+                        ui.spacing_mut().item_spacing.y = 10.0;
+                        export_body(ui, p, ex, actions);
+                    });
+            });
+        },
+    );
+}
+
+fn export_body(ui: &mut egui::Ui, p: &Palette, ex: &ExportPanel, actions: &mut Vec<PanelAction>) {
+    let s = ex.settings;
+    // What's being exported: the name, then the frame (a video / animation) and its size.
+    match &ex.source {
+        Some(src) => {
+            ui.label(
+                RichText::new(&src.name)
+                    .family(FontFamily::Name(pb_ui::SEMIBOLD.into()))
+                    .color(p.text),
+            );
+            let detail: Vec<String> = src
+                .frame
+                .iter()
+                .cloned()
+                .chain(src.dims.map(dims_label))
+                .collect();
+            if !detail.is_empty() {
+                ui.label(RichText::new(detail.join(" · ")).color(panel_secondary(p)));
+            }
+            if let Some(why) = &src.blocked {
+                ui.label(RichText::new(why).color(panel_secondary(p)));
+            }
+        }
+        None => {
+            ui.label(RichText::new("Nothing to export").color(panel_secondary(p)));
+        }
+    }
+    let enabled = ex.source.as_ref().is_some_and(|s| s.blocked.is_none());
+    ui.add_enabled_ui(enabled, |ui| {
+        export_row(ui, p, "Format", |ui| {
+            let mut f = s.format;
+            egui::ComboBox::from_id_salt("export_format")
+                .selected_text(f.label())
+                .width(120.0)
+                .show_ui(ui, |ui| {
+                    pb_ui::apply_to_ui(ui, p.dark);
+                    for c in FormatChoice::ALL {
+                        ui.selectable_value(&mut f, c, c.label());
+                    }
+                });
+            if f != s.format {
+                actions.push(PanelAction::ExportFormat(f));
+            }
+        });
+        match s.format {
+            FormatChoice::Jpeg => export_row(ui, p, "Quality", |ui| {
+                let mut q = s.jpeg_quality;
+                pb_ui::slider_stepped(
+                    ui,
+                    &mut q,
+                    pb_app_core::export_panel::JPEG_QUALITY_MIN
+                        ..=pb_app_core::export_panel::JPEG_QUALITY_MAX,
+                    pb_app_core::export_panel::JPEG_QUALITY_STEP as f64,
+                    0,
+                    "",
+                )
+                .on_hover_text("JPEG quality — [ and ] step it");
+                if q != s.jpeg_quality {
+                    actions.push(PanelAction::ExportJpegQuality(q));
+                }
+            }),
+            FormatChoice::Png => export_row(ui, p, "Compression", |ui| {
+                let mut c = s.png;
+                egui::ComboBox::from_id_salt("export_png")
+                    .selected_text(c.label())
+                    .width(120.0)
+                    .show_ui(ui, |ui| {
+                        pb_ui::apply_to_ui(ui, p.dark);
+                        for o in PngCompression::ALL {
+                            ui.selectable_value(&mut c, o, o.label());
+                        }
+                    })
+                    .response
+                    .on_hover_text("PNG is lossless at every level — this trades size for time");
+                if c != s.png {
+                    actions.push(PanelAction::ExportPngCompression(c));
+                }
+            }),
+        }
+        export_row(ui, p, "Size", |ui| {
+            ui.vertical(|ui| {
+                ui.spacing_mut().item_spacing.y = 4.0;
+                let current = ex
+                    .sizes
+                    .iter()
+                    .find(|o| o.choice == s.size)
+                    .map_or_else(|| "Full size".to_string(), |o| o.label.clone());
+                let mut picked = None;
+                egui::ComboBox::from_id_salt("export_size")
+                    .selected_text(current)
+                    .width(120.0)
+                    .show_ui(ui, |ui| {
+                        pb_ui::apply_to_ui(ui, p.dark);
+                        for o in &ex.sizes {
+                            // Presets at or above the image's own size are greyed: never upscaled.
+                            let r = ui.add_enabled(
+                                o.enabled,
+                                egui::SelectableLabel::new(o.choice == s.size, &o.label),
+                            );
+                            if r.clicked() {
+                                picked = Some(o.choice);
+                            }
+                        }
+                    });
+                if let Some(c) = picked.filter(|c| *c != s.size) {
+                    actions.push(PanelAction::ExportSize(c));
+                }
+                if let Some(d) = ex.output_dims {
+                    ui.label(RichText::new(dims_label(d)).color(panel_secondary(p)));
+                }
+            });
+        });
+        ui.horizontal(|ui| {
+            let mut strip = s.strip_metadata;
+            let r = pb_ui::toggle(ui, p, &mut strip).on_hover_text(
+                "Leave out camera details, dates and location. The colour profile is kept.",
+            );
+            ui.label(RichText::new("Strip metadata").color(p.text));
+            if r.changed() {
+                actions.push(PanelAction::ExportStripMetadata(strip));
+            }
+        });
+    });
+    for note in &ex.notes {
+        ui.label(RichText::new(note).size(12.0).color(panel_secondary(p)));
+    }
+    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+        let r = ui
+            .add_enabled_ui(ex.can_export, |ui| pb_ui::primary_button(ui, p, "Export…"))
+            .inner
+            .on_hover_text("Export with these settings (Ctrl+Enter)");
+        if r.clicked() {
+            actions.push(PanelAction::ExportCommit);
+        }
+    });
+}
+
+/// A labelled row: the label in a fixed leading column, the control beside it.
+fn export_row(ui: &mut egui::Ui, p: &Palette, label: &str, add: impl FnOnce(&mut egui::Ui)) {
+    ui.horizontal_top(|ui| {
+        let (rect, _) = ui.allocate_exact_size(
+            egui::vec2(EXPORT_LABEL_W, pb_ui::CONTROL_H),
+            egui::Sense::hover(),
+        );
+        let g = galley(
+            ui,
+            label,
+            FontId::proportional(13.5),
+            panel_secondary(p),
+            EXPORT_LABEL_W,
+        );
+        paint_vtext(ui, rect.left(), rect.center().y, &g);
+        add(ui);
+    });
 }
 
 /// The segmented tab control (Details / Text / Describe), drawn manually into the header so

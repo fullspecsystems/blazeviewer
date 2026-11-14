@@ -299,6 +299,7 @@ async fn run(out: &Path, dark: bool, tab: InspectorTab, welcome: bool) -> Result
     let warm_frame = std::env::var("PB_SHOT_LAG").is_ok().then(|| PanelFrame {
         help: None,
         inspector: None,
+        export: None,
         tree: frame.tree.as_ref().map(|t| TreeFrame {
             rows: t.rows.iter().take(4).cloned().collect(),
             parent_name: t.parent_name.clone(),
@@ -505,6 +506,7 @@ fn sample_frame(dark: bool, tab: InspectorTab, welcome: bool) -> PanelFrame {
         return PanelFrame {
             help: None,
             inspector: None,
+            export: None,
             tree: None,
             info: None,
             scan: None,
@@ -731,6 +733,7 @@ fn sample_frame(dark: bool, tab: InspectorTab, welcome: bool) -> PanelFrame {
         return PanelFrame {
             help: None,
             inspector: None,
+            export: None,
             tree: None,
             info: None,
             scan: None,
@@ -757,6 +760,7 @@ fn sample_frame(dark: bool, tab: InspectorTab, welcome: bool) -> PanelFrame {
     PanelFrame {
         help: (!tree_only).then_some(help),
         inspector: (!tree_only).then_some(inspector),
+        export: None,
         tree: Some(tree),
         info: (!tree_only).then(|| panels_ui::InfoLine {
             main: "1990s/1990-12-24 · 6048 × 4024".into(),

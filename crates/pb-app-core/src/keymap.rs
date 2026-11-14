@@ -283,6 +283,7 @@ pub const EDITOR_GROUPS: &[(&str, &[Action])] = &[
             Action::RevealInFileManager,
             Action::SaveRotation,
             Action::Export,
+            Action::ExportMode,
             Action::RevealLastExport,
             Action::Delete,
             Action::DeletePermanent,
@@ -668,9 +669,19 @@ fn default_bindings() -> Vec<(Action, Vec<KeyChord>)> {
         // key; ⇧⌘R is taken by other apps on macOS). A user can bind one in Settings.
         (Action::RevealInFileManager, vec![]),
         one(Action::SaveRotation, "Ctrl+S"),
-        // Export (task #89): bare E — the owner's pick, unbound before; rung 2 makes it the
-        // Export-mode toggle. The macOS menu also carries the Photos-style ⇧⌘E.
-        one(Action::Export, "E"),
+        // Export (task #89): bare E — the owner's pick — toggles Export mode (rung 2);
+        // ⌘↩ / Ctrl+Enter enters it, or exports in it (Ask About Image's submit precedent).
+        // ⌘ on the Mac (the platform's commit chord; the menu also carries the Photos-style
+        // ⇧⌘E), Ctrl elsewhere — never Win+Enter, which starts Narrator.
+        one(Action::ExportMode, "E"),
+        (
+            Action::Export,
+            if cfg!(target_os = "macos") {
+                vec![p("Cmd+Enter"), p("Cmd+NumpadEnter")]
+            } else {
+                vec![p("Ctrl+Enter"), p("Ctrl+NumpadEnter")]
+            },
+        ),
         (Action::RevealLastExport, vec![]),
         one(Action::Delete, "Delete"),
         one(Action::DeletePermanent, "Shift+Delete"),

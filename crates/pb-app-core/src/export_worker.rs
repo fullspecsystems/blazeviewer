@@ -1,7 +1,7 @@
 //! The export **write worker** (export-plan.md § 3.3 / § 3.4, rung 0c).
 //!
 //! One low-priority thread, FIFO: read the source bytes → `pb_decode` export decode →
-//! `pb_encode::prepare` → PNG → a safe write. Jobs survive navigation — the user asked for
+//! `pb_encode::prepare` → the chosen codec (`dyn Encoder`: PNG or JPEG) → a safe write. Jobs survive navigation — the user asked for
 //! this file — and never touch the decode pool, so display decodes always find a worker.
 //! Results go back over a channel the core drains on its (low-rate) export wake.
 //!
@@ -38,6 +38,8 @@ pub struct ExportJob {
     pub rotation_cw: u8,
     /// A captured frame to export instead of re-decoding the file (task #81).
     pub frame: Option<crate::frame_capture::FrameSource>,
+    /// Format, quality, size and Strip, frozen at command time (rung 2).
+    pub settings: crate::export_panel::ExportSettings,
     pub dest: PathBuf,
     pub queued_at: Instant,
 }
@@ -201,8 +203,14 @@ fn run_stages(job: &ExportJob, t: &mut ExportTimings) -> Result<ExportOutcome, S
     };
 
     let s = Instant::now();
-    // Rung 1: PNG at full resolution (PNG's caps are everything `prepare` produces).
-    let spec = pb_encode::PrepareSpec::full(job.rotation_cw, true);
+    // The codec decides what `prepare` reduces to: JPEG flattens alpha onto white and
+    // narrows to 8-bit; PNG keeps everything.
+    let encoder = job.settings.export_format().encoder();
+    let spec = pb_encode::PrepareSpec {
+        caps: encoder.caps(),
+        resize: job.settings.size.resize(),
+        ..pb_encode::PrepareSpec::full(job.rotation_cw, job.settings.strip_metadata)
+    };
     let image = pb_encode::catch_panics(|| {
         pb_encode::prepare(src, &spec).map_err(|e| pb_encode::EncodeError::Codec(e.to_string()))
     })
@@ -210,18 +218,18 @@ fn run_stages(job: &ExportJob, t: &mut ExportTimings) -> Result<ExportOutcome, S
     t.prepare = s.elapsed();
 
     let s = Instant::now();
-    let png =
-        pb_encode::catch_panics(|| pb_encode::encode_png(&image, pb_encode::PngEffort::Balanced))
-            .map_err(|e| format!("couldn't encode the PNG ({e})"))?;
+    let label = job.settings.format.label();
+    let bytes = pb_encode::catch_panics(|| encoder.encode(&image))
+        .map_err(|e| format!("couldn't encode the {label} ({e})"))?;
     t.encode = s.elapsed();
 
     let s = Instant::now();
-    commit_file(&job.dest, &png, job.source_path.as_deref()).map_err(|e| e.to_string())?;
+    commit_file(&job.dest, &bytes, job.source_path.as_deref()).map_err(|e| e.to_string())?;
     t.write = s.elapsed();
 
     Ok(ExportOutcome {
         notes: image.notes,
-        bytes: png.len() as u64,
+        bytes: bytes.len() as u64,
     })
 }
 

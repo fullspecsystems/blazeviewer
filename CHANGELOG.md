@@ -9,13 +9,19 @@ with any pre-release suffix carried only by the tag.
 
 ### Added
 
-- **Export as PNG.** File ▸ Export as PNG… (or press `E`; ⇧⌘E on a Mac, or
-  right-click the photo) saves the photo on screen as a PNG at full resolution,
-  with any rotation applied. Colours
-  are kept exactly: wide-gamut photos stay Display P3, Adobe RGB and so on, and
-  16-bit images stay 16-bit. HDR photos are saved as SDR for now, and the
-  confirmation says so. Exports carry no metadata — no camera details and no
-  location — and never appear in your system's recent files. The save dialog
+- **Export.** Press `E` (or File ▸ Export…, ⇧⌘E on a Mac, or right-click the
+  photo) for Export mode: a panel in the Inspector's place where you pick PNG or
+  JPEG, the JPEG quality (`[` and `]` step it) or PNG compression, and a size —
+  full resolution or a long edge from 800 to 3840 pixels, never larger than the
+  photo. Keep browsing with the panel open and your settings stay put; press
+  Export… (⌘↩ on a Mac, Ctrl+Enter elsewhere) to save the photo on screen, with
+  any rotation applied, and `E` again to leave. Your format, quality and size are
+  remembered for next time. Colours are kept exactly: wide-gamut photos stay
+  Display P3, Adobe RGB and so on, and 16-bit PNGs stay 16-bit; resizing is done
+  in linear light, and transparency in a JPEG becomes white. HDR photos are saved
+  as SDR for now, and the confirmation says so. Exports carry no metadata — no
+  camera details and no location — and never appear in your system's recent
+  files. The save dialog
   opens beside the photo (or in your pinned "Open files in" folder); export from
   the same folder again and it opens where you put the last one. Nothing about
   where you export is kept after you quit. On a Mac, click the "Exported …"
@@ -28,7 +34,7 @@ with any pre-release suffix carried only by the tag.
   available.
 - **Copy, read text from, describe and export the video frame you're looking at.**
   Pause a video (or let it play) and Copy, Copy Text from Image, Describe, Ask and
-  Export as PNG now use the frame on screen, at full resolution, instead of the
+  Export now use the frame on screen, at full resolution, instead of the
   video's poster. The same goes for a paused animated GIF, WebP or PNG and a Live
   Photo's motion. Exported frames are named with their time, like
   `clip-0h01m23s.png`, and HDR video frames export like HDR photos.

@@ -2,10 +2,11 @@
 //! `.taskmaster/docs/export-plan.md`). The `AppCore` methods live in
 //! `app_core_impl/export.rs` (the two-halves rule, `docs/where-code-goes.md`).
 //!
-//! Rung 1 is **Export as PNG**: the command freezes an [`ExportRequest`] (source, item,
-//! rotation — so navigating, rotating or changing anything afterwards can't alter it), the
-//! shell runs the native save dialog, and the [write worker](crate::export_worker) decodes,
-//! prepares, encodes and writes off the event loop.
+//! The command freezes an [`ExportRequest`] (source, item, rotation, frame and the Export
+//! panel's settings — so navigating, rotating or changing anything afterwards can't alter
+//! it), the shell runs the native save dialog, and the [write worker](crate::export_worker)
+//! decodes, prepares, encodes and writes off the event loop. Export mode itself (rung 2 —
+//! the panel and its settings) is [`crate::export_panel`].
 //!
 //! Privacy (ADR-018): an export is an explicit user edit, never a passive write — and it
 //! writes **nothing but the exported file**. Where you exported from each folder is
@@ -41,6 +42,8 @@ pub struct ExportRequest {
     /// itself (a photo — full fidelity: its own profile, 16-bit); `Some` captures a video
     /// frame, a video's poster or an animation frame.
     pub frame: Option<crate::frame_capture::FrameSource>,
+    /// The Export panel's settings at command time (format, quality, size, Strip).
+    pub settings: crate::export_panel::ExportSettings,
 }
 
 impl std::fmt::Debug for ExportRequest {
@@ -50,6 +53,7 @@ impl std::fmt::Debug for ExportRequest {
             .field("item", &self.item)
             .field("name", &self.name)
             .field("rotation_cw", &self.rotation_cw)
+            .field("settings", &self.settings)
             .finish_non_exhaustive()
     }
 }
@@ -95,6 +99,14 @@ pub struct ExportState {
     /// The "Exported name.png" notice on screen, if any (macOS draws it as a clickable pill).
     pub notice: Option<ExportNotice>,
     notice_seq: u64,
+    /// Export mode's settings as the panel shows them (rung 2) — seeded from the saved
+    /// preferences at each fresh entry to the mode.
+    pub draft: crate::export_panel::ExportSettings,
+    /// The draft changed since the preferences were last saved; saved when the mode closes,
+    /// at Export… and at quit.
+    pub prefs_dirty: bool,
+    /// What the panel showed at the last tick — the native shells re-pull when it changes.
+    pub last_panel_key: Option<crate::export_panel::PanelKey>,
 }
 
 /// How long the export notice stays while the pointer isn't on it.
@@ -222,29 +234,30 @@ pub fn start_dir(
         .unwrap_or_else(|| fallback.to_path_buf())
 }
 
-/// The suggested output name: the source's stem + `.png`, suffixed (`-1`, `-2`, …) past any
+/// The suggested output name: the source's stem + `.ext`, suffixed (`-1`, `-2`, …) past any
 /// name `is_taken` reports (an existing file or another export's pending destination).
-pub fn suggested_name(display_name: &str, is_taken: impl Fn(&str) -> bool) -> String {
+pub fn suggested_name(display_name: &str, ext: &str, is_taken: impl Fn(&str) -> bool) -> String {
     let file = crate::engine::file_name_of(display_name);
     let stem = Path::new(&file)
         .file_stem()
         .and_then(|s| s.to_str())
         .filter(|s| !s.is_empty())
         .unwrap_or("export");
-    crate::quick_sort::unique_name(&format!("{stem}.png"), is_taken)
+    crate::quick_sort::unique_name(&format!("{stem}.{ext}"), is_taken)
 }
 
-/// Make sure the chosen path ends in `.png` (Linux's dialog doesn't enforce the filter).
-pub fn ensure_png_extension(path: PathBuf) -> PathBuf {
-    let is_png = path
-        .extension()
-        .and_then(|e| e.to_str())
-        .is_some_and(|e| e.eq_ignore_ascii_case("png"));
-    if is_png {
+/// Make sure the chosen path carries the format's extension (Linux's dialog doesn't enforce
+/// the filter). JPEG accepts `.jpeg` as well as `.jpg`.
+pub fn ensure_extension(path: PathBuf, ext: &str) -> PathBuf {
+    let ok = path.extension().and_then(|e| e.to_str()).is_some_and(|e| {
+        e.eq_ignore_ascii_case(ext) || (ext == "jpg" && e.eq_ignore_ascii_case("jpeg"))
+    });
+    if ok {
         path
     } else {
         let mut s = path.into_os_string();
-        s.push(".png");
+        s.push(".");
+        s.push(ext);
         PathBuf::from(s)
     }
 }
@@ -376,38 +389,38 @@ mod tests {
 
     #[test]
     fn suggested_names_use_the_stem_and_avoid_taken_names() {
-        assert_eq!(suggested_name("IMG_1234.HEIC", |_| false), "IMG_1234.png");
         assert_eq!(
-            suggested_name("trip/day1/beach.jpg", |_| false),
+            suggested_name("IMG_1234.HEIC", "png", |_| false),
+            "IMG_1234.png"
+        );
+        assert_eq!(
+            suggested_name("trip/day1/beach.jpg", "png", |_| false),
             "beach.png"
         );
         let taken = ["beach.png", "beach-1.png"];
         assert_eq!(
-            suggested_name("beach.jpg", |n| taken.contains(&n)),
+            suggested_name("beach.jpg", "png", |n| taken.contains(&n)),
             "beach-2.png"
         );
-        assert_eq!(suggested_name("", |_| false), "export.png");
-        assert_eq!(suggested_name("noext", |_| false), "noext.png");
+        assert_eq!(suggested_name("", "png", |_| false), "export.png");
+        assert_eq!(suggested_name("noext", "png", |_| false), "noext.png");
+        // A JPEG export of a JPEG suggests the same name — the folder check suffixes it.
+        assert_eq!(
+            suggested_name("beach.jpg", "jpg", |n| n == "beach.jpg"),
+            "beach-1.jpg"
+        );
     }
 
     #[test]
-    fn png_extension_is_enforced_without_doubling() {
-        assert_eq!(
-            ensure_png_extension(PathBuf::from("/o/a.png")),
-            PathBuf::from("/o/a.png")
-        );
-        assert_eq!(
-            ensure_png_extension(PathBuf::from("/o/a.PNG")),
-            PathBuf::from("/o/a.PNG")
-        );
-        assert_eq!(
-            ensure_png_extension(PathBuf::from("/o/a")),
-            PathBuf::from("/o/a.png")
-        );
-        assert_eq!(
-            ensure_png_extension(PathBuf::from("/o/a.jpg")),
-            PathBuf::from("/o/a.jpg.png")
-        );
+    fn the_extension_is_enforced_without_doubling() {
+        let e = |p: &str, ext: &str| ensure_extension(PathBuf::from(p), ext);
+        assert_eq!(e("/o/a.png", "png"), PathBuf::from("/o/a.png"));
+        assert_eq!(e("/o/a.PNG", "png"), PathBuf::from("/o/a.PNG"));
+        assert_eq!(e("/o/a", "png"), PathBuf::from("/o/a.png"));
+        assert_eq!(e("/o/a.jpg", "png"), PathBuf::from("/o/a.jpg.png"));
+        assert_eq!(e("/o/a.jpg", "jpg"), PathBuf::from("/o/a.jpg"));
+        assert_eq!(e("/o/a.JPEG", "jpg"), PathBuf::from("/o/a.JPEG"));
+        assert_eq!(e("/o/a.png", "jpg"), PathBuf::from("/o/a.png.jpg"));
     }
 
     #[test]

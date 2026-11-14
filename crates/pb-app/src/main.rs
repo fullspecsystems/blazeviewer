@@ -1491,6 +1491,8 @@ impl App {
     fn overlay_panel_visible(&self) -> bool {
         self.core.help_panel_visible()
             || self.core.inspector_panel_visible()
+            // Export mode's panel (task #89) — interactive (combos, slider, Export…).
+            || self.core.export_panel_visible()
             || self.core.tree_panel_visible()
             // The Thumbnails strip (task #83) is the left pane's other tab — interactive (tab
             // bar, cell clicks, scroll), so it joins the pointer-routing + render gate. Without
@@ -2109,6 +2111,14 @@ impl App {
         match action {
             A::CloseHelp => self.core.toggle_help(),
             A::CloseInspector => self.core.panels.inspector = None,
+            // Export mode's panel (task #89): each control → the core's setter.
+            A::ExportFormat(f) => self.core.export_set_format(f),
+            A::ExportJpegQuality(q) => self.core.export_set_jpeg_quality(q),
+            A::ExportPngCompression(c) => self.core.export_set_png_compression(c),
+            A::ExportSize(s) => self.core.export_set_size(s),
+            A::ExportStripMetadata(on) => self.core.export_set_strip_metadata(on),
+            A::ExportClose => self.core.export_close(),
+            A::ExportCommit => self.core.export_commit(),
             A::CloseTree => self.core.toggle_folder_tree(),
             A::SelectTab(tab) => self.core.panels.open_inspector(tab),
             // Left-pane tab-bar click (task #83) — ride the same ⇧F/⇧T actions the keyboard
@@ -2716,8 +2726,8 @@ impl App {
             self.core.displayed_item,
             self.core.compare_pin,
         );
-        // File ▸ Export as PNG… (task #89): set here, like `space_toggles_video`.
-        state.export_enabled = self.core.can_export();
+        // File ▸ Export… (task #89): set here, like `space_toggles_video`.
+        state.export_enabled = self.core.export_menu_enabled();
         state.reveal_last_export_enabled = self.core.export.last_export.is_some();
         // The docked toolbar (#61) is a shell-honored setting, not derived view state, so it's
         // set here (the choke point defaults it off). It rides `MenuState` so the View ▸ Show
@@ -3457,12 +3467,14 @@ impl App {
                         request_id,
                         start_dir,
                         suggested_name,
+                        extension,
                     } => {
                         #[cfg(windows)]
                         let owner = self.window.as_ref().and_then(|w| hwnd_of(w));
                         #[cfg(not(windows))]
                         let owner = None;
-                        let path = save_dialog::save_png(owner, &start_dir, &suggested_name);
+                        let path =
+                            save_dialog::save_export(owner, &start_dir, &suggested_name, extension);
                         self.core.save_panel_resolved(request_id, path);
                     }
                     // Pop up the right-click photo context menu at the cursor (task #41).

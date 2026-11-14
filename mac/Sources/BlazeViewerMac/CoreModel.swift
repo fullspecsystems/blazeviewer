@@ -173,6 +173,10 @@ final class CoreModel {
     private(set) var inspectorVisible = false
     private(set) var inspectorTab = 0
     private(set) var inspectorRows: [InspectorRow] = []
+    /// Export mode's panel (task #89, rung 2) — it takes the Inspector's slot. Visibility and
+    /// the model, refreshed on `PanelsChanged` (`refreshExportPanel`).
+    private(set) var exportVisible = false
+    private(set) var exportPanel = ExportPanelModel()
     /// The native folder tree (⇧F) — visibility and the current photo's folder hierarchy
     /// as a flat, depth-indented row list, refreshed on `PanelsChanged` (`refreshTree`).
     /// A native list scrolls, so every derived row shows (no HUD paging).
@@ -905,6 +909,55 @@ final class CoreModel {
         kick()
     }
 
+    /// Re-pull Export mode's panel after a `PanelsChanged` marker.
+    private func refreshExportPanel() {
+        let vis = core.export_panel_visible()
+        if vis != exportVisible {
+            withAnimation(Layout.chromeFade) { exportVisible = vis }
+        }
+        guard vis else { return } // keep the last model while it fades out
+        core.export_refresh()
+        var sizes: [ExportSizeOption] = []
+        for i in 0..<Int(core.export_size_count()) {
+            let idx = UInt(i)
+            sizes.append(
+                ExportSizeOption(
+                    code: core.export_size_code_at(idx),
+                    label: core.export_size_label_at(idx).toString(),
+                    enabled: core.export_size_enabled_at(idx)))
+        }
+        var notes: [String] = []
+        for i in 0..<Int(core.export_note_count()) {
+            notes.append(core.export_note_at(UInt(i)).toString())
+        }
+        exportPanel = ExportPanelModel(
+            name: core.export_source_name().toString(),
+            frame: core.export_source_frame().toString(),
+            sourceDims: core.export_source_dims().toString(),
+            outputDims: core.export_output_dims().toString(),
+            blocked: core.export_blocked().toString(),
+            canExport: core.export_can_export(),
+            format: Int(core.export_format()),
+            jpegQuality: Int(core.export_jpeg_quality()),
+            pngCompression: Int(core.export_png_compression()),
+            size: core.export_size(),
+            sizes: sizes,
+            stripMetadata: core.export_strip_metadata(),
+            notes: notes)
+    }
+
+    // Export panel edits: each goes to the core, which re-signals `PanelsChanged`.
+    func exportSetFormat(_ code: Int) { core.export_set_format(UInt8(code)); kick() }
+    func exportSetJpegQuality(_ q: Int) { core.export_set_jpeg_quality(UInt8(q)); kick() }
+    func exportSetPngCompression(_ code: Int) {
+        core.export_set_png_compression(UInt8(code)); kick()
+    }
+    func exportSetSize(_ code: UInt32) { core.export_set_size(code); kick() }
+    func exportSetStripMetadata(_ on: Bool) { core.export_set_strip_metadata(on); kick() }
+    func closeExport() { core.export_close(); kick() }
+    /// The panel's Export… button: the save sheet follows once the core suggests a name.
+    func commitExport() { core.export_commit(); kick() }
+
     /// Close the Inspector from its ✕ button.
     func closeInspector() {
         core.inspector_close()
@@ -1294,7 +1347,7 @@ final class CoreModel {
             menu.addItem(.separator())
         }
         if canExport {
-            add("export", "Export as PNG…")
+            add("export", "Export…")
         }
         if canReveal {
             add("reveal", "Show in Finder")
@@ -2569,9 +2622,10 @@ final class CoreModel {
             presentOpenPanel(startDir: dir.toString(), choosingFolders: false)
         case .OpenFolderPanel(let dir):
             presentOpenPanel(startDir: dir.toString(), choosingFolders: true)
-        case .ShowSavePanel(let requestId, let dir, let name):
+        case .ShowSavePanel(let requestId, let dir, let name, let ext):
             presentSavePanel(
-                requestId: requestId, startDir: dir.toString(), suggestedName: name.toString())
+                requestId: requestId, startDir: dir.toString(), suggestedName: name.toString(),
+                fileExtension: ext.toString())
         case .SetCursor(let kind):
             applyCursor(kind.toString())
         case .WriteClipboard:
@@ -2685,6 +2739,7 @@ final class CoreModel {
             refreshHelp()
             openPanelVisible = core.open_panel_visible()
             refreshInspector()
+            refreshExportPanel()
             refreshTree()
             refreshThumbs()
             syncToolbar() // the folder-tree / inspector toggle state lives here, not MenuState
@@ -2789,24 +2844,27 @@ final class CoreModel {
     }
 
     /// The native save panel for an image export (task #89, `CoreEffect::ShowSavePanel`):
-    /// a sheet on the viewer window — Preview's Export idiom — PNG only, starting in the
-    /// folder the core chose (export-plan.md § 3.6: "Open files in" decides). The answer goes
+    /// a sheet on the viewer window — Preview's Export idiom — allowing only the format chosen
+    /// in the Export panel, starting in the folder the core chose (export-plan.md § 3.6). The answer goes
     /// back with the same request id; "" means cancelled. Afterwards AppKit's own folder
     /// memory is removed from our defaults: the app always passes `directoryURL`, so nothing
     /// is lost, and no folder trace lingers outside settings.toml (§ 3.6, review F9 — the
     /// Open panel's half of that cleanup is task #147).
-    private func presentSavePanel(requestId: UInt64, startDir: String, suggestedName: String) {
+    private func presentSavePanel(
+        requestId: UInt64, startDir: String, suggestedName: String, fileExtension: String
+    ) {
         guard !panelOpen else {
             // A panel is already up: answer "cancelled" so the request doesn't linger.
             core.save_panel_resolved(requestId, "")
             return
         }
         let panel = NSSavePanel()
-        panel.title = "Export as PNG"
+        let type: UTType = fileExtension == "jpg" ? .jpeg : .png
+        panel.title = type == .jpeg ? "Export as JPEG" : "Export as PNG"
         panel.prompt = "Export"
         panel.nameFieldStringValue = suggestedName
         panel.directoryURL = URL(fileURLWithPath: startDir, isDirectory: true)
-        panel.allowedContentTypes = [.png]
+        panel.allowedContentTypes = [type]
         panel.canCreateDirectories = true
         panel.isExtensionHidden = false
         panelOpen = true

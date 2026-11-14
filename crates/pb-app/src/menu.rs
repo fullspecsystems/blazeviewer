@@ -572,7 +572,8 @@ pub struct ViewChecks {
 pub struct BuiltMenu {
     pub menu: Menu,
     pub save_rotation: MenuItem,
-    /// File ▸ Export as PNG… (task #89) — enabled while a still image is on screen.
+    /// File ▸ Export… (task #89) — enters Export mode, or exports in it
+    /// (`AppCore::export_menu_enabled`).
     pub export: MenuItem,
     /// File ▸ Show Last Export in File Explorer (task #89) — enabled once something was
     /// exported this session.
@@ -674,8 +675,9 @@ pub fn build_menu(keymap: &Keymap) -> BuiltMenu {
 
     // Disabled until a rotation is pending on an eligible file (toggled at runtime).
     let save_rotation = MenuItem::with_id(ids::SAVE_ROTATION, "Save Rotation\tCtrl+S", false, None);
-    // Disabled until a still image is displayed (toggled at runtime, task #89).
-    let export = MenuItem::with_id(ids::EXPORT, "Export as PNG…\tE", false, None);
+    // Disabled until an item is displayed (toggled at runtime, task #89). Enters Export
+    // mode (`E` toggles it); in the mode, exports.
+    let export = MenuItem::with_id(ids::EXPORT, "Export…\tCtrl+Enter", false, None);
     // Disabled until something was exported this session (toggled at runtime).
     let reveal_last_export = MenuItem::with_id(
         ids::REVEAL_LAST_EXPORT,
@@ -1038,7 +1040,11 @@ pub fn menu_bar_spec(keymap: &Keymap, s: &crate::contract::MenuState) -> Vec<Men
                     "Save Rotation\tCtrl+S",
                     s.save_rotation_enabled,
                 ),
-                item(MenuAction::Export, "Export as PNG…\tE", s.export_enabled),
+                item(
+                    MenuAction::Export,
+                    &l("Export…", Action::Export),
+                    s.export_enabled,
+                ),
                 item(
                     MenuAction::RevealLastExport,
                     "Show Last Export in File Explorer",
@@ -1565,7 +1571,7 @@ pub fn build_context_menu(
         let _ = menu.append(&sep());
     }
     if state.can_export {
-        let _ = menu.append(&item(ids::EXPORT, "Export as PNG…"));
+        let _ = menu.append(&item(ids::EXPORT, "Export…"));
     }
     // Reveal only for a real on-disk file (archive entries have no path). The label follows
     // the platform idiom, matching the File-menu item.

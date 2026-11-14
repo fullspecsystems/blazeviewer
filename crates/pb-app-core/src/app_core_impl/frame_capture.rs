@@ -393,7 +393,7 @@ mod tests {
         let mut core = video_core(S::Paused, Duration::from_secs_f64(12.0 / 30.0));
         core.persist_prefs = false;
         assert!(core.can_export());
-        core.export_cmd();
+        core.export_cmd(crate::export_panel::ExportSettings::default());
         pump(&mut core, |c| {
             c.effects
                 .iter()
