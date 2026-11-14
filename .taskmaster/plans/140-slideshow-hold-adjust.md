@@ -90,9 +90,12 @@ property changes on purpose.
   `CoreModel.menuAction` → `pb-mac-ffi menu_action` (lib.rs:939) →
   `CoreEvent::MenuAction`, and the Mac toolbar has no faster/slower buttons.
 
-**Not verified:**
-- #140.7 by hand on either platform: clicking the menu items in a running app. Close
-  140.7 and #140 once the owner has clicked through them.
+- **Owner hand test on the Mac, 2026-11-13:** clicked View ▸ Slideshow Faster / Slower
+  in the rebuilt app and confirmed the menu steps work. 140.7 and #140 closed.
+
+**Not verified:** nothing outstanding for #140. Windows hasn't had a hand click of the
+menu stops, but the logic is core-only and shared, and both shells deliver the same
+`CoreEvent::MenuAction`.
 
 **Cross-platform debt:**
 - ~~**Mac toolbar interval label goes stale during/after a hold.**
@@ -120,5 +123,4 @@ property changes on purpose.
   goes the same direction, and the hint is how a menu user learns the faster, finer
   path. The Mac menu shows no key hint (unchanged). The Mac session flagged this.
 
-**Claimed:** nothing. The Mac verification of #140.7 is recorded above. Subtask 6
-landed in 0d3db2f4.
+**Claimed:** nothing. #140 is done (6 in 0d3db2f4, 7 in 19cff206).

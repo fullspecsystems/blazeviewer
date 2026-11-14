@@ -1921,7 +1921,7 @@
         "id": 140,
         "title": "Slideshow interval: size-scaled [ / ] taps + hold-to-accelerate",
         "description": "Owner request 2026-11-12: [ / ] should adjust the slideshow interval in 0.1s steps, and holding either key should accelerate through coarser steps (0.1s, then 0.5s, then 1s, ...) rather than just repeating 0.1s fast. Before: [ / ] were OneShot (holding did nothing past the first step; OS auto-repeat is dropped by the core), stepping 0.5s at/above 0.5s and 0.1s below. Design: the curve is one data table (slideshow::HOLD_CURVE: stage = held-for threshold, step size, repeat cadence) plus slideshow::ZONES, step sizes by magnitude (owner follow-up 2026-11-12 after the first feel test: a tap is 0.1s under 10s, 0.5s from 10s to 30s, 1s from 30s; each zone also caps a held step, 0.1s below 1s and 1s below 10s); each step snaps to its own grid in the direction of travel so values stay clean (5.1 -> 5.5 -> 6.0). Constants, not a user setting (owner call: tune it once, nobody needs to adjust it). While [ or ] is held the slideshow does not advance; on release the current slide gets a fresh interval at the new speed (a slideshow-only anchor, not last_present, which also paces hold-to-blaze and the eager animation prep). All logic in pb-app-core; the shells already forward clean KeyDown/KeyUp (no menu accelerators on either). Plan + Handoff: .taskmaster/plans/140-slideshow-hold-adjust.md.",
-        "status": "review",
+        "status": "done",
         "priority": "medium",
         "dependencies": [],
         "subtasks": [
@@ -1964,8 +1964,8 @@
           {
             "id": 7,
             "title": "Menu clicks jump between round values (MENU_STOPS)",
-            "description": "Owner 2026-11-13: tenths from View > Slideshow Faster / Slower take forever. A menu click now jumps to the next stop in slideshow::MENU_STOPS (0.1, 0.2, 0.5, 1, 2, 3, 4, 5, 7, 10, 15, 20, 30, 45, 60s); between-stop values snap in the click's direction. Core-only (CoreEvent::MenuAction -> AppCore::slideshow_menu_step); keys unchanged. Windows: tests/clippy/fmt green. Review = awaiting the Mac session's pb-app-core + pb-mac-ffi tests and Swift host build.",
-            "status": "review"
+            "description": "Owner 2026-11-13: tenths from View > Slideshow Faster / Slower take forever. A menu click now jumps to the next stop in slideshow::MENU_STOPS (0.1, 0.2, 0.5, 1, 2, 3, 4, 5, 7, 10, 15, 20, 30, 45, 60s); between-stop values snap in the click's direction. Core-only (CoreEvent::MenuAction -> AppCore::slideshow_menu_step); keys unchanged. Windows: tests/clippy/fmt green. Review = awaiting the Mac session's pb-app-core + pb-mac-ffi tests and Swift host build. Owner clicked the menu stops on the Mac 2026-11-13 and signed off.",
+            "status": "done"
           }
         ]
       }
