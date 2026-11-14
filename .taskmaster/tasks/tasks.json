@@ -565,8 +565,8 @@
       },
       {
         "id": 81,
-        "title": "Video: full-resolution current-frame capture for Copy / OCR / Describe / Compare / Export (all platforms)",
-        "description": "Survey 2026-11-13 (.taskmaster/docs/export-plan.md): CoreEffect::CaptureNativeVideoFrame and NativeCapturePurpose are defined, but NOTHING emits the effect and no shell consumes it, and decode_item on a video calls decode_video_poster — so Copy / OCR / Describe / Compare on a video use the POSTER on every platform, Windows included (the previous description's 'matching Windows' was wrong; confirm on Windows). Build one on-demand capture: the frame at the current time at the ORIGINAL resolution (not the display-scaled image), HDR kept where the route has it, gated by request_id + session_id + item so a frame captured before a navigation is rejected. On-demand only — never a continuous copy path (privacy). Prerequisite for exporting video frames (#89 rung 0a).",
+        "title": "Video/animation: full-resolution frame capture for Copy / OCR / Describe / Export (all platforms)",
+        "description": "Survey 2026-11-13: CoreEffect::CaptureNativeVideoFrame + NativeCapturePurpose are defined but nothing emits the effect and no shell consumes it; decode_item on a video calls decode_video_poster, so Copy / OCR / Describe on a video use the POSTER on every platform (confirm on Windows). Build on-demand capture by FROZEN IDENTITY (video PTS + track + seek generation; animation frame index) with a full-resolution decode — the live playback buffers are fit-scaled (animation decode_fit, Live Photo motion cap, Session fit box), so they're used only when already full-res with matching identity. Replies validate against the request, not live state. On demand only (privacy). Consumers: Copy, OCR, Describe, Export (#89 rung 0a). Compare is OUT of scope: it pins an item and stops playback when jumping; pinning a captured frame needs its own design. Plan: .taskmaster/docs/export-plan.md rung 0a. Rev 4 (Fable review, 2026-11-13): runs on its OWN one-shot capture thread at low priority, so #81 does not depend on #89's export worker. Copy on a video becomes asynchronous (a copy-when-done state, like copy_image_text). AVPlayer route: the core's position is a ~20 Hz mirror, so the SHELL reads currentTime() when it handles the effect and the reply carries the time used. Animations: composite-and-discard up to frame k at full res (decode_animation's 1.5 GB cap truncates early). On Windows the decode is MF (FFmpeg there is container-reading only).",
         "status": "pending",
         "priority": "medium",
         "dependencies": [
@@ -575,32 +575,32 @@
         "subtasks": [
           {
             "id": 1,
-            "title": "Core: capture request/reply contract",
-            "description": "Re-wire or replace the vestigial CaptureNativeVideoFrame / NativeCapturePurpose (add an Export purpose). The reply carries pixels + colour info; stale replies are rejected by request_id + session_id + item. Test-first.",
+            "title": "Core: frozen capture request + reply contract",
+            "description": "Replace the vestigial CaptureNativeVideoFrame / NativeCapturePurpose with CaptureVideoFrame { request_id, … } + VideoFrameCaptured; the request freezes PTS/track/seek generation or frame index; replies validate against the request. Test-first.",
             "status": "pending"
           },
           {
             "id": 2,
             "title": "macOS AVPlayer route (MP4/MOV)",
-            "description": "Grab the frame at the current time at full size — likely AVAssetImageGenerator with zero tolerance, else AVPlayerItemVideoOutput. For HDR, reuse whatever #144 lands (HDR posters for this route; in progress in a parallel session on 2026-11-13) rather than building a second HDR frame path.",
+            "description": "AVAssetImageGenerator at the frozen time, zero tolerance, full size. For HDR, extend #144's livephoto::stream_hdr_frames with a seek/PTS entry point rather than a second HDR path (it currently streams from the start).",
             "status": "pending"
           },
           {
             "id": 3,
             "title": "Session route (FFmpeg on macOS; MF/FFmpeg on Windows)",
-            "description": "Keep the last presented frame's pixels in RAM (NV12 / P010 / RGBA as decoded) or re-decode one frame at its PTS. Preserve P010 PQ/HLG so HDR export can keep it.",
+            "description": "One-shot full-resolution decode at the frozen PTS on the export worker (seek to the preceding keyframe, decode forward) from the same input (filesystem or archive) and selected track. Preserve P010 PQ/HLG with its real transfer. Measure p50/p95 on long-GOP files.",
             "status": "pending"
           },
           {
             "id": 4,
             "title": "Animations + Live Photos",
-            "description": "Use the current animation frame (animation.rs current_frame) rather than the first frame.",
+            "description": "Full-resolution decode of the frozen animation frame index with correct compositing (disposal/blend); Live Photo motion frame by PTS as in subtask 3.",
             "status": "pending"
           },
           {
             "id": 5,
-            "title": "Wire the consumers + verify on both platforms",
-            "description": "Copy, OCR, Describe, Compare pin and Export use the captured frame. Behaviour-unverified until each shell has been run; record results in the plan's Handoff.",
+            "title": "Wire Copy / OCR / Describe / Export + verify on both platforms",
+            "description": "Each consumer uses the capture instead of decode_item for videos/animations. Behaviour-unverified until each shell is run; record in the plan's Handoff. Compare stays item-based (out of scope).",
             "status": "pending"
           }
         ]
@@ -904,7 +904,7 @@
       {
         "id": 89,
         "title": "Image export — Export mode, codec choice, flick compare, HDR + batch (Squoosh-inspired)",
-        "description": "Export the current image or video frame to a file. MVP = PNG with correct colour (wide gamut kept via the source profile; HDR tone-mapped, or 16-bit PQ PNG as an option). The ambition: an Export mode that replaces the right-hand Inspector (Details/Text/Describe) with export controls + details; codec choice (PNG/JPEG first, then WebP/AVIF/JXL, HEIC on macOS); quality and resize; Y flicks original <-> encoded on the real viewer surface (wipe is a later nice-to-have); HDR-preserving output; and batch. Writes are explicit user edits (ADR-018), never passive; encoded previews are RAM-only; metadata stripped by default and written from an allowlist; location never sticky. Full plan, survey, decisions and ladder: .taskmaster/docs/export-plan.md.",
+        "description": "Export the current image or video frame to a file. MVP = PNG with correct colour (wide gamut kept with a clean profile; HDR tone-mapped until HDR read-back exists). Then an Export mode that replaces the right-hand Inspector with export controls + details; codec choice (PNG/JPEG first, then WebP/AVIF/JXL, HEIC on macOS); quality and resize presets; Y flicks export <-> original (tap toggles, hold peeks) on the real viewer surface; HDR-preserving output; batch. Writes are explicit user edits (ADR-018); previews/caches RAM-only; metadata (incl. the ICC profile) stripped by default via an allowlist; location never sticky; OS recents suppressed. Plan of record (rev 4, reviewed by Codex + Fable): .taskmaster/docs/export-plan.md — follow it, not this summary, where they differ.",
         "status": "pending",
         "priority": "medium",
         "dependencies": [],
@@ -912,67 +912,67 @@
           {
             "id": 1,
             "title": "Product-fit + scope decision",
-            "description": "Owner, 2026-11-13: the feature is in. Decisions (metadata stripped by default; Export mode replaces the Inspector; zoom/pan instead of fit insets; flick before wipe) are recorded in export-plan.md § Decisions.",
+            "description": "Owner, 2026-11-13: the feature is in. Decisions in export-plan.md § 1.4.",
             "status": "done"
           },
           {
             "id": 2,
-            "title": "Rung 0a — full-resolution video frame grab",
-            "description": "Tracked as task #81 (rewritten 2026-11-13): the frame at the current time at original size, HDR kept where the route has it. Also fixes Copy/OCR/Describe/Compare on video.",
+            "title": "Rung 0a — full-resolution frame capture",
+            "description": "Tracked as #81: capture by frozen identity (video PTS/track, animation frame index) with a full-resolution decode — not the fit-scaled playback buffer. Compare is out of #81's scope.",
             "status": "pending"
           },
           {
             "id": 3,
-            "title": "Rung 0b — export decode purpose + pixel preparation",
-            "description": "A decode purpose that keeps 16-bit and float and carries the original ICC bytes (zune decode_rgba_with_icc, image_backend load_with_icc, jxl rendered_icc already read them). One prep function: bake rotation, keep alpha, apply the colour policy, tone-map HDR only for SDR targets. Move Copy onto it so Copy gains correct colour too. Display decode untouched.",
+            "title": "Rung 0b — export decode + prepare",
+            "description": "decode_for_export per the source matrix (plan § 3.10) incl. the macOS EXPORT Image I/O draw (CGImage's own colour space, 16 bpc when > 8-bit, straight alpha, ICC via CGColorSpaceCopyICCData; P3 only as fallback). Minimal prepare: un-premultiply, rotate any sample type, HDR -> P3-linear tone-map for SDR targets, gray stays gray, zero RGB under alpha 0. Resize/flatten wait for rung 2; Copy ICC is task #148. Fidelity via the export decoder + container inspection; fuzz new parsers.",
             "status": "pending"
           },
           {
             "id": 4,
-            "title": "Rung 0c — pb-encode crate + export subsystem",
-            "description": "Encoder seam mirroring the decode seam (encode(&ExportImage, &EncodeOptions, &cancel)); pure, test-first, round-trip tests through pb-decode; encode_jpeg_rgba8 moves in. Orchestration in a new export.rs with its app_core_impl/export.rs concern file in the same commit (two-halves rule).",
+            "title": "Rung 0c — pb-encode, export subsystem, two workers, safe writes",
+            "description": "pb-encode (types — no pb-decode/pb-app-core dependency; pb-decode uses it for types only; codecs behind features): prepare, PNG via png 0.18 (8/16/gray, colour-type reduction, iCCP/sRGB), the sanitized-ICC builder (tag allowlist, neutral desc/cprt, zeroed header) + ICC leak fixture + colorimetry round trip; JPEG encoder moved (describe.rs import updated, no re-export). No Encoder trait yet. export.rs + app_core_impl/export.rs; write worker only: worker-owned rayon pool, low OS priority, event-style wake (never work_pending), bounded finish on quit + temp cleanup. Safe writes: visible unique temps, no-clobber -> link -> placeholder commit, direct-write fallback on EPERM, pending destinations, file-identity source refusal. One export field on AppCore + Windows cross-check from the Mac. macOS-runnable core no-trace test.",
             "status": "pending"
           },
           {
             "id": 5,
             "title": "Rung 1 — MVP: Export as PNG",
-            "description": "Action::Export (File > Export…, tentative key E) -> native save dialog -> decode + encode on a worker that navigation does not cancel and that never competes with display wants; toast with Reveal. Wide gamut kept; HDR -> tone-mapped SDR by default, 16-bit PQ PNG (cICP + cLLI) as an option. No metadata beyond colour tags. png + optional oxipng pass; pick the default preset from corpus p50/p95 encode time and bytes/MP. CHANGELOG entry.",
+            "description": "Action::Export (tentative E; File > Export… ⇧⌘E; context menu; all ~17 Action registration sites) -> frozen ExportRequest -> save dialog (NSSavePanel + defaults-key cleanup; Windows IFileDialog wrapper with FOS_DONTADDTORECENT; Linux rfd) -> write worker. Folder policy per plan § 3.6 (last_export_folder never while pinned; pinned session folder in ExportState). Strip-on only: sanitized profile, no other metadata; HDR -> P3 SDR with a toast note. Disabled for doors, CMYK, video until #81. Hand checks: Windows MRU registry keys, macOS NSOSPLastRootDirectory, exFAT/SMB/TCC. ExportFile from dialog confirm, split by stage; nav p95 manual protocol. CHANGELOG.",
             "status": "pending"
           },
           {
             "id": 6,
             "title": "Rung 2 — Export mode panel",
-            "description": "Export mode replaces the right-hand Inspector with export controls + details (original shown, no live encode yet). PNG + JPEG; quality; resize; colour + HDR menus greyed per format; metadata allowlist writer + preset/category UI with the per-photo GPS warning; settings remembered except location. Esc leaves the mode; Return/Cmd-S exports; Space/Backspace keep settings and encode only when parked. Native panel on macOS (run /mac-arsed-mac-app first), pb-ui panel on Windows.",
+            "description": "2.0 input routing: Action::ExportCommit (bindable; proposed Cmd/Ctrl+Enter), E toggles the mode, Esc stays quit (ADR-023 — owner may amend), Enter stays Random, [ ] contextual quality, Tab suspends the mode; optional macOS Tab-focus arbitration. Then SlotContent::Export; the Encoder trait + Caps + JPEG; resize presets (no raster upscaling; SVG rasterized at target) + Custom… dialog; flatten; Strip metadata + categories (typed EXIF allowlist); details/provenance notes; the mode × action table (one test per row); prefs via the lenient [export] deserializer. Native SwiftUI (run /mac-arsed-mac-app first); pb-ui on Windows (checkbox component if missing).",
             "status": "pending"
           },
           {
             "id": 7,
-            "title": "Rung 3 — live preview + Y flick",
-            "description": "Latest-wins cancellable encode worker; one preview texture slot in pb-render kept from eviction (like the compare pin) so Y is a rebind; a chip says which side is showing. Readouts: size, % of original, encode time (optional ssimulacra2). RAM encode cache keyed by (item, settings) within budget; idle pre-encode of neighbouring quality steps; viewport-first encode only if measured necessary. PB_PERF episodes: setting change -> preview, Y -> photon.",
+            "title": "Rung 3 — live preview + tap/hold flick",
+            "description": "3.0: the PRESENT GATE in app_core_impl.rs (one presented-thing field; every re-present site gated; scenario test), two aux textures modelled on the stash slots (full identity guard, geometry override, mips for every mode, clamp), unified external-VRAM sum (replaces sync_stash_external; no ring-capacity change), the preview worker. Flick sides BOTH from the export pipeline: A = prepared before resize/encode, B = decode-back presented at A's geometry. Preview bytes = file bytes (rotation baked, metadata included, presented at R0) so Export… reuses them. Spring machine (tap toggles, hold peeks; event timestamps; settings/nav force Export). Caches: decoded ExportSource + encoded bytes; returning to a cached setting = re-upload (measured). Resized-preview readout + export-1:1 toggle. PB_PERF to the present call, cold/cache/resident, p50/p95/p99. Open: normal compare tap/hold.",
             "status": "pending"
           },
           {
             "id": 8,
             "title": "Rung 4 — codec breadth",
-            "description": "Independent backends behind the seam: mozjpeg, libwebp (lossy), libavif + aom, libjxl, Image I/O HEIC (macOS only — x265 is GPL and never ships). Risk is C build deps on three platforms, not licensing. Platform encoders (Image I/O, WIC) available for A/B.",
+            "description": "mozjpeg, webp/libwebp-sys, libavif (+aom/rav1e) or ravif, oxipng, ssimulacra2; Image I/O HEIC on macOS. JPEG XL (owner wants it): a thin safe wrapper in pb-encode over jxl-sys (MIT OR Apache-2.0, libjxl 0.12) — NOT jpegxl-rs/jpegxl-sys (GPL-3.0-or-later); zune-jpegxl (pure Rust, lossless-only) as an optional no-C++ lossless path. Audit each codec's whole chain + native linkage before it lands (libjxl: highway, brotli, skcms/lcms2); THIRD-PARTY-NOTICES.",
             "status": "pending"
           },
           {
             "id": 9,
             "title": "Rung 5 — HDR export",
-            "description": "PQ AVIF (10/12-bit) and JPEG XL for archiving; gain-map JPEG/AVIF as the 'share HDR' option; HEIC on macOS. Never write an HDR format we can't read back — each lands with its matching decode. MaxCLL/MaxFALL measured from the pixels. Depends on #145 for gain-map sources. Add a 'what SDR viewers will see' view.",
+            "description": "5.0 luminance audit first (task #146): PQ anchors through every HDR backend, normalize to 1.0 = 203 nits (a mismatch is also a display bug -> own task). cICP PNG + HDR JXL read-back. Outputs: 16-bit PQ PNG, AVIF PQ + gain map, JXL, gain-map JPEG (libultrahdr, audited) or Image I/O, HEIC on macOS. Branch on the real transfer (HLG converted). Light-level stats from the final prepared image. #145 needed only for gain-map sources.",
             "status": "pending"
           },
           {
             "id": 10,
             "title": "Rung 6 — batch",
-            "description": "Scope 'all items in this folder' first (no multi-select model exists yet). Reuse Quick Sort's unique_name_in + worker and the progress + Cancel views; naming template, destination, overwrite policy; 'apply these settings to N items' from Export mode. Encoder threads capped so browsing never degrades.",
+            "description": "'All items in this folder' first. Location FORCED OFF in batch. Pure planner reserves every output name, refuses output == input by file identity, suffix or skip only; no-clobber commits; progress + Cancel + summary; capped write workers with RAM admission; nav p95 via the manual protocol (build a nav replay harness first if possible).",
             "status": "pending"
           },
           {
             "id": 11,
             "title": "Later",
-            "description": "Wipe divider; saved presets; a Settings > Export tab once dialog-less paths exist (same stored value as the panel); drag-out (NSFilePromiseProvider); export what's on screen (crop/zoom); fit_rect insets; lossless JPEG -> JPEG XL recompression.",
+            "description": "Wipe; convert-to-sRGB option; Settings > Export (same stored values); quick export + drag-out; share sheet; presets; crop UI; fit_rect insets; JPEG -> JXL lossless; IPTC/XMP credit; 16-bit Image I/O export path; pinning a captured video frame for Compare.",
             "status": "pending"
           }
         ],
@@ -2140,7 +2140,7 @@
         "status": "pending",
         "priority": "medium",
         "dependencies": [],
-        "details": "Approach sketch — verify each before building. macOS: Image I/O can apply gain maps when decoding (a decode-to-HDR request option, macOS 14+; confirm the exact API). Windows/Linux: libultrahdr (Apache-2.0) for Ultra HDR JPEG; HEIC/AVIF carry the gain map as an auxiliary image (libheif/libavif expose it), and applying it is simple per-pixel maths (ISO 21496-1 / Adobe gain-map spec). Keep preview-first: the SDR base can be the preview rung and the HDR result the refinement. Measure decode cost on the corpus (p50/p95): it adds a second image decode and a per-pixel pass. Fixtures: real iPhone HEIC + Ultra HDR JPEG in the local corpus — never commit private photos (the repo is public).",
+        "details": "Approach sketch — verify each before building. macOS: Image I/O can apply gain maps when decoding (a decode-to-HDR request option, macOS 14+; confirm the exact API). Windows/Linux: libultrahdr (Apache-2.0) for Ultra HDR JPEG; HEIC/AVIF carry the gain map as an auxiliary image (libheif/libavif expose it), and applying it is simple per-pixel maths (ISO 21496-1 / Adobe gain-map spec). Keep preview-first: the SDR base can be the preview rung and the HDR result the refinement. Measure decode cost on the corpus (p50/p95): it adds a second image decode and a per-pixel pass. Fixtures: real iPhone HEIC + Ultra HDR JPEG in the local corpus — never commit private photos (the repo is public). Review round 1 (2026-11-13): normalize the decoded HDR into the app's named luminance convention (1.0 = 203 nits; export-plan.md § 3.8 Rule 2) — the WIC/Image I/O float paths are not yet proven to; the rung 5.0 audit covers both. Gain-map decode is a prerequisite only for exporting gain-map sources; PQ/HLG exports don't wait for it.",
         "subtasks": [
           {
             "id": 1,
@@ -2167,6 +2167,86 @@
             "status": "pending"
           }
         ]
+      },
+      {
+        "id": 146,
+        "title": "HDR brightness audit — make every HDR decoder agree on what 1.0 means (203-nit reference white)",
+        "description": "Found by the #89 plan review (Codex C6, 2026-11-13). The app stores HDR as scene-linear floats where 1.0 should mean SDR reference white = 203 nits (BT.2408; color::SDR_WHITE_NITS). The FFmpeg/AVFoundation video paths provably normalize to that (pq_to_scrgb divides by 203). The still-image HDR paths don't normalize explicitly: Windows WIC returns GUID_WICPixelFormat128bppRGBAFloat (Windows' scRGB convention is 1.0 = 80 nits) and macOS Image I/O draws into kCGColorSpaceExtendedLinearSRGB (Apple's EDR scale — unverified), and both feed finalize_hdr_scrgb unchanged. If any backend uses a different scale, the same HDR photo displays brighter or dimmer depending on which decoder opened it (80 vs 203 is 2.54x), tone-mapping on SDR screens is off, and #89's HDR export would bake the error into files. Approach: synthetic test images with patches of KNOWN brightness, decoded through every HDR backend, compared against the expected numbers. No HDR expertise needed to run it — the expected values are just nits / 203.",
+        "status": "pending",
+        "priority": "medium",
+        "dependencies": [],
+        "details": "Expected decoded values (linear, 1.0 = 203 nits): 0 nits -> 0.0; 100 -> 0.4926; 203 -> 1.0; 400 -> 1.970; 1000 -> 4.926; 4000 -> 19.70. PQ code values for those (ST 2084): 100 nits ~0.5081, 203 nits ~0.5807, 1000 nits ~0.7518. HLG: the decode applies a 1000-nit BT.2100 OOTF, so HLG cards need their own expected table. Test cards are SYNTHETIC (flat grey patches), so they are safe to commit as small fixtures to the public repo; generate them with a documented script so they are reproducible, using tools independent of our decoders (ffmpeg for video + AVIF, libheif heif-enc or avifenc for stills). Related: #89 rung 5.0 (export-plan.md § 3.8 Rule 2), #145 (gain-map decode must also normalize into this convention), #95. Platform split: macOS half (Image I/O stills, FFmpeg + AVFoundation video/posters) can run on the Mac; the WIC half needs the Windows machine.",
+        "subtasks": [
+          {
+            "id": 1,
+            "title": "Generate synthetic HDR test cards",
+            "description": "A script (scripts/) that writes PQ and HLG test cards with flat patches at 0/100/203/400/1000/4000 nits, BT.2020 primaries, in every container an HDR path decodes: HEIC (nclx 9/16/9), AVIF, HEVC and AV1 video (MP4 + MKV). Commit the small outputs as fixtures with the expected-value table.",
+            "status": "pending"
+          },
+          {
+            "id": 2,
+            "title": "Measurement harness",
+            "description": "An env-gated test or pb-decode example that decodes each card through each backend (WIC, Image I/O, libheif where applicable, FFmpeg Session, AVFoundation poster / #144 path) and prints + asserts each patch's decoded value against nits/203 (start with ~2% tolerance). Report a table per platform.",
+            "status": "pending"
+          },
+          {
+            "id": 3,
+            "title": "Normalize any backend that is off",
+            "description": "If a backend's 203-nit patch doesn't decode to ~1.0, scale it into the convention at its decode boundary (one documented constant per backend, citing the measurement). Keep the harness as a regression test. CHANGELOG entry if HDR stills change brightness for users.",
+            "status": "pending"
+          },
+          {
+            "id": 4,
+            "title": "Visual check on an HDR display",
+            "description": "The same card as a still (HEIC/AVIF) and as a video should look identically bright in Blaze on both platforms, and on an SDR screen tone-map the same. Note any difference vs the OS's own viewer, but treat the measured numbers as the authority (reference viewers vary).",
+            "status": "pending"
+          },
+          {
+            "id": 5,
+            "title": "HLG",
+            "description": "Repeat with HLG cards against the OOTF-adjusted expected table.",
+            "status": "pending"
+          }
+        ]
+      },
+      {
+        "id": 147,
+        "title": "Open dialogs leave OS traces: macOS NSOSPLastRootDirectory; Windows Recent Items / Jump List / dialog MRUs",
+        "description": "Found by the #89 plan review (Fable F9, 2026-11-13). macOS (CONFIRMED on the dev Mac, key names only): the app's defaults domain holds NSOSPLastRootDirectory (and NSNavPanelExpandedSizeForOpenMode) — NSOpenPanel persists the last browsed folder outside settings.toml, even when 'Open files in' is pinned, although the app always passes directoryURL. Windows (UNVERIFIED): the Open dialog is rfd 0.14.1, which never sets FOS_DONTADDTORECENT, so opened photos likely land in Recent Items and the app's Jump List; the common dialog also keeps ComDlg32\\OpenSavePidlMRU\\<ext> (full paths) and LastVisitedPidlMRU. Under ADR-018 these are involuntary traces of viewing. Fix: macOS — remove NSOSPLastRootDirectory / NSNavLastRootDirectory / NSNavRecentPlaces after every open panel closes (shared helper with #89's save panel). Windows — move Open onto #89's IFileDialog wrapper with FOS_DONTADDTORECENT; check the registry MRUs and, if they can't be suppressed, take it to the owner. Linux — check GTK recently-used.xbel.",
+        "status": "pending",
+        "priority": "medium",
+        "dependencies": [],
+        "subtasks": [
+          {
+            "id": 1,
+            "title": "macOS: clear panel-memory keys after every NSOpenPanel",
+            "description": "Remove NSOSPLastRootDirectory, NSNavLastRootDirectory, NSNavRecentPlaces from the app's defaults when a panel closes; verify by key name.",
+            "status": "pending"
+          },
+          {
+            "id": 2,
+            "title": "Windows: Open via an IFileDialog wrapper with FOS_DONTADDTORECENT",
+            "description": "Shared with #89 rung 1's save wrapper. Verify Recent Items, the Jump List, OpenSavePidlMRU and LastVisitedPidlMRU by hand before/after.",
+            "status": "pending"
+          },
+          {
+            "id": 3,
+            "title": "Linux: check recently-used.xbel",
+            "description": "Does the GTK (rfd gtk3) dialog record opened files? If it can't be prevented, owner decision.",
+            "status": "pending"
+          }
+        ]
+      },
+      {
+        "id": 148,
+        "title": "Copy carries the colour profile (wide-gamut pastes are untagged today)",
+        "description": "Split out of #89 rung 0b by the plan review (Fable F13, 2026-11-13). to_clipboard_rgba8 passes wide-gamut Rgba8 through untagged and tone-maps HDR to BT.709, so a P3 photo pastes desaturated. Once #89's decode_for_export + prepare exist, move Copy onto them and carry the (sanitized) profile: the macOS pasteboard TIFF can hold one; Windows CF_DIBV5 can embed one via BITMAPV5HEADER PROFILE_EMBEDDED (verify); Linux/arboard likely can't. Changes ClipboardPayload and both shells' clipboard code. Copy stays synchronous unless measured otherwise.",
+        "status": "pending",
+        "priority": "low",
+        "dependencies": [
+          89
+        ],
+        "subtasks": []
       }
     ],
     "metadata": {
