@@ -567,7 +567,7 @@
         "id": 81,
         "title": "Video/animation: full-resolution frame capture for Copy / OCR / Describe / Export (all platforms)",
         "description": "Survey 2026-11-13: CoreEffect::CaptureNativeVideoFrame + NativeCapturePurpose are defined but nothing emits the effect and no shell consumes it; decode_item on a video calls decode_video_poster, so Copy / OCR / Describe on a video use the POSTER on every platform (confirm on Windows). Build on-demand capture by FROZEN IDENTITY (video PTS + track + seek generation; animation frame index) with a full-resolution decode — the live playback buffers are fit-scaled (animation decode_fit, Live Photo motion cap, Session fit box), so they're used only when already full-res with matching identity. Replies validate against the request, not live state. On demand only (privacy). Consumers: Copy, OCR, Describe, Export (#89 rung 0a). Compare is OUT of scope: it pins an item and stops playback when jumping; pinning a captured frame needs its own design. Plan: .taskmaster/docs/export-plan.md rung 0a. Rev 4 (Fable review, 2026-11-13): runs on its OWN one-shot capture thread at low priority, so #81 does not depend on #89's export worker. Copy on a video becomes asynchronous (a copy-when-done state, like copy_image_text). AVPlayer route: the core's position is a ~20 Hz mirror, so the SHELL reads currentTime() when it handles the effect and the reply carries the time used. Animations: composite-and-discard up to frame k at full res (decode_animation's 1.5 GB cap truncates early). On Windows the decode is MF (FFmpeg there is container-reading only).",
-        "status": "pending",
+        "status": "in-progress",
         "priority": "medium",
         "dependencies": [
           "79"

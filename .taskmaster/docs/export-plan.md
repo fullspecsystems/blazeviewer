@@ -1009,4 +1009,7 @@ test script: `.taskmaster/docs/export-rung1-manual-test.md`. Rung 0a (#81) not s
 
 **Claimed**
 
-- None (session 1 done). Next up per the ladder: rung 2 (the Export mode panel) or #81.
+- **#81 / rung 0a — video + animation frame capture — claimed by the Mac (session 3, 2026-11-14).**
+  Core contract + macOS routes first; the Windows MF route will be written and compile-checked
+  from the Mac, then listed here as cross-platform debt. Don't start #81 on Windows without
+  fetching first.
