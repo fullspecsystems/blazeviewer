@@ -21,7 +21,7 @@ missing rather than shipping a binary without them:
 | libheif | 1.23.0 | vcpkg commit `a0400024` (`scripts/setup-libheif.ps1 -VcpkgRef`) |
 | libde265 | 1.1.1 | same vcpkg commit |
 | dav1d | 1.5.3 | same vcpkg commit |
-| FFmpeg | **8.1.2** on Windows (vcpkg) · **8.1.3** on macOS (pinned tarball + sha256 in `scripts/build-ffmpeg-macos.sh`) | as noted |
+| FFmpeg | **8.1.3** | Windows: the vcpkg port, moved to the version + source SHA512 in `scripts/ffmpeg-windows.psd1` · macOS: pinned tarball + sha256 in `scripts/build-ffmpeg-macos.sh` |
 | Sparkle (macOS only) | 2.9.4 | `mac/Package.resolved` (SwiftPM) |
 
 Linux takes libheif/FFmpeg from the build distro and bundles the resulting shared objects, so
@@ -66,8 +66,9 @@ means distributing the libraries themselves in object form, which obliges us to 
 source available. **The libraries are unmodified upstream releases** at the versions pinned
 above — only build *configuration* differs (decode-only flags; no source patches beyond the
 upstream-packaged vcpkg portfile adjustments, which are themselves published in the pinned
-vcpkg tree). The exact configuration is reproducible from `scripts/setup-libheif.ps1` (Windows)
-and `scripts/build-ffmpeg-macos.sh` (macOS).
+vcpkg tree; on Windows the FFmpeg port is additionally moved to the upstream release pinned in
+`scripts/ffmpeg-windows.psd1`). The exact configuration is reproducible from
+`scripts/setup-libheif.ps1` (Windows) and `scripts/build-ffmpeg-macos.sh` (macOS).
 
 > **Written offer.** For three years from the date you received this binary, we will provide,
 > on request, the complete corresponding machine-readable source code for the LGPL libraries

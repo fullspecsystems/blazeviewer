@@ -1970,6 +1970,46 @@
         ]
       },
       {
+        "id": 141,
+        "title": "Windows FFmpeg 8.1.2 -> 8.1.3 (security point release)",
+        "description": "Owner request 2026-11-13, relayed by the Mac session: the Windows half of the macOS 8.1.3 bump in ec8d6f87. 8.1.3 brings bounds/overflow/leak fixes backported from 9.0.x, and some are in code Windows runs on untrusted files (the ogg demuxer is in our trimmed build). Route: stay on 8.1.x by patching the pinned vcpkg ffmpeg port in place (version + source SHA512), not by moving -VcpkgRef, because upstream vcpkg went from 8.1.2 to 9.0.x (a soname major). The pin lives in scripts/ffmpeg-windows.psd1; setup-libheif.ps1 applies it and release-windows.ps1 refuses any other installed version. Plan: .taskmaster/plans/141-windows-ffmpeg-8.1.3.md. Not a release; shipping it is a later owner call.",
+        "status": "in-progress",
+        "priority": "high",
+        "dependencies": [],
+        "subtasks": [
+          {
+            "id": 1,
+            "title": "Vet the n8.1.3 source",
+            "description": "Tag commit identical on GitHub and git.ffmpeg.org; release tarball PGP-signed by FCF9 86EA ... D676 58D8; GitHub tag archive matches the signed tarball file for file; all 14 vcpkg port patches apply.",
+            "status": "done"
+          },
+          {
+            "id": 2,
+            "title": "Pin in setup-libheif.ps1 + release guard",
+            "description": "ffmpeg-windows.psd1 holds Version + Sha512. Setup patches ports\\ffmpeg (vcpkg.json version, portfile SHA512; throws on a missing anchor or a cross-minor pin), removes the installed ffmpeg whenever the port changed or the installed version differs, and fails if the result is not the pin. The trim size guard now sizes avcodec-*.dll (avcodec.lib is only an import lib on the DLL triplet). release-windows.ps1 refuses a non-pinned FFmpeg. Setup's default tree now follows build/release/CI (VCPKG_ROOT -> C:\\vcpkg-pb -> ~/vcpkg); it used to default to ~/vcpkg, a tree the build never read on this box. All three run paths verified on x64: version bump, idempotent re-run, stale install repaired.",
+            "status": "done"
+          },
+          {
+            "id": 3,
+            "title": "Rebuild + verify on x64",
+            "description": "Done on x64 against C:\\vcpkg-pb: av_version_info 8.1.3 (avcodec 62.28.103), LGPL, trim intact, the same 7-DLL import closure (no swscale); pb-decode --features ffprobe 366 passed, pb-app-core --features ffprobe 1030 passed. Review = owner by hand: a film with AC-3/DTS audio still has sound, and the Details pane on multitrack.mkv looks the same.",
+            "status": "review"
+          },
+          {
+            "id": 4,
+            "title": "Re-run setup on the ARM64 VM",
+            "description": "Before the next ARM64 release: git pull, then pwsh scripts/setup-libheif.ps1 -Triplet arm64-windows. release-windows.ps1 -Arch arm64 refuses to package until this is done.",
+            "status": "pending"
+          },
+          {
+            "id": 5,
+            "title": "Docs: notices, licenses README, compliance doc, CHANGELOG",
+            "description": "Flip the 'FFmpeg 8.1.2 on Windows' lines and widen the [Unreleased] Security entry to cover Windows.",
+            "status": "done"
+          }
+        ]
+      },
+      {
         "id": 142,
         "title": "Menu shortcut hints follow context (Next / Play/Pause over a live video)",
         "description": "Owner report 2026-11-13: over a live video Space pauses and Shift+Space goes to the next item (task #94), but the menu still showed Space on Next and P on Play/Pause. One core rule, Keymap::menu_hint(action, space_toggles_video), drives every shell's hint; MenuState.skip_next_visible is renamed space_toggles_video and Windows/Linux now set it. Plan + Handoff: .taskmaster/plans/142-contextual-menu-hints.md.",

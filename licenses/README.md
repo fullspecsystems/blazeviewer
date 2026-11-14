@@ -20,14 +20,16 @@ is linked, and why that linkage complies). It points here; this is the legal tex
 |---|---|---|
 | `libheif-COPYING.txt` | libheif 1.23.0 | LGPL-3.0-or-later (+ GPL-3.0, + MIT for samples) |
 | `libde265-COPYING.txt` | libde265 1.1.1 | LGPL-3.0-or-later (+ GPL-3.0, + MIT for samples) |
-| `ffmpeg-COPYING.LGPLv2.1.txt` | FFmpeg 8.1.2 (Windows) · 8.1.3 (macOS) | LGPL-2.1-or-later |
+| `ffmpeg-COPYING.LGPLv2.1.txt` | FFmpeg 8.1.3 (Windows + macOS) | LGPL-2.1-or-later |
 | `dav1d-COPYING.txt` | dav1d 1.5.3 | BSD-2-Clause |
 
 ## Provenance
 
 Copied verbatim from the pinned upstream sources — the same trees the shipped binaries are
 built from (the vcpkg commit recorded in `scripts/setup-libheif.ps1 -VcpkgRef`, and the pinned
-FFmpeg tarball in `scripts/build-ffmpeg-macos.sh`). Not fetched from the web, not retyped.
+FFmpeg tarball in `scripts/build-ffmpeg-macos.sh`). Not fetched from the web, not retyped. The
+FFmpeg text was re-checked against 8.1.3's `COPYING.LGPLv2.1` when Windows moved to that pin
+(task #141): identical apart from line endings.
 
 **When a pinned version moves, re-copy these.** A license text is only correct for the version
 it shipped with, and an upstream project can relicense between releases. Versions above must

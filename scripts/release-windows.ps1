@@ -136,7 +136,16 @@ foreach ($stem in "avcodec", "avformat") {
         throw "$stem-*.dll ($Triplet) not found. Run ``scripts/setup-libheif.ps1 -Triplet $Triplet`` first."
     }
 }
-Write-Host "==> native decode libs: $env:VCPKG_ROOT ($Triplet)"
+# ...and they must be the pinned version (task #141). A pin bump arrives with `git pull`, but the
+# DLLs only change when setup re-runs, so without this check a box that skipped that step
+# (each arch builds on its own box) would quietly package the old FFmpeg.
+$ffPin = Import-PowerShellDataFile "$PSScriptRoot\ffmpeg-windows.psd1"
+$ffVersionH = "$env:VCPKG_ROOT\installed\$Triplet\include\libavutil\ffversion.h"
+$ffGot = if ((Test-Path $ffVersionH) -and ((Get-Content $ffVersionH -Raw) -match 'FFMPEG_VERSION "([^"]+)"')) { $Matches[1] } else { "unknown" }
+if ($ffGot -ne $ffPin.Version) {
+    throw "FFmpeg ($Triplet) is $ffGot but scripts/ffmpeg-windows.psd1 pins $($ffPin.Version). Run ``scripts/setup-libheif.ps1 -Triplet $Triplet`` to rebuild it."
+}
+Write-Host "==> native decode libs: $env:VCPKG_ROOT ($Triplet, FFmpeg $ffGot)"
 
 # ── 2b. FFmpeg's bindgen needs libclang AND the MSVC/SDK include paths (task #100) — new
 #       with `ffprobe`, since a plain cargo build never needed a Developer shell. Skipped

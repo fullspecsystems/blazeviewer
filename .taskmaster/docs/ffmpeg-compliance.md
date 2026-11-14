@@ -11,18 +11,17 @@ remain before a public/commercial ship.
 |---|---|---|---|
 | **macOS** | yes (task #84) | **shared dylibs** in `PhotoBlaze.app/Contents/Frameworks` | `scripts/build-ffmpeg-macos.sh` (pinned source, LGPL config) |
 | **Linux** | yes | **shared `.so`** in the AppImage's `usr/lib` | `scripts/release-linux.sh` (system/distro FFmpeg, bundled by linuxdeploy) |
-| **Windows** | **yes** — demux/metadata only (task #100, 2026-07-14) | ⚠ **static** (`*-windows-static-md`) | pinned vcpkg tree, patched demux-only by `scripts/setup-libheif.ps1` |
+| **Windows** | **yes** — demux/metadata only (task #100, 2026-07-14) | **shared DLLs** beside the exe (`x64-windows` / `arm64-windows` vcpkg triplets, task #77) | pinned vcpkg tree; the ffmpeg port is moved to the pin in `scripts/ffmpeg-windows.psd1` (task #141) and trimmed to demux-only by `scripts/setup-libheif.ps1` |
 
-The compliance argument below holds on macOS and Linux: **FFmpeg is a shared library the user
-can replace.**
+The compliance argument below holds on all three platforms: **FFmpeg is a shared library the
+user can replace.**
 
-⚠ **Windows no longer sits outside this manifest.** Until 2026-07-14 this table read "Windows:
-no — FFmpeg is never linked", and the whole document rested on that. Task #100 changed it:
-Windows links FFmpeg statically, because Media Foundation cannot enumerate subtitle tracks at
-all. MF still does 100% of decode, so FFmpeg's *role* there is narrow — but LGPL attaches to
-**distribution and linkage**, not to how much of the library gets called. A static link is a
-static link. Windows therefore now carries the **same** unmet §6 relink obligation as its
-libheif/libde265 static link (task #77), and the two must be solved together.
+**Windows joined this manifest with task #100** (2026-07-14). Before that the table read
+"Windows: no — FFmpeg is never linked". Windows links FFmpeg because Media Foundation cannot
+enumerate subtitle tracks at all. MF still does every *video* decode, so FFmpeg's role there is
+narrow, but LGPL attaches to **distribution and linkage**, not to how much of the library gets
+called. FFmpeg was first linked statically there, which left an unmet §6 relink obligation;
+task #77 moved it (with libheif/libde265) to DLLs, validated in the shipped 0.2.1 packages.
 
 ## License mode — LGPL-2.1-or-later, decode-only
 
@@ -67,6 +66,41 @@ Pinned in `scripts/build-ffmpeg-macos.sh`:
 Output: `third_party/ffmpeg/arm64/{lib,include}` (git-ignored). arm64-only today (the app's
 single slice, ADR-021); a universal build is a future `--arch x86_64` + `lipo` step.
 
+## Build configuration (Windows)
+
+Built by vcpkg from the tree pinned in `scripts/setup-libheif.ps1 -VcpkgRef`, with two local
+changes the script applies to that tree's `ports\ffmpeg` on every run:
+
+- **Version (task #141):** FFmpeg **8.1.3**, the same as macOS. The port at the pinned commit is
+  8.1.2, and upstream vcpkg went from there straight to 9.0.x, a soname major. So the script
+  moves the port's `version` and source `SHA512` to the values in `scripts/ffmpeg-windows.psd1`
+  rather than moving the ref. Same sonames (avcodec-62 / avformat-62 / avutil-60 /
+  swresample-6) and API, so it is a pure patch bump. The script rebuilds FFmpeg whenever the
+  installed `ffversion.h` differs from the pin, and `release-windows.ps1` refuses to package any
+  other version.
+- **Source integrity (2026-11-13):** the `n8.1.3` tag is the same object (`23151b11`, commit
+  `1041abdc`) on GitHub and `git.ffmpeg.org`. The release tarball has a good PGP signature from
+  the release key `FCF9 86EA … D676 58D8`, and GitHub's tag archive (what vcpkg downloads, pinned
+  by SHA512) matches it file for file. The archive adds only `.gitignore` / `.gitattributes`, and
+  the tarball adds only `VERSION`.
+- **Demux/metadata only (task #100):** `--disable-everything` plus the file protocol, the
+  container demuxers, the subtitle decoders, and the audio decoders (audio playback and named
+  channel layouts both need them). No video decoders, encoders, muxers, filters, network or
+  programs. The exact list is the `PhotoBlaze task #100` block in `setup-libheif.ps1`.
+
+Shipped beside the exe: the import closure of `blazeviewer.exe`, which `release-windows.ps1`
+computes with dumpbin rather than a fixed list. Measured on x64 at 8.1.3 (2026-11-13):
+
+| DLL | size | pulled in by |
+|---|---|---|
+| `avcodec-62.dll` | 1.94 MB | exe |
+| `avformat-62.dll` | 0.54 MB | exe |
+| `avutil-60.dll` | 0.84 MB | exe |
+| `swresample-6.dll` | 0.12 MB | avcodec |
+
+vcpkg also builds `swscale-9.dll`, but nothing imports it, so it is not shipped. At run time the
+DLLs report `av_version_info` 8.1.3 and `avcodec_license` "LGPL version 2.1 or later".
+
 ## Bundled components (macOS)
 
 Five shared dylibs, ~14 MB total (real files; the `.NN.dylib` / bare-name symlinks are not
@@ -106,15 +140,19 @@ suitable shared library mechanism for linking with the Library."**
   macos.sh` as the exact reproducible configuration. FFmpeg's own license texts
   (`COPYING.LGPLv2.1`, `LICENSE.md`) live in that source tree.
 
-Contrast: the Windows **static** link of libheif/libde265 (task #77 original) does **not** get
-this for free — a static link needs object files or another relink path. **On macOS and Linux
-FFmpeg avoids that problem entirely by being dynamically linked.**
+- **Windows:** FFmpeg ships as DLLs next to `blazeviewer.exe` (`avcodec-62.dll`,
+  `avformat-62.dll`, `avutil-60.dll`, `swresample-6.dll`). Windows loads a DLL from the exe's own
+  directory first, so replacing one with a modified, ABI-compatible build is the same §6(b)
+  mechanism. Corresponding source: the upstream `n<version>` tag pinned in
+  `scripts/ffmpeg-windows.psd1`, the port patches in the pinned vcpkg tree, and
+  `setup-libheif.ps1` as the exact configuration.
 
-**Windows does not.** Since task #100 it links FFmpeg statically from the vcpkg tree
-(`*-windows-static-md`), so it inherits exactly the libheif/libde265 problem rather than
-escaping it. The remedy is the same for all three libraries and should be chosen once — DLL
-linkage (§6(b)) is the conventional answer and the one CLAUDE.md's Licensing section already
-names for libheif. See task #77 (and #100.6, which defers to it).
+History: Windows first linked FFmpeg (task #100) and libheif/libde265 **statically**
+(`*-windows-static-md`), which does not get this for free; a static link needs object files or
+another relink path. Task #77 chose DLL linkage for all three. `PB_VCPKG_STATIC=1` still forces
+libheif/dav1d back to static for A/B measurement only (such a build must never ship). FFmpeg
+stays a DLL even then: `ffmpeg-sys-next` picks its own triplet, and pb-decode deliberately does
+not enable its `static` feature (see `crates/pb-decode/build.rs`).
 
 ## Patent note (separate from copyright license)
 
