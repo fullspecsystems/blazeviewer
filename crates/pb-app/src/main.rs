@@ -70,6 +70,7 @@ mod menu;
 mod panels_ui;
 mod pb_key_winit;
 mod reveal;
+mod save_dialog;
 mod sdf_rect;
 // Windows single-instance: elect one primary process, forward later launches
 // (Explorer double-click / multi-select) to it via WM_COPYDATA (task #14).
@@ -545,6 +546,8 @@ struct App {
     /// runtime (only enabled when the current photo has an unsaved rotation on an
     /// EXIF-writable file).
     save_rotation_item: Option<muda::MenuItem>,
+    /// File ▸ Export as PNG… (task #89), enabled from `AppCore::can_export`.
+    export_item: Option<muda::MenuItem>,
     /// The File ▸ Show in Finder/Explorer menu item, enabled only when a real on-disk file
     /// is displayed (greyed out for archive entries + the empty deck; see `AppCore::can_reveal`).
     reveal_item: Option<muda::MenuItem>,
@@ -1170,6 +1173,7 @@ impl App {
             video_seek_last: None,
             pending_delete_retry: None,
             quick_sort_queue: None,
+            export: Default::default(),
             video_pill_text: None,
             video_osd_until: None,
             video_geometry_stale: false,
@@ -1199,6 +1203,7 @@ impl App {
             accent_watcher: None,
             menu: None,
             save_rotation_item: None,
+            export_item: None,
             reveal_item: None,
             compare_pin_item: None,
             compare_toggle_item: None,
@@ -2446,6 +2451,7 @@ impl App {
             let built = menu::build_menu(&self.core.keymap);
             self.menu = Some(built.menu);
             self.save_rotation_item = Some(built.save_rotation);
+            self.export_item = Some(built.export);
             self.reveal_item = Some(built.reveal);
             self.cancel_scan_item = Some(built.cancel_scan);
             self.undo_item = Some(built.undo);
@@ -2703,6 +2709,8 @@ impl App {
             self.core.displayed_item,
             self.core.compare_pin,
         );
+        // File ▸ Export as PNG… (task #89): set here, like `space_toggles_video`.
+        state.export_enabled = self.core.can_export();
         // The docked toolbar (#61) is a shell-honored setting, not derived view state, so it's
         // set here (the choke point defaults it off). It rides `MenuState` so the View ▸ Show
         // Toolbar checkmark tracks it through the same per-tick diff as every other check.
@@ -2745,6 +2753,10 @@ impl App {
         // File ▸ Save Rotation enabled state.
         if let Some(it) = self.save_rotation_item.as_ref() {
             it.set_enabled(state.save_rotation_enabled);
+        }
+        // File ▸ Export as PNG… enabled state (task #89).
+        if let Some(it) = self.export_item.as_ref() {
+            it.set_enabled(state.export_enabled);
         }
         // File ▸ Show in Finder/Explorer enabled state.
         if let Some(it) = self.reveal_item.as_ref() {
@@ -3428,6 +3440,20 @@ impl App {
                     contract::CoreEffect::RevealPath(path) => {
                         reveal::in_file_manager(&path);
                     }
+                    // Image export (task #89): the native save dialog (modal, like the Open
+                    // pickers), then hand the answer straight back to the core.
+                    contract::CoreEffect::ShowSavePanel {
+                        request_id,
+                        start_dir,
+                        suggested_name,
+                    } => {
+                        #[cfg(windows)]
+                        let owner = self.window.as_ref().and_then(|w| hwnd_of(w));
+                        #[cfg(not(windows))]
+                        let owner = None;
+                        let path = save_dialog::save_png(owner, &start_dir, &suggested_name);
+                        self.core.save_panel_resolved(request_id, path);
+                    }
                     // Pop up the right-click photo context menu at the cursor (task #41).
                     contract::CoreEffect::ShowContextMenu(state) => {
                         self.show_context_menu_native(&state);
@@ -3668,6 +3694,9 @@ impl App {
         // teardown. Explicit, not just `Drop`, so it's auditable here with the other RAM
         // caches — and so it holds even if the process later exits without unwinding.
         self.core.clear_archive_passwords();
+        // A confirmed export gets a bounded chance to land rather than vanish (task #89, F11).
+        self.core
+            .finish_exports_for_exit(std::time::Duration::from_secs(4));
         self.core.failed.clear();
         self.core.preview_resident.clear();
         self.core.preview_watchdog = None;

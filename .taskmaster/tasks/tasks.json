@@ -905,7 +905,7 @@
         "id": 89,
         "title": "Image export — Export mode, codec choice, flick compare, HDR + batch (Squoosh-inspired)",
         "description": "Export the current image or video frame to a file. MVP = PNG with correct colour (wide gamut kept with a clean profile; HDR tone-mapped until HDR read-back exists). Then an Export mode that replaces the right-hand Inspector with export controls + details; codec choice (PNG/JPEG first, then WebP/AVIF/JXL, HEIC on macOS); quality and resize presets; Y flicks export <-> original (tap toggles, hold peeks) on the real viewer surface; HDR-preserving output; batch. Writes are explicit user edits (ADR-018); previews/caches RAM-only; metadata (incl. the ICC profile) stripped by default via an allowlist; location never sticky; OS recents suppressed. Plan of record (rev 4, reviewed by Codex + Fable): .taskmaster/docs/export-plan.md — follow it, not this summary, where they differ.",
-        "status": "pending",
+        "status": "in-progress",
         "priority": "medium",
         "dependencies": [],
         "subtasks": [
@@ -925,19 +925,19 @@
             "id": 3,
             "title": "Rung 0b — export decode + prepare",
             "description": "decode_for_export per the source matrix (plan § 3.10) incl. the macOS EXPORT Image I/O draw (CGImage's own colour space, 16 bpc when > 8-bit, straight alpha, ICC via CGColorSpaceCopyICCData; P3 only as fallback). Minimal prepare: un-premultiply, rotate any sample type, HDR -> P3-linear tone-map for SDR targets, gray stays gray, zero RGB under alpha 0. Resize/flatten wait for rung 2; Copy ICC is task #148. Fidelity via the export decoder + container inspection; fuzz new parsers.",
-            "status": "pending"
+            "status": "done"
           },
           {
             "id": 4,
             "title": "Rung 0c — pb-encode, export subsystem, two workers, safe writes",
             "description": "pb-encode (types — no pb-decode/pb-app-core dependency; pb-decode uses it for types only; codecs behind features): prepare, PNG via png 0.18 (8/16/gray, colour-type reduction, iCCP/sRGB), the sanitized-ICC builder (tag allowlist, neutral desc/cprt, zeroed header) + ICC leak fixture + colorimetry round trip; JPEG encoder moved (describe.rs import updated, no re-export). No Encoder trait yet. export.rs + app_core_impl/export.rs; write worker only: worker-owned rayon pool, low OS priority, event-style wake (never work_pending), bounded finish on quit + temp cleanup. Safe writes: visible unique temps, no-clobber -> link -> placeholder commit, direct-write fallback on EPERM, pending destinations, file-identity source refusal. One export field on AppCore + Windows cross-check from the Mac. macOS-runnable core no-trace test.",
-            "status": "pending"
+            "status": "done"
           },
           {
             "id": 5,
             "title": "Rung 1 — MVP: Export as PNG",
-            "description": "Action::Export (tentative E; File > Export… ⇧⌘E; context menu; all ~17 Action registration sites) -> frozen ExportRequest -> save dialog (NSSavePanel + defaults-key cleanup; Windows IFileDialog wrapper with FOS_DONTADDTORECENT; Linux rfd) -> write worker. Folder policy per plan § 3.6 (last_export_folder never while pinned; pinned session folder in ExportState). Strip-on only: sanitized profile, no other metadata; HDR -> P3 SDR with a toast note. Disabled for doors, CMYK, video until #81. Hand checks: Windows MRU registry keys, macOS NSOSPLastRootDirectory, exFAT/SMB/TCC. ExportFile from dialog confirm, split by stage; nav p95 manual protocol. CHANGELOG.",
-            "status": "pending"
+            "description": "Action::Export (tentative E; File > Export… ⇧⌘E; context menu; all ~17 Action registration sites) -> frozen ExportRequest -> save dialog (NSSavePanel + defaults-key cleanup; Windows IFileDialog wrapper with FOS_DONTADDTORECENT; Linux rfd) -> write worker. Folder policy per plan § 3.6 (last_export_folder never while pinned; pinned session folder in ExportState). Strip-on only: sanitized profile, no other metadata; HDR -> P3 SDR with a toast note. Disabled for doors, CMYK, video until #81. Hand checks: Windows MRU registry keys, macOS NSOSPLastRootDirectory, exFAT/SMB/TCC. ExportFile from dialog confirm, split by stage; nav p95 manual protocol. CHANGELOG. || BUILT 2026-11-13 (session 1): macOS end to end, Windows compile-checked only. Owner manual test: .taskmaster/docs/export-rung1-manual-test.md; Windows section W owed. PNG default Balanced (corpus p50 158 ms / p95 1.7 s). Not yet: context-menu item, toast Reveal, pinning-clears-last_export_folder (Q6).",
+            "status": "review"
           },
           {
             "id": 6,

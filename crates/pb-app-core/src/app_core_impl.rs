@@ -21,6 +21,7 @@ mod compare;
 mod delete;
 mod describe;
 mod dir_scan;
+mod export;
 mod image_text;
 mod item_kind;
 mod menu;
@@ -366,6 +367,7 @@ impl AppCore {
             video_seek_last: None,
             pending_delete_retry: None,
             quick_sort_queue: None,
+            export: Default::default(),
             video_pill_text: None,
             video_osd_until: None,
             video_geometry_stale: false,
@@ -551,6 +553,7 @@ impl AppCore {
             Action::ComparePin => self.compare_pin_cmd(),
             Action::CompareToggle => self.compare_toggle_cmd(),
             Action::Copy => self.copy_image(),
+            Action::Export => self.export_cmd(),
             Action::CopyPath => self.copy_path(),
             Action::CopyImageDetails => self.copy_image_details(),
             Action::CopyImageText => self.copy_image_text(),
@@ -1321,6 +1324,9 @@ impl AppCore {
         // is recorded here, and a failure puts the item back in the deck. Cheap no-op until
         // the user's first sort spawns the worker.
         self.poll_quick_sort();
+        // 0'''. Image export (task #89): open the save dialog once a name suggestion lands, and
+        // land finished writes (toast + remembered folder). No-op until the first export.
+        self.poll_export();
         // 1. Absorb finished decodes (uploads; presents the target if it arrived).
         self.drain_results();
         // 1'. macOS archive video (off the event loop): land a finished playback byte read
@@ -1839,8 +1845,12 @@ impl AppCore {
         // The earliest of the viewer's poll, the animation's next-frame deadline, the eager-prep
         // dwell, the Live-Photo-revert deadline, and the watchdog's; `None` = idle. (The host
         // mins in its own dialog-repaint clock.)
+        // Export work (task #89) polls at a low rate — deliberately NOT through `work_pending`,
+        // which would hold the pump at the frame rate for the seconds an encode takes (F8).
+        let export_wake = self.export.busy().then(|| now + export::EXPORT_POLL);
         let wake = [
             base_wake,
+            export_wake,
             anim_wake,
             prep_wake,
             revert_wake,

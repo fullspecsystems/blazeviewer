@@ -962,6 +962,9 @@ pub struct AppCore {
     /// RAM-only and dropped on exit like every other runtime cache (privacy #2): there is no
     /// on-disk queue, so an unfinished sort simply never happened.
     pub quick_sort_queue: Option<crate::quick_sort::SortQueue>,
+    /// Image export (task #89): frozen requests, the write worker, in-flight exports and the
+    /// pinned-session export folder. One field, so the winit struct literal changes once.
+    pub export: crate::export::ExportState,
     /// The text currently shown in the video position pill (`m:ss / m:ss`), so it
     /// re-rasterizes only when the second ticks over — not per frame.
     pub video_pill_text: Option<String>,

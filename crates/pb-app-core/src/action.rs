@@ -107,6 +107,9 @@ pub enum Action {
     /// on-disk files can be revealed (an archive entry / the empty deck cannot).
     RevealInFileManager,
     SaveRotation,
+    /// Export the current image to a file (task #89). Rung 1: PNG via the native save
+    /// dialog; rung 2 turns this into the Export-mode toggle.
+    Export,
     Delete,
     DeletePermanent,
     Undo,
@@ -227,6 +230,7 @@ const BASE_ACTIONS: &[Action] = &[
     Action::CopyDescription,
     Action::RevealInFileManager,
     Action::SaveRotation,
+    Action::Export,
     Action::Delete,
     Action::DeletePermanent,
     Action::Undo,
@@ -378,6 +382,7 @@ impl Action {
             Action::CopyDescription => "copy_description",
             Action::RevealInFileManager => "reveal",
             Action::SaveRotation => "save_rotation",
+            Action::Export => "export",
             Action::Delete => "delete",
             Action::DeletePermanent => "delete_permanent",
             Action::Undo => "undo",
@@ -473,6 +478,7 @@ impl Action {
                 }
             }
             Action::SaveRotation => "Save rotation",
+            Action::Export => "Export as PNG",
             Action::Delete => "Delete to Recycle Bin",
             Action::DeletePermanent => "Delete permanently",
             Action::Undo => "Undo",

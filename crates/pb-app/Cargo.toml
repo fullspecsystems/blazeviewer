@@ -140,6 +140,10 @@ windows = { version = "0.62", features = [
     "Win32_Foundation",
     "Win32_UI_WindowsAndMessaging",
     "Win32_UI_Shell",
+    # The export save dialog (task #89, src/save_dialog.rs): IFileSaveDialog + COMDLG_FILTERSPEC,
+    # CoCreateInstance/CoTaskMemFree.
+    "Win32_UI_Shell_Common",
+    "Win32_System_Com",
     # AttachConsole + std-handle rebind so clap --help/--version/errors are visible from a
     # GUI-subsystem release build (task #78, src/win_console.rs).
     "Win32_System_Console",

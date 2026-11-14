@@ -126,6 +126,10 @@ crates/
               archive — ZIP / 7z / tar family / RAR4 / RAR5, lazy random-access vs
               eager-to-RAM per kind; `archive_kind` is the one classifier. RAM-only,
               read-only on the view path
+  pb-encode   the export pipeline (task #89): ExportSource/ExportImage types, `prepare`
+              (rotation, HDR→P3 tone-map, colour resolution), the ICC sanitizer behind
+              "Strip metadata", PNG/JPEG encoders behind features. Pure; pb-decode uses
+              it for types only
   pb-render   the wgpu presenter: swapchain + resident texture ring, view transforms
               (fit/fill/1:1, zoom/pan/rotate), staging-ring uploads, GPU Lanczos
               resample, fp16 scRGB color + HDR output, NV12/P010 video planes,
@@ -392,8 +396,11 @@ is persisted unless the user deliberately invokes the action.
   only *viewing*, so it still holds once the Edit commands land (a scan/decode never
   triggers them); and a static audit that no `fs::write`/`File::create` sits on the
   *passive view/decode path* (today the only ones in the tree are `#[cfg(test)]` code
-  and the `offscreen_png` example). The Edit-menu commands (delete, save-rotation) are
-  the one place app code writes — reachable only from an explicit user action. Re-run
+  and the `offscreen_png` example). The Edit-menu commands (delete, save-rotation) and
+  File ▸ Export (task #89 — the export worker's commit, plus `last_export_folder` when
+  "Open files in" is unpinned) are the only places app code writes — each reachable only
+  from an explicit user action. A core-level export no-trace test runs on every platform
+  (`app_core_impl/export.rs`). Re-run
   the audit before adding any *passive* disk write; any on-disk scratch must be opt-in
   + cleared.
 
@@ -449,9 +456,11 @@ converts to Apache-2.0 after two years. (It was a closed proprietary EULA until
 2026-07-14; the superseded `LICENSE` file is gone.) That still makes third-party native
 deps a hard ship gate, not a chore. The rule, in one line:
 
-> **We only ever DECODE. Ship LGPL; never ship GPL.** GPL-only encoders and
-> filters (x264, x265, GPL avfilter) are irrelevant to a viewer — we don't encode
-> anything, so we give up nothing by excluding them.
+> **We decode with LGPL; we encode only with permissive code; never ship GPL.**
+> GPL-only encoders and filters (x264, x265, GPL avfilter) stay out — video is never
+> encoded. Image export (task #89) adds still-image encoders, and **every crate in an
+> encoder's dependency chain is audited before it lands** (`jpegxl-rs`/`jpegxl-sys` are
+> GPL — JPEG XL goes through `jxl-sys`; see `.taskmaster/docs/export-plan.md` rung 4).
 
 ### ⚠️ The Homebrew trap — the #1 false alarm in this repo
 

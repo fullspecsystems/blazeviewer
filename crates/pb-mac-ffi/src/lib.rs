@@ -1061,6 +1061,13 @@ impl AppCoreHandle {
         self.open_paths_inner(paths, None);
     }
 
+    /// The NSSavePanel for an export closed (task #89): `path` is the chosen file, or ""
+    /// when the user cancelled. Stale ids are ignored by the core.
+    fn save_panel_resolved(&mut self, request_id: u64, path: String) {
+        let path = (!path.is_empty()).then(|| std::path::PathBuf::from(path));
+        self.core.save_panel_resolved(request_id, path);
+    }
+
     /// The shared open-plan body: `recursive_override = Some(r)` forces a directory scan's
     /// recursion (the CLI launch, where a flag or the saved preference decides — see
     /// [`open_launch_paths`](Self::open_launch_paths)); `None` keeps `open::plan`'s own
@@ -1403,6 +1410,7 @@ impl AppCoreHandle {
             compare_pinned_here: s.compare_pinned_here,
             compare_toggle_enabled: s.compare_toggle_enabled,
             save_rotation_enabled: s.save_rotation_enabled,
+            export_enabled: s.export_enabled,
             reveal_enabled: s.reveal_enabled,
             cancel_scan_enabled: s.cancel_scan_enabled,
             undo_enabled: s.undo.is_some(),
@@ -2504,7 +2512,7 @@ impl AppCoreHandle {
     /// owner-reported "not implemented"), stale checkmarks everywhere. Compare-gated:
     /// nothing is pushed when nothing moved.
     fn apply_menu_state(&mut self) {
-        let next = AppCore::menu_state_from(
+        let mut next = AppCore::menu_state_from(
             self.core.view.mode,
             self.core.info_line,
             self.core.panels,
@@ -2527,6 +2535,8 @@ impl AppCoreHandle {
             self.core.displayed_item,
             self.core.compare_pin,
         );
+        // File ▸ Export… (task #89): set here, like `space_toggles_video`.
+        next.export_enabled = self.core.can_export();
         // Show Archives (task #104) is a setting, defaulted off by the pure choke point, so
         // override it here the way the winit shell does (`current_menu_state`).
         let next = contract::MenuState {
@@ -2793,10 +2803,15 @@ impl AppCoreHandle {
                 // (`Quit`) and the Esc/keymap (`ShellFlowAction("quit")`) paths pass here.
                 C::Quit => {
                     self.core.clear_archive_passwords();
+                    // Let a confirmed export land rather than vanish (task #89, review F11).
+                    self.core
+                        .finish_exports_for_exit(std::time::Duration::from_secs(4));
                     return Some(map_effect(C::Quit));
                 }
                 C::ShellFlowAction(Action::Quit) => {
                     self.core.clear_archive_passwords();
+                    self.core
+                        .finish_exports_for_exit(std::time::Duration::from_secs(4));
                     return Some(map_effect(C::ShellFlowAction(Action::Quit)));
                 }
                 other => return Some(map_effect(other)),
@@ -3368,6 +3383,15 @@ fn map_effect(e: contract::CoreEffect) -> ffi::CoreEffectFfi {
         C::OpenFolderPanel { start_dir } => {
             E::OpenFolderPanel(start_dir.to_string_lossy().into_owned())
         }
+        C::ShowSavePanel {
+            request_id,
+            start_dir,
+            suggested_name,
+        } => E::ShowSavePanel(
+            request_id,
+            start_dir.to_string_lossy().into_owned(),
+            suggested_name,
+        ),
         // Pointer cursor, by kind name — the host maps to NSCursor (hover feedback for the
         // on-canvas controls, the pan hand, the hidden viewer cursor).
         C::SetCursor(kind) => {
@@ -4318,6 +4342,9 @@ mod ffi {
         // via open_paths (files+archives / folders respectively).
         OpenFilePanel(String),
         OpenFolderPanel(String),
+        // Image export (task #89): run NSSavePanel (request_id, start_dir, suggested_name),
+        // PNG only; answer via save_panel_resolved(request_id, path) — "" = cancelled.
+        ShowSavePanel(u64, String, String),
         // Pointer cursor by kind: "default" | "hidden" | "grab" | "grabbing" | "pointer".
         SetCursor(String),
         // A clipboard write is pending — pull it via take_clipboard_text() /
@@ -4623,6 +4650,7 @@ mod ffi {
         compare_pinned_here: bool,
         compare_toggle_enabled: bool,
         save_rotation_enabled: bool,
+        export_enabled: bool,
         reveal_enabled: bool,
         cancel_scan_enabled: bool,
         undo_enabled: bool,
@@ -4655,6 +4683,7 @@ mod ffi {
         fn next_effect(&mut self) -> Option<CoreEffectFfi>;
         fn open_path(&mut self, path: &str);
         fn open_paths(&mut self, paths: Vec<String>);
+        fn save_panel_resolved(&mut self, request_id: u64, path: String);
 
         // Pointer + gestures (NS1 item 4) — same conventions as the winit shell:
         // physical px, top-left origin; pixel scrolls scaled by the backing factor.

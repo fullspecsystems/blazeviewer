@@ -29,6 +29,7 @@ pub mod ids {
     pub const OPEN_FOLDER: &str = "open_folder";
     pub const CANCEL_SCAN: &str = "cancel_scan";
     pub const SAVE_ROTATION: &str = "save_rotation";
+    pub const EXPORT: &str = "export";
     pub const REVEAL: &str = "reveal";
     pub const DELETE: &str = "delete";
     pub const DELETE_PERMANENTLY: &str = "delete_permanently";
@@ -244,6 +245,7 @@ pub enum MenuAction {
     OpenFolder,
     CancelScan,
     SaveRotation,
+    Export,
     Reveal,
     Delete,
     DeletePermanently,
@@ -310,6 +312,7 @@ impl MenuAction {
             MenuAction::OpenFolder => Action::OpenFolder,
             MenuAction::CancelScan => Action::CancelScan,
             MenuAction::SaveRotation => Action::SaveRotation,
+            MenuAction::Export => Action::Export,
             MenuAction::Reveal => Action::RevealInFileManager,
             MenuAction::Delete => Action::Delete,
             MenuAction::DeletePermanently => Action::DeletePermanent,
@@ -375,6 +378,7 @@ pub fn action_for(id: &str) -> Option<MenuAction> {
         OPEN_FOLDER => MenuAction::OpenFolder,
         CANCEL_SCAN => MenuAction::CancelScan,
         SAVE_ROTATION => MenuAction::SaveRotation,
+        EXPORT => MenuAction::Export,
         REVEAL => MenuAction::Reveal,
         DELETE => MenuAction::Delete,
         DELETE_PERMANENTLY => MenuAction::DeletePermanently,
@@ -564,6 +568,8 @@ pub struct ViewChecks {
 pub struct BuiltMenu {
     pub menu: Menu,
     pub save_rotation: MenuItem,
+    /// File ▸ Export as PNG… (task #89) — enabled while a still image is on screen.
+    pub export: MenuItem,
     /// The File ▸ Show in Finder/Explorer item. Returned so the app can enable it only when
     /// the displayed photo is a real on-disk file (see `AppCore::can_reveal`); it greys out
     /// for archive entries + the empty deck. Starts disabled (empty deck at launch).
@@ -661,6 +667,8 @@ pub fn build_menu(keymap: &Keymap) -> BuiltMenu {
 
     // Disabled until a rotation is pending on an eligible file (toggled at runtime).
     let save_rotation = MenuItem::with_id(ids::SAVE_ROTATION, "Save Rotation\tCtrl+S", false, None);
+    // Disabled until a still image is displayed (toggled at runtime, task #89).
+    let export = MenuItem::with_id(ids::EXPORT, "Export as PNG…\tE", false, None);
     // Disabled until a real on-disk file is displayed (toggled at runtime).
     let reveal = MenuItem::with_id(ids::REVEAL, "Show in File Explorer", false, None);
     // Disabled until a folder scan is actually streaming in (toggled at runtime).
@@ -677,6 +685,7 @@ pub fn build_menu(keymap: &Keymap) -> BuiltMenu {
         &cancel_scan,
         &sep(),
         &save_rotation,
+        &export,
         &reveal,
         &quick_sort,
         &sep(),
@@ -901,6 +910,7 @@ pub fn build_menu(keymap: &Keymap) -> BuiltMenu {
     BuiltMenu {
         menu,
         save_rotation,
+        export,
         reveal,
         cancel_scan,
         undo,
@@ -1012,6 +1022,7 @@ pub fn menu_bar_spec(keymap: &Keymap, s: &crate::contract::MenuState) -> Vec<Men
                     "Save Rotation\tCtrl+S",
                     s.save_rotation_enabled,
                 ),
+                item(MenuAction::Export, "Export as PNG…\tE", s.export_enabled),
                 item(
                     MenuAction::Reveal,
                     "Show in File Explorer",
@@ -1754,6 +1765,7 @@ mod tests {
             action_for(ids::SAVE_ROTATION),
             Some(MenuAction::SaveRotation)
         );
+        assert_eq!(action_for(ids::EXPORT), Some(MenuAction::Export));
         assert_eq!(action_for(ids::REVEAL), Some(MenuAction::Reveal));
         assert_eq!(action_for(ids::DELETE), Some(MenuAction::Delete));
         assert_eq!(

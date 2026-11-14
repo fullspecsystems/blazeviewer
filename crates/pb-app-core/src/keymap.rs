@@ -282,6 +282,7 @@ pub const EDITOR_GROUPS: &[(&str, &[Action])] = &[
             Action::AskImage,
             Action::RevealInFileManager,
             Action::SaveRotation,
+            Action::Export,
             Action::Delete,
             Action::DeletePermanent,
             Action::Undo,
@@ -666,6 +667,9 @@ fn default_bindings() -> Vec<(Action, Vec<KeyChord>)> {
         // key; ⇧⌘R is taken by other apps on macOS). A user can bind one in Settings.
         (Action::RevealInFileManager, vec![]),
         one(Action::SaveRotation, "Ctrl+S"),
+        // Export (task #89): bare E — the owner's pick, unbound before; rung 2 makes it the
+        // Export-mode toggle. The macOS menu also carries the Photos-style ⇧⌘E.
+        one(Action::Export, "E"),
         one(Action::Delete, "Delete"),
         one(Action::DeletePermanent, "Shift+Delete"),
         // Undo the last reversible edit (currently a saved rotation). Ctrl+Z on Windows;
@@ -814,6 +818,7 @@ pub fn macos_menu_chord(action: Action) -> Option<KeyChord> {
         Action::OpenFile => c("Cmd+O"),
         Action::OpenFolder => c("Shift+Cmd+O"),
         Action::SaveRotation => c("Cmd+S"),
+        Action::Export => c("Shift+Cmd+E"),
         Action::Copy => c("Cmd+C"),
         Action::CopyPath => c("Shift+Cmd+C"),
         Action::Undo => c("Cmd+Z"),

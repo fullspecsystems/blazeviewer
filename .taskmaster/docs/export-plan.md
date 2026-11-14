@@ -306,12 +306,11 @@ pub struct ExportRequest {
 
 - **Temp files:** `create_new` a sibling named `<stem>.blaze-export-<random>.tmp` (no leading dot —
   a crash leftover stays visible, F7), tracked in `ExportState` until committed or unlinked.
-- **Commit, in order of preference** (F7):
-  1. **No-clobber rename** (`renamex_np(RENAME_EXCL)` / `MoveFileExW` without
-     `MOVEFILE_REPLACE_EXISTING` / `renameat2(RENAME_NOREPLACE)` — Linux needs a `libc` dependency).
-  2. **Link + unlink** where hard links exist.
-  3. **Placeholder:** `create_new` the target as a zero-byte placeholder, then rename the temp over
-     our own placeholder (works on exFAT/FAT and most SMB shares).
+- **Commit, in order of preference** (F7; as built in session 1):
+  1. **Hard link** temp → target, then remove the temp — atomic and no-clobber on APFS, NTFS and
+     ext4, with portable `std` calls (built instead of `renamex_np` / `renameat2` / `MoveFileExW`).
+  2. **Placeholder:** where links aren't supported (exFAT/FAT, many SMB shares), `create_new` the
+     target as a zero-byte placeholder, then rename the temp over our own placeholder.
   - **Confirmed replace** (the dialog confirmed an overwrite): rename-over.
   - On macOS, `FileManager.replaceItemAt` with an `itemReplacementDirectory` is an option for the
     replace case.
@@ -914,31 +913,61 @@ confirmed directly). **All accepted.**
 
 ## Handoff
 
-**Verified**
+**Status (2026-11-13, implementation session 1):** rungs **0b, 0c and 1 are built** — Export as PNG
+end to end on macOS, compile-checked for Windows. Manual test script:
+`.taskmaster/docs/export-rung1-manual-test.md`. Rung 0a (#81) not started.
 
-- Nothing built. Plan rev 4 written 2026-11-13 on macOS (code reading, crates.io licence checks, and
-  the app's defaults key names on the dev Mac).
+**Verified** (on the dev Mac, macOS)
+
+- `cargo test`: pb-encode 28, pb-decode 270, pb-app-core 1,043 — all pass, incl. the new
+  core-level export no-trace test (`app_core_impl/export.rs`: viewing writes nothing; one export
+  writes exactly one file, no temp left, the frozen 90° rotation baked in, the folder remembered
+  only when unpinned).
+- `cargo clippy -D warnings --all-targets` clean: pb-encode, pb-decode, pb-app-core, pb-mac-ffi
+  natively; **pb-app (tests included) via the Windows cross-check** — so the `IFileSaveDialog`
+  wrapper and the background-priority thread compile against `windows` 0.62.
+- The Swift host builds (`build-swift-host.sh --release`): NSSavePanel sheet + File ▸ Export as
+  PNG… (⇧⌘E). **The GUI itself was not driven** — behaviour-unverified until the owner runs it.
+- Corpus sweep (`cargo run --release -p pb-app-core --example export_bench -- <folder>`) over
+  ~/Downloads/test-images: 31/31 decodable files exported (JPEG, AVIF, WebP, HEIC incl. 10-bit and
+  HDR, PNG, NEF, JXL, SVG). sRGB AVIF/HEIC stay sRGB through the new macOS export draw (F5);
+  iPhone HEICs stay Display P3; 10-bit HEICs export 16-bit; HDR tone-maps to P3 (visually checked
+  on one). `sips` reads the sanitized profiles as "Display P3" / "sRGB IEC61966-2.1".
+- **PNG default = `Balanced`** from those numbers: encode p50 158 ms / p95 1.7 s, 1.37 MB/MP;
+  `Fast` 10 ms / 104 ms but 1.82 MB/MP (+33%); `High` 435 ms / 3.9 s for −1%.
 
 **Not verified**
 
-- Copy on a video copies the poster on Windows (inferred). Confirm: pause mid-scene, Ctrl+C, paste.
-- HDR luminance per backend → #146.
-- `NSSavePanel` key names (expected to match the Open panel's); Windows MRU behaviour with
-  `FOS_DONTADDTORECENT`; Linux `recently-used.xbel`.
-- TCC behaviour for a temp sibling next to a granted save path; exFAT/SMB commit paths.
-- Windows `CF_DIBV5` embedded-profile support (#148).
+- Everything in the manual test script — notably the sheet, the toasts, menu enablement, and that
+  `NSSavePanel` doesn't add to Recent Items.
+- Windows: the dialog's behaviour, `FOS_DONTADDTORECENT`, the `ComDlg32` MRU keys (W5), background
+  priority. Linux: rfd's save dialog and GTK `recently-used.xbel`.
+- TCC behaviour for the temp sibling next to a granted save path (the direct-write fallback is
+  unit-untested on a real refusal); exFAT/SMB commit paths (the placeholder fallback).
+- Copy on a video copies the poster on Windows (inferred). HDR luminance per backend → #146.
 
-**Decisions / corrections**
+**Decisions / corrections (implementation)**
 
-- Rev 2: no PQ PNG in the MVP; Return-not-⌘S. Rev 3: aux texture; clean profiles; recents.
-  **Rev 4:** Esc stays quit and Return stays Random (both owner-confirmable); flick A/B from the
-  export pipeline; preview bytes = file bytes; present gate; sanitized ICC; macOS export draw;
-  `jxl-sys`; MVP slimmed (trait/resize/flatten/preview worker/Copy ICC moved later).
+- Rev 2–4 as before (Esc quit + Enter Random owner-confirmed 2026-11-13, pinned for revisit).
+- **No-clobber commit = hard link first, then a `create_new` placeholder** — portable std calls
+  instead of `renamex_np` / `renameat2` / `MoveFileExW` (same guarantee, no libc/windows APIs;
+  § 3.4's order changed accordingly).
+- **The JPEG encoder moved** to `pb_encode::encode_jpeg_rgba8` (no re-export); `describe.rs` and
+  pb-decode's test fixtures use it from there.
+- **Not yet:** the right-click context-menu item (File menu + `E` + ⇧⌘E only); a Reveal action on
+  the success toast; "pinning clears a stored `last_export_folder`" (Part 8 Q6, unconfirmed).
+- `last_export_folder` is never written while pinned; the pinned session folder lives in
+  `ExportState` (RAM). The save-panel cleanup removes `NSOSPLastRootDirectory`,
+  `NSNavLastRootDirectory`, `NSNavRecentPlaces` after each export dialog.
+- Quit waits up to 4 s for an in-flight export (`finish_exports_for_exit`), from both shells.
 
 **Cross-platform debt**
 
-- None yet.
+- **Windows: export is compile-checked only** — `save_dialog.rs` (IFileSaveDialog), the menu item,
+  `export_worker::lower_thread_priority` (`THREAD_MODE_BACKGROUND_BEGIN`). The Windows machine
+  must run manual-test section W. Strike this line once it does.
+- **Linux:** untested (rfd save dialog; `nice(10)` worker priority).
 
 **Claimed**
 
-- None.
+- None (session 1 done). Next up per the ladder: rung 2 (the Export mode panel) or #81.

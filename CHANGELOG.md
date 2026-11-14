@@ -7,6 +7,17 @@ with any pre-release suffix carried only by the tag.
 
 ## [Unreleased]
 
+### Added
+
+- **Export as PNG.** File ▸ Export as PNG… (or press `E`; ⇧⌘E on a Mac) saves the
+  photo on screen as a PNG at full resolution, with any rotation applied. Colours
+  are kept exactly: wide-gamut photos stay Display P3, Adobe RGB and so on, and
+  16-bit images stay 16-bit. HDR photos are saved as SDR for now, and the
+  confirmation says so. Exports carry no metadata — no camera details and no
+  location — and never appear in your system's recent files. The save dialog
+  remembers the last folder you exported to, unless Settings ▸ "Open files in" is
+  set to a pinned folder, in which case nothing is remembered after you quit.
+
 ### Changed
 
 - **Finer slideshow timing.** `[` and `]` now change the slideshow interval by a

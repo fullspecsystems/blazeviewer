@@ -240,6 +240,11 @@ pub struct Settings {
     /// file names — updated only when the opened folder changes, written by the same
     /// explicit open action that loads it (never passively while viewing).
     pub last_folder: Option<PathBuf>,
+    /// The folder of the most recent completed **export** (task #89) — the save dialog's start
+    /// when "Open files in" is unpinned. An ADR-022 addendum (owner, 2026-11-13): one folder
+    /// path, never a file name; written only by a completed explicit export and **never while
+    /// pinned** (`picker_dir` set) — then the session's folder lives in RAM instead.
+    pub last_export_folder: Option<PathBuf>,
     /// Play a Live Photo's audio when its motion plays (#38). Muted via `M` / the Image
     /// menu; persisted so the choice sticks. Default on (audio plays).
     pub mute_live_audio: bool,
@@ -358,10 +363,11 @@ impl Default for Settings {
             panel_opacity: 92,                // conservative-high (≈ today's material look)
             slideshow_interval_secs: slideshow::DEFAULT_INTERVAL.as_secs_f64(), // 4.0
             window: None,
-            picker_dir: None,       // start in the current photo's folder
-            last_folder: None,      // no folder to reopen until the first open
-            mute_live_audio: false, // Live Photo audio plays by default (#38)
-            subtitles: false,       // captions off until asked for (task #90)
+            picker_dir: None,         // start in the current photo's folder
+            last_folder: None,        // no folder to reopen until the first open
+            last_export_folder: None, // nothing remembered until the first export
+            mute_live_audio: false,   // Live Photo audio plays by default (#38)
+            subtitles: false,         // captions off until asked for (task #90)
             // On: forced signs are part of the film, not an aid you switch on (task #99).
             forced_subtitles: true,
             subtitle_style: crate::subtitle::SubtitleStyle::default(),

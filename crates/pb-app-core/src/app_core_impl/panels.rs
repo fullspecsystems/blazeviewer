@@ -188,6 +188,7 @@ impl AppCore {
                     row("Copy image", sc(Action::Copy)),
                     row("Copy file path", sc(Action::CopyPath)),
                     row("Save rotation", sc(Action::SaveRotation)),
+                    row("Export as PNG", sc(Action::Export)),
                     row("Undo", sc(Action::Undo)),
                     row(trash, sc(Action::Delete)),
                     row("Delete permanently", sc(Action::DeletePermanent)),

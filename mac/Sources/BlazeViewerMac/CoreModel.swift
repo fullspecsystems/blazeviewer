@@ -2531,6 +2531,9 @@ final class CoreModel {
             presentOpenPanel(startDir: dir.toString(), choosingFolders: false)
         case .OpenFolderPanel(let dir):
             presentOpenPanel(startDir: dir.toString(), choosingFolders: true)
+        case .ShowSavePanel(let requestId, let dir, let name):
+            presentSavePanel(
+                requestId: requestId, startDir: dir.toString(), suggestedName: name.toString())
         case .SetCursor(let kind):
             applyCursor(kind.toString())
         case .WriteClipboard:
@@ -2743,6 +2746,55 @@ final class CoreModel {
                 guard response == .OK, !panel.urls.isEmpty else { return }
                 self.openPaths(panel.urls.map(\.path))
             }
+        }
+    }
+
+    /// The native save panel for an image export (task #89, `CoreEffect::ShowSavePanel`):
+    /// a sheet on the viewer window — Preview's Export idiom — PNG only, starting in the
+    /// folder the core chose (export-plan.md § 3.6: "Open files in" decides). The answer goes
+    /// back with the same request id; "" means cancelled. Afterwards AppKit's own folder
+    /// memory is removed from our defaults: the app always passes `directoryURL`, so nothing
+    /// is lost, and no folder trace lingers outside settings.toml (§ 3.6, review F9 — the
+    /// Open panel's half of that cleanup is task #147).
+    private func presentSavePanel(requestId: UInt64, startDir: String, suggestedName: String) {
+        guard !panelOpen else {
+            // A panel is already up: answer "cancelled" so the request doesn't linger.
+            core.save_panel_resolved(requestId, "")
+            return
+        }
+        let panel = NSSavePanel()
+        panel.title = "Export as PNG"
+        panel.prompt = "Export"
+        panel.nameFieldStringValue = suggestedName
+        panel.directoryURL = URL(fileURLWithPath: startDir, isDirectory: true)
+        panel.allowedContentTypes = [.png]
+        panel.canCreateDirectories = true
+        panel.isExtensionHidden = false
+        panelOpen = true
+        let finish: (NSApplication.ModalResponse) -> Void = { [weak self] response in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.panelOpen = false
+                let path = response == .OK ? (panel.url?.path ?? "") : ""
+                self.core.save_panel_resolved(requestId, path)
+                Self.forgetPanelFolderMemory()
+                self.kick() // the export worker needs the pump polling
+                self.drainEffects()
+            }
+        }
+        if let window = hostWindow {
+            panel.beginSheetModal(for: window, completionHandler: finish)
+        } else {
+            panel.begin(completionHandler: finish)
+        }
+    }
+
+    /// Remove AppKit's open/save-panel folder memory from our defaults domain (privacy #2:
+    /// no involuntary trace of where the user browsed).
+    static func forgetPanelFolderMemory() {
+        let defaults = UserDefaults.standard
+        for key in ["NSOSPLastRootDirectory", "NSNavLastRootDirectory", "NSNavRecentPlaces"] {
+            defaults.removeObject(forKey: key)
         }
     }
 

@@ -175,6 +175,9 @@ pub struct MenuState {
     pub compare_toggle_enabled: bool,
     /// File ▸ Save Rotation — enabled only with an unsaved rotation on a writable file.
     pub save_rotation_enabled: bool,
+    /// File ▸ Export… — a still image is on screen (`AppCore::can_export`). Like
+    /// `space_toggles_video`, `menu_state_from` leaves it false and the shells set it.
+    pub export_enabled: bool,
     /// File ▸ Show in Finder/Explorer — enabled only for a real on-disk file (not an
     /// archive entry or the empty deck).
     pub reveal_enabled: bool,
@@ -398,6 +401,15 @@ pub enum CoreEffect {
     OpenFilePanel { start_dir: PathBuf },
     /// Open the native folder picker at `start_dir`.
     OpenFolderPanel { start_dir: PathBuf },
+    /// Run the native **save** dialog for an export (task #89): start in `start_dir`, offer
+    /// `suggested_name`, PNG only. The shell answers via `AppCore::save_panel_resolved` with
+    /// the same `request_id` (`None`/empty = cancelled). OS recent-file history must be
+    /// suppressed where the platform allows (export-plan.md § 3.6).
+    ShowSavePanel {
+        request_id: u64,
+        start_dir: PathBuf,
+        suggested_name: String,
+    },
     /// Start opening an archive off the event loop (NS0 5.6 Step 3): the host spawns the worker
     /// (a `.zip` is synchronous; a `.7z` decompresses on a thread after a RAM pre-flight), holds
     /// the progress-dialog handle + generation, and feeds the result back as `ArchiveResolved` (or
