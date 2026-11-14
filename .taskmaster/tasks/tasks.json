@@ -2289,6 +2289,43 @@
             "status": "pending"
           }
         ]
+      },
+      {
+        "id": 150,
+        "title": "Cloud model servers for AI describe (OpenAI / Anthropic): API key + explicit opt-in",
+        "description": "Owner 2026-11-14: low priority — Blaze is private by default, so sending photos to a cloud model is an opt-in extra, but it would make describe/Ask more useful for tricky images where the on-device and local models fall short. (Owner observation the same day: Apple's on-device model is noticeably weaker than qwen3.6-35b-a3b served by LM Studio.) Today the 'Local endpoint' backend sends no Authorization header and has no API key setting, so OpenAI's API and Anthropic's OpenAI-compatible endpoint (https://api.anthropic.com/v1/chat/completions — normalize_base already turns https://api.anthropic.com into it) reject it. Workaround that needs no app change: a local proxy such as LiteLLM that adds the key and forwards; point Blaze at the proxy. Privacy (Second Directive): anything leaving the machine is explicit opt-in behind a clear warning that says what goes where — and auto-describe with a cloud server uploads every photo you park on, so it needs its own warning or to be off for cloud hosts.",
+        "status": "pending",
+        "priority": "low",
+        "dependencies": [
+          44,
+          149
+        ],
+        "subtasks": [
+          {
+            "id": 1,
+            "title": "API key storage",
+            "description": "macOS Keychain / Windows Credential Manager (Linux: Secret Service or session-only). Never settings.toml. In core, hold it as a SecretString (zeroized, redacted Debug) like the archive-password cache.",
+            "status": "pending"
+          },
+          {
+            "id": 2,
+            "title": "Request changes",
+            "description": "Send Authorization: Bearer <key> when a key is set. Require a model name for cloud servers (no 'loaded model'). Newer OpenAI models reject max_tokens (want max_completion_tokens) and a non-default temperature — handle by retrying without them on that 400, or by host detection. Check Anthropic's compat layer accepts image_url data URIs.",
+            "status": "pending"
+          },
+          {
+            "id": 3,
+            "title": "Settings UI (both shells)",
+            "description": "Rename 'Local endpoint' → 'Model server'; add an API key field (masked); a clear warning when the address isn't local (loopback / private LAN) saying photos are uploaded to that company, and what auto-describe would do. Test & list models should send the key too.",
+            "status": "pending"
+          },
+          {
+            "id": 4,
+            "title": "Privacy review",
+            "description": "Decide whether auto-describe is disabled (or separately confirmed) for non-local hosts; re-read ADR-018 and the CLAUDE.md Second Directive; update the AI-tab privacy copy and the plan doc.",
+            "status": "pending"
+          }
+        ]
       }
     ],
     "metadata": {
