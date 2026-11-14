@@ -117,6 +117,7 @@ mod jxl;
 mod libheif;
 pub mod metadata;
 pub mod orientation;
+mod png_hdr;
 pub mod png_text;
 /// The one poster walk policy (task #115), shared by the MF / FFmpeg /
 /// AVFoundation backends. Pure: no unsafe, no cfg, no I/O.

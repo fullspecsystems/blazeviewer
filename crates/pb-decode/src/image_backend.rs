@@ -85,7 +85,16 @@ pub(crate) fn decode_format(
     if !supported(fmt) {
         return Err(DecodeError::Unsupported);
     }
+    // PNG `cICP` (PNG 3rd ed.): PQ/HLG → an HDR still; an SDR one outranks `iCCP`.
+    let cicp = (fmt == ImageFormat::Png)
+        .then(|| crate::png_hdr::read_cicp(bytes))
+        .flatten();
     let (img, icc) = load_with_icc(bytes, fmt)?;
+    if let Some(c) = cicp.filter(|c| c.is_hdr()) {
+        let (linear, w, h) = crate::png_hdr::linear_scrgb(&img, &c);
+        drop(img);
+        return common::finalize_hdr_scrgb(linear, w, h, codec_name(fmt), fit);
+    }
     let rgba = img.to_rgba8();
     let (w, h) = (rgba.width(), rgba.height());
     // Only TIFF and WebP carry EXIF orientation among these; for the rest, skip
@@ -93,7 +102,9 @@ pub(crate) fn decode_format(
     let exif = matches!(fmt, ImageFormat::Tiff | ImageFormat::WebP).then_some(bytes);
     let mut decoded = common::finalize(rgba.into_raw(), w, h, exif, codec_name(fmt), fit, false)?;
     // Wide-gamut PNG/TIFF/WebP carry an ICC profile → in-shader color management.
-    if let Some(icc) = icc {
+    if let Some(c) = cicp {
+        decoded.color = c.sdr_transform();
+    } else if let Some(icc) = icc {
         decoded.color = ColorTransform::from_icc(&icc);
     }
     Ok(decoded)
@@ -113,7 +124,29 @@ pub(crate) fn export_format(
     if !supported(fmt) {
         return Err(DecodeError::Unsupported.into());
     }
+    let cicp = (fmt == ImageFormat::Png)
+        .then(|| crate::png_hdr::read_cicp(bytes))
+        .flatten();
     let (img, icc) = load_with_icc(bytes, fmt)?;
+    // An HDR PNG: linear scRGB in the app convention, like the other HDR stills.
+    if let Some(c) = cicp.filter(|c| c.is_hdr()) {
+        let (linear, w, h) = crate::png_hdr::linear_scrgb(&img, &c);
+        return Ok(ExportSource {
+            width: w,
+            height: h,
+            channels: Channels::Rgba,
+            samples: Samples::F32(linear),
+            encoding: SampleEncoding::Linear,
+            alpha: AlphaMode::Straight,
+            color: ColorDesc::LinearScRgb,
+            provenance: Provenance {
+                codec: codec_name(fmt),
+                path: "image",
+                recovered: false,
+                raw_preview: false,
+            },
+        });
+    }
     let (w, h) = (img.width(), img.height());
     let (channels, samples) = match img {
         DynamicImage::ImageLuma8(b) => (Channels::Gray, Samples::U8(b.into_raw())),
@@ -148,6 +181,8 @@ pub(crate) fn export_format(
         alpha: AlphaMode::Straight,
         color: if linear {
             ColorDesc::LinearScRgb
+        } else if let Some(c) = cicp {
+            ColorDesc::Cicp(c.export_cicp())
         } else {
             crate::export::icc_desc(icc)
         },

@@ -192,8 +192,9 @@ fn inflate_bounded(payload: &[u8]) -> Option<String> {
     Some(String::from_utf8_lossy(&out).into_owned())
 }
 
-/// PNG's CRC-32 (IEEE, reflected) over the chunk type followed by its data.
-fn crc32(kind: &[u8], data: &[u8]) -> u32 {
+/// PNG's CRC-32 (IEEE, reflected) over the chunk type followed by its data. Shared with
+/// `png_hdr`'s `cICP` reader.
+pub(crate) fn crc32(kind: &[u8], data: &[u8]) -> u32 {
     let mut crc = 0xFFFF_FFFFu32;
     for &b in kind.iter().chain(data) {
         crc ^= b as u32;

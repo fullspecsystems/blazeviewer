@@ -445,7 +445,7 @@ the mean of those maxima; alpha ignored; non-finite → 0; units per format (PNG
 
 | Format | Wide gamut | HDR | Notes |
 |---|---|---|---|
-| PNG | 8/16-bit + `iCCP` / `sRGB` | 16-bit + `cICP` + `cLLI` (`png` 0.18) | HDR PNG reader support is uneven |
+| PNG | 8/16-bit + `iCCP` / `sRGB` | 16-bit + `cICP` + `cLLI` (`png` 0.18 reads them; write as raw chunks) | HDR PNG reader support is uneven; macOS Image I/O reads it |
 | JPEG | 8-bit + ICC | Gain map | Most compatible HDR |
 | WebP | ICC | — | HDR → tone-mapped, with a note |
 | AVIF | ICC or nclx, 10/12-bit | PQ/HLG + `clli`; gain maps | Best all-rounder |
@@ -746,8 +746,12 @@ around until measured (F23).
 
 ## Rung 5 — HDR export
 
-- **Prerequisites:** #146 (luminance + HLG audit); `cICP` PNG read-back (`png` 0.18 exposes it);
-  HDR JPEG XL decode; #145 only for gain-map sources.
+- **Prerequisites:** #146 (luminance + HLG audit — macOS half done 2026-11-14); `cICP` PNG
+  read-back (**done 2026-11-14**, `pb-decode/src/png_hdr.rs`); HDR JPEG XL decode; #145 only for
+  gain-map sources.
+- ⚠ **`png` 0.18 reads `cICP` / `mDCV` / `cLLI` but its encoder never writes them from `Info`**
+  (checked in 0.18.1's source). Write them as raw chunks with `Writer::write_chunk` after
+  `write_header` and before the image data — `png_hdr.rs`'s test helper does exactly this.
 - **Outputs:** 16-bit PQ/HLG PNG (`cICP` + `cLLI` (+ `mDCV`)); AVIF 10/12-bit PQ/HLG + `clli`;
   gain-map AVIF; JPEG XL; gain-map JPEG (libultrahdr, audited, or Image I/O on macOS); HEIC on macOS.
 - *3.8* Rules 1–4; HDR menu (Keep / SDR fallback / Tone-map) greyed per format; "Preview as SDR".
@@ -951,8 +955,11 @@ script: `.taskmaster/docs/export-rung1-manual-test.md` (sections 1–11). Rung 0
 - **HDR luminance (#146), macOS half measured 2026-11-14** (`pb-decode/src/hdr_audit.rs`, synthetic
   PQ + HLG cards): Image I/O stills (display **and** export decode), FFmpeg posters → exactly on the
   203-nit scale; AVFoundation posters +2–3 % on PQ (≈ one JND). So rung 1's HDR → SDR export on the
-  Mac starts from correct values. **Not HDR at all:** JPEG XL (shows SDR) and PNG with `cICP` (shows
-  the raw PQ/HLG code values as SDR — wrong). WIC + MF owed on Windows (ignored tests there).
+  Mac starts from correct values. **Not HDR at all:** JPEG XL (shows SDR). PNG with `cICP` showed
+  the raw PQ/HLG code values as SDR — **fixed in session 2** (`png_hdr.rs`: PQ/HLG → scRGB via a
+  cached LUT + the CICP primaries matrix → `finalize_hdr_scrgb`; display and export decode, every
+  platform; an SDR `cICP` sets the colour transform, outranking `iCCP` per the spec). WIC + MF owed
+  on Windows (ignored tests there).
 
 **Decisions / corrections (implementation)**
 

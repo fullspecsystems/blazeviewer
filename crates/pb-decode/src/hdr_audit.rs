@@ -99,7 +99,10 @@ fn decoded_line(
 ) -> String {
     match img {
         Ok(i) if i.format != PixelFormat::Rgba16F => {
-            format!("{label:<34} not HDR: {:?} {}x{}", i.format, i.width, i.height)
+            format!(
+                "{label:<34} not HDR: {:?} {}x{}",
+                i.format, i.width, i.height
+            )
         }
         Ok(i) => line(label, nits, display_patches(&i)),
         Err(e) => format!("{label:<34} error: {e}"),
@@ -151,7 +154,9 @@ const CLIPS: [&str; 2] = ["pq-card.mp4", "hlg-card.mp4"];
 #[test]
 #[ignore = "a report: run with --ignored --nocapture"]
 fn report() {
-    let mut out = vec![String::from("HDR audit — measured value (ratio to nits/203) per patch")];
+    let mut out = vec![String::from(
+        "HDR audit — measured value (ratio to nits/203) per patch",
+    )];
     for name in STILLS.iter().chain(&PNGS) {
         let nits = nits_for(name);
         let bytes = fixture(name);
@@ -163,7 +168,10 @@ fn report() {
         let export = match crate::decode_named_bytes_for_export(name, &bytes) {
             Ok(s) => export_patches(&s),
             Err(e) => {
-                out.push(format!("{:<34} export refused: {e}", format!("{name} export")));
+                out.push(format!(
+                    "{:<34} export refused: {e}",
+                    format!("{name} export")
+                ));
                 continue;
             }
         };
@@ -176,7 +184,11 @@ fn report() {
             None,
             &std::sync::atomic::AtomicBool::new(false),
         );
-        out.push(decoded_line(&format!("{name} poster (AVFoundation)"), &nits_for(name), img));
+        out.push(decoded_line(
+            &format!("{name} poster (AVFoundation)"),
+            &nits_for(name),
+            img,
+        ));
     }
     #[cfg(feature = "ffvideo")]
     for name in CLIPS {
@@ -185,7 +197,11 @@ fn report() {
             None,
             &std::sync::atomic::AtomicBool::new(false),
         );
-        out.push(decoded_line(&format!("{name} poster (FFmpeg)"), &nits_for(name), img));
+        out.push(decoded_line(
+            &format!("{name} poster (FFmpeg)"),
+            &nits_for(name),
+            img,
+        ));
     }
     let _ = CLIPS;
     println!("{}", out.join("\n"));
@@ -295,5 +311,25 @@ fn media_foundation_hdr_posters_are_on_the_203_nit_scale() {
         .unwrap_or_else(|e| panic!("{name}: {e}"));
         let m = display_patches(&img).unwrap_or_else(|| panic!("{name}: poster isn't HDR"));
         assert_on_scale(&format!("{name} poster"), &nits_for(name), &m, 0.05);
+    }
+}
+
+/// HDR PNGs (`cICP` PQ/HLG, `png_hdr`) — pure Rust, so the same on every platform. Before
+/// `png_hdr` these displayed their raw code values as SDR (the audit's first finding).
+#[test]
+fn hdr_pngs_decode_on_the_203_nit_scale() {
+    for name in PNGS {
+        let nits = nits_for(name);
+        let bytes = fixture(name);
+        let img = crate::decode_named_bytes(name, &bytes, None, false)
+            .unwrap_or_else(|e| panic!("{name}: {e}"));
+        let m = display_patches(&img)
+            .unwrap_or_else(|| panic!("{name}: displayed as {:?}, not HDR", img.format));
+        assert_on_scale(&format!("{name} display"), &nits, &m, 0.01);
+        assert!(img.peak > 4.0, "{name}: a real HDR peak, got {}", img.peak);
+        let src = crate::decode_named_bytes_for_export(name, &bytes)
+            .unwrap_or_else(|e| panic!("{name} export: {e}"));
+        let m = export_patches(&src).unwrap_or_else(|| panic!("{name}: export isn't HDR"));
+        assert_on_scale(&format!("{name} export"), &nits, &m, 0.01);
     }
 }

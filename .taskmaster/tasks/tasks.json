@@ -2192,7 +2192,7 @@
           {
             "id": 3,
             "title": "Normalize any backend that is off",
-            "description": "If a backend's 203-nit patch doesn't decode to ~1.0, scale it into the convention at its decode boundary (one documented constant per backend, citing the measurement). Keep the harness as a regression test. CHANGELOG entry if HDR stills change brightness for users. — macOS: nothing to normalize — every HDR path is on the 203-nit scale. Windows (WIC, MF) still owed: run the ignored hdr_audit tests there.",
+            "description": "If a backend's 203-nit patch doesn't decode to ~1.0, scale it into the convention at its decode boundary (one documented constant per backend, citing the measurement). Keep the harness as a regression test. CHANGELOG entry if HDR stills change brightness for users. — macOS: nothing to normalize — every HDR path is on the 203-nit scale. Windows (WIC, MF) still owed: run the ignored hdr_audit tests there. HDR PNG FIXED (2026-11-14, every platform): the audit found PNGs with a cICP PQ/HLG chunk displayed as SDR code values; pb-decode/src/png_hdr.rs now decodes them on scale (hdr_pngs_decode_on_the_203_nit_scale, 1%). Remaining non-HDR format: JPEG XL (jxl-oxide path returns SDR) — a #89 rung 5 prerequisite.",
             "status": "pending"
           },
           {

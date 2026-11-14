@@ -76,14 +76,23 @@ fn main() {
             src.samples.bit_depth(),
             match &src.color {
                 pb_encode::ColorDesc::Icc(b) => {
-                    format!("icc[{}]", pb_encode::icc::description(b).unwrap_or_default())
+                    format!(
+                        "icc[{}]",
+                        pb_encode::icc::description(b).unwrap_or_default()
+                    )
                 }
                 other => format!("{other:?}"),
             },
             src.provenance.path,
             src.is_hdr(),
         );
-        let img = match prepare(src, &PrepareSpec { rotation_cw: 0, strip_metadata: true }) {
+        let img = match prepare(
+            src,
+            &PrepareSpec {
+                rotation_cw: 0,
+                strip_metadata: true,
+            },
+        ) {
             Ok(i) => i,
             Err(e) => {
                 println!("FAIL     {name}: prepare: {e}");
@@ -102,12 +111,24 @@ fn main() {
             let et = t.elapsed().as_secs_f64() * 1e3;
             times[i].push(et);
             bpm[i].push(png.len() as f64 / mp);
-            line.push_str(&format!(" {effort:?} {et:.0}ms {:.1}MB", png.len() as f64 / 1e6));
+            line.push_str(&format!(
+                " {effort:?} {et:.0}ms {:.1}MB",
+                png.len() as f64 / 1e6
+            ));
             if *effort == PngEffort::Balanced {
-                let back = pb_decode::decode_named_bytes("x.png", &png, None, false).expect("decode back");
-                assert_eq!((back.width, back.height), (img.width, img.height), "{name}: dims survive");
+                let back =
+                    pb_decode::decode_named_bytes("x.png", &png, None, false).expect("decode back");
+                assert_eq!(
+                    (back.width, back.height),
+                    (img.width, img.height),
+                    "{name}: dims survive"
+                );
                 if let Some(o) = &out {
-                    let stem = Path::new(&name).file_stem().unwrap().to_string_lossy().into_owned();
+                    let stem = Path::new(&name)
+                        .file_stem()
+                        .unwrap()
+                        .to_string_lossy()
+                        .into_owned();
                     std::fs::write(o.join(format!("{stem}.png")), &png).expect("write");
                 }
             }
@@ -119,8 +140,15 @@ fn main() {
         ok += 1;
     }
 
-    println!("\n{ok} exported, {refused} refused, {failed} skipped/failed of {}", files.len());
-    println!("decode p50 {:.0}ms p95 {:.0}ms", pct(&mut decode_ms.clone(), 0.5), pct(&mut decode_ms, 0.95));
+    println!(
+        "\n{ok} exported, {refused} refused, {failed} skipped/failed of {}",
+        files.len()
+    );
+    println!(
+        "decode p50 {:.0}ms p95 {:.0}ms",
+        pct(&mut decode_ms.clone(), 0.5),
+        pct(&mut decode_ms, 0.95)
+    );
     for (i, effort) in efforts.iter().enumerate() {
         println!(
             "{effort:?}: encode p50 {:.0}ms p95 {:.0}ms | bytes/MP p50 {:.2}MB",

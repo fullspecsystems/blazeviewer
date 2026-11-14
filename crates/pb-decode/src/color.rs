@@ -247,13 +247,11 @@ fn trc_is_srgb_like(trc: &[f32; 7]) -> bool {
 // tone-maps to SDR using the frame's `peak`.
 
 /// SDR reference white for the scene-linear normalization (BT.2408).
-// Callers: the FFmpeg path (`ffmpeg` feature) and the macOS AVFoundation HDR poster. A
-// build with neither (Windows/Linux without FFmpeg) only uses them from tests.
-#[cfg_attr(not(any(target_os = "macos", feature = "ffmpeg")), allow(dead_code))]
+// Callers: the FFmpeg path, the macOS AVFoundation HDR poster, and HDR PNGs (`png_hdr`,
+// every platform).
 pub const SDR_WHITE_NITS: f32 = 203.0;
 
 /// ST 2084 (PQ) EOTF: encoded [0,1] → scene-linear scRGB (1.0 = 203 nits).
-#[cfg_attr(not(any(target_os = "macos", feature = "ffmpeg")), allow(dead_code))]
 pub fn pq_to_scrgb(e: f32) -> f32 {
     const M1: f32 = 2610.0 / 16384.0;
     const M2: f32 = 2523.0 / 4096.0 * 128.0;
@@ -275,7 +273,6 @@ pub fn pq_to_scrgb(e: f32) -> f32 {
 /// nominal-peak OOTF (γ = 1.2, Lw = 1000 nits). Per-channel is the standard
 /// fast approximation of the luminance-based OOTF — fine for v1 SW playback
 /// (the HW path re-does this in-shader later).
-#[cfg_attr(not(any(target_os = "macos", feature = "ffmpeg")), allow(dead_code))]
 pub fn hlg_to_scrgb(e: f32) -> f32 {
     const A: f32 = 0.178_832_77;
     const B: f32 = 0.284_668_92; // 1 - 4a

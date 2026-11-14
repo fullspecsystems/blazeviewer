@@ -40,6 +40,9 @@ with any pre-release suffix carried only by the tag.
 - **The menu shows the right keys while a video plays.** Space pauses a playing video
   and Shift+Space moves on to the next item, so the menu now says so: Next shows
   Shift+Space and Play/Pause shows Space until the video ends.
+- **HDR PNGs show in HDR.** PNGs tagged as HDR (PQ or HLG — the 2025 PNG standard) used
+  to look flat and grey; they now show with full HDR brightness, like HDR HEIC and AVIF
+  photos. PNGs tagged with a wide-gamut colour space this way get correct colours too.
 
 ### Security
 

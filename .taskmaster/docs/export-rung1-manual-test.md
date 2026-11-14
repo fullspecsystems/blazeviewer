@@ -1,7 +1,7 @@
 # Export as PNG (task #89, rungs 0b / 0c / 1) — manual test script
 
 _Written 2026-11-13 with the implementation; session 2 (2026-11-14) added 1.7–1.8, 6.8–6.9 and
-section 10. Work top to bottom; each step says what to do and what you should see. Note anything
+section 10 (HDR, including HDR PNGs). Work top to bottom; each step says what to do and what you should see. Note anything
 that differs in the plan's `## Handoff` (`.taskmaster/docs/export-plan.md`)._
 
 **What shipped:** File ▸ **Export as PNG…** (`E`; `⇧⌘E` on the Mac menu; right-click the photo).
@@ -147,8 +147,9 @@ The numbers are already measured: on the Mac every HDR decoder agrees that 203 n
 | 10.1 | Open the `hdr` fixture folder in Blaze; step through `pq-card.avif`, `pq-card.heic`, `pq-card.mp4` | All three look **identical** — same brightness for each patch. On an HDR (XDR) screen the right-hand patches glow brighter than white UI; on an SDR screen they compress toward white but still step up |
 | 10.2 | Same for `hlg-card.avif`, `.heic`, `.mp4` | Identical to each other |
 | 10.3 | Compare the **203-nit** patch (3rd PQ, 4th HLG) with a white Finder window side by side | Roughly the same white — that patch *is* SDR reference white |
-| 10.4 | `pq-card.jxl`, `pq-card.png` | **Known gap**: these show as SDR (JPEG XL has no HDR path yet; Blaze ignores a PNG's HDR tag — the PNG looks flat and grey). Compare with Preview, which shows the PNG as HDR |
-| 10.5 | Export `pq-card.heic` as PNG (`E`) | Toast "(HDR as SDR)"; the PNG's patches step up evenly to near-white, no banding or clipping before the 1000-nit patch |
+| 10.4 | `pq-card.png` and `hlg-card.png` (**new in session 2** — HDR PNGs) | Look **identical** to the AVIF/HEIC cards (they used to be flat and grey). Preview should agree |
+| 10.5 | `pq-card.jxl` | **Known gap**: shows as SDR (JPEG XL has no HDR path yet) |
+| 10.6 | Export `pq-card.heic` and `pq-card.png` as PNG (`E`) | Both toast "(HDR as SDR)"; both PNGs step up evenly from black to white with no clipping, and match each other |
 
 ---
 
