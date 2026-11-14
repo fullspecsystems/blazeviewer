@@ -85,18 +85,19 @@ the real viewer (GPU zoom, 1:1, instant flick), and it can show true HDR.
 8. **Flick first, wipe later;** tap toggles, hold peeks.
 9. **OS recent-file history is always suppressed** — not only when pinned.
 10. **JPEG XL output is wanted**, via a thin safe wrapper over `jxl-sys`.
-
-**Changed by review round 2 — confirm with the owner**
-
-- **`Esc` stays unconditional quit, including in Export mode** (F1). ADR-023 records the owner's
-  "insta-quit is a priority feature"; rev 3 had silently reversed it. Export mode is left with `E`,
-  the panel's ✕, or the menu. If the owner wants `Esc` to leave the mode, that's an ADR-023
-  amendment.
-- **`Return` is not the commit key** (F15) — `Enter` / `NumpadEnter` are `Action::Random`, a spine
-  navigation key. Commit is a bindable `Action::ExportCommit` (proposed default `⌘↩` /
-  `Ctrl+Enter`), plus File ▸ Export… (`⇧⌘E`), which enters the mode or commits when already in it.
-- **The flick compares the prepared source with the decoded export** (F2), not the ring's
-  displayed image — so the difference on screen is exactly the codec (and resize).
+11. **Export mode is a mode, not a modal — `Esc` and `Enter` keep their global meanings**
+    (owner, 2026-11-13, "try it this way"; review F1/F15). The test: the rest of the keyboard still
+    drives the image (Space/Backspace navigate, `R` rotates, `Y` flicks), unlike Settings or a
+    dialog, where focus has moved to another window. So `Esc` quits (ADR-023's insta-quit) and
+    `Enter` is Random. Commit is the bindable `Action::ExportCommit` on `⌘↩` / `Ctrl+Enter` —
+    the app's own precedent (Ask About Image submits with `⌘/Ctrl+Enter`) — plus File ▸ Export…
+    (`⇧⌘E`), which enters the mode or commits in it; leave with `E`, the ✕ or the menu. The truly
+    modal pieces inside the flow (save dialog, "Custom…" size, batch progress) follow dialog
+    rules natively: `Esc` cancels, `Return` commits. A stray `Enter` is cheap to undo
+    (`Shift+Enter` is RandomPrev, and settings carry across navigation).
+    **Pinned for revisit — see *Part 8* "Pinned".**
+12. **The flick compares the prepared source with the decoded export** (F2), so the difference on
+    screen is exactly the codec (and resize).
 
 **Recommended, not yet confirmed** — *Part 8*.
 
@@ -657,6 +658,8 @@ macOS; exFAT / SMB / TCC hand checks pass.
 
 **2.0 Input routing** (*3.11*): `ExportCommit`, `E` toggle, `Esc` unchanged, `[`/`]` contextual,
 `Tab` suspend, optional macOS Tab-focus arbitration; tests for the release net in every focus state.
+Build the Export-mode bindings as a **contextual keymap layer** so the pinned `Enter`/`Esc` revisit
+(*Part 8*) is a one-line default change.
 
 **Design.**
 
@@ -820,8 +823,8 @@ explicit paths only** (shared working copy).
 
 # Part 8 — Open questions
 
-1. **`Esc` in Export mode** — keep quit (ADR-023, current plan) or amend so it leaves the mode?
-2. **Commit key** — `⌘↩` / `Ctrl+Enter` for `ExportCommit`; `⇧⌘E` for File ▸ Export…?
+1. ~~`Esc` in Export mode~~ — decided (*1.4* #11): quit, pinned for revisit.
+2. ~~Commit key~~ — decided (*1.4* #11): `⌘↩` / `Ctrl+Enter` + `⇧⌘E`, pinned for revisit.
 3. **`E`** toggles Export mode (rung 1: opens the save dialog directly).
 4. **HDR default** — "HDR with SDR fallback" recommended.
 5. **Normal compare tap/hold** — recommended.
@@ -831,6 +834,16 @@ explicit paths only** (shared working copy).
 8. **RAW** — match the viewer (embedded full-size preview) recommended; a demosaic option?
 9. **macOS Tab focus into the panel** in rung 2, or later?
 10. **Windows MRU keys / Linux recents** — if they can't be suppressed, accept or work around?
+
+**Pinned (owner, 2026-11-13) — revisit once Export mode is in daily use:**
+
+- **`Enter` commits in Export mode** and/or **`Esc` leaves the mode**, if the owner finds they keep
+  pressing them naturally. The owner's view: losing your place to an unexpected `Enter` or `Esc` is
+  likely costlier than not being able to jump to a random image mid-export. `Esc` → leave mode
+  would be an ADR-023 amendment.
+- **To keep the flip cheap,** rung 2.0 implements Export-mode bindings as a **contextual keymap
+  layer**: switching `Enter` to `ExportCommit` or `Esc` to "leave mode" in that context is a
+  one-line default change plus its tests, not a redesign.
 
 # Part 9 — Review logs
 

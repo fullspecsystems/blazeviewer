@@ -942,7 +942,7 @@
           {
             "id": 6,
             "title": "Rung 2 — Export mode panel",
-            "description": "2.0 input routing: Action::ExportCommit (bindable; proposed Cmd/Ctrl+Enter), E toggles the mode, Esc stays quit (ADR-023 — owner may amend), Enter stays Random, [ ] contextual quality, Tab suspends the mode; optional macOS Tab-focus arbitration. Then SlotContent::Export; the Encoder trait + Caps + JPEG; resize presets (no raster upscaling; SVG rasterized at target) + Custom… dialog; flatten; Strip metadata + categories (typed EXIF allowlist); details/provenance notes; the mode × action table (one test per row); prefs via the lenient [export] deserializer. Native SwiftUI (run /mac-arsed-mac-app first); pb-ui on Windows (checkbox component if missing).",
+            "description": "2.0 input routing (owner 2026-11-13: Export mode is a mode, not a modal): Action::ExportCommit on Cmd/Ctrl+Enter (bindable; Ask About Image precedent) + File > Export… ⇧⌘E, E toggles the mode, Esc stays quit, Enter stays Random — built as a contextual keymap layer so the PINNED revisit (Enter commits / Esc leaves the mode, plan Part 8) is a one-line default change, [ ] contextual quality, Tab suspends the mode; optional macOS Tab-focus arbitration. Then SlotContent::Export; the Encoder trait + Caps + JPEG; resize presets (no raster upscaling; SVG rasterized at target) + Custom… dialog; flatten; Strip metadata + categories (typed EXIF allowlist); details/provenance notes; the mode × action table (one test per row); prefs via the lenient [export] deserializer. Native SwiftUI (run /mac-arsed-mac-app first); pb-ui on Windows (checkbox component if missing).",
             "status": "pending"
           },
           {
