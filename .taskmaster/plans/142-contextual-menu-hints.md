@@ -45,13 +45,22 @@ pan overflow, which a table can't express cleanly.
   `shortcut_hint` had become test-only, a dead-code error on Windows. It's now the single
   context-aware function. (Buzz needed `rustup target add x86_64-pc-windows-msvc` first.)
 
+**Verified (Windows x64, 2026-11-13, at 765c0b0a + #141):** native compile and tests, the
+first time the `pb-app` changes were built on Windows.
+- `cargo clippy --workspace --all-targets --locked -- -D warnings`: clean.
+- `cargo clippy -p pb-decode -p pb-app --features libheif,dav1d,ffprobe --all-targets --locked
+  -- -D warnings`: clean.
+- `cargo test -p pb-app --locked`: 91 passed, including
+  `menu::tests::image_labels_carry_the_users_keymap_shortcut` with the new `labeled_in`
+  asserts. With the ship features: 92 passed.
+- `cargo test -p pb-app-core --features ffprobe --locked`: 1034 passed, 5 ignored (+4 for
+  `menu_hint` and the parity test).
+
 **Not verified:**
-- **Windows run:** the `pb-app` changes (`menu.rs` `ContextHints`, `main.rs` field +
-  `apply_menu_to_native` + `current_menu_state`) compile but have never run, and the
-  `menu.rs` unit tests (incl. the new `labeled_in` asserts) only run on Windows. Run
-  `cargo test -p pb-app`, then play a video and check Image ▸ Next reads "Shift+Space" and
-  Playback ▸ Play/Pause reads "Space", and that both return to "Space" / "P" when the clip
-  ends or you move to a photo.
+- **Windows by hand:** play a video and check Image ▸ Next reads "Shift+Space" and Playback ▸
+  Play/Pause reads "Space", and that both return to "Space" / "P" when the clip ends or you
+  move to a photo. Owner check, with `pwsh scripts/build-windows.ps1 -Run`. Set 142.3 done
+  once it passes.
 - **Linux:** the egui bar change (`menu_bar_spec`'s `l` closure) is `cfg(linux)` and not
   compiled anywhere yet. It's two lines; next Linux build (AppImage) will catch a typo.
 - **macOS by hand:** the same check as Windows, in the Mac menu (badges).
