@@ -174,8 +174,8 @@ fn fs_scene_planar(in: VsOut) -> @location(0) vec4<f32> {
 /// samples the intermediate, then branches on the surface type (`params.z`):
 ///   - **SDR 8-bit surface** (0): an SDR image (peak = 1) passes straight to the sRGB
 ///     encode, exactly as before. An **HDR** image (peak > 1) gets the hue-keeping map —
-///     into the sRGB gamut by desaturating toward luminance, then extended Reinhard on the
-///     brightest channel with the others scaled alongside — the WGSL twin of
+///     negative (out-of-sRGB) channels clipped, then extended Reinhard on the brightest
+///     channel with the others scaled alongside — the WGSL twin of
 ///     `pb_color::tonemap::hdr_to_sdr`, which the export and clipboard paths use. (The old
 ///     per-channel curve turned bright saturated reds magenta.)
 ///   - **HDR fp16 scRGB surface** (1): output scene-linear scaled to the SDR white
@@ -214,15 +214,9 @@ fn reinhard(v: f32, lw: f32) -> f32 {
     return x * (1.0 + x / (lw * lw)) / (1.0 + x);
 }
 
-// pb_color::tonemap::into_gamut with BT.709 luma: pull a negative channel to 0 by moving the
-// colour toward its own luminance (keeps hue), instead of clipping it.
+// pb_color::tonemap::into_gamut: clip negative (out-of-sRGB) channels to 0.
 fn into_gamut(c: vec3<f32>) -> vec3<f32> {
-    let mn = min(c.r, min(c.g, c.b));
-    if (mn >= 0.0) { return c; }
-    let y = dot(c, vec3<f32>(0.212639, 0.715169, 0.072192));
-    if (y <= 0.0) { return vec3<f32>(0.0); }
-    let t = y / (y - mn);
-    return max(vec3<f32>(y) + t * (c - vec3<f32>(y)), vec3<f32>(0.0));
+    return max(c, vec3<f32>(0.0));
 }
 
 // Highlight roll-off for the macOS EDR surface: identity at/below SDR white (1.0),
@@ -7090,7 +7084,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
             let out = render_offscreen_hdr(&px, w, h, w, h, peak);
             let got = at(&out, w, w / 2, h / 2);
             // The CPU reference — the export / clipboard paths' exact maths.
-            let sdr = pb_color::tonemap::hdr_to_sdr(rgb, peak, pb_color::tonemap::LUMA_BT709);
+            let sdr = pb_color::tonemap::hdr_to_sdr(rgb, peak);
             let want = sdr.map(|v| {
                 let x = v.clamp(0.0, 1.0);
                 let e = if x <= 0.003_130_8 {

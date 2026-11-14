@@ -270,7 +270,7 @@ fn unpremultiply(samples: &mut Samples, channels: Channels) {
 
 /// Tone-map linear scRGB (BT.709 primaries, 1.0 = SDR white) to Display P3 16-bit
 /// (export-plan.md § 3.8): convert to P3-linear first so wide-gamut colour isn't clamped
-/// away, bring anything still outside P3 in by desaturating toward its luminance, take the
+/// away, clip whatever is still outside P3 (a negative channel) to 0, take the
 /// white point from the full-resolution peak, then the **hue-keeping** extended Reinhard
 /// (`pb_color::tonemap` — the brightest channel follows the curve and the others scale with
 /// it; per-channel compression turned bright reds magenta), and encode with the sRGB/P3
@@ -296,8 +296,8 @@ fn tone_map_to_p3(f: &[f32], channels: Channels) -> (Samples, Channels, bool) {
             m[2][0] * c[0] + m[2][1] * c[1] + m[2][2] * c[2],
         ]
     };
-    use pb_color::tonemap::{into_gamut, tone_map, LUMA_DISPLAY_P3};
-    let in_p3 = |px: &[f32]| into_gamut(to_p3(rgb_of(px)), LUMA_DISPLAY_P3);
+    use pb_color::tonemap::{into_gamut, tone_map};
+    let in_p3 = |px: &[f32]| into_gamut(to_p3(rgb_of(px)));
     let mut peak = 1.0f32;
     for px in f.chunks_exact(n) {
         for v in in_p3(px) {

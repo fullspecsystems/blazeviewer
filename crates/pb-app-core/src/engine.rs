@@ -1322,9 +1322,9 @@ pub fn srgb_oetf(c: f32) -> f32 {
 ///   no ICC profile, so a wide-gamut source pastes interpreted as sRGB — a
 ///   documented v1 limitation.
 /// - `Rgba16F` (HDR scene-linear scRGB) is tone-mapped to SDR sRGB8 with the same
-///   hue-keeping map as the export and the SDR present pass (`pb_color::tonemap`: into the
-///   sRGB gamut by desaturating toward luminance, then extended Reinhard on the brightest
-///   channel at the image `peak`), then sRGB-encoded.
+///   hue-keeping map as the export and the SDR present pass (`pb_color::tonemap`: negative
+///   (out-of-sRGB) channels clipped, then extended Reinhard on the brightest channel at the
+///   image `peak`), then sRGB-encoded.
 pub fn to_clipboard_rgba8(img: &DecodedImage) -> Vec<u8> {
     match img.format {
         PixelFormat::Rgba8 => img.pixels.clone(),
@@ -1336,7 +1336,7 @@ pub fn to_clipboard_rgba8(img: &DecodedImage) -> Vec<u8> {
             for px in img.pixels.chunks_exact(8) {
                 let rgb = [0, 1, 2]
                     .map(|ch| half::f16::from_le_bytes([px[ch * 2], px[ch * 2 + 1]]).to_f32());
-                let sdr = pb_color::tonemap::hdr_to_sdr(rgb, lw, pb_color::tonemap::LUMA_BT709);
+                let sdr = pb_color::tonemap::hdr_to_sdr(rgb, lw);
                 for v in sdr {
                     out.push((srgb_oetf(v) * 255.0 + 0.5) as u8);
                 }

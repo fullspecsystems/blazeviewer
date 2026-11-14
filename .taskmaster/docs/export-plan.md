@@ -443,7 +443,8 @@ approximation (F18). SDR P010 is SDR.
 **HDR → SDR (rungs 1–4 and SDR targets)** (F18): tone-map in **Display-P3 linear** (not BT.709 —
 negatives aren't clamped away first), with the white point from the **full-resolution prepared
 image's** peak, then encode P3 and tag P3. Operator (revised 2026-11-14 after the owner saw exported HDR reds turn magenta): **hue-keeping**
-extended Reinhard — out-of-gamut colours are desaturated toward their luminance, then the
+extended Reinhard — out-of-gamut channels are clipped to 0 (desaturating toward luminance was
+tried first, and added blue to the owner's BT.2020-red test bar), then the
 *brightest channel* follows the curve and all three scale with it (`pb_color::tonemap`). The same
 maths runs in the clipboard path (Copy / OCR / Describe) and the renderer's SDR shader (HDR images
 only — SDR content is untouched), so an SDR export still matches what an SDR screen shows. The
@@ -1043,8 +1044,10 @@ test script: `.taskmaster/docs/export-rung1-manual-test.md`. Rung 0a (#81) not s
   `NSNavRecentPlaces` after each export dialog.
 - **HDR → SDR keeps hue (session 5, owner report "HDR red looks kind of magenta"):** the
   per-channel Reinhard in `prepare`, `to_clipboard_rgba8` and the present shader is replaced by
-  `pb_color::tonemap` (gamut-map toward luminance, then Reinhard on max-RGB with the channels
-  scaled together — § 3.8). Verified: pb-color unit tests (the old curve's 5× ratio jump is pinned
+  `pb_color::tonemap` (clip out-of-gamut channels, then Reinhard on max-RGB with the channels
+  scaled together — § 3.8). Owner's HDR10 test pattern (BT.2020 bars near 10,000 nits): the red
+  bar was (255, 0, 94); first fix (desaturate toward luminance) would still give ≈ 62 blue; the
+  clip gives pure red — pinned by `the_test_patterns_bt2020_red_bar_stays_red`. Verified: pb-color unit tests (the old curve's 5× ratio jump is pinned
   as the counter-example), a prepare test, and a **GPU golden test** that the shader's HDR branch
   matches the CPU map within 2/255 (`offscreen_hdr_tone_map_keeps_hue_and_matches_the_cpu_map`,
   via a new `render_offscreen_hdr`). SDR images take the unchanged path (goldens pass).
