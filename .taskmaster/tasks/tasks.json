@@ -2004,6 +2004,40 @@
             "status": "review"
           }
         ]
+      },
+      {
+        "id": 143,
+        "title": "Audio still drifts out of sync on long MKV playback (macOS Session route)",
+        "description": "Owner report 2026-11-13: playing a feature-length MKV, audio still sometimes gets out of sync with the picture. Intermittent, not constant. Owner expects the fix to be tedious.\n\nREPRO FILE (owner's NAS, over SMB; exact path is kept off this public repo, ask the owner or see the Mac session's local notes): Blade Runner 2049 UHD remux, ~68 GB MKV, 2h43m, ~55.5 Mb/s. Video: HEVC Main 10, 3840x2160, 23.976 fps, PQ HDR10 + Dolby Vision. Audio: TrueHD + Atmos 7.1 48 kHz (default) + AC-3 5.1 compatibility track. 20+ PGS subtitle tracks.\n\nWHICH PIPELINE: on macOS, MKV takes the Session route (FFmpeg demux/decode -> wgpu -> Metal; macos_native_route says MKV isn't AVPlayer-native, and the sample-buffer presenter is parked behind PB_SAMPLE_BUFFER=1). Audio is the master clock: video is paced to the audio position with a bounded correction (video_session.rs MAX_AUDIO_CORRECTION, ~200 ms/s of convergence), and starvation rebuffers rather than drifts (STARVATION_REBUFFER = 300 ms). TrueHD is decoded by FFmpeg to PCM on the owned off-main audio decoder (overhaul 1E).\n\nPRIOR WORK (none of it an open task on this): #79 built the streaming player and its audio-position-corrected sync (79.6: physical lip-sync was left as a manual check). The video-playback-overhaul plan fixed the post-seek and starvation audio bugs R2/R4/R5 (1B, 1D, 1E). #133 [review] added the SMB read-ahead ring; this file is exactly the high-bitrate-over-SMB case it targets.\n\nHYPOTHESES (unranked, none tested):\n(a) A rebuffer or long read stall over SMB resumes video and audio at slightly different points.\n(b) A seek, pause/resume or track switch lands audio and video on different timestamps (the R4/1D seek coordinator settles audio 250 ms after landing).\n(c) Steady drift between the audio device clock and the clock video is paced against, if the correction loop isn't actually engaged on this path (e.g. after a discontinuity).\n(d) Output latency (Bluetooth/AirPlay/HDMI, or a device change mid-film) that isn't compensated; that would read as constant, not intermittent.\n(e) TrueHD-specific: decoder delay, Atmos substream handling, or the 7.1 downmix/resample path.\n\nNEXT TIME IT HAPPENS, capture: how far into the film; audio ahead or behind, roughly how much; whether it followed a seek, pause, subtitle/audio track change or a visible stutter; whether it corrects itself or stays off; which output device; whether switching to the AC-3 track or pausing/resuming fixes it.\n\nGAP: the PB_TRACE session diag (app_core_impl/video.rs, every ~2 s while Playing) prints dropped/rebuf/pos but NOT the A/V offset, so a drift can't be seen in a log today. Adding it is the cheap first step.",
+        "status": "pending",
+        "priority": "medium",
+        "dependencies": [],
+        "subtasks": [
+          {
+            "id": 1,
+            "title": "Instrument: put the A/V offset in the PB_TRACE session diag",
+            "description": "Add presented-video PTS minus audio clock position (and the current audio output latency, plus the correction applied) to the ~2 s session diag line, and log discontinuity/rebuffer/seek events with their offsets. Without this, 'sometimes out of sync' can't be measured or tied to a cause. Durations only, no paths (privacy rule).",
+            "status": "pending"
+          },
+          {
+            "id": 2,
+            "title": "Reproduce and characterize with the owner's repro file",
+            "description": "Play the repro file over SMB with PB_TRACE=1. Establish whether the offset jumps at an event (rebuffer, seek, pause, track switch) or creeps steadily, its sign and size, and whether it self-corrects. Compare the TrueHD track with the AC-3 compatibility track, and a local copy against SMB.",
+            "status": "pending"
+          },
+          {
+            "id": 3,
+            "title": "Check Windows on the same file",
+            "description": "Windows decodes video with Media Foundation and audio via WASAPI/FFmpeg. If it drifts there too the cause is likely shared core pacing; if not, it's the macOS Session audio path. Needs the Windows session.",
+            "status": "pending"
+          },
+          {
+            "id": 4,
+            "title": "Fix, with a regression test for the cause found",
+            "description": "Shape depends on 1-3. Pin the specific event (e.g. a rebuffer mid-play, a seek) in a VideoSession unit test with a fake clock, the way the starvation/seek tests already do.",
+            "status": "pending"
+          }
+        ]
       }
     ],
     "metadata": {
