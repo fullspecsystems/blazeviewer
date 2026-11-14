@@ -27,8 +27,14 @@ git pull
 ./scripts/build-swift-host.sh --run      # quits any running copy first, then launches
 ```
 
-A prebuilt app from last night's session is at `target/swift-host/release/Blaze Viewer.app`.
-Rebuild anyway if you've pulled since.
+A prebuilt app is at `target/swift-host/release/Blaze Viewer.app` (session 2, built from the
+commit that added this line — About shows its build id). Rebuild if you've pulled since.
+
+**What changed in session 2** (2026-11-14), so you know where to look:
+- the right-click **Export as PNG…** item (1.7–1.8);
+- pinning "Open files in" now forgets a remembered export folder (6.8–6.9);
+- **HDR PNGs** display in HDR instead of flat grey (10.4, 10.6);
+- rung 2's encoding core (JPEG, resize) landed with **no UI** — nothing to click yet.
 
 Have handy:
 - a folder with an **iPhone HEIC** (Display P3);
@@ -39,7 +45,8 @@ Have handy:
 - a large **NEF/ARW**;
 - an **SVG**;
 - a **video**;
-- a **.zip of photos**.
+- a **.zip of photos**;
+- the HDR test cards in `crates/pb-decode/tests/fixtures/hdr/` (section 10).
 
 ## 1. Where it lives
 
