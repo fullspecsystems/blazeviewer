@@ -19,6 +19,8 @@ pub mod animation;
 mod color;
 mod common;
 pub mod export;
+#[cfg(test)]
+mod hdr_audit;
 mod image_backend;
 #[cfg(target_os = "macos")]
 mod imageio;

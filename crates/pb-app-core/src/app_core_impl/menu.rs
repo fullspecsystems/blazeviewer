@@ -91,6 +91,7 @@ impl AppCore {
             fullscreen: !self.windowed,
             compare_pinned: self.compare_pin.is_some(),
             compare_pinned_here: self.compare_pin == Some(item),
+            can_export: self.can_export(),
         };
         self.effects
             .push(contract::CoreEffect::ShowContextMenu(state));

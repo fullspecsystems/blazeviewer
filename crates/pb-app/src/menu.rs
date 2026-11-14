@@ -1538,6 +1538,14 @@ pub fn build_context_menu(
         &item(ids::ASK_IMAGE, "Ask About Image…"),
         &item(ids::COPY_DESCRIPTION, "Copy AI Description"),
     ]);
+    // File group: Export (task #89 — any still, archive entries included), then Reveal.
+    // The separator only when the group has a row (macOS parity).
+    if state.can_export || state.can_reveal {
+        let _ = menu.append(&sep());
+    }
+    if state.can_export {
+        let _ = menu.append(&item(ids::EXPORT, "Export as PNG…"));
+    }
     // Reveal only for a real on-disk file (archive entries have no path). The label follows
     // the platform idiom, matching the File-menu item.
     if state.can_reveal {

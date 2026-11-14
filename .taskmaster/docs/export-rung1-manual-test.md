@@ -1,10 +1,11 @@
 # Export as PNG (task #89, rungs 0b / 0c / 1) — manual test script
 
-_Written 2026-11-13 with the implementation. Work top to bottom; each step says what to do
-and what you should see. Note anything that differs in the plan's `## Handoff`
-(`.taskmaster/docs/export-plan.md`)._
+_Written 2026-11-13 with the implementation; session 2 (2026-11-14) added 1.7–1.8, 6.8–6.9 and
+section 10. Work top to bottom; each step says what to do and what you should see. Note anything
+that differs in the plan's `## Handoff` (`.taskmaster/docs/export-plan.md`)._
 
-**What shipped:** File ▸ **Export as PNG…** (`E`; `⇧⌘E` on the Mac menu). It opens the native
+**What shipped:** File ▸ **Export as PNG…** (`E`; `⇧⌘E` on the Mac menu; right-click the photo).
+It opens the native
 save dialog, then writes a full-resolution PNG off the event loop:
 - the RAM rotation is baked in;
 - wide gamut is kept, with a sanitized profile;
@@ -50,6 +51,8 @@ Have handy:
 | 1.4 | In a folder containing a `.zip`, land on the zip's door tile | Menu item **disabled**; `E` toasts "Open the archive to export its images" |
 | 1.5 | Press `?` (help overlay) | A row "Export as PNG — E" |
 | 1.6 | Settings ▸ Shortcuts | "Export as PNG" listed, bound to `E`, rebindable |
+| 1.7 | Right-click a photo | "**Export as PNG…**" after the AI items, in a group with Show in Finder and Quick Sort; choosing it opens the same sheet as `E` |
+| 1.8 | Right-click a **video**, a **zip door**, and a photo **inside a zip** | Video and door: **no** Export item. Inside the zip: Export is there, Show in Finder and Quick Sort aren't (and that group still has its separator) |
 
 ## 2. Basic export
 
@@ -100,7 +103,8 @@ Have handy:
 | 6.5 | Settings ▸ "Open files in": **a pinned folder** → choose one. Export | The sheet starts in the **pinned folder** |
 | 6.6 | Export to a third folder, then export again | Starts in that third folder (remembered **for this session only**) |
 | 6.7 | Quit, relaunch, export | Starts in the **pinned folder** again — nothing was remembered |
-| 6.8 | The `settings.toml` value from 6.4 | Unchanged by 6.5–6.7 (pinned exports never write it). Pinning does **not** clear an already-stored value — that's open question Q6 in the plan |
+| 6.8 | Re-run the `grep -c` from 6.4 | `0` — **pinning in 6.5 forgot the remembered folder** (plan Q6, implemented in session 2 on your "pinned means don't remember" reasoning). Tell me if you'd rather it kept it |
+| 6.9 | Settings ▸ "Open files in": back to **the current image's folder**. Export | Starts in the **photo's own folder** (nothing remembered); after this export, `grep -c` shows `1` again |
 
 ## 7. Safety
 
@@ -131,6 +135,21 @@ Have handy:
 | 9.5 | Export a **CMYK JPEG** (if you have one) | Toast "Export failed — CMYK JPEGs can't be exported yet" |
 | 9.6 | Export an **animated GIF/WebP** | The first frame (exporting the current frame waits for #81) |
 
+## 10. HDR brightness (task #146 — the visual half)
+
+The numbers are already measured: on the Mac every HDR decoder agrees that 203 nits = SDR white
+(within 3 %). This is the eyeball check. The cards live in
+`crates/pb-decode/tests/fixtures/hdr/`: six flat grey patches, left to right **0 · 100 · 203 · 400 ·
+1000 · 4000 nits** (PQ) or **0 · 50 · 100 · 203 · 400 · 1000** (HLG).
+
+| # | Do | Expect |
+|---|---|---|
+| 10.1 | Open the `hdr` fixture folder in Blaze; step through `pq-card.avif`, `pq-card.heic`, `pq-card.mp4` | All three look **identical** — same brightness for each patch. On an HDR (XDR) screen the right-hand patches glow brighter than white UI; on an SDR screen they compress toward white but still step up |
+| 10.2 | Same for `hlg-card.avif`, `.heic`, `.mp4` | Identical to each other |
+| 10.3 | Compare the **203-nit** patch (3rd PQ, 4th HLG) with a white Finder window side by side | Roughly the same white — that patch *is* SDR reference white |
+| 10.4 | `pq-card.jxl`, `pq-card.png` | **Known gap**: these show as SDR (JPEG XL has no HDR path yet; Blaze ignores a PNG's HDR tag — the PNG looks flat and grey). Compare with Preview, which shows the PNG as HDR |
+| 10.5 | Export `pq-card.heic` as PNG (`E`) | Toast "(HDR as SDR)"; the PNG's patches step up evenly to near-white, no banding or clipping before the 1000-nit patch |
+
 ---
 
 ## Windows (the other machine)
@@ -149,3 +168,5 @@ only compile-checked from the Mac.
 | W7 | Browse while a big export runs | Smooth; the export thread runs at background priority |
 | W8 | Quit during an export | Quits within ~4 s; no `.tmp` left |
 | W9 | (#81 handoff) Pause a film mid-scene, Ctrl+C, paste into Paint | Is it the **poster**, or the paused frame? (Expected today: the poster) |
+| W10 | Right-click a photo, a video, a zip door | "Export as PNG…" on the photo only; it opens the save dialog |
+| W11 | `cargo test -p pb-decode hdr_audit -- --ignored --nocapture` (#146 Windows half) | Every ratio ≈ 1.00x. If WIC reads ~2.5x off, that's the 80-vs-203-nit scRGB mismatch — record the table in the plan's Handoff |

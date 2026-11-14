@@ -827,8 +827,10 @@ explicit paths only** (shared working copy).
 3. **`E`** toggles Export mode (rung 1: opens the save dialog directly).
 4. **HDR default** — "HDR with SDR fallback" recommended.
 5. **Normal compare tap/hold** — recommended.
-6. **Pinned + save start folder** — pinned folder + RAM-only session memory; **pinning clears a
-   stored `last_export_folder`** — recommended.
+6. ~~**Pinned + save start folder**~~ — implemented 2026-11-14 on the owner's own reasoning
+   ("a pinned folder says *don't remember what folder I was last in*"): pinned folder + RAM-only
+   session memory, and **pinning clears a stored `last_export_folder`**
+   (`export::export_folder_after_settings`). Revert = return `live` unconditionally.
 7. **Strip-metadata stickiness** — always starts checked (recommended).
 8. **RAW** — match the viewer (embedded full-size preview) recommended; a demosaic option?
 9. **macOS Tab focus into the panel** in rung 2, or later?
@@ -913,9 +915,10 @@ confirmed directly). **All accepted.**
 
 ## Handoff
 
-**Status (2026-11-13, implementation session 1):** rungs **0b, 0c and 1 are built** — Export as PNG
-end to end on macOS, compile-checked for Windows. Manual test script:
-`.taskmaster/docs/export-rung1-manual-test.md`. Rung 0a (#81) not started.
+**Status (2026-11-14, implementation session 2):** rungs **0b, 0c and 1 are built** — Export as PNG
+end to end on macOS, compile-checked for Windows. Session 2 closed rung 1's gaps (right-click item,
+Q6) and ran the macOS half of the HDR brightness audit (#146, rung 5's prerequisite). Manual test
+script: `.taskmaster/docs/export-rung1-manual-test.md` (sections 1–11). Rung 0a (#81) not started.
 
 **Verified** (on the dev Mac, macOS)
 
@@ -944,7 +947,12 @@ end to end on macOS, compile-checked for Windows. Manual test script:
   priority. Linux: rfd's save dialog and GTK `recently-used.xbel`.
 - TCC behaviour for the temp sibling next to a granted save path (the direct-write fallback is
   unit-untested on a real refusal); exFAT/SMB commit paths (the placeholder fallback).
-- Copy on a video copies the poster on Windows (inferred). HDR luminance per backend → #146.
+- Copy on a video copies the poster on Windows (inferred).
+- **HDR luminance (#146), macOS half measured 2026-11-14** (`pb-decode/src/hdr_audit.rs`, synthetic
+  PQ + HLG cards): Image I/O stills (display **and** export decode), FFmpeg posters → exactly on the
+  203-nit scale; AVFoundation posters +2–3 % on PQ (≈ one JND). So rung 1's HDR → SDR export on the
+  Mac starts from correct values. **Not HDR at all:** JPEG XL (shows SDR) and PNG with `cICP` (shows
+  the raw PQ/HLG code values as SDR — wrong). WIC + MF owed on Windows (ignored tests there).
 
 **Decisions / corrections (implementation)**
 
@@ -954,8 +962,13 @@ end to end on macOS, compile-checked for Windows. Manual test script:
   § 3.4's order changed accordingly).
 - **The JPEG encoder moved** to `pb_encode::encode_jpeg_rgba8` (no re-export); `describe.rs` and
   pb-decode's test fixtures use it from there.
-- **Not yet:** the right-click context-menu item (File menu + `E` + ⇧⌘E only); a Reveal action on
-  the success toast; "pinning clears a stored `last_export_folder`" (Part 8 Q6, unconfirmed).
+- **Session 2:** the right-click item "Export as PNG…" on both shells (`ContextMenuState::can_export`,
+  hidden for videos and doors — the menu's existing omit-don't-disable idiom), in a new file group
+  with Show in Finder / Quick Sort. Q6 implemented (Part 8). `apply_settings` now also keeps the
+  **live** `last_export_folder` over the Settings form's snapshot (the winit dialog folds onto the
+  settings it opened with, so an export finishing while Settings is open was reverted).
+- **Not yet:** a Reveal action on the success toast — toasts carry no actions (1.3 s pills on both
+  shells), so it needs a toast-action design first.
 - `last_export_folder` is never written while pinned; the pinned session folder lives in
   `ExportState` (RAM). The save-panel cleanup removes `NSOSPLastRootDirectory`,
   `NSNavLastRootDirectory`, `NSNavRecentPlaces` after each export dialog.
@@ -967,6 +980,10 @@ end to end on macOS, compile-checked for Windows. Manual test script:
   `export_worker::lower_thread_priority` (`THREAD_MODE_BACKGROUND_BEGIN`). The Windows machine
   must run manual-test section W. Strike this line once it does.
 - **Linux:** untested (rfd save dialog; `nice(10)` worker priority).
+- **Windows (session 2):** the right-click "Export as PNG…" item is compile-checked only. The #146
+  WIC-stills and MF-poster audit tests are `#[ignore]`d on Windows — run
+  `cargo test -p pb-decode hdr_audit -- --ignored --nocapture`; drop the attributes if they pass,
+  else normalize per #146 subtask 3.
 
 **Claimed**
 

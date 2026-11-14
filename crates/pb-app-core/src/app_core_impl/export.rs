@@ -310,6 +310,38 @@ mod tests {
         v
     }
 
+    /// The right-click menu offers "Export as PNG…" exactly when the File menu would: a
+    /// still, not a video (until #81) or an archive door.
+    #[test]
+    fn the_context_menu_offers_export_only_for_exportable_items() {
+        let lib = sandbox("ctx");
+        write_jpeg(&lib.join("a.jpg"), 4, 4);
+        std::fs::write(lib.join("b.mp4"), b"").unwrap();
+        std::fs::write(lib.join("c.zip"), b"").unwrap();
+        let mut core = test_core();
+        core.source = Arc::new(pb_source::FsSource::new(vec![
+            lib.join("a.jpg"),
+            lib.join("b.mp4"),
+            lib.join("c.zip"),
+        ]));
+        let offered = |core: &mut AppCore, item: usize| {
+            core.displayed_item = Some(item);
+            core.effects.clear();
+            core.show_context_menu();
+            match core.effects.pop() {
+                Some(contract::CoreEffect::ShowContextMenu(s)) => {
+                    assert_eq!(s.can_export, core.can_export(), "menu bar parity");
+                    s.can_export
+                }
+                _ => panic!("no context menu"),
+            }
+        };
+        assert!(offered(&mut core, 0), "a still");
+        assert!(!offered(&mut core, 1), "a video");
+        assert!(!offered(&mut core, 2), "an archive door");
+        let _ = std::fs::remove_dir_all(&lib);
+    }
+
     #[test]
     fn nothing_to_export_on_an_empty_deck() {
         let mut core = test_core();

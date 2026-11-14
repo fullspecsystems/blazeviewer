@@ -128,6 +128,19 @@ pub fn start_dir(
         .unwrap_or_else(|| fallback.to_path_buf())
 }
 
+/// The remembered export folder once Settings are applied (export-plan.md Part 8 Q6, § 3.6).
+/// A pinned "Open files in" means *don't remember where I was*, so pinning clears a folder
+/// remembered before the pin. The Settings form never edits this field, so otherwise the
+/// **live** value wins over the form's snapshot — an export can finish while Settings is open,
+/// and the winit dialog folds onto the settings it was opened with.
+pub fn export_folder_after_settings(live: Option<&Path>, pinned: bool) -> Option<PathBuf> {
+    if pinned {
+        None
+    } else {
+        live.map(Path::to_path_buf)
+    }
+}
+
 /// The suggested output name: the source's stem + `.png`, suffixed (`-1`, `-2`, …) past any
 /// name `is_taken` reports (an existing file or another export's pending destination).
 pub fn suggested_name(display_name: &str, is_taken: impl Fn(&str) -> bool) -> String {
@@ -227,6 +240,18 @@ mod tests {
             ),
             PathBuf::from("/sess")
         );
+    }
+
+    #[test]
+    fn pinning_forgets_the_remembered_export_folder_and_unpinned_keeps_the_live_one() {
+        let live = Path::new("/out");
+        assert_eq!(export_folder_after_settings(Some(live), true), None);
+        assert_eq!(export_folder_after_settings(None, true), None);
+        assert_eq!(
+            export_folder_after_settings(Some(live), false).as_deref(),
+            Some(live)
+        );
+        assert_eq!(export_folder_after_settings(None, false), None);
     }
 
     #[test]

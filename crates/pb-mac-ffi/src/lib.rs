@@ -3486,6 +3486,7 @@ fn map_effect(e: contract::CoreEffect) -> ffi::CoreEffectFfi {
             s.fullscreen,
             s.compare_pinned,
             s.compare_pinned_here,
+            s.can_export,
         ),
         // The password sheet's "Checking…" state while a submitted entry re-opens the
         // archive. (CloseDialog is handled in `next_effect` — it updates the shown-dialog
@@ -4421,8 +4422,9 @@ mod ffi {
         // help_refresh() then read help_visible() + help_row_* and update the view.
         PanelsChanged,
         // Pop the photo context menu at the cursor: (has_image, has_motion, can_reveal,
-        // fullscreen) — the curated item set mirrors menu.rs build_context_menu.
-        ShowContextMenu(bool, bool, bool, bool, bool, bool),
+        // fullscreen, compare_pinned, compare_pinned_here, can_export) — the curated item
+        // set mirrors menu.rs build_context_menu.
+        ShowContextMenu(bool, bool, bool, bool, bool, bool, bool),
         // Present a chrome dialog by kind ("about" | "settings" | "confirm" | "message" |
         // "password" | "loading" | "scanning"). "about" = the standard NSApp panel;
         // "settings" opens the Settings window; the rest carry their text via

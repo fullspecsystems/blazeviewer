@@ -228,6 +228,9 @@ pub struct ContextMenuState {
     pub compare_pinned: bool,
     /// The displayed photo IS the pin → the pin item reads "Unpin from Compare".
     pub compare_pinned_here: bool,
+    /// The displayed item can be exported (task #89, `AppCore::can_export`: a still, an
+    /// archive entry, an animation — not a video or a door) → include "Export as PNG…".
+    pub can_export: bool,
 }
 
 /// What to write to the system clipboard — the shell-neutral payload of

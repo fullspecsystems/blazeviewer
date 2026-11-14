@@ -1228,7 +1228,7 @@ final class CoreModel {
     /// menu.rs `build_context_menu`. Items dispatch by the same Action ids as the menu bar.
     fileprivate func popContextMenu(
         hasImage: Bool, hasMotion: Bool, canReveal: Bool, fullscreen: Bool,
-        comparePinned: Bool, comparePinnedHere: Bool
+        comparePinned: Bool, comparePinnedHere: Bool, canExport: Bool
     ) {
         guard hasImage, let (event, view) = pendingContextMenuEvent else { return }
         let menu = NSMenu()
@@ -1269,6 +1269,14 @@ final class CoreModel {
         add("describe", "Describe Image")
         add("ask_image", "Ask About Image…")
         add("copy_description", "Copy AI Description")
+        // File group: export (task #89 — any still, incl. archive entries) and the on-disk
+        // file's own actions. The separator only when the group has a row.
+        if canExport || canReveal {
+            menu.addItem(.separator())
+        }
+        if canExport {
+            add("export", "Export as PNG…")
+        }
         if canReveal {
             add("reveal", "Show in Finder")
         }
@@ -2652,12 +2660,13 @@ final class CoreModel {
             syncToolbar() // the folder-tree / inspector toggle state lives here, not MenuState
         case .ShowContextMenu(
             let hasImage, let hasMotion, let canReveal, let fullscreen,
-            let comparePinned, let comparePinnedHere
+            let comparePinned, let comparePinnedHere, let canExport
         ):
             popContextMenu(
                 hasImage: hasImage, hasMotion: hasMotion,
                 canReveal: canReveal, fullscreen: fullscreen,
-                comparePinned: comparePinned, comparePinnedHere: comparePinnedHere
+                comparePinned: comparePinned, comparePinnedHere: comparePinnedHere,
+                canExport: canExport
             )
         case .ShowDialog(let kind):
             showDialog(kind.toString())
