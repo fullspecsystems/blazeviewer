@@ -188,11 +188,17 @@ pub struct MenuState {
     /// macOS only: whether native (Spaces) full-screen is engaged, so the shell can
     /// flip the item's "Enter/Exit Full Screen" label. Always `false` on Windows.
     pub native_fullscreen_engaged: bool,
-    /// Playback ▸ Skip to Next Item — shown only while the displayed item has live
-    /// video playback (task #94: the menu twin of ⇧Space / the scrubber skip button;
-    /// hidden otherwise — plain Image ▸ Next covers the still case). Defaulted off by
-    /// the pure choke point; each shell overrides from `space_toggles_video`.
-    pub skip_next_visible: bool,
+    /// Whether the displayed item has live video playback that owns the Next keys
+    /// ([`AppCore::space_toggles_video`](crate::AppCore::space_toggles_video), task #94:
+    /// Space pauses and resumes instead of navigating). Two consumers:
+    /// * Playback ▸ Skip to Next Item is shown only while it holds (macOS; the menu twin of
+    ///   ⇧Space and the scrubber skip button — with no video, Image ▸ Next covers it).
+    /// * The menu's shortcut hints for Next and Play/Pause swap
+    ///   ([`Keymap::menu_hint`](crate::keymap::Keymap::menu_hint), task #142, every shell).
+    ///
+    /// Defaulted off by the pure choke point; each shell overrides it from
+    /// `space_toggles_video()`.
+    pub space_toggles_video: bool,
 }
 
 /// What the right-click **photo context menu** should offer for the current photo (task

@@ -54,6 +54,10 @@ final class MenuBar: NSObject {
     /// entry and for the empty deck. If the two ever need to diverge, split the flag then
     /// rather than now.
     private var canQuickSort = false
+    /// Whether live video owns the Next keys, from the last `SetMenuState` (task #142).
+    /// Cached because the badges are also refreshed outside `sync` (install, a Settings
+    /// save), and they must agree with the state the menu last applied.
+    private var spaceTogglesVideo = false
 
     init(model: CoreModel) {
         self.model = model
@@ -103,12 +107,20 @@ final class MenuBar: NSObject {
     /// `NSMenuItemBadge` renders the hint without registering anything. Reads the
     /// LIVE keymap's primary slot (the same display the Shortcuts editor shows), so a
     /// rebind updates the menu bar too — called again after a Settings save.
+    ///
+    /// Context-aware (task #142, `Keymap::menu_hint` in the core): over a live video
+    /// Next shows ⇧Space and Play/Pause shows Space, because that's what those keys do
+    /// then. `sync` re-runs this when that context flips.
     func refreshShortcutBadges() {
         guard let model else { return }
         for (id, item) in items {
             guard item.keyEquivalent.isEmpty else { continue } // ⌘-items keep the native column
-            let hint = model.keymapSlotDisplay(id: id, slot: 0)
-            item.badge = hint.isEmpty ? nil : NSMenuItemBadge(string: hint)
+            let hint = model.menuHintDisplay(id: id, spaceTogglesVideo: spaceTogglesVideo)
+            let badge = hint.isEmpty ? nil : hint
+            // Skip unchanged badges: this now runs whenever playback starts or stops,
+            // and reassigning an identical badge is still a menu-item update.
+            guard item.badge?.stringValue != badge else { continue }
+            item.badge = badge.map { NSMenuItemBadge(string: $0) }
         }
     }
 
@@ -146,7 +158,12 @@ final class MenuBar: NSObject {
         items["undo"]?.isEnabled = s.undo_enabled
         items["undo"]?.title = s.undo_label.toString()
         // Contextual: only offered while a video is in playback (task #94).
-        items["skip_next"]?.isHidden = !s.skip_next_visible
+        items["skip_next"]?.isHidden = !s.space_toggles_video
+        // The same context swaps the Next / Play/Pause badges (task #142).
+        if s.space_toggles_video != spaceTogglesVideo {
+            spaceTogglesVideo = s.space_toggles_video
+            refreshShortcutBadges()
+        }
     }
 
     // MARK: - Construction
@@ -472,7 +489,7 @@ final class MenuBar: NSObject {
             item("play_pause", "Play/Pause"),
             // Skip to the next item while a video is up (task #94) — the menu twin of
             // ⇧Space and the scrubber's skip button. Hidden unless playback is live
-            // (`SetMenuState.skip_next_visible`): with no video, Image ▸ Next covers it.
+            // (`SetMenuState.space_toggles_video`): with no video, Image ▸ Next covers it.
             {
                 let skip = item("skip_next", "Skip to Next Item")
                 skip.isHidden = true

@@ -464,10 +464,13 @@ fn check_item(id: &str, label: &str) -> CheckMenuItem {
 /// Settings ▸ Shortcuts editor shows), never a hardcoded guess. The first binding wins when
 /// an action has two (menus show one accelerator). Used by the Windows native menu (the Linux
 /// egui menu renders labels without the `\t` accelerator hint); kept + tested cross-platform.
-fn shortcut_hint(keymap: &Keymap, action: Action) -> String {
+///
+/// Context-aware (task #142): over a live video (`space_toggles_video`) Next shows Skip
+/// Next's key and Play/Pause shows Next's, because that's what those keys do then. The
+/// rule lives in the core ([`Keymap::menu_hint`]) so every shell's menu says the same thing.
+fn shortcut_hint(keymap: &Keymap, action: Action, space_toggles_video: bool) -> String {
     keymap
-        .bindings_for(action)
-        .first()
+        .menu_hint(action, space_toggles_video)
         .map(|c| c.to_string())
         .unwrap_or_default()
 }
@@ -478,11 +481,50 @@ fn shortcut_hint(keymap: &Keymap, action: Action) -> String {
 /// so an un-shortcutted item just reads as its plain label. Used by the Windows native menu;
 /// the Linux egui menu builds its rows from the plain labels + the model, not this `\t` form.
 fn labeled(keymap: &Keymap, base: &str, action: Action) -> String {
-    let hint = shortcut_hint(keymap, action);
+    labeled_in(keymap, base, action, false)
+}
+
+/// [`labeled`] for the current context — see [`shortcut_hint`] (task #142).
+fn labeled_in(keymap: &Keymap, base: &str, action: Action, space_toggles_video: bool) -> String {
+    let hint = shortcut_hint(keymap, action, space_toggles_video);
     if hint.is_empty() {
         base.to_string()
     } else {
         format!("{base}\t{hint}")
+    }
+}
+
+/// Labels of the items whose hint changes with context, shared by the native bar, its
+/// runtime refresh ([`ContextHints::refresh`]) and the egui bar so the three can't drift.
+const NEXT_LABEL: &str = "Next";
+const PLAY_PAUSE_LABEL: &str = "Play/Pause";
+
+/// The native menu items whose shortcut hint depends on context (task #142). Over a live
+/// video Space pauses and ⇧Space moves on, so Image ▸ Next and Playback ▸ Play/Pause swap
+/// hints. muda labels are set once at build, so the app holds these and re-labels them
+/// whenever `MenuState::space_toggles_video` flips (`App::apply_menu_to_native`).
+#[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
+pub struct ContextHints {
+    next: MenuItem,
+    play_pause: MenuItem,
+}
+
+#[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
+impl ContextHints {
+    /// Re-label both items for the current context and keymap.
+    pub fn refresh(&self, keymap: &Keymap, space_toggles_video: bool) {
+        self.next.set_text(labeled_in(
+            keymap,
+            NEXT_LABEL,
+            Action::Next,
+            space_toggles_video,
+        ));
+        self.play_pause.set_text(labeled_in(
+            keymap,
+            PLAY_PAUSE_LABEL,
+            Action::PlayPause,
+            space_toggles_video,
+        ));
     }
 }
 
@@ -560,6 +602,9 @@ pub struct BuiltMenu {
     /// (and the same ⚠ never-disable-the-holder rule) as `subtitle_tracks`.
     pub audio_tracks: Submenu,
     pub checks: ViewChecks,
+    /// Image ▸ Next and Playback ▸ Play/Pause, re-labelled when a video starts or stops
+    /// owning Space (task #142).
+    pub context_hints: ContextHints,
 }
 
 /// Build the full menu bar. Best-effort: a failed `append` (rare) is logged and the
@@ -774,9 +819,15 @@ pub fn build_menu(keymap: &Keymap) -> BuiltMenu {
         None,
     );
 
+    // Held for runtime re-labelling (task #142, `ContextHints`).
+    let next = item(ids::NEXT, &labeled(keymap, NEXT_LABEL, Action::Next));
+    let play_pause = item(
+        ids::PLAY_PAUSE,
+        &labeled(keymap, PLAY_PAUSE_LABEL, Action::PlayPause),
+    );
     let image = Submenu::new("&Image", true);
     let _ = image.append_items(&[
-        &item(ids::NEXT, &labeled(keymap, "Next", Action::Next)),
+        &next,
         &item(ids::PREVIOUS, &labeled(keymap, "Previous", Action::Prev)),
         &item(ids::RANDOM, &labeled(keymap, "Random", Action::Random)),
         &item(
@@ -814,10 +865,7 @@ pub fn build_menu(keymap: &Keymap) -> BuiltMenu {
     let audio_tracks = Submenu::new("Audio Track", true);
     let playback = Submenu::new("&Playback", true);
     let _ = playback.append_items(&[
-        &item(
-            ids::PLAY_PAUSE,
-            &labeled(keymap, "Play/Pause", Action::PlayPause),
-        ),
+        &play_pause,
         &item(
             ids::FRAME_NEXT,
             &labeled(keymap, "Next Frame", Action::FrameNext),
@@ -861,6 +909,7 @@ pub fn build_menu(keymap: &Keymap) -> BuiltMenu {
         subtitle_tracks,
         quick_sort,
         audio_tracks,
+        context_hints: ContextHints { next, play_pause },
         checks: ViewChecks {
             fit,
             fill,
@@ -942,8 +991,9 @@ pub fn menu_bar_spec(keymap: &Keymap, s: &crate::contract::MenuState) -> Vec<Men
         }
     };
     let sep = || MenuRow::Separator;
-    // Shortcut hint for a keymap-bound item, live from the user's bindings (as `labeled`).
-    let l = |base, action| labeled(keymap, base, action);
+    // Shortcut hint for a keymap-bound item, live from the user's bindings (as `labeled`),
+    // in the current context: over a live video Next and Play/Pause swap (task #142).
+    let l = |base, action| labeled_in(keymap, base, action, s.space_toggles_video);
 
     vec![
         MenuGroup {
@@ -1116,7 +1166,7 @@ pub fn menu_bar_spec(keymap: &Keymap, s: &crate::contract::MenuState) -> Vec<Men
         MenuGroup {
             title: "Image",
             items: vec![
-                item(MenuAction::Next, &l("Next", Action::Next), true),
+                item(MenuAction::Next, &l(NEXT_LABEL, Action::Next), true),
                 item(MenuAction::Previous, &l("Previous", Action::Prev), true),
                 item(MenuAction::Random, &l("Random", Action::Random), true),
                 item(
@@ -1160,7 +1210,7 @@ pub fn menu_bar_spec(keymap: &Keymap, s: &crate::contract::MenuState) -> Vec<Men
             items: vec![
                 item(
                     MenuAction::PlayPause,
-                    &l("Play/Pause", Action::PlayPause),
+                    &l(PLAY_PAUSE_LABEL, Action::PlayPause),
                     true,
                 ),
                 item(
@@ -1648,9 +1698,9 @@ mod tests {
     fn image_labels_carry_the_users_keymap_shortcut() {
         let km = Keymap::defaults();
         // The animation actions the Image menu added surface their default chords…
-        assert_eq!(shortcut_hint(&km, Action::PlayPause), "P");
-        assert_eq!(shortcut_hint(&km, Action::FrameNext), ".");
-        assert_eq!(shortcut_hint(&km, Action::FramePrev), ",");
+        assert_eq!(shortcut_hint(&km, Action::PlayPause, false), "P");
+        assert_eq!(shortcut_hint(&km, Action::FrameNext, false), ".");
+        assert_eq!(shortcut_hint(&km, Action::FramePrev, false), ",");
         // …and a label reads "base\thint" (a bound nav action too).
         assert_eq!(
             labeled(&km, "Play/Pause Animation", Action::PlayPause),
@@ -1662,10 +1712,27 @@ mod tests {
         let mut custom = Keymap::defaults();
         let chord = KeyChord::parse("Shift+P").expect("valid chord");
         custom.set_slot(Action::PlayPause, 0, chord);
-        assert_eq!(shortcut_hint(&custom, Action::PlayPause), chord.to_string());
+        assert_eq!(
+            shortcut_hint(&custom, Action::PlayPause, false),
+            chord.to_string()
+        );
         assert_eq!(
             labeled(&custom, "Play/Pause Animation", Action::PlayPause),
             format!("Play/Pause Animation\t{chord}"),
+        );
+
+        // Over a live video Next and Play/Pause swap hints (task #142).
+        assert_eq!(
+            labeled_in(&km, NEXT_LABEL, Action::Next, true),
+            "Next\tShift+Space"
+        );
+        assert_eq!(
+            labeled_in(&km, PLAY_PAUSE_LABEL, Action::PlayPause, true),
+            "Play/Pause\tSpace"
+        );
+        assert_eq!(
+            labeled_in(&km, NEXT_LABEL, Action::Next, false),
+            "Next\tSpace"
         );
 
         // An unbound action falls back to the plain label (no trailing tab).

@@ -408,6 +408,33 @@ impl Keymap {
         self.bindings_for(action).get(slot).copied()
     }
 
+    /// The key a **menu item** for `action` should show as its shortcut hint right now
+    /// (task #142). Every shell's menu reads this, so they can't disagree.
+    ///
+    /// Usually that's the action's own primary binding. The exception is a key whose
+    /// meaning changes with context while the menu item's doesn't: over a live video
+    /// (`AppCore::space_toggles_video`, carried to the shells as
+    /// `MenuState::space_toggles_video`) the keys bound to Next pause and resume it
+    /// (task #94, `AppCore::nav_press`), but Image ▸ Next still navigates. So while
+    /// that holds, Next advertises Skip Next's key (⇧Space, which still navigates), and
+    /// Play/Pause advertises Next's key (Space, which now pauses), falling back to its own
+    /// if Next is unbound.
+    ///
+    /// ⚠ **A new context override in `nav_press` (or the tick) that changes what a
+    /// menu-listed action's key does must add its arm here**, or the menu advertises the
+    /// wrong key. `menu_hints_do_what_they_say_over_a_live_video` pins this pair against
+    /// the real input path.
+    pub fn menu_hint(&self, action: Action, space_toggles_video: bool) -> Option<KeyChord> {
+        let primary = |a| self.slot(a, 0);
+        match action {
+            Action::Next if space_toggles_video => primary(Action::SkipNext),
+            Action::PlayPause if space_toggles_video => {
+                primary(Action::Next).or_else(|| primary(Action::PlayPause))
+            }
+            _ => primary(action),
+        }
+    }
+
     /// Assign `chord` to `action`'s positional `slot` (0 = primary, 1 = secondary),
     /// stealing it from any other action so every chord has exactly one owner (the
     /// standard rebind behavior). Returns the action it was taken from, if it had been
@@ -804,6 +831,59 @@ pub fn macos_menu_chord(action: Action) -> Option<KeyChord> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Task #142: with no live video every menu item advertises its own primary key.
+    #[test]
+    fn menu_hint_is_the_primary_binding_without_a_live_video() {
+        let km = Keymap::defaults();
+        let chord = |s: &str| KeyChord::parse(s);
+        assert_eq!(km.menu_hint(Action::Next, false), chord("Space"));
+        assert_eq!(km.menu_hint(Action::PlayPause, false), chord("P"));
+        assert_eq!(km.menu_hint(Action::SkipNext, false), chord("Shift+Space"));
+        assert_eq!(
+            km.menu_hint(Action::RotateCw, false),
+            km.slot(Action::RotateCw, 0)
+        );
+    }
+
+    /// Task #142: over a live video the keys bound to Next pause instead of navigating
+    /// (#94), so Next advertises Skip Next's key and Play/Pause advertises Next's.
+    #[test]
+    fn menu_hint_swaps_next_and_play_pause_over_a_live_video() {
+        let km = Keymap::defaults();
+        let chord = |s: &str| KeyChord::parse(s);
+        assert_eq!(km.menu_hint(Action::Next, true), chord("Shift+Space"));
+        assert_eq!(km.menu_hint(Action::PlayPause, true), chord("Space"));
+        // Everything else is untouched, including Skip Next itself.
+        assert_eq!(km.menu_hint(Action::SkipNext, true), chord("Shift+Space"));
+        assert_eq!(km.menu_hint(Action::Prev, true), chord("Backspace"));
+    }
+
+    /// Task #142: the swap follows the user's bindings, not the defaults.
+    #[test]
+    fn menu_hint_follows_rebinds_and_unbound_actions() {
+        let mut km = Keymap::defaults();
+        let n = KeyChord::parse("N").unwrap();
+        km.set_slot(Action::Next, 0, n);
+        assert_eq!(
+            km.menu_hint(Action::PlayPause, true),
+            Some(n),
+            "N pauses now"
+        );
+
+        // Nothing navigates by key over a video once Skip Next is unbound: no hint,
+        // rather than a key that would pause.
+        while km.slot(Action::SkipNext, 0).is_some() {
+            km.clear_slot(Action::SkipNext, 0);
+        }
+        assert_eq!(km.menu_hint(Action::Next, true), None);
+
+        // With Next unbound too, Play/Pause falls back to its own key.
+        while km.slot(Action::Next, 0).is_some() {
+            km.clear_slot(Action::Next, 0);
+        }
+        assert_eq!(km.menu_hint(Action::PlayPause, true), KeyChord::parse("P"));
+    }
 
     /// A `keymap.toml` saved before Shift+Left/Right became defaults wipes those
     /// chords (`to_toml` writes every action) — the migration must restore them,

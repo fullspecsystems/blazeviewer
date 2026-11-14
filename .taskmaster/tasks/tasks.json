@@ -1968,6 +1968,42 @@
             "status": "done"
           }
         ]
+      },
+      {
+        "id": 142,
+        "title": "Menu shortcut hints follow context (Next / Play/Pause over a live video)",
+        "description": "Owner report 2026-11-13: over a live video Space pauses and Shift+Space goes to the next item (task #94), but the menu still showed Space on Next and P on Play/Pause. One core rule, Keymap::menu_hint(action, space_toggles_video), drives every shell's hint; MenuState.skip_next_visible is renamed space_toggles_video and Windows/Linux now set it. Plan + Handoff: .taskmaster/plans/142-contextual-menu-hints.md.",
+        "status": "review",
+        "priority": "low",
+        "dependencies": [
+          94
+        ],
+        "subtasks": [
+          {
+            "id": 1,
+            "title": "Core: Keymap::menu_hint + tests, incl. a hint-vs-input parity test",
+            "description": "Pure rule in keymap.rs; menu_hints_do_what_they_say_over_a_live_video drives the hinted chords through nav_press (mutation-checked).",
+            "status": "done"
+          },
+          {
+            "id": 2,
+            "title": "macOS: context-aware menu badges",
+            "description": "menu_hint_display FFI; MenuBar.refreshShortcutBadges uses it and sync re-runs it when space_toggles_video flips.",
+            "status": "review"
+          },
+          {
+            "id": 3,
+            "title": "Windows: re-label Next / Play/Pause on the muda menu",
+            "description": "menu::ContextHints held by App, refreshed in apply_menu_to_native; current_menu_state sets space_toggles_video. Compile-checked from the Mac only; needs a run on Windows.",
+            "status": "review"
+          },
+          {
+            "id": 4,
+            "title": "Linux: egui bar shortcut column follows context",
+            "description": "menu_bar_spec's l closure uses labeled_in with s.space_toggles_video. Not compiled yet (cfg linux).",
+            "status": "review"
+          }
+        ]
       }
     ],
     "metadata": {

@@ -1407,7 +1407,7 @@ impl AppCoreHandle {
             cancel_scan_enabled: s.cancel_scan_enabled,
             undo_enabled: s.undo.is_some(),
             undo_label: s.undo.as_deref().unwrap_or("Undo").to_string(),
-            skip_next_visible: s.skip_next_visible,
+            space_toggles_video: s.space_toggles_video,
         }
     }
 
@@ -2253,6 +2253,24 @@ impl AppCoreHandle {
             .unwrap_or_default()
     }
 
+    /// The shortcut badge a menu item for `action_id` shows right now, as macOS glyphs
+    /// ("" = none). Context-aware ([`Keymap::menu_hint`], task #142): while
+    /// `space_toggles_video`, Next shows ⇧Space and Play/Pause shows Space. Takes the flag
+    /// from the last `SetMenuState` rather than reading it live, so the badges always agree
+    /// with the rest of the menu the shell just applied. Same keymap source as
+    /// `keymap_slot_display` (the draft while editing).
+    ///
+    /// [`Keymap::menu_hint`]: pb_app_core::keymap::Keymap::menu_hint
+    fn menu_hint_display(&self, action_id: &str, space_toggles_video: bool) -> String {
+        let Some(action) = Action::from_id(action_id) else {
+            return String::new();
+        };
+        let map = self.keymap_draft.as_ref().unwrap_or(&self.core.keymap);
+        map.menu_hint(action, space_toggles_video)
+            .map(|c| c.mac_symbol_editor())
+            .unwrap_or_default()
+    }
+
     /// The macOS menu bar's own accelerator for this action ("" = none) — the Shortcuts
     /// editor shows it as a read-only hint beside the editable slots. ⌘-chords live in
     /// the menu (not the keymap: its defaults keep real-Ctrl chords), so without this
@@ -2513,8 +2531,9 @@ impl AppCoreHandle {
         // override it here the way the winit shell does (`current_menu_state`).
         let next = contract::MenuState {
             show_archives: self.core.settings.show_archives,
-            // Playback ▸ Skip to Next Item — visible only with live video (task #94).
-            skip_next_visible: self.core.space_toggles_video(),
+            // Live video owns the Next keys (task #94): shows Playback ▸ Skip to Next Item
+            // and swaps the Next / Play/Pause shortcut badges (task #142).
+            space_toggles_video: self.core.space_toggles_video(),
             ..next
         };
         if self.last_menu_state == next {
@@ -4608,7 +4627,7 @@ mod ffi {
         cancel_scan_enabled: bool,
         undo_enabled: bool,
         undo_label: String,
-        skip_next_visible: bool,
+        space_toggles_video: bool,
     }
 
     extern "Rust" {
@@ -5023,6 +5042,7 @@ mod ffi {
         fn keymap_action_id(&self, group: usize, index: usize) -> String;
         fn keymap_action_label(&self, group: usize, index: usize) -> String;
         fn keymap_slot_display(&self, action_id: &str, slot: usize) -> String;
+        fn menu_hint_display(&self, action_id: &str, space_toggles_video: bool) -> String;
         fn keymap_menu_chord(&self, action_id: &str) -> String;
         fn keymap_capture(
             &mut self,

@@ -553,6 +553,9 @@ struct App {
     /// The Edit ▸ Undo menu item, kept so its title + enabled state can mirror the top of
     /// the undo stack at runtime.
     undo_item: Option<muda::MenuItem>,
+    /// Image ▸ Next + Playback ▸ Play/Pause, whose shortcut hints swap while a live video
+    /// owns Space (task #142).
+    context_hint_items: Option<menu::ContextHints>,
     /// Image ▸ Pin for Compare (task #43): enabled with a photo shown; checked while the
     /// displayed photo IS the pin.
     compare_pin_item: Option<muda::CheckMenuItem>,
@@ -1201,6 +1204,7 @@ impl App {
             compare_toggle_item: None,
             cancel_scan_item: None,
             undo_item: None,
+            context_hint_items: None,
             view_checks: None,
             menu_state: None,
             menu_attached: false,
@@ -2445,6 +2449,7 @@ impl App {
             self.reveal_item = Some(built.reveal);
             self.cancel_scan_item = Some(built.cancel_scan);
             self.undo_item = Some(built.undo);
+            self.context_hint_items = Some(built.context_hints);
             self.compare_pin_item = Some(built.compare_pin);
             self.compare_toggle_item = Some(built.compare_toggle);
             self.subtitle_tracks_menu = Some(built.subtitle_tracks);
@@ -2705,6 +2710,9 @@ impl App {
         // Show Archives (task #104) is a setting too, so the View ▸ Show Archives checkmark
         // tracks it through the same per-tick MenuState diff.
         state.show_archives = self.core.settings.show_archives;
+        // A live video owns Space (task #94), so the menu's Next / Play/Pause hints swap
+        // (task #142). Riding `MenuState` puts the flip through the same per-tick diff.
+        state.space_toggles_video = self.core.space_toggles_video();
         state
     }
 
@@ -2760,6 +2768,10 @@ impl App {
             let base = state.undo.as_deref().unwrap_or("Undo");
             it.set_text(format!("{base}\tCtrl+Z"));
             it.set_enabled(state.undo.is_some());
+        }
+        // Image ▸ Next / Playback ▸ Play/Pause hints for the current context (task #142).
+        if let Some(h) = self.context_hint_items.as_ref() {
+            h.refresh(&self.core.keymap, state.space_toggles_video);
         }
     }
 

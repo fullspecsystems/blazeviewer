@@ -2450,6 +2450,46 @@ mod tests {
         );
     }
 
+    /// Task #142: the menu's shortcut hints over a live video must do what they say.
+    /// Play/Pause advertises a key that really pauses, and Next advertises one that really
+    /// navigates. Drives the hinted chords through the same keymap lookup + `nav_press`
+    /// the keyboard uses, so a new override in `nav_press` without a matching
+    /// `Keymap::menu_hint` arm fails here.
+    #[test]
+    fn menu_hints_do_what_they_say_over_a_live_video() {
+        let mut core = core_with_a_native_video(); // Playing, item 0 displayed
+        assert!(core.space_toggles_video());
+        let live = core.space_toggles_video();
+        let press = |core: &mut AppCore, action: Action| {
+            let chord = core.keymap.menu_hint(action, live).expect("a hint");
+            let bound = core.keymap.action_for(&chord).expect("the chord is bound");
+            core.effects.clear();
+            core.held.clear();
+            core.nav_press(chord.code, bound);
+        };
+
+        press(&mut core, Action::PlayPause);
+        assert!(
+            core.effects
+                .iter()
+                .any(|e| matches!(e, contract::CoreEffect::PauseVideo { .. })),
+            "Play/Pause's hinted key pauses the video"
+        );
+
+        press(&mut core, Action::Next);
+        assert!(
+            !core.effects.iter().any(|e| matches!(
+                e,
+                contract::CoreEffect::PauseVideo { .. } | contract::CoreEffect::ResumeVideo { .. }
+            )),
+            "Next's hinted key never toggles playback"
+        );
+        assert!(
+            !core.held.is_empty(),
+            "Next's hinted key navigates (a held nav key)"
+        );
+    }
+
     /// #94: the default keymap binds Shift+Space to SkipNext, and the engine
     /// resolves it to forward navigation.
     #[test]

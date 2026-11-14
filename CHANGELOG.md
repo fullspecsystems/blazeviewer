@@ -19,6 +19,12 @@ with any pre-release suffix carried only by the tag.
   now jump between round values like 1, 2, 5, 10, 30 and 60 seconds, instead of
   creeping a tenth at a time.
 
+### Fixed
+
+- **The menu shows the right keys while a video plays.** Space pauses a playing video
+  and Shift+Space moves on to the next item, so the menu now says so: Next shows
+  Shift+Space and Play/Pause shows Space until the video ends.
+
 ### Security
 
 - **Mac: the built-in video library (FFmpeg) is updated to 8.1.3**, picking up upstream fixes

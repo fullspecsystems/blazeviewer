@@ -1890,6 +1890,13 @@ final class CoreModel {
         core.keymap_slot_display(id, UInt(slot)).toString()
     }
 
+    /// A menu item's shortcut badge right now ("" = none). Context-aware, unlike
+    /// `keymapSlotDisplay`: over a live video Next shows ⇧Space and Play/Pause shows
+    /// Space (task #142).
+    func menuHintDisplay(id: String, spaceTogglesVideo: Bool) -> String {
+        core.menu_hint_display(id, spaceTogglesVideo).toString()
+    }
+
     /// A captured chord. False = the keymap can't express that key (stay armed).
     func keymapCapture(
         id: String, slot: Int, key: String, ctrl: Bool, shift: Bool, alt: Bool, logo: Bool

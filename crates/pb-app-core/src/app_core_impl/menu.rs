@@ -70,7 +70,7 @@ impl AppCore {
             cancel_scan_enabled,
             undo,
             native_fullscreen_engaged,
-            skip_next_visible: false, // the shells override (see the field's doc)
+            space_toggles_video: false, // the shells override (see the field's doc)
         }
     }
 
