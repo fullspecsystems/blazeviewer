@@ -442,8 +442,14 @@ approximation (F18). SDR P010 is SDR.
 
 **HDR → SDR (rungs 1–4 and SDR targets)** (F18): tone-map in **Display-P3 linear** (not BT.709 —
 negatives aren't clamped away first), with the white point from the **full-resolution prepared
-image's** peak, then encode P3 and tag P3. Operator: the display's extended Reinhard, so an SDR
-export matches what an SDR screen shows.
+image's** peak, then encode P3 and tag P3. Operator (revised 2026-11-14 after the owner saw exported HDR reds turn magenta): **hue-keeping**
+extended Reinhard — out-of-gamut colours are desaturated toward their luminance, then the
+*brightest channel* follows the curve and all three scale with it (`pb_color::tonemap`). The same
+maths runs in the clipboard path (Copy / OCR / Describe) and the renderer's SDR shader (HDR images
+only — SDR content is untouched), so an SDR export still matches what an SDR screen shows. The
+per-channel curve it replaced compressed each channel separately, which pushed bright crimson to
+magenta and orange to yellow. The macOS EDR highlight roll-off now scales by the brightest channel
+too.
 
 **Light-level metadata:** from the final prepared image — per-pixel max(R, G, B) in nits; MaxFALL =
 the mean of those maxima; alpha ignored; non-finite → 0; units per format (PNG `cLLI`:
@@ -1035,6 +1041,13 @@ test script: `.taskmaster/docs/export-rung1-manual-test.md`. Rung 0a (#81) not s
     yet. `last_export` is RAM-only.
 - The save-panel cleanup removes `NSOSPLastRootDirectory`, `NSNavLastRootDirectory`,
   `NSNavRecentPlaces` after each export dialog.
+- **HDR → SDR keeps hue (session 5, owner report "HDR red looks kind of magenta"):** the
+  per-channel Reinhard in `prepare`, `to_clipboard_rgba8` and the present shader is replaced by
+  `pb_color::tonemap` (gamut-map toward luminance, then Reinhard on max-RGB with the channels
+  scaled together — § 3.8). Verified: pb-color unit tests (the old curve's 5× ratio jump is pinned
+  as the counter-example), a prepare test, and a **GPU golden test** that the shader's HDR branch
+  matches the CPU map within 2/255 (`offscreen_hdr_tone_map_keeps_hue_and_matches_the_cpu_map`,
+  via a new `render_offscreen_hdr`). SDR images take the unchanged path (goldens pass).
 - Quit waits up to 4 s for an in-flight export (`finish_exports_for_exit`), from both shells.
 
 **Cross-platform debt**
@@ -1043,6 +1056,9 @@ test script: `.taskmaster/docs/export-rung1-manual-test.md`. Rung 0a (#81) not s
   `export_worker::lower_thread_priority` (`THREAD_MODE_BACKGROUND_BEGIN`). The Windows machine
   must run manual-test section W. Strike this line once it does.
 - **Linux:** untested (rfd save dialog; `nice(10)` worker priority).
+- **Windows (session 5):** HDR photos/video on an **SDR** Windows desktop now display through the
+  new hue-keeping shader branch (Metal-verified on the Mac; compile-checked for Windows). Look at
+  a saturated HDR highlight on an SDR screen: reds should stay red.
 - **Windows (session 3, #81):** video-frame capture is compile-checked only. It goes through MF's
   `decode_video_poster_replay(input, origin 0, t)` — verify it lands on the **paused frame** (MF's
   origin is assumed 0; if frames come out one off, pass the producer's origin), and note its

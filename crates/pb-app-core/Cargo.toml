@@ -9,6 +9,8 @@ description = "Platform-neutral orchestration model for PhotoBlaze: actions, the
 # the per-user config dir) is allowed here — that is platform code, not *shell*
 # code — but UI toolkits never are. This is the crate the macOS Swift bridge links.
 [dependencies]
+# The hue-keeping HDR → SDR tone map (Copy / OCR / Describe), shared with export + the shader.
+pb-color = { path = "../pb-color" }
 # Keymap + settings config parse/format (keymap.toml / settings.toml). Same version +
 # features as pb-app so the lockfile is unchanged by the split.
 toml = { version = "0.8", default-features = false, features = ["parse", "display"] }

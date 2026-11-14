@@ -89,7 +89,7 @@ Have handy:
 | 3.1 | Export an **iPhone HEIC** | Preview Inspector ▸ ColorSync profile: **Display P3**. Side by side with the original in Preview, the colours are identical (no washed-out or oversaturated look) |
 | 3.2 | Export an **sRGB AVIF/HEIC** | Profile **sRGB IEC61966-2.1** — *not* Display P3 |
 | 3.3 | Export a **16-bit PNG/TIFF** or a 10-bit HEIC; then `sips -g bitsPerSample out.png` | `bitsPerSample: 16` |
-| 3.4 | Export an **HDR HEIC/AVIF** | The pill reads "Exported name.png (HDR as SDR)". The PNG looks natural: bright highlights aren't blown out, the image isn't dim, colours aren't muted |
+| 3.4 | Export an **HDR HEIC/AVIF** | The pill reads "Exported name.png (HDR as SDR)". The PNG looks natural: bright highlights aren't blown out, the image isn't dim, colours aren't muted — and **bright reds stay red, oranges stay orange** (they used to drift to magenta / yellow) |
 | 3.5 | Export a **PNG with transparency** | Transparency preserved (Preview shows the checkerboard) |
 | 3.6 | Export an **opaque** photo; `sips -g hasAlpha out.png` | `hasAlpha: no` (no wasted alpha channel) |
 
@@ -198,7 +198,7 @@ video or animation with `.` (forward) and `,` (back); the arrow keys seek.
 | 11.6 | Open the **Text** tab (`T`) while a video plays | Nothing churns while it plays; pause → "Reading text…" → that frame's text |
 | 11.7 | With a describe backend set up: pause on a frame, press `D` (or Ask with `⇧D`) | The description is of **the paused frame**. Pause elsewhere and Ask again: describes the new frame |
 | 11.8 | Pause on a frame and press `E` | Sheet name `<clip>-0h01m23s.png` (the paused time); the PNG is that frame at full resolution |
-| 11.9 | Export a paused frame of an **HDR** clip | The pill reads "(HDR as SDR)"; the PNG looks natural, not washed out or dim |
+| 11.9 | Export a paused frame of an **HDR** clip — ideally **the clip whose reds looked magenta** | The pill reads "(HDR as SDR)"; the PNG looks natural, not washed out or dim, and **its reds stay red** (side by side with Blaze's own view of that frame). `⌘C` of the same frame should match too |
 | 11.10 | `E` on a video **before playing it** | Exports the **poster** (what's on screen), named `<clip>.png` |
 | 11.11 | A video **inside a zip** (enter with `P`): pause and `⌘C`, then `E` | The real paused frame for both (Copy used to give a grey placeholder for zipped MP4/MOV) |
 | 11.12 | Copy a video frame and paste into **Messages** or **Mail** | An **image** is pasted, not the video file |

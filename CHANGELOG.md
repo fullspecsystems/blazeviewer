@@ -72,6 +72,9 @@ with any pre-release suffix carried only by the tag.
   several seconds; it now happens in the background.
 - **Mac: copying a video inside an archive copies a real frame**, not a grey
   placeholder.
+- **HDR colours stay true in SDR.** Exporting or copying an HDR photo or video frame, and
+  viewing HDR on a non-HDR screen, could shift bright, saturated colours — reds turned
+  magenta and oranges yellow. Highlights now keep their colour.
 - **HDR PNGs show in HDR.** PNGs tagged as HDR (PQ or HLG — the 2025 PNG standard) used
   to look flat and grey; they now show with full HDR brightness, like HDR HEIC and AVIF
   photos. PNGs tagged with a wide-gamut colour space this way get correct colours too.

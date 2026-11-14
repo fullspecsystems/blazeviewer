@@ -1316,21 +1316,15 @@ pub fn srgb_oetf(c: f32) -> f32 {
     }
 }
 
-/// Extended-Reinhard tone-map with white point `lw`, matching the present shader's
-/// `reinhard`. `lw = 1` is the identity (faithful SDR); a larger `lw` rolls HDR
-/// highlights into the displayable range.
-fn reinhard(v: f32, lw: f32) -> f32 {
-    let x = v.max(0.0);
-    x * (1.0 + x / (lw * lw)) / (1.0 + x)
-}
-
 /// Convert a decoded image to a straight-alpha RGBA8 buffer for the clipboard.
 ///
 /// - `Rgba8` is taken as-is (source-encoded sRGB). The DIB clipboard format carries
 ///   no ICC profile, so a wide-gamut source pastes interpreted as sRGB — a
 ///   documented v1 limitation.
-/// - `Rgba16F` (HDR scene-linear scRGB) is tone-mapped to SDR sRGB8 exactly as the
-///   SDR present pass does: extended-Reinhard at the image `peak`, then sRGB-encode.
+/// - `Rgba16F` (HDR scene-linear scRGB) is tone-mapped to SDR sRGB8 with the same
+///   hue-keeping map as the export and the SDR present pass (`pb_color::tonemap`: into the
+///   sRGB gamut by desaturating toward luminance, then extended Reinhard on the brightest
+///   channel at the image `peak`), then sRGB-encoded.
 pub fn to_clipboard_rgba8(img: &DecodedImage) -> Vec<u8> {
     match img.format {
         PixelFormat::Rgba8 => img.pixels.clone(),
@@ -1340,10 +1334,11 @@ pub fn to_clipboard_rgba8(img: &DecodedImage) -> Vec<u8> {
             let mut out = Vec::with_capacity(px_count * 4);
             // 4 half-floats (8 bytes) per pixel, little-endian.
             for px in img.pixels.chunks_exact(8) {
-                for ch in 0..3 {
-                    let h = half::f16::from_le_bytes([px[ch * 2], px[ch * 2 + 1]]);
-                    let v = srgb_oetf(reinhard(h.to_f32(), lw));
-                    out.push((v * 255.0 + 0.5) as u8);
+                let rgb = [0, 1, 2]
+                    .map(|ch| half::f16::from_le_bytes([px[ch * 2], px[ch * 2 + 1]]).to_f32());
+                let sdr = pb_color::tonemap::hdr_to_sdr(rgb, lw, pb_color::tonemap::LUMA_BT709);
+                for v in sdr {
+                    out.push((srgb_oetf(v) * 255.0 + 0.5) as u8);
                 }
                 out.push(255); // opaque; HDR sources have no meaningful alpha here
             }

@@ -172,8 +172,12 @@ fn fs_scene_planar(in: VsOut) -> @location(0) vec4<f32> {
 
 /// Present pass: the scene-linear intermediate → the surface. A fullscreen triangle
 /// samples the intermediate, then branches on the surface type (`params.z`):
-///   - **SDR 8-bit surface** (0): per-channel extended Reinhard with the image's
-///     peak as the white point (peak = 1 ⇒ identity, faithful SDR), then sRGB-encode.
+///   - **SDR 8-bit surface** (0): an SDR image (peak = 1) passes straight to the sRGB
+///     encode, exactly as before. An **HDR** image (peak > 1) gets the hue-keeping map —
+///     into the sRGB gamut by desaturating toward luminance, then extended Reinhard on the
+///     brightest channel with the others scaled alongside — the WGSL twin of
+///     `pb_color::tonemap::hdr_to_sdr`, which the export and clipboard paths use. (The old
+///     per-channel curve turned bright saturated reds magenta.)
 ///   - **HDR fp16 scRGB surface** (1): output scene-linear scaled to the SDR white
 ///     level (`params.y`). Negatives (wide gamut) and values > 1 (HDR) are kept —
 ///     scRGB carries them to the panel.
@@ -210,6 +214,17 @@ fn reinhard(v: f32, lw: f32) -> f32 {
     return x * (1.0 + x / (lw * lw)) / (1.0 + x);
 }
 
+// pb_color::tonemap::into_gamut with BT.709 luma: pull a negative channel to 0 by moving the
+// colour toward its own luminance (keeps hue), instead of clipping it.
+fn into_gamut(c: vec3<f32>) -> vec3<f32> {
+    let mn = min(c.r, min(c.g, c.b));
+    if (mn >= 0.0) { return c; }
+    let y = dot(c, vec3<f32>(0.212639, 0.715169, 0.072192));
+    if (y <= 0.0) { return vec3<f32>(0.0); }
+    let t = y / (y - mn);
+    return max(vec3<f32>(y) + t * (c - vec3<f32>(y)), vec3<f32>(0.0));
+}
+
 // Highlight roll-off for the macOS EDR surface: identity at/below SDR white (1.0),
 // smoothly compressing values above 1 so they asymptote to `headroom` rather than
 // hard-clipping at the panel's EDR limit. SDR/diffuse and wide-gamut (negative)
@@ -229,18 +244,27 @@ fn fs_present(in: VsOut) -> @location(0) vec4<f32> {
         // scRGB. On Windows (headroom 0) the DWM compositor tone-maps, so pass straight
         // through. On macOS, EDR hard-clips above the panel headroom, so roll highlights
         // off toward it — keeping SDR/diffuse and wide-gamut (negative) values intact.
+        // The roll-off follows the brightest channel and scales all three with it, so a
+        // bright saturated highlight keeps its hue (per channel, it drifted toward white).
         let hr = pr.params.y;
-        if (hr > 0.0) {
-            return vec4<f32>(rolloff(s.r, hr), rolloff(s.g, hr), rolloff(s.b, hr), 1.0);
+        let m = max(s.r, max(s.g, s.b));
+        if (hr > 0.0 && m > 1.0) {
+            return vec4<f32>(s.rgb * (rolloff(m, hr) / m), 1.0);
         }
         return vec4<f32>(s.rgb, 1.0);
     }
     let lw = pr.params.x;
-    let o = vec3<f32>(
-        srgb_oetf(reinhard(s.r, lw)),
-        srgb_oetf(reinhard(s.g, lw)),
-        srgb_oetf(reinhard(s.b, lw)),
-    );
+    var t = s.rgb;
+    if (lw > 1.0) {
+        // HDR image on an SDR surface: the hue-keeping map (pb_color::tonemap::hdr_to_sdr).
+        let g = into_gamut(s.rgb);
+        let gm = max(g.r, max(g.g, g.b));
+        t = vec3<f32>(0.0);
+        if (gm > 0.0) {
+            t = g * (reinhard(gm, lw) / gm);
+        }
+    }
+    let o = vec3<f32>(srgb_oetf(t.r), srgb_oetf(t.g), srgb_oetf(t.b));
     return vec4<f32>(o, 1.0);
 }
 "#;
@@ -4326,6 +4350,27 @@ pub fn render_offscreen_color(
     ))
 }
 
+/// Like [`render_offscreen`] for an **HDR** image: `image` is `Rgba16F` scene-linear scRGB
+/// (little-endian half floats), tone-mapped to the RGBA8 target with white point `peak` —
+/// the SDR present pass's HDR branch. Backs the hue-keeping tone-map golden test.
+pub fn render_offscreen_hdr(
+    image: &[u8],
+    img_w: u32,
+    img_h: u32,
+    screen_w: u32,
+    screen_h: u32,
+    peak: f32,
+) -> Vec<u8> {
+    pollster::block_on(render_offscreen_async(
+        OffscreenSource::Hdr { image, peak },
+        img_w,
+        img_h,
+        screen_w,
+        screen_h,
+        ColorTransform::srgb(),
+    ))
+}
+
 /// Headless render of one NV12 frame through the real two-plane scene pipeline
 /// (`fs_scene_planar`) + present pass — the task 79.10 golden harness, compared
 /// against [`crate::yuv::nv12_to_rgba`] (the CPU reference) in tests.
@@ -4361,6 +4406,11 @@ pub fn render_offscreen_nv12(
 /// What [`render_offscreen_async`] draws: an RGBA8 image or a planar plane pair.
 enum OffscreenSource<'a> {
     Rgba(&'a [u8]),
+    /// `Rgba16F` scene-linear scRGB, presented with white point `peak`.
+    Hdr {
+        image: &'a [u8],
+        peak: f32,
+    },
     Planar {
         y: &'a [u8],
         uv: &'a [u8],
@@ -4390,7 +4440,27 @@ async fn render_offscreen_async(
     let format = wgpu::TextureFormat::Rgba8Unorm;
     let pipelines = build_pipelines(&device, format);
     let mut upload = StagingUpload::new();
+    let present_peak = match &source {
+        OffscreenSource::Hdr { peak, .. } => *peak,
+        _ => 1.0,
+    };
     let (scene_pipeline, bind_group) = match source {
+        OffscreenSource::Hdr { image, .. } => (
+            &pipelines.scene,
+            upload_image(
+                &device,
+                &queue,
+                &pipelines.scene_bgl,
+                &mut upload,
+                image,
+                img_w,
+                img_h,
+                &color,
+                true,
+                1.0,
+                None,
+            ),
+        ),
         OffscreenSource::Rgba(image) => (
             &pipelines.scene,
             upload_image(
@@ -4441,10 +4511,11 @@ async fn render_offscreen_async(
     let ibuf = index_buffer(&device);
 
     // Same scene → fp16 intermediate → present path as the on-screen renderer, so
-    // the golden tests exercise the real pipeline. SDR peak = 1.0 (identity tone-map).
+    // the golden tests exercise the real pipeline. SDR peak = 1.0 (identity tone-map);
+    // an HDR source brings its own.
     let peak_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
         label: Some("present-uniform"),
-        contents: bytemuck::bytes_of(&PresentUniform::new(1.0, false, 0.0)),
+        contents: bytemuck::bytes_of(&PresentUniform::new(present_peak, false, 0.0)),
         usage: wgpu::BufferUsages::UNIFORM,
     });
     let (intermediate, tonemap_bind_group) = make_intermediate(
@@ -7000,6 +7071,41 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
                 pct(new_ms.clone(), 0.5),
                 pct(new_ms, 0.95),
             );
+        }
+    }
+
+    #[test]
+    fn offscreen_hdr_tone_map_keeps_hue_and_matches_the_cpu_map() {
+        let _gpu = crate::gpu_test_lock();
+        // A bright crimson (scRGB) and an out-of-sRGB-gamut green, white point 10.
+        let peak = 10.0f32;
+        let cases: [[f32; 3]; 2] = [[8.0, 0.5, 1.0], [-0.3, 2.5, 0.2]];
+        for rgb in cases {
+            let (w, h) = (8u32, 8u32);
+            let px: Vec<u8> = [rgb[0], rgb[1], rgb[2], 1.0]
+                .iter()
+                .flat_map(|v| half::f16::from_f32(*v).to_le_bytes())
+                .collect::<Vec<u8>>()
+                .repeat((w * h) as usize);
+            let out = render_offscreen_hdr(&px, w, h, w, h, peak);
+            let got = at(&out, w, w / 2, h / 2);
+            // The CPU reference — the export / clipboard paths' exact maths.
+            let sdr = pb_color::tonemap::hdr_to_sdr(rgb, peak, pb_color::tonemap::LUMA_BT709);
+            let want = sdr.map(|v| {
+                let x = v.clamp(0.0, 1.0);
+                let e = if x <= 0.003_130_8 {
+                    12.92 * x
+                } else {
+                    1.055 * x.powf(1.0 / 2.4) - 0.055
+                };
+                (e * 255.0 + 0.5) as u8
+            });
+            for c in 0..3 {
+                assert!(
+                    got[c].abs_diff(want[c]) <= 2,
+                    "{rgb:?}: GPU {got:?} vs CPU {want:?}"
+                );
+            }
         }
     }
 

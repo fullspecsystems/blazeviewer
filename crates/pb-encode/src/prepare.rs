@@ -75,13 +75,6 @@ const SRGB_TO_P3: [[f32; 3]; 3] = [
     [0.017_082_7, 0.072_397_4, 0.910_519_9],
 ];
 
-/// Extended Reinhard with white point `lw` — the same curve the SDR present pass and the
-/// clipboard use (`engine::to_clipboard_rgba8`), so an SDR export matches an SDR screen.
-fn reinhard(v: f32, lw: f32) -> f32 {
-    let x = v.max(0.0);
-    x * (1.0 + x / (lw * lw)) / (1.0 + x)
-}
-
 /// The sRGB (and Display P3) transfer curve, linear → encoded.
 fn srgb_oetf(c: f32) -> f32 {
     let x = c.clamp(0.0, 1.0);
@@ -277,10 +270,13 @@ fn unpremultiply(samples: &mut Samples, channels: Channels) {
 
 /// Tone-map linear scRGB (BT.709 primaries, 1.0 = SDR white) to Display P3 16-bit
 /// (export-plan.md § 3.8): convert to P3-linear first so wide-gamut colour isn't clamped
-/// away, take the white point from the full-resolution peak, apply extended Reinhard, encode
-/// with the sRGB/P3 curve. Gray input is expanded to RGB (the P3 profile is RGB). Returns the
-/// samples, their layout, and whether anything exceeded SDR white (i.e. real tone-mapping
-/// happened rather than an identity pass).
+/// away, bring anything still outside P3 in by desaturating toward its luminance, take the
+/// white point from the full-resolution peak, then the **hue-keeping** extended Reinhard
+/// (`pb_color::tonemap` — the brightest channel follows the curve and the others scale with
+/// it; per-channel compression turned bright reds magenta), and encode with the sRGB/P3
+/// curve — the same maths as the clipboard path and the renderer's SDR shader. Gray input is
+/// expanded to RGB (the P3 profile is RGB). Returns the samples, their layout, and whether
+/// anything exceeded SDR white (i.e. real tone-mapping happened rather than an identity pass).
 fn tone_map_to_p3(f: &[f32], channels: Channels) -> (Samples, Channels, bool) {
     let n = channels.count();
     let has_alpha = channels.has_alpha();
@@ -300,9 +296,11 @@ fn tone_map_to_p3(f: &[f32], channels: Channels) -> (Samples, Channels, bool) {
             m[2][0] * c[0] + m[2][1] * c[1] + m[2][2] * c[2],
         ]
     };
+    use pb_color::tonemap::{into_gamut, tone_map, LUMA_DISPLAY_P3};
+    let in_p3 = |px: &[f32]| into_gamut(to_p3(rgb_of(px)), LUMA_DISPLAY_P3);
     let mut peak = 1.0f32;
     for px in f.chunks_exact(n) {
-        for v in to_p3(rgb_of(px)) {
+        for v in in_p3(px) {
             if v.is_finite() && v > peak {
                 peak = v;
             }
@@ -315,9 +313,8 @@ fn tone_map_to_p3(f: &[f32], channels: Channels) -> (Samples, Channels, bool) {
     };
     let mut out = Vec::with_capacity(px_count * out_ch.count());
     for px in f.chunks_exact(n) {
-        for v in to_p3(rgb_of(px)) {
-            let v = if v.is_finite() { v } else { 0.0 };
-            out.push(q16(srgb_oetf(reinhard(v, peak))));
+        for v in tone_map(in_p3(px), peak) {
+            out.push(q16(srgb_oetf(v)));
         }
         if has_alpha {
             out.push(q16(px[n - 1]));
@@ -749,6 +746,45 @@ mod tests {
         };
         assert_eq!(icc::data_color_space(p), Some(icc::IccSpace::Rgb));
         assert!(!icc::is_srgb(p));
+    }
+
+    /// Owner report (2026-11-14): an exported HDR video frame's reds looked magenta. A
+    /// bright crimson must keep its hue through the export tone map.
+    #[test]
+    fn a_bright_saturated_highlight_keeps_its_hue() {
+        // A peak-white pixel (sets the white point) and a bright crimson, both in P3-linear
+        // terms; feed them as BT.709 linear (P3 → 709 is the inverse of SRGB_TO_P3).
+        let p3_to_709 = |c: [f32; 3]| -> [f32; 3] {
+            let m = [
+                [1.224_940_2, -0.224_940_2, 0.0],
+                [-0.042_056_9, 1.042_056_9, 0.0],
+                [-0.019_637_6, -0.078_636_1, 1.098_273_7],
+            ];
+            [0, 1, 2].map(|r| m[r][0] * c[0] + m[r][1] * c[1] + m[r][2] * c[2])
+        };
+        let (white, crimson) = (p3_to_709([10.0; 3]), p3_to_709([8.0, 0.5, 1.0]));
+        let mut s = src(2, 1, Channels::Rgb, Samples::F32([white, crimson].concat()));
+        s.encoding = SampleEncoding::Linear;
+        s.color = ColorDesc::LinearScRgb;
+        let out = prepare(s, &STRIP).unwrap();
+        let Samples::U16(v) = out.samples else {
+            panic!()
+        };
+        let lin = |q: u16| {
+            let e = q as f32 / 65535.0;
+            if e <= 0.040_45 {
+                e / 12.92
+            } else {
+                ((e + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        let (r, g, b) = (lin(v[3]), lin(v[4]), lin(v[5]));
+        assert!(
+            (g / r - 0.0625).abs() < 0.01 && (b / r - 0.125).abs() < 0.01,
+            "hue kept: G/R {} B/R {} (per-channel gave ≈0.35 / 0.53)",
+            g / r,
+            b / r
+        );
     }
 
     #[test]

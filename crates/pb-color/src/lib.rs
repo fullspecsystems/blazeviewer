@@ -16,6 +16,11 @@
 //!
 //! Pure math, zero dependencies: no I/O, no GPU, no cfg. `pb-decode` and `pb-render`
 //! both depend on it; nothing depends on them.
+//!
+//! [`tonemap`] is the second resident: the hue-keeping HDR → SDR mapping that the export
+//! (`pb-encode`), the clipboard path (`pb-app-core`) and the renderer's SDR shader share.
+
+pub mod tonemap;
 
 /// The YUV→RGB matrix families both media paths use (H.273 non-constant-luminance
 /// `matrix_coefficients`). Deliberately just the three that carry distinct luma
