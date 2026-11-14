@@ -52,6 +52,10 @@ with any pre-release suffix carried only by the tag.
   could spend the whole response length thinking and fail with "Couldn't read the
   endpoint's reply". Blaze Viewer now gives a model that thinks room to finish thinking
   and still answer at the response length you chose.
+- **Describe the new frame after a video plays on.** With the Describe panel open, pressing
+  D (or choosing Describe Image) now describes the frame on screen if the video or animation
+  has moved on since the last description, instead of closing the panel. The same goes for
+  the panel's "Press D to describe this image."
 - **Mac: HDR videos look right before you press play.** Parked on an HDR MP4 or MOV, the
   preview frame now shows in full HDR, as MKVs already did, instead of a flat SDR frame
   that brightened once playback started.

@@ -18,13 +18,17 @@ impl AppCore {
     /// **Describe image** (`D`, task #44): toggle the Inspector's Describe tab.
     /// Showing it kicks the vision-model describe for the displayed photo (no-op
     /// when cached / already running); `D` on an already-showing Describe tab closes
-    /// the Inspector; while `Tab`-hidden it reveals (never closes).
+    /// the Inspector — unless the panel has nothing for what's on screen
+    /// ([`describe_is_stale`](Self::describe_is_stale)), when it describes instead; while
+    /// `Tab`-hidden it reveals (never closes).
     pub fn describe_image(&mut self) {
         let was_showing = self.slot_content() == Some(SlotContent::Describe);
-        self.panels.toggle_inspector(InspectorTab::Describe);
-        if was_showing {
-            self.refresh_slot(); // closed it
-            return;
+        if !(was_showing && self.describe_is_stale()) {
+            self.panels.toggle_inspector(InspectorTab::Describe);
+            if was_showing {
+                self.refresh_slot(); // closed it
+                return;
+            }
         }
         // An explicit `D` retries a previously-failed describe (the endpoint may have come up,
         // or Local Network permission was just granted) — a cached *error* is cleared so the
@@ -38,6 +42,34 @@ impl AppCore {
         self.ensure_describe_scan(None); // default (accessibility) prompt
         self.show_overlay();
         self.refresh_info_line_visibility(); // Tab-hidden reveals with the panel
+    }
+
+    /// Whether the open Describe panel has nothing for what's on screen, so `D` should
+    /// describe rather than close it: a description (or one in flight) of a **different
+    /// frame** — a video or animation that played on since (owner report 2026-11-14, #81;
+    /// the Mac Inspector has no other "describe again" control) — or the idle "Press D to
+    /// describe this image." invitation. A cached error for this frame is not stale: `D`
+    /// closes it as before, and reopening retries.
+    fn describe_is_stale(&self) -> bool {
+        let Some(item) = self.displayed_item else {
+            return false;
+        };
+        let key = self.frame_key(item);
+        if let Some(scan) = self.describe_scan.as_ref().filter(|s| s.item == item) {
+            return scan.frame != key;
+        }
+        match self.descriptions.get(&item) {
+            None => true, // the idle "Press D" invitation
+            // Keyed like `ensure_describe_scan`'s cache check (absent = the still).
+            Some(_) => {
+                self.frame_capture
+                    .described
+                    .get(&item)
+                    .copied()
+                    .unwrap_or_default()
+                    != key
+            }
+        }
     }
 
     /// **Ask about image** (`Shift+D`, task #44 subtask 9): open the text-input dialog for a
@@ -342,6 +374,85 @@ mod tests {
             prompt.contains("Canon"),
             "the EXIF camera fact should still reach the describer: {prompt}"
         );
+    }
+
+    /// A core showing one video, paused at `at` on the AVPlayer-style (native) route, with
+    /// no endpoint configured so a describe runs synchronously (it caches the setup hint).
+    fn paused_video_core(at: std::time::Duration) -> AppCore {
+        use crate::video::{VideoSessionId, VideoSessionState as S};
+        use crate::video_native::{ActiveVideoBackend, NativeVideoProxy};
+        let mut core = test_core();
+        core.settings.describe_endpoint = String::new(); // keep it thread-free
+        core.displayed_item = Some(0);
+        let id = VideoSessionId(7);
+        let mut p = NativeVideoProxy::new(0, id, true);
+        p.on_state_changed(id, S::Paused);
+        p.set_position(at);
+        core.video = Some(ActiveVideoBackend::Native(p));
+        core
+    }
+
+    fn seek_to(core: &mut AppCore, at: std::time::Duration) {
+        match core.video.as_mut() {
+            Some(crate::video_native::ActiveVideoBackend::Native(p)) => p.set_position(at),
+            _ => unreachable!("paused_video_core installs a native player"),
+        }
+    }
+
+    /// Owner report 2026-11-14 (#81 follow-up): describe a video frame, play on, and `D`
+    /// must describe the frame now on screen — it used to close the panel, and the Mac
+    /// Inspector has no other "describe again" control. `D` still closes the panel once it
+    /// shows the frame on screen.
+    #[test]
+    fn d_on_an_open_panel_describes_a_new_frame_instead_of_closing() {
+        use crate::frame_capture::FrameKey;
+        use std::time::Duration;
+        let mut core = paused_video_core(Duration::from_secs(1));
+        core.dispatch_action(Action::DescribeImage);
+        assert_eq!(core.panels.inspector, Some(InspectorTab::Describe));
+        // The 1 s frame is described.
+        core.descriptions.insert(0, Ok("A grey frame.".to_string()));
+        core.frame_capture
+            .described
+            .insert(0, FrameKey::Video { millis: 1000 });
+
+        // Play on to 5 s, pause, press D: the panel stays open and the 5 s frame is described.
+        seek_to(&mut core, Duration::from_secs(5));
+        core.dispatch_action(Action::DescribeImage);
+        assert_eq!(
+            core.panels.inspector,
+            Some(InspectorTab::Describe),
+            "D re-describes rather than closing over a stale description"
+        );
+        assert_eq!(
+            core.frame_capture.described.get(&0),
+            Some(&FrameKey::Video { millis: 5000 })
+        );
+        assert!(
+            !matches!(core.descriptions.get(&0), Some(Ok(t)) if t == "A grey frame."),
+            "the 1 s description isn't shown as the 5 s frame's"
+        );
+
+        // Same frame now: D closes as it always has.
+        core.dispatch_action(Action::DescribeImage);
+        assert_eq!(core.panels.inspector, None);
+    }
+
+    /// The open panel inviting "Press D to describe this image." (auto-describe off, a new
+    /// item) means `D` describes — it doesn't close the panel that asked for it.
+    #[test]
+    fn d_on_an_open_idle_panel_describes() {
+        let mut core = test_core();
+        core.settings.describe_endpoint = String::new();
+        core.displayed_item = Some(0);
+        core.panels.open_inspector(InspectorTab::Describe);
+        assert!(matches!(
+            core.describe_panel().body,
+            crate::panels::DescribeBody::Idle
+        ));
+        core.dispatch_action(Action::DescribeImage);
+        assert_eq!(core.panels.inspector, Some(InspectorTab::Describe));
+        assert!(core.descriptions.contains_key(&0), "the describe ran");
     }
 
     #[test]

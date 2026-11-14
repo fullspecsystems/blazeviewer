@@ -602,6 +602,12 @@
             "title": "Wire Copy / OCR / Describe / Export + verify on both platforms",
             "description": "Each consumer uses the capture instead of decode_item for videos/animations. Behaviour-unverified until each shell is run; record in the plan's Handoff. Compare stays item-based (out of scope). WIRED (session 3): Copy (async, image-only), Copy Text + Text tab (frame-keyed cache; auto waits for pause), Describe/Ask (frame-keyed; auto waits), Export (video items exportable; name carries the time). Verification = manual test script section 11 (Mac) + W12–W15 (Windows).",
             "status": "review"
+          },
+          {
+            "id": 6,
+            "title": "Follow-up: D on an open Describe panel re-describes a new frame",
+            "description": "Owner report 2026-11-14: after describing a video frame and playing on, D / Describe Image closed the panel (the Mac Inspector has no other describe-again control). AppCore::describe_is_stale: when the panel shows a description (or scan) of a different frame_key, or the idle 'Press D' invitation, D describes instead of closing; same frame still closes. Core-only, unit-tested (d_on_an_open_panel_describes_a_new_frame_instead_of_closing, d_on_an_open_idle_panel_describes). Owner hand check on the Mac pending; Windows inherits it from the core.",
+            "status": "review"
           }
         ]
       },
