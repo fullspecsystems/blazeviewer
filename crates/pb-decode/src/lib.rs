@@ -187,13 +187,15 @@ pub use ffmpeg::cues::{ff_read_subtitle_cues, ff_stream_subtitle_cues};
 #[cfg(feature = "ffvideo")]
 pub use ffmpeg::details::{ff_probe_video_details, ff_probe_video_input};
 #[cfg(feature = "ffvideo")]
+pub use ffmpeg::frame_at::ff_decode_frame_at;
+#[cfg(feature = "ffvideo")]
 pub use ffmpeg::poster::ff_decode_video_poster;
 #[cfg(feature = "ffvideo")]
 pub use ffmpeg::video_producer::run_ff_video_producer;
 // The demux-only compressed packet source (video-overhaul Phase 3): feeds the
 // macOS AVSampleBufferDisplayLayer presenter compressed access units + the
 // hvcC/avcC/DoVi config a CMVideoFormatDescription needs.
-pub use export::{decode_named_bytes_for_export, ExportDecodeError};
+pub use export::{decode_named_bytes_for_export, export_source_from_decoded, ExportDecodeError};
 #[cfg(feature = "ffvideo")]
 pub use ffmpeg::demux::{DemuxPacket, DemuxStreamInfo, DoviConfig, VideoCodec, VideoDemuxer};
 pub use image_backend::ImageCrateDecoder;

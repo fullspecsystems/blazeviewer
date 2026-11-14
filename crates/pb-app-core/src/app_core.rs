@@ -453,6 +453,9 @@ pub struct AppCore {
     /// on-device OCR lines + QR payloads, cached so a revisit is instant. RAM-only
     /// (privacy #2) — dropped on rebuild and exit, never written anywhere.
     pub recognized_text: HashMap<usize, crate::image_text::ImageText>,
+    /// Frame capture (task #81): Copy Image of a video/animation frame in flight, and which
+    /// frame each cached description came from.
+    pub frame_capture: crate::frame_capture::FrameCaptureState,
     /// The in-flight off-thread text scan, or `None`. Polled by the tick
     /// (`poll_text_scan`); superseded by replacing it (the old receiver drops).
     pub text_scan: Option<crate::image_text::TextScan>,

@@ -16,7 +16,12 @@ fn main() {
     };
     let source = pb_source::FsSource::new(vec![path.clone().into()]);
     let t0 = Instant::now();
-    let r = pb_app_core::image_text::scan_job(&source, 0, pb_render::Rotation::default());
+    let r = pb_app_core::image_text::scan_job(
+        &source,
+        0,
+        &pb_app_core::frame_capture::FrameSource::Still,
+        pb_render::Rotation::default(),
+    );
     println!("{path}: scanned in {:?}", t0.elapsed());
     for q in &r.qr {
         println!("QR: {q}");

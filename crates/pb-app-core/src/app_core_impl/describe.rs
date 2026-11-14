@@ -80,23 +80,43 @@ impl AppCore {
     /// that same describe is already running. `prompt_override` is the Ask question; `None`
     /// builds the default accessibility prompt from salient EXIF (`prompt::build_prompt`).
     /// A misconfigured backend caches a one-line error rather than a description.
+    ///
+    /// On a video or a playing animation it describes **the frame on screen** (task #81); a
+    /// cached description is reused only for that same frame. (The automatic run — the
+    /// opt-in auto-describe with the panel open — waits for playback to stop: the tick
+    /// checks [`frame_is_moving`](Self::frame_is_moving) before calling this.)
     pub(super) fn ensure_describe_scan(&mut self, prompt_override: Option<String>) {
         let Some(item) = self.displayed_item else {
             return;
         };
-        if self.descriptions.contains_key(&item)
-            || self.describe_scan.as_ref().is_some_and(|s| s.item == item)
+        let key = self.frame_key(item);
+        let cached_key = self
+            .frame_capture
+            .described
+            .get(&item)
+            .copied()
+            .unwrap_or_default();
+        if (self.descriptions.contains_key(&item) && cached_key == key)
+            || self
+                .describe_scan
+                .as_ref()
+                .is_some_and(|s| s.item == item && s.frame == key)
         {
             return;
         }
+        // A description of a different frame is stale: drop it so the panel shows the
+        // describing state, not the old frame's text.
+        self.descriptions.remove(&item);
         let Some(describer) = self.describer_from_settings() else {
             self.descriptions.insert(
                 item,
                 Err("No description backend is set up (Settings ▸ AI Descriptions).".to_string()),
             );
+            self.frame_capture.described.insert(item, key);
             return;
         };
         let prompt = prompt_override.unwrap_or_else(|| self.default_describe_prompt(item));
+        let frame = self.frame_target(item);
         let gen = self.describe_gen;
         let source = Arc::clone(&self.source);
         // Bake the in-RAM rotation override: the model should see the pixels upright.
@@ -106,6 +126,7 @@ impl AppCore {
             let _ = tx.send(crate::describe::describe_job(
                 source.as_ref(),
                 item,
+                &frame,
                 rot,
                 &prompt,
                 describer.as_ref(),
@@ -114,6 +135,7 @@ impl AppCore {
         self.describe_scan = Some(crate::describe::DescribeScan {
             gen,
             item,
+            frame: key,
             copy_when_done: false,
             rx,
         });
@@ -129,13 +151,13 @@ impl AppCore {
                 return;
             };
             match s.rx.try_recv() {
-                Ok(result) => Some((s.gen, s.item, s.copy_when_done, result)),
+                Ok(result) => Some((s.gen, s.item, s.frame, s.copy_when_done, result)),
                 Err(TryRecvError::Empty) => return, // still describing
                 Err(TryRecvError::Disconnected) => None, // worker died
             }
         };
         self.describe_scan = None;
-        let Some((gen, item, copy, result)) = outcome else {
+        let Some((gen, item, frame, copy, result)) = outcome else {
             return;
         };
         if gen != self.describe_gen {
@@ -144,6 +166,7 @@ impl AppCore {
         // Store the description, or the backend error as a one-line user message.
         self.descriptions
             .insert(item, result.map_err(|e| e.user_message()));
+        self.frame_capture.described.insert(item, frame);
         if self.slot_content() == Some(SlotContent::Describe) && self.displayed_item == Some(item) {
             self.show_overlay();
         }
@@ -262,6 +285,7 @@ mod tests {
         core.describe_scan = Some(crate::describe::DescribeScan {
             gen: core.describe_gen,
             item,
+            frame: Default::default(),
             copy_when_done: false,
             rx,
         });

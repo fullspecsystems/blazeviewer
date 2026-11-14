@@ -592,6 +592,34 @@ Independent of #89: it runs on **its own one-shot capture thread** at low priori
 animation compositor matches playback at full resolution. **Acceptance.** A paused mid-scene frame
 reaches Copy/OCR/Describe at native resolution on both platforms and both macOS routes.
 
+**Built (session 3, 2026-11-14) — with two deliberate deviations from the design above:**
+- **No shell round trip on the AVPlayer route.** AVPlayer's periodic time observer fires on
+  pause, seek and step (and `pause()` now publishes explicitly), so the core's mirrored position
+  is *exact* whenever the video is paused — the case that matters — and at most one ~50 ms report
+  stale while it plays. The frame is then decoded **in Rust through FFmpeg** (present in every
+  normal Mac build — dev and release; a `--no-ffvideo` build refuses video capture with a toast)
+  rather than `AVAssetImageGenerator`: full resolution, HDR on the verified 203-nit scale, archive
+  bytes included, and unit-testable. The never-emitted `CaptureNativeVideoFrame` effect and
+  `NativeCapturePurpose` were deleted.
+- **No dedicated capture thread.** OCR and Describe already run on workers, so `scan_job` /
+  `describe_job` call `frame_capture::capture` there; Export does it on the export worker; only
+  Copy needed a new one-shot thread (`pb-frame-copy`, low priority).
+- **Where things are:** `pb-app-core/src/frame_capture.rs` (`FrameSource` frozen at command
+  time, `FrameKey` cache key, `capture`) + `app_core_impl/frame_capture.rs` (`frame_target` /
+  `frame_key` / `frame_is_moving`, async Copy); `pb-decode/src/ffmpeg/frame_at.rs`
+  (`ff_decode_frame_at`: keyframe seek, decode forward, the last frame ≤ t + 1 ms, refcounted
+  `av_frame_ref` so only the winner leaves the GPU); Windows uses MF's
+  `decode_video_poster_replay(origin 0, t)` (native-capped 4096, SDR — compile-checked only).
+- **Sources of `t`:** the Session route's presented `current_pts`; the native route's mirror; a
+  Live Photo's motion = the sum of earlier frame delays; an animation = its index (re-decoded at
+  full size via `decode_animation_cancellable(None)` only when the shown frame was fitted).
+- **Caches:** `ImageText.frame` and `frame_capture.described` record the frame each OCR /
+  description came from; a cached result is reused only for the same frame. The automatic runs
+  (Text tab open, opt-in auto-describe) skip a *playing* video/animation and read the paused
+  frame once it stops.
+- **Measured:** frame captures on local 1080p/1440p HEVC + H.264 phone clips: 25–125 ms (the
+  first includes hardware-decoder start-up).
+
 ## Rung 0b — `decode_for_export` + minimal `prepare`
 
 - `decode_for_export(bytes, name, frame) -> ExportSource` per *3.10*, including the **macOS export
@@ -933,6 +961,10 @@ confirmed directly). **All accepted.**
 
 ## Handoff
 
+**Status (2026-11-14, session 3):** **rung 0a (#81) is built** — Copy / Copy Text / Describe / Ask /
+Export act on the video or animation frame on screen (Mac verified by tests; GUI and Windows not
+driven). See Rung 0a's "Built" note. Session 2's status follows.
+
 **Status (2026-11-14, implementation session 2):** rungs **0b, 0c and 1 are built** — Export as PNG
 end to end on macOS, compile-checked for Windows. Session 2 closed rung 1's gaps (right-click item,
 Q6), ran the macOS half of the HDR brightness audit (#146, rung 5's prerequisite), fixed HDR PNG
@@ -1002,6 +1034,10 @@ test script: `.taskmaster/docs/export-rung1-manual-test.md`. Rung 0a (#81) not s
   `export_worker::lower_thread_priority` (`THREAD_MODE_BACKGROUND_BEGIN`). The Windows machine
   must run manual-test section W. Strike this line once it does.
 - **Linux:** untested (rfd save dialog; `nice(10)` worker priority).
+- **Windows (session 3, #81):** video-frame capture is compile-checked only. It goes through MF's
+  `decode_video_poster_replay(input, origin 0, t)` — verify it lands on the **paused frame** (MF's
+  origin is assumed 0; if frames come out one off, pass the producer's origin), and note its
+  limits: native-capped at 4096 px and HDR clipped to SDR. Manual test W12–W15.
 - **Windows (session 2):** the right-click "Export as PNG…" item is compile-checked only. The #146
   WIC-stills and MF-poster audit tests are `#[ignore]`d on Windows — run
   `cargo test -p pb-decode hdr_audit -- --ignored --nocapture`; drop the attributes if they pass,
@@ -1009,7 +1045,4 @@ test script: `.taskmaster/docs/export-rung1-manual-test.md`. Rung 0a (#81) not s
 
 **Claimed**
 
-- **#81 / rung 0a — video + animation frame capture — claimed by the Mac (session 3, 2026-11-14).**
-  Core contract + macOS routes first; the Windows MF route will be written and compile-checked
-  from the Mac, then listed here as cross-platform debt. Don't start #81 on Windows without
-  fetching first.
+- None. (#81 was claimed and built by the Mac in session 3; its Windows half is the debt below.)

@@ -114,6 +114,7 @@ pub(super) fn text_result(qr: &[&str], lines: &[&str]) -> crate::image_text::Ima
         qr: qr.iter().map(|s| s.to_string()).collect(),
         lines: lines.iter().map(|s| s.to_string()).collect(),
         ocr_error: None,
+        frame: Default::default(),
     }
 }
 

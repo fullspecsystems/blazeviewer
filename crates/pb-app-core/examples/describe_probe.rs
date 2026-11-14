@@ -61,6 +61,7 @@ fn main() {
     match describe_job(
         &source,
         0,
+        &pb_app_core::frame_capture::FrameSource::Still,
         pb_render::Rotation::default(),
         &prompt,
         &backend,

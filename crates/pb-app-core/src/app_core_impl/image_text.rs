@@ -15,22 +15,35 @@ impl AppCore {
     /// kicks the off-thread scan and copies when it lands (`copy_when_done`). An
     /// explicit user command; the scan never leaves the machine and the result is
     /// RAM-only (privacy #2).
+    ///
+    /// On a video or a playing animation it reads **the frame on screen** (task #81), and a
+    /// cached reading is reused only if it came from that same frame.
     pub fn copy_image_text(&mut self) {
         let Some(item) = self.displayed_item else {
             self.show_toast("Nothing to copy");
             return;
         };
-        if self.recognized_text.contains_key(&item) {
+        let key = self.frame_key(item);
+        if self
+            .recognized_text
+            .get(&item)
+            .is_some_and(|r| r.frame == key)
+        {
             self.copy_recognized(item);
             return;
         }
-        self.ensure_text_scan();
+        if !self
+            .text_scan
+            .as_ref()
+            .is_some_and(|s| s.item == item && s.frame == key)
+        {
+            let frame = self.frame_target(item);
+            self.start_text_scan(item, frame);
+        }
         if let Some(scan) = self.text_scan.as_mut() {
-            if scan.item == item {
-                scan.copy_when_done = true;
-                // Feedback that a scan is running; the result toast replaces it.
-                self.show_toast("Reading text…");
-            }
+            scan.copy_when_done = true;
+            // Feedback that a scan is running; the result toast replaces it.
+            self.show_toast("Reading text…");
         }
     }
 
@@ -47,14 +60,43 @@ impl AppCore {
     /// in-flight scan (another item's) drops its receiver — the worker's send fails
     /// and its thread exits quietly. Decode + OCR + QR all run on the worker; the
     /// event loop never blocks.
+    ///
+    /// The automatic run (the `T` panel open): on a video or animation it reads the frame on
+    /// screen once it **stops** — a playing one isn't chased frame by frame (task #81).
     pub(super) fn ensure_text_scan(&mut self) {
         let Some(item) = self.displayed_item else {
             return;
         };
-        if self.recognized_text.contains_key(&item)
-            || self.text_scan.as_ref().is_some_and(|s| s.item == item)
+        if self.frame_is_moving(item) {
+            return;
+        }
+        let key = self.frame_key(item);
+        if self
+            .recognized_text
+            .get(&item)
+            .is_some_and(|r| r.frame == key)
+            || self
+                .text_scan
+                .as_ref()
+                .is_some_and(|s| s.item == item && s.frame == key)
         {
             return;
+        }
+        let frame = self.frame_target(item);
+        self.start_text_scan(item, frame);
+    }
+
+    /// Start reading `frame` of `item` on a worker, replacing any scan in flight. A reading
+    /// cached from a *different* frame is dropped first, so the panel shows "Reading text…"
+    /// rather than the old frame's text.
+    fn start_text_scan(&mut self, item: usize, frame: crate::frame_capture::FrameSource) {
+        let key = frame.key();
+        if self
+            .recognized_text
+            .get(&item)
+            .is_some_and(|r| r.frame != key)
+        {
+            self.recognized_text.remove(&item);
         }
         let gen = self.text_gen;
         let source = Arc::clone(&self.source);
@@ -62,11 +104,17 @@ impl AppCore {
         let rot = self.rotations.get(&item).copied().unwrap_or_default();
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            let _ = tx.send(crate::image_text::scan_job(source.as_ref(), item, rot));
+            let _ = tx.send(crate::image_text::scan_job(
+                source.as_ref(),
+                item,
+                &frame,
+                rot,
+            ));
         });
         self.text_scan = Some(crate::image_text::TextScan {
             gen,
             item,
+            frame: key,
             copy_when_done: false,
             rx,
         });
@@ -141,6 +189,7 @@ mod tests {
         core.text_scan = Some(crate::image_text::TextScan {
             gen: core.text_gen,
             item,
+            frame: Default::default(),
             copy_when_done: copy,
             rx,
         });

@@ -14,14 +14,25 @@ impl AppCore {
     /// Copy the current photo to the OS clipboard (`Ctrl+C` / Edit ▸ Copy, task #27).
     ///
     /// Decodes the original at **full resolution** here — not the fit-downscaled ring
-    /// texture — so a paste lands at native size. This is a synchronous decode on the
-    /// event-loop thread, which is fine: Copy is an explicit, infrequent user command
-    /// (like the modal file picker), not the nav hot path. Any in-RAM rotation
-    /// override is baked into the copied pixels so the clipboard is WYSIWYG.
+    /// texture — so a paste lands at native size. For a photo this is a synchronous decode on
+    /// the event-loop thread, which is fine: Copy is an explicit, infrequent user command
+    /// (like the modal file picker), not the nav hot path. **A video or a playing animation
+    /// copies the frame on screen** (task #81) and captures it off the event loop — even a
+    /// video's poster, whose walk can take seconds. Any in-RAM rotation override is baked
+    /// into the copied pixels so the clipboard is WYSIWYG.
     pub fn copy_image(&mut self) {
         let Some(item) = self.displayed_item else {
             return; // empty state — nothing to copy
         };
+        let frame = self.frame_target(item);
+        let is_video = matches!(
+            crate::video::item_kind(self.source.as_ref(), item),
+            crate::video::LibraryItemKind::Video(_)
+        );
+        if is_video || !frame.is_still() {
+            self.copy_frame(item, frame);
+            return;
+        }
         let img = match decode_item(self.source.as_ref(), item, None, false) {
             Ok(img) => img,
             Err(e) => {

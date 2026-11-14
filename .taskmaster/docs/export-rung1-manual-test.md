@@ -30,6 +30,10 @@ git pull
 A prebuilt app is at `target/swift-host/release/Blaze Viewer.app` (session 2, built from the
 commit that added this line — About shows its build id). Rebuild if you've pulled since.
 
+**What changed in session 3** (2026-11-14): **video and animation frames** — Copy, Copy Text,
+Describe/Ask and Export act on the frame on screen (section 11; W9, W12–W15). Rows 1.3, 1.8 and 9.6
+changed with it.
+
 **What changed in session 2** (2026-11-14), so you know where to look:
 - the right-click **Export as PNG…** item (1.7–1.8);
 - pinning "Open files in" now forgets a remembered export folder (6.8–6.9);
@@ -54,12 +58,12 @@ Have handy:
 |---|---|---|
 | 1.1 | Launch with nothing open; open the **File** menu | **Export as PNG…** is present, **disabled**, shows ⇧⌘E |
 | 1.2 | Open a folder of photos; File menu again | Export as PNG… is **enabled** |
-| 1.3 | Navigate to a **video** | Menu item **disabled**; pressing `E` toasts "Exporting video frames isn't available yet" |
+| 1.3 | Navigate to a **video** (session 3: video frames export now) | Menu item **enabled**; `E` opens the sheet named `<clip>.png` (the poster, before playing) — section 11 covers playing/paused frames |
 | 1.4 | In a folder containing a `.zip`, land on the zip's door tile | Menu item **disabled**; `E` toasts "Open the archive to export its images" |
 | 1.5 | Press `?` (help overlay) | A row "Export as PNG — E" |
 | 1.6 | Settings ▸ Shortcuts | "Export as PNG" listed, bound to `E`, rebindable |
 | 1.7 | Right-click a photo | "**Export as PNG…**" after the AI items, in a group with Show in Finder and Quick Sort; choosing it opens the same sheet as `E` |
-| 1.8 | Right-click a **video**, a **zip door**, and a photo **inside a zip** | Video and door: **no** Export item. Inside the zip: Export is there, Show in Finder and Quick Sort aren't (and that group still has its separator) |
+| 1.8 | Right-click a **video**, a **zip door**, and a photo **inside a zip** | Video: Export **is** there (session 3). Door: **no** Export item. Inside the zip: Export is there, Show in Finder and Quick Sort aren't (and that group still has its separator) |
 
 ## 2. Basic export
 
@@ -140,7 +144,7 @@ Have handy:
 | 9.3 | Export a **RAW** with a full-size preview (most Nikon/Sony) | Full-size PNG of the camera's rendering |
 | 9.4 | Export a **JPEG XL** | Works; colours match |
 | 9.5 | Export a **CMYK JPEG** (if you have one) | Toast "Export failed — CMYK JPEGs can't be exported yet" |
-| 9.6 | Export an **animated GIF/WebP** | The first frame (exporting the current frame waits for #81) |
+| 9.6 | Export an **animated GIF/WebP** without playing it | The first frame, named `<name>.png` (playing/paused frames: section 11) |
 
 ## 10. HDR brightness (task #146 — the visual half)
 
@@ -157,6 +161,29 @@ The numbers are already measured: on the Mac every HDR decoder agrees that 203 n
 | 10.4 | `pq-card.png` and `hlg-card.png` (**new in session 2** — HDR PNGs) | Look **identical** to the AVIF/HEIC cards (they used to be flat and grey). Preview should agree |
 | 10.5 | `pq-card.jxl` | **Known gap**: shows as SDR (JPEG XL has no HDR path yet) |
 | 10.6 | Export `pq-card.heic` and `pq-card.png` as PNG (`E`) | Both toast "(HDR as SDR)"; both PNGs step up evenly from black to white with no clipping, and match each other |
+
+## 11. Video and animation frames (task #81 — session 3)
+
+Copy, Copy Text from Image, Describe/Ask and Export now act on **the frame on screen**, not the
+video's poster. Use a film or phone clip with recognizable scenes (and on-screen text for 11.5).
+
+| # | Do | Expect |
+|---|---|---|
+| 11.1 | Open an **MP4/MOV**, play it, pause on a distinctive frame, `⌘C`; paste into Preview (File ▸ New from Clipboard) | Toast "Copying frame…" then "Copied image". The paste is **that paused frame** at the video's full resolution (not the poster), upright for a portrait phone clip |
+| 11.2 | Same with an **MKV or WebM** (the other playback route) | Same: the paused frame |
+| 11.3 | Step a frame with the arrow key while paused (or scrub), then `⌘C` again | The new frame, not the previous one |
+| 11.4 | `⌘C` while the video is **playing** | A frame from that moment (within a frame or two); the app never stalls |
+| 11.5 | Pause on a frame with **text** in it, then Edit ▸ **Copy Text from Image** (or the right-click menu — it has no default key) | Toast "Reading text…", then the text **of that frame** is copied. Pause on a different frame and do it again: the new frame's text, not the old one's |
+| 11.6 | Open the **Text** tab (`T`) while a video plays | Nothing churns while it plays; pause → "Reading text…" → that frame's text |
+| 11.7 | With a describe backend set up: pause on a frame, press `D` (or Ask with `⇧D`) | The description is of **the paused frame**. Pause elsewhere and Ask again: describes the new frame |
+| 11.8 | Pause on a frame and press `E` | Sheet name `<clip>-0h01m23s.png` (the paused time); the PNG is that frame at full resolution |
+| 11.9 | Export a paused frame of an **HDR** clip (iPhone HDR / HLG or an HDR10 file) | Toast "(HDR as SDR)"; the PNG looks natural, not washed out or dim |
+| 11.10 | `E` on a video **before playing it** | Exports the **poster** (what's on screen), named `<clip>.png` |
+| 11.11 | A video **inside a zip** (enter with `P`): pause and `⌘C`, then `E` | The real paused frame for both (Copy used to give a grey placeholder for zipped MP4/MOV) |
+| 11.12 | Copy a video and paste into **Messages** or **Mail** | An **image** is pasted, not the video file |
+| 11.13 | Play an **animated GIF/WebP** (`P`), pause it on a later frame (or step with the arrows), `⌘C` and `E` | That frame; the export is named `<name>-frame12.png` (1-based) |
+| 11.14 | A **Live Photo**: press `P` and `⌘C` while the motion is on screen | The motion frame on screen, at full motion resolution (not the still) — Live Photo capture isn't covered by automated tests, so this one matters |
+| 11.15 | Copy a frame, then immediately navigate away | The copy still completes (that frame lands on the clipboard); nothing hangs |
 
 ---
 
@@ -175,6 +202,10 @@ only compile-checked from the Mac.
 | W6 | Overwrite prompt: export onto an existing PNG | Windows asks to replace; confirm → replaced |
 | W7 | Browse while a big export runs | Smooth; the export thread runs at background priority |
 | W8 | Quit during an export | Quits within ~4 s; no `.tmp` left |
-| W9 | (#81 handoff) Pause a film mid-scene, Ctrl+C, paste into Paint | Is it the **poster**, or the paused frame? (Expected today: the poster) |
-| W10 | Right-click a photo, a video, a zip door | "Export as PNG…" on the photo only; it opens the save dialog |
+| W9 | Pause a film mid-scene, Ctrl+C, paste into Paint | The **paused frame** (session 3 — it used to be the poster). Toast "Copying frame…" then the copy icon |
+| W10 | Right-click a photo, a video, a zip door | "Export as PNG…" on the photo **and the video** (session 3), not the door; it opens the save dialog |
 | W11 | `cargo test -p pb-decode hdr_audit -- --ignored --nocapture` (#146 Windows half) | Every ratio ≈ 1.00x. If WIC reads ~2.5x off, that's the 80-vs-203-nit scRGB mismatch — record the table in the plan's Handoff |
+| W12 | Pause a film, `E`, export | Name `<film>-0h12m34s.png`; the PNG is **the paused frame** — if it is consistently one frame off, note it (Media Foundation's timeline origin is assumed to be 0) |
+| W13 | Same on an **HDR** film | Exports, but **SDR and capped at 4096 px** on Windows for now (MF's replay path); note how it looks |
+| W14 | Pause, Copy Text from Image; then `D` | Both act on the paused frame |
+| W15 | Play an animated GIF, pause on a later frame, Ctrl+C | That frame |

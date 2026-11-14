@@ -19,6 +19,12 @@ with any pre-release suffix carried only by the tag.
   remembers the last folder you exported to, unless Settings ▸ "Open files in" is
   set to a pinned folder, in which case nothing is remembered after you quit —
   and pinning a folder forgets any export folder remembered before.
+- **Copy, read text from, describe and export the video frame you're looking at.**
+  Pause a video (or let it play) and Copy, Copy Text from Image, Describe, Ask and
+  Export as PNG now use the frame on screen, at full resolution, instead of the
+  video's poster. The same goes for a paused animated GIF, WebP or PNG and a Live
+  Photo's motion. Exported frames are named with their time, like
+  `clip-0h01m23s.png`, and HDR video frames export like HDR photos.
 
 ### Changed
 
@@ -40,6 +46,11 @@ with any pre-release suffix carried only by the tag.
 - **The menu shows the right keys while a video plays.** Space pauses a playing video
   and Shift+Space moves on to the next item, so the menu now says so: Next shows
   Shift+Space and Play/Pause shows Space until the video ends.
+- **Copying a video no longer freezes the app.** Copy used to search for the
+  video's poster frame on the main thread, which could stall everything for
+  several seconds; it now happens in the background.
+- **Mac: copying a video inside an archive copies a real frame**, not a grey
+  placeholder.
 - **HDR PNGs show in HDR.** PNGs tagged as HDR (PQ or HLG — the 2025 PNG standard) used
   to look flat and grey; they now show with full HDR brightness, like HDR HEIC and AVIF
   photos. PNGs tagged with a wide-gamut colour space this way get correct colours too.

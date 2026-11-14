@@ -36,6 +36,10 @@ pub struct ExportRequest {
     pub source_path: Option<PathBuf>,
     /// Clockwise quarter turns of the RAM rotation at command time.
     pub rotation_cw: u8,
+    /// The frame to export, frozen at command time (task #81): `None` re-decodes the file
+    /// itself (a photo — full fidelity: its own profile, 16-bit); `Some` captures a video
+    /// frame, a video's poster or an animation frame.
+    pub frame: Option<crate::frame_capture::FrameSource>,
 }
 
 impl std::fmt::Debug for ExportRequest {

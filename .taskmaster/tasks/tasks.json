@@ -567,7 +567,7 @@
         "id": 81,
         "title": "Video/animation: full-resolution frame capture for Copy / OCR / Describe / Export (all platforms)",
         "description": "Survey 2026-11-13: CoreEffect::CaptureNativeVideoFrame + NativeCapturePurpose are defined but nothing emits the effect and no shell consumes it; decode_item on a video calls decode_video_poster, so Copy / OCR / Describe on a video use the POSTER on every platform (confirm on Windows). Build on-demand capture by FROZEN IDENTITY (video PTS + track + seek generation; animation frame index) with a full-resolution decode — the live playback buffers are fit-scaled (animation decode_fit, Live Photo motion cap, Session fit box), so they're used only when already full-res with matching identity. Replies validate against the request, not live state. On demand only (privacy). Consumers: Copy, OCR, Describe, Export (#89 rung 0a). Compare is OUT of scope: it pins an item and stops playback when jumping; pinning a captured frame needs its own design. Plan: .taskmaster/docs/export-plan.md rung 0a. Rev 4 (Fable review, 2026-11-13): runs on its OWN one-shot capture thread at low priority, so #81 does not depend on #89's export worker. Copy on a video becomes asynchronous (a copy-when-done state, like copy_image_text). AVPlayer route: the core's position is a ~20 Hz mirror, so the SHELL reads currentTime() when it handles the effect and the reply carries the time used. Animations: composite-and-discard up to frame k at full res (decode_animation's 1.5 GB cap truncates early). On Windows the decode is MF (FFmpeg there is container-reading only).",
-        "status": "in-progress",
+        "status": "review",
         "priority": "medium",
         "dependencies": [
           "79"
@@ -576,32 +576,32 @@
           {
             "id": 1,
             "title": "Core: frozen capture request + reply contract",
-            "description": "Replace the vestigial CaptureNativeVideoFrame / NativeCapturePurpose with CaptureVideoFrame { request_id, … } + VideoFrameCaptured; the request freezes PTS/track/seek generation or frame index; replies validate against the request. Test-first.",
-            "status": "pending"
+            "description": "Replace the vestigial CaptureNativeVideoFrame / NativeCapturePurpose with CaptureVideoFrame { request_id, … } + VideoFrameCaptured; the request freezes PTS/track/seek generation or frame index; replies validate against the request. Test-first. DONE (session 3): frame_capture.rs — FrameSource frozen at command time + FrameKey; no reply contract needed (see 2).",
+            "status": "done"
           },
           {
             "id": 2,
             "title": "macOS AVPlayer route (MP4/MOV)",
-            "description": "AVAssetImageGenerator at the frozen time, zero tolerance, full size. For HDR, extend #144's livephoto::stream_hdr_frames with a seek/PTS entry point rather than a second HDR path (it currently streams from the start).",
-            "status": "pending"
+            "description": "AVAssetImageGenerator at the frozen time, zero tolerance, full size. For HDR, extend #144's livephoto::stream_hdr_frames with a seek/PTS entry point rather than a second HDR path (it currently streams from the start). DONE differently (session 3): no AVAssetImageGenerator round trip — the core's mirrored AVPlayer position is exact once paused (pause() now publishes), and FFmpeg decodes the frame in Rust (ff_decode_frame_at). Owner verifies by hand.",
+            "status": "done"
           },
           {
             "id": 3,
             "title": "Session route (FFmpeg on macOS; MF/FFmpeg on Windows)",
-            "description": "One-shot full-resolution decode at the frozen PTS on the export worker (seek to the preceding keyframe, decode forward) from the same input (filesystem or archive) and selected track. Preserve P010 PQ/HLG with its real transfer. Measure p50/p95 on long-GOP files.",
-            "status": "pending"
+            "description": "One-shot full-resolution decode at the frozen PTS on the export worker (seek to the preceding keyframe, decode forward) from the same input (filesystem or archive) and selected track. Preserve P010 PQ/HLG with its real transfer. Measure p50/p95 on long-GOP files. DONE (session 3): FFmpeg on macOS/Linux (ff_decode_frame_at, fixture-tested incl. B-frames + HDR); Windows via MF decode_video_poster_replay — COMPILE-CHECKED ONLY.",
+            "status": "done"
           },
           {
             "id": 4,
             "title": "Animations + Live Photos",
-            "description": "Full-resolution decode of the frozen animation frame index with correct compositing (disposal/blend); Live Photo motion frame by PTS as in subtask 3.",
-            "status": "pending"
+            "description": "Full-resolution decode of the frozen animation frame index with correct compositing (disposal/blend); Live Photo motion frame by PTS as in subtask 3. DONE (session 3): animations use the shown frame when it's full size, else decode_animation_cancellable(None)[index]; Live Photo motion re-decodes the .mov at the frame's time (falls back to the shown frame). Live Photo path not unit-tested.",
+            "status": "done"
           },
           {
             "id": 5,
             "title": "Wire Copy / OCR / Describe / Export + verify on both platforms",
-            "description": "Each consumer uses the capture instead of decode_item for videos/animations. Behaviour-unverified until each shell is run; record in the plan's Handoff. Compare stays item-based (out of scope).",
-            "status": "pending"
+            "description": "Each consumer uses the capture instead of decode_item for videos/animations. Behaviour-unverified until each shell is run; record in the plan's Handoff. Compare stays item-based (out of scope). WIRED (session 3): Copy (async, image-only), Copy Text + Text tab (frame-keyed cache; auto waits for pause), Describe/Ask (frame-keyed; auto waits), Export (video items exportable; name carries the time). Verification = manual test script section 11 (Mac) + W12–W15 (Windows).",
+            "status": "review"
           }
         ]
       },
@@ -918,8 +918,8 @@
           {
             "id": 2,
             "title": "Rung 0a — full-resolution frame capture",
-            "description": "Tracked as #81: capture by frozen identity (video PTS/track, animation frame index) with a full-resolution decode — not the fit-scaled playback buffer. Compare is out of #81's scope.",
-            "status": "pending"
+            "description": "Tracked as #81: capture by frozen identity (video PTS/track, animation frame index) with a full-resolution decode — not the fit-scaled playback buffer. Compare is out of #81's scope. Built in session 3 as #81 — see the plan's Rung 0a 'Built' note.",
+            "status": "review"
           },
           {
             "id": 3,

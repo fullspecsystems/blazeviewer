@@ -56,6 +56,8 @@ an `AppCore` method.
 | settings, keymap, launch flags | `settings.rs`, `keymap.rs`, `launch.rs`, `config.rs` |
 | file edits (delete, rotation, sidecars) | `delete.rs`, `save_rotation.rs`, `sidecar.rs`, `undo.rs` |
 | AI description, OCR | `describe.rs`, `image_text.rs` |
+| image export (save dialog, write worker) | `export.rs`, `export_worker.rs` (pixels: the `pb-encode` crate) |
+| "which frame?" for Copy / OCR / Describe / Export of a video or animation | `frame_capture.rs` |
 | metadata / EXIF / details | `meta.rs`, `media_details.rs` |
 | timing, metrics, perf episodes | `timing.rs`, `metrics.rs`, `perf.rs` |
 | secrets | `secret.rs` |

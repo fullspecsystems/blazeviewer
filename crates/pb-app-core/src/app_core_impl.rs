@@ -22,6 +22,7 @@ mod delete;
 mod describe;
 mod dir_scan;
 mod export;
+mod frame_capture;
 mod image_text;
 mod item_kind;
 mod menu;
@@ -246,6 +247,7 @@ impl AppCore {
             audio_active: None,
             subtitles: crate::subtitle_engine::SubtitleEngine::from_settings(&settings),
             recognized_text: std::collections::HashMap::new(),
+            frame_capture: Default::default(),
             text_scan: None,
             text_gen: 0,
             descriptions: std::collections::HashMap::new(),
@@ -502,6 +504,9 @@ impl AppCore {
             // An off-thread describe (task #44) keeps polling so `poll_describe_scan`
             // installs the result promptly.
             || self.describe_scan.is_some()
+            // A frame capture for Copy Image (task #81) keeps polling so
+            // `poll_frame_copy` writes the clipboard promptly.
+            || self.frame_capture.copy.is_some()
             // An off-thread video Details probe (task #98) keeps polling so
             // `poll_details_probe` swaps the panel off "Reading…" promptly. Without this
             // an idle app could stop ticking with the result sitting in the channel.
@@ -1373,6 +1378,8 @@ impl AppCore {
         // 1d. Pick up a finished off-thread AI describe (task #44): cache it and refresh
         // the description panel's busy state.
         self.poll_describe_scan();
+        // 1d'. A video/animation frame captured for Copy Image (task #81).
+        self.poll_frame_copy();
 
         // 2. Continuous zoom/pan while their keys are held (accelerating ramp).
         // Also glide any eased scroll-zoom toward its target — OR'd into `transforming` so it
@@ -1562,8 +1569,11 @@ impl AppCore {
                         }
                     }
                     Some(InspectorTab::Text) if self.text_scan.is_none() => self.ensure_text_scan(),
+                    // Never auto-describe a playing video/animation frame by frame (#81).
                     Some(InspectorTab::Describe)
-                        if self.settings.describe_auto && self.describe_scan.is_none() =>
+                        if self.settings.describe_auto
+                            && self.describe_scan.is_none()
+                            && !self.displayed_item.is_some_and(|i| self.frame_is_moving(i)) =>
                     {
                         self.ensure_describe_scan(None)
                     }

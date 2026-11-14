@@ -622,16 +622,6 @@ pub enum CoreEffect {
     StopVideo {
         session_id: crate::video::VideoSessionId,
     },
-    /// Capture the *displayed* frame for an explicit user command (Copy / OCR /
-    /// Describe / Compare). The shell replies via `AppCore::native_video_frame_ready`
-    /// with the pixels; `request_id` + `session_id` + `item` reject a frame captured
-    /// before a navigation. On-demand only — never a continuous copy path.
-    CaptureNativeVideoFrame {
-        session_id: crate::video::VideoSessionId,
-        item: usize,
-        purpose: crate::video::NativeCapturePurpose,
-        request_id: u64,
-    },
     /// Perform a genuinely **host-side command** — one whose execution *is* a platform
     /// operation, not core orchestration. After the #131 inversions the residue is just two:
     /// **Quit** (hide-window teardown, also reached from the window-close / Esc paths) and

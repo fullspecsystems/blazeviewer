@@ -22,10 +22,12 @@ impl AppCore {
     /// task #81's frame capture), not an archive door, not the empty deck.
     pub fn can_export(&self) -> bool {
         self.displayed_item.is_some_and(|item| {
-            matches!(
-                crate::video::item_kind(self.source.as_ref(), item),
-                crate::video::LibraryItemKind::Image
-            )
+            match crate::video::item_kind(self.source.as_ref(), item) {
+                crate::video::LibraryItemKind::Image => true,
+                // The frame on screen (task #81) — when this build can decode one.
+                crate::video::LibraryItemKind::Video(_) => crate::frame_capture::CAN_CAPTURE_VIDEO,
+                crate::video::LibraryItemKind::Archive(_) => false,
+            }
         })
     }
 
@@ -35,18 +37,25 @@ impl AppCore {
         let Some(item) = self.displayed_item else {
             return; // empty deck
         };
-        match crate::video::item_kind(self.source.as_ref(), item) {
-            crate::video::LibraryItemKind::Image => {}
+        let is_video = match crate::video::item_kind(self.source.as_ref(), item) {
+            crate::video::LibraryItemKind::Image => false,
             crate::video::LibraryItemKind::Video(_) => {
-                // Never silently export the poster — it isn't the frame on screen (#81).
-                self.show_toast("Exporting video frames isn't available yet");
-                return;
+                if !crate::frame_capture::CAN_CAPTURE_VIDEO {
+                    self.show_toast("Exporting video frames isn't supported in this build");
+                    return;
+                }
+                true
             }
             crate::video::LibraryItemKind::Archive(_) => {
                 self.show_toast("Open the archive to export its images");
                 return;
             }
-        }
+        };
+        // The frame on screen, frozen now (task #81): a video's playback frame (or its
+        // poster), an animation's current frame. A photo's still re-decodes the file.
+        let frame = self.frame_target(item);
+        let frame = (is_video || !frame.is_still()).then_some(frame);
+        let suffix = frame.as_ref().map(|f| f.name_suffix()).unwrap_or_default();
         let id = self.export.next_id();
         let source_path = self.source.path(item).map(Path::to_path_buf);
         let container = self.source.container().map(Path::to_path_buf);
@@ -58,6 +67,7 @@ impl AppCore {
             name: self.source.name(item).to_string(),
             source_path: source_path.clone(),
             rotation_cw: export::quarter_turns(rotation),
+            frame,
         };
         let start_dir = export::start_dir(
             self.settings.picker_dir.as_deref(),
@@ -72,7 +82,17 @@ impl AppCore {
         let (tx, rx) = std::sync::mpsc::channel();
         let pending = self.export.pending_destinations();
         let dir = start_dir.clone();
-        let name = request.name.clone();
+        // A frame's name carries its time or index: `clip-0h01m23s.png`, `anim-frame12.png`.
+        let name = if suffix.is_empty() {
+            request.name.clone()
+        } else {
+            let file = crate::engine::file_name_of(&request.name);
+            let stem = Path::new(&file)
+                .file_stem()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or(file);
+            format!("{stem}{suffix}.png")
+        };
         let _ = std::thread::Builder::new()
             .name("pb-export-name".into())
             .spawn(move || {
@@ -115,6 +135,7 @@ impl AppCore {
             name: request.name,
             source_path: request.source_path,
             rotation_cw: request.rotation_cw,
+            frame: request.frame,
             dest: dest.clone(),
             queued_at: std::time::Instant::now(),
         };
@@ -311,7 +332,7 @@ mod tests {
     }
 
     /// The right-click menu offers "Export as PNG…" exactly when the File menu would: a
-    /// still, not a video (until #81) or an archive door.
+    /// still, a video when this build can capture its frame (#81), never an archive door.
     #[test]
     fn the_context_menu_offers_export_only_for_exportable_items() {
         let lib = sandbox("ctx");
@@ -337,7 +358,11 @@ mod tests {
             }
         };
         assert!(offered(&mut core, 0), "a still");
-        assert!(!offered(&mut core, 1), "a video");
+        assert_eq!(
+            offered(&mut core, 1),
+            crate::frame_capture::CAN_CAPTURE_VIDEO,
+            "a video"
+        );
         assert!(!offered(&mut core, 2), "an archive door");
         let _ = std::fs::remove_dir_all(&lib);
     }

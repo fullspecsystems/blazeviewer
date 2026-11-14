@@ -47,8 +47,8 @@ pub fn ff_decode_video_poster(
 /// that's seconds (the "video takes ~5 s to show a poster" cost). The returned
 /// [`HwSession`](super::hw::HwSession) must outlive the decoder — the caller
 /// stores it. Falls back to software transparently (a rare HW-open failure
-/// retries software; `PB_NO_HWACCEL` forces it).
-fn decoder_for(
+/// retries software; `PB_NO_HWACCEL` forces it). Shared with `frame_at`.
+pub(super) fn decoder_for(
     ctx: &mut ff::format::context::Input,
     index: usize,
 ) -> Result<(ff::decoder::Video, Option<super::hw::HwSession>), DecodeError> {

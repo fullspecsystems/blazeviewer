@@ -22,7 +22,7 @@ use std::sync::mpsc::Receiver;
 use pb_render::Rotation;
 use pb_source::ItemSource;
 
-use crate::engine::{decode_item, rotate_rgba8, to_clipboard_rgba8};
+use crate::engine::{rotate_rgba8, to_clipboard_rgba8};
 
 /// Everything found in one photo: QR payloads (full-res decode) + recognized text
 /// lines (OCR), plus the OCR backend's error when it couldn't run (missing language
@@ -36,6 +36,9 @@ pub struct ImageText {
     pub lines: Vec<String>,
     /// Why OCR produced nothing, when it failed outright (`None` = it ran fine).
     pub ocr_error: Option<String>,
+    /// Which frame this was read from (task #81): the still, or a video/animation frame —
+    /// so a cached reading of one frame is never served for another.
+    pub frame: crate::frame_capture::FrameKey,
 }
 
 impl ImageText {
@@ -80,22 +83,31 @@ impl ImageText {
 pub struct TextScan {
     pub gen: u64,
     pub item: usize,
+    /// The frame being read (task #81).
+    pub frame: crate::frame_capture::FrameKey,
     /// Copy the result to the clipboard when it lands (the Copy command ran while
     /// the scan was still in flight).
     pub copy_when_done: bool,
     pub rx: Receiver<ImageText>,
 }
 
-/// The whole worker-thread job: decode `item` at full resolution, bake the in-RAM
-/// rotation override (OCR needs the pixels upright as displayed), then QR + OCR.
-/// Never returns an Err — failures fold into [`ImageText::ocr_error`] so the panel
-/// and toast have one shape to render.
-pub fn scan_job(source: &dyn ItemSource, item: usize, rot: Rotation) -> ImageText {
-    let img = match decode_item(source, item, None, false) {
+/// The whole worker-thread job: decode `frame` of `item` at full resolution (the still, or
+/// the video/animation frame on screen — task #81), bake the in-RAM rotation override (OCR
+/// needs the pixels upright as displayed), then QR + OCR. Never returns an Err — failures
+/// fold into [`ImageText::ocr_error`] so the panel and toast have one shape to render.
+pub fn scan_job(
+    source: &dyn ItemSource,
+    item: usize,
+    frame: &crate::frame_capture::FrameSource,
+    rot: Rotation,
+) -> ImageText {
+    let cancel = std::sync::atomic::AtomicBool::new(false);
+    let img = match crate::frame_capture::capture(source, item, frame, &cancel) {
         Ok(img) => img,
         Err(e) => {
             return ImageText {
                 ocr_error: Some(format!("Can't read this image ({e})")),
+                frame: frame.key(),
                 ..ImageText::default()
             }
         }
@@ -104,7 +116,10 @@ pub fn scan_job(source: &dyn ItemSource, item: usize, rot: Rotation) -> ImageTex
     // want plain 8-bit.
     let rgba = to_clipboard_rgba8(&img);
     let (rgba, w, h) = rotate_rgba8(&rgba, img.width, img.height, rot);
-    analyze_rgba(rgba, w, h)
+    ImageText {
+        frame: frame.key(),
+        ..analyze_rgba(rgba, w, h)
+    }
 }
 
 /// QR + OCR over a straight-alpha RGBA8 buffer. Split from [`scan_job`] so tests can
@@ -136,6 +151,7 @@ pub fn analyze_rgba(rgba: Vec<u8>, w: u32, h: u32) -> ImageText {
         qr,
         lines,
         ocr_error,
+        frame: Default::default(),
     }
 }
 
@@ -472,6 +488,7 @@ mod tests {
             qr: qr.iter().map(|s| s.to_string()).collect(),
             lines: lines.iter().map(|s| s.to_string()).collect(),
             ocr_error: None,
+            frame: Default::default(),
         }
     }
 

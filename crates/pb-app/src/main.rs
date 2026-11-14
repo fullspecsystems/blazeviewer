@@ -1021,6 +1021,7 @@ impl App {
             // takes the whole `Settings` precisely so the style can't be forgotten either.
             subtitles: pb_app_core::subtitle_engine::SubtitleEngine::from_settings(&settings),
             recognized_text: HashMap::new(),
+            frame_capture: Default::default(),
             text_scan: None,
             text_gen: 0,
             descriptions: HashMap::new(),
@@ -3579,8 +3580,7 @@ impl App {
                     | contract::CoreEffect::SeekVideoFraction { .. }
                     | contract::CoreEffect::StepVideo { .. }
                     | contract::CoreEffect::SetVideoMuted { .. }
-                    | contract::CoreEffect::StopVideo { .. }
-                    | contract::CoreEffect::CaptureNativeVideoFrame { .. } => {}
+                    | contract::CoreEffect::StopVideo { .. } => {}
                     // The core routed a flow action (dialog / window / scan / file edit / quit) it
                     // doesn't own end-to-end yet — run the shell half.
                     contract::CoreEffect::ShellFlowAction(action) => {

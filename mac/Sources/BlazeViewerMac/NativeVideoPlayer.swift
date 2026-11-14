@@ -495,6 +495,10 @@ final class NativeVideoPlayer {
 
     func pause() {
         player.pause()
+        // Publish the paused playhead now: frame capture (Copy / Copy Text / Describe /
+        // Export of the frame on screen, task #81) reads the core's mirror of it, which
+        // must be exact once paused rather than up to one observer tick stale.
+        publishProgress()
     }
 
     /// Resume — or replay when parked at EOS (seek to zero first, then play). The seek is

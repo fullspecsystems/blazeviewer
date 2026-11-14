@@ -202,6 +202,18 @@ fn with_colr(mut s: ExportSource, bytes: &[u8]) -> ExportSource {
 /// the known Display-P3 case are exact; anything else is tagged sRGB with a log line (no
 /// such backend exists today — see the module docs).
 pub(crate) fn from_decoded(img: DecodedImage, path: &'static str) -> ExportSource {
+    from_decoded_inner(img, path)
+}
+
+/// A display-decoded image as an export source — for a **captured frame** (task #81: a video
+/// frame, an animation frame, a video poster), which has no file of its own to re-decode.
+/// fp16 HDR stays linear (`prepare` tone-maps); RGBA8 keeps an exact colour tag only for
+/// sRGB and Display P3, as [`from_decoded`]'s rules say.
+pub fn export_source_from_decoded(img: DecodedImage) -> ExportSource {
+    from_decoded_inner(img, "frame")
+}
+
+fn from_decoded_inner(img: DecodedImage, path: &'static str) -> ExportSource {
     let provenance = Provenance {
         codec: img.codec,
         path,

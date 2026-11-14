@@ -121,6 +121,17 @@ impl Playback {
         self.anim.color
     }
 
+    /// The decoder's codec label (`"GIF"`, `"Live Photo"`, …).
+    pub fn codec(&self) -> &'static str {
+        self.anim.codec
+    }
+
+    /// When the current frame starts, from the first frame — the sum of the earlier frames'
+    /// delays. A Live Photo's motion-movie time for frame capture (task #81).
+    pub fn elapsed(&self) -> Duration {
+        self.anim.frames[..self.index].iter().map(|f| f.delay).sum()
+    }
+
     /// How long the current frame is held before advancing.
     pub fn current_delay(&self) -> Duration {
         self.anim.frames[self.index].delay

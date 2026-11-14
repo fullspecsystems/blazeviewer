@@ -36,6 +36,8 @@ pub struct ExportJob {
     pub name: String,
     pub source_path: Option<PathBuf>,
     pub rotation_cw: u8,
+    /// A captured frame to export instead of re-decoding the file (task #81).
+    pub frame: Option<crate::frame_capture::FrameSource>,
     pub dest: PathBuf,
     pub queued_at: Instant,
 }
@@ -112,7 +114,7 @@ impl Default for ExportWorker {
 }
 
 /// Run on low OS priority so an export never competes with browsing (review F8).
-fn lower_thread_priority() {
+pub(crate) fn lower_thread_priority() {
     #[cfg(target_os = "macos")]
     {
         extern "C" {
@@ -164,20 +166,39 @@ pub fn run_job(job: ExportJob) -> ExportDone {
 }
 
 fn run_stages(job: &ExportJob, t: &mut ExportTimings) -> Result<ExportOutcome, String> {
-    let s = Instant::now();
-    let bytes = job
-        .source
-        .bytes(job.item)
-        .map_err(|e| format!("couldn't read the image ({e})"))?;
-    t.read = s.elapsed();
+    let src = match &job.frame {
+        // A captured frame (task #81): decode exactly that frame (read + decode in one).
+        Some(frame) => {
+            let s = Instant::now();
+            let cancel = std::sync::atomic::AtomicBool::new(false);
+            let img = crate::frame_capture::capture(job.source.as_ref(), job.item, frame, &cancel)
+                .map_err(|e| format!("couldn't read that frame ({e})"))?;
+            t.decode = s.elapsed();
+            pb_decode::export_source_from_decoded(img)
+        }
+        None => {
+            let s = Instant::now();
+            let bytes = job
+                .source
+                .bytes(job.item)
+                .map_err(|e| format!("couldn't read the image ({e})"))?;
+            t.read = s.elapsed();
 
-    let s = Instant::now();
-    let src = pb_decode::decode_named_bytes_for_export(&job.name, &bytes).map_err(|e| match e {
-        pb_decode::ExportDecodeError::Refused(why) => why.to_string(),
-        pb_decode::ExportDecodeError::Decode(e) => format!("couldn't decode the image ({e})"),
-    })?;
-    drop(bytes);
-    t.decode = s.elapsed();
+            let s = Instant::now();
+            let src =
+                pb_decode::decode_named_bytes_for_export(&job.name, &bytes).map_err(
+                    |e| match e {
+                        pb_decode::ExportDecodeError::Refused(why) => why.to_string(),
+                        pb_decode::ExportDecodeError::Decode(e) => {
+                            format!("couldn't decode the image ({e})")
+                        }
+                    },
+                )?;
+            drop(bytes);
+            t.decode = s.elapsed();
+            src
+        }
+    };
 
     let s = Instant::now();
     // Rung 1: PNG at full resolution (PNG's caps are everything `prepare` produces).

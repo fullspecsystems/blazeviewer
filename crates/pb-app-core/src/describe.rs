@@ -25,7 +25,7 @@ use pb_render::Rotation;
 use pb_source::ItemSource;
 use serde_json::{json, Value};
 
-use crate::engine::{decode_item, rotate_rgba8, to_clipboard_rgba8};
+use crate::engine::{rotate_rgba8, to_clipboard_rgba8};
 
 /// An in-flight off-thread describe for `item` — the [`image_text::TextScan`] shape: kicked
 /// by `D` / Ask, polled by the tick, superseded by dropping the receiver. `gen` is the deck
@@ -35,6 +35,8 @@ use crate::engine::{decode_item, rotate_rgba8, to_clipboard_rgba8};
 pub struct DescribeScan {
     pub gen: u64,
     pub item: usize,
+    /// The frame being described (task #81).
+    pub frame: crate::frame_capture::FrameKey,
     /// Copy the description to the clipboard when it lands (the Copy command ran while the
     /// describe was still in flight) — the `image_text::TextScan::copy_when_done` shape.
     pub copy_when_done: bool,
@@ -169,18 +171,21 @@ pub fn prepare_image(rgba: Vec<u8>, w: u32, h: u32) -> Result<PreparedImage, Des
     Ok(PreparedImage { jpeg })
 }
 
-/// The whole worker-thread job for the endpoint backend: decode `item` at full
-/// resolution, tone-map to sRGB8 + bake the displayed rotation (as the clipboard/scan
-/// paths do), prepare the image, then hand it to `describer`. Mirrors
+/// The whole worker-thread job for the endpoint backend: decode `frame` of `item` at full
+/// resolution (the still, or the video/animation frame on screen — task #81), tone-map to
+/// sRGB8 + bake the displayed rotation (as the clipboard/scan paths do), prepare the image,
+/// then hand it to `describer`. Mirrors
 /// [`image_text::scan_job`](crate::image_text::scan_job); the event loop never blocks.
 pub fn describe_job(
     source: &dyn ItemSource,
     item: usize,
+    frame: &crate::frame_capture::FrameSource,
     rot: Rotation,
     prompt: &str,
     describer: &dyn Describer,
 ) -> Result<String, DescribeError> {
-    let img = decode_item(source, item, None, false)
+    let cancel = std::sync::atomic::AtomicBool::new(false);
+    let img = crate::frame_capture::capture(source, item, frame, &cancel)
         .map_err(|e| DescribeError::Prep(format!("can't read this image ({e})")))?;
     let rgba = to_clipboard_rgba8(&img);
     let (rgba, w, h) = rotate_rgba8(&rgba, img.width, img.height, rot);
