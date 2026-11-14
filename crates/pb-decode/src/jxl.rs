@@ -52,6 +52,76 @@ impl ImageDecoder for JxlDecoder {
     }
 }
 
+/// The JPEG XL **export** decode (rung 0b): SDR at the image's own bit depth (8 or 16) with
+/// the rendered ICC — the display decode quantizes everything to 8-bit. HDR JPEG XL is
+/// refused until rung 5 adds its linearization (review C18).
+pub(crate) fn export_jxl(
+    bytes: &[u8],
+) -> Result<pb_encode::ExportSource, crate::export::ExportDecodeError> {
+    use pb_encode::{AlphaMode, Channels, ExportSource, Provenance, SampleEncoding, Samples};
+    let image = JxlImage::read_with_defaults(Cursor::new(bytes))
+        .map_err(|e| DecodeError::Corrupt(e.to_string()))?;
+    if image.hdr_type().is_some() {
+        return Err(crate::export::ExportDecodeError::Refused(
+            "HDR JPEG XL images can't be exported yet",
+        ));
+    }
+    let (w, h) = (image.width(), image.height());
+    let fmt = image.pixel_format();
+    let (channels, take) = match fmt {
+        PixelFormat::Gray => (Channels::Gray, 1),
+        PixelFormat::Graya => (Channels::GrayAlpha, 2),
+        PixelFormat::Rgb => (Channels::Rgb, 3),
+        PixelFormat::Rgba => (Channels::Rgba, 4),
+        PixelFormat::Cmyk | PixelFormat::Cmyka => {
+            return Err(crate::export::ExportDecodeError::Refused(
+                "CMYK images can't be exported yet",
+            ))
+        }
+    };
+    let bits = image.image_header().metadata.bit_depth.bits_per_sample();
+    let render = image
+        .render_frame(0)
+        .map_err(|e| DecodeError::Corrupt(e.to_string()))?;
+    let fb = render.image_all_channels();
+    let ch = fb.channels();
+    let n = (w as usize) * (h as usize);
+    if ch < take || fb.buf().len() < n * ch {
+        return Err(DecodeError::Corrupt("jxl framebuffer too small".into()).into());
+    }
+    let buf = fb.buf();
+    let samples = if bits <= 8 {
+        let q = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
+        Samples::U8(
+            (0..n)
+                .flat_map(|i| (0..take).map(move |c| q(buf[i * ch + c])))
+                .collect(),
+        )
+    } else {
+        let q = |v: f32| (v.clamp(0.0, 1.0) * 65535.0).round() as u16;
+        Samples::U16(
+            (0..n)
+                .flat_map(|i| (0..take).map(move |c| q(buf[i * ch + c])))
+                .collect(),
+        )
+    };
+    Ok(ExportSource {
+        width: w,
+        height: h,
+        channels,
+        samples,
+        encoding: SampleEncoding::Encoded,
+        alpha: AlphaMode::Straight,
+        color: crate::export::icc_desc(Some(image.rendered_icc())),
+        provenance: Provenance {
+            codec: "JXL",
+            path: "jxl-oxide",
+            recovered: false,
+            raw_preview: false,
+        },
+    })
+}
+
 /// Quantize interleaved f32 channels (stride `ch`, the framebuffer's channel
 /// count) to RGBA8, mapping by the image's `PixelFormat`. Color channels come
 /// first, then alpha, then any extra channels (ignored).

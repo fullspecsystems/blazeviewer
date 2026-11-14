@@ -99,6 +99,67 @@ pub(crate) fn decode_format(
     Ok(decoded)
 }
 
+/// The **export** decode for an `image`-crate format (rung 0b): keeps 16-bit and gray
+/// layouts and the ICC verbatim (the display decode narrows to RGBA8). EXR / Radiance come
+/// back as linear float — HDR in the app convention (1.0 = SDR white). Other float sources
+/// (float TIFF) stay source-encoded and are quantized by `prepare`.
+pub(crate) fn export_format(
+    bytes: &[u8],
+    fmt: ImageFormat,
+) -> Result<pb_encode::ExportSource, crate::export::ExportDecodeError> {
+    use pb_encode::{
+        AlphaMode, Channels, ColorDesc, ExportSource, Provenance, SampleEncoding, Samples,
+    };
+    if !supported(fmt) {
+        return Err(DecodeError::Unsupported.into());
+    }
+    let (img, icc) = load_with_icc(bytes, fmt)?;
+    let (w, h) = (img.width(), img.height());
+    let (channels, samples) = match img {
+        DynamicImage::ImageLuma8(b) => (Channels::Gray, Samples::U8(b.into_raw())),
+        DynamicImage::ImageLumaA8(b) => (Channels::GrayAlpha, Samples::U8(b.into_raw())),
+        DynamicImage::ImageRgb8(b) => (Channels::Rgb, Samples::U8(b.into_raw())),
+        DynamicImage::ImageRgba8(b) => (Channels::Rgba, Samples::U8(b.into_raw())),
+        DynamicImage::ImageLuma16(b) => (Channels::Gray, Samples::U16(b.into_raw())),
+        DynamicImage::ImageLumaA16(b) => (Channels::GrayAlpha, Samples::U16(b.into_raw())),
+        DynamicImage::ImageRgb16(b) => (Channels::Rgb, Samples::U16(b.into_raw())),
+        DynamicImage::ImageRgba16(b) => (Channels::Rgba, Samples::U16(b.into_raw())),
+        DynamicImage::ImageRgb32F(b) => (Channels::Rgb, Samples::F32(b.into_raw())),
+        DynamicImage::ImageRgba32F(b) => (Channels::Rgba, Samples::F32(b.into_raw())),
+        other => (Channels::Rgba, Samples::U8(other.to_rgba8().into_raw())),
+    };
+    let linear = matches!(fmt, ImageFormat::Hdr | ImageFormat::OpenExr);
+    let orientation = if matches!(fmt, ImageFormat::Tiff | ImageFormat::WebP) {
+        common::read_orientation(bytes)
+    } else {
+        1
+    };
+    let (samples, w, h) = crate::export::orient(samples, w, h, channels, orientation);
+    Ok(ExportSource {
+        width: w,
+        height: h,
+        channels,
+        samples,
+        encoding: if linear {
+            SampleEncoding::Linear
+        } else {
+            SampleEncoding::Encoded
+        },
+        alpha: AlphaMode::Straight,
+        color: if linear {
+            ColorDesc::LinearScRgb
+        } else {
+            crate::export::icc_desc(icc)
+        },
+        provenance: Provenance {
+            codec: codec_name(fmt),
+            path: "image",
+            recovered: false,
+            raw_preview: false,
+        },
+    })
+}
+
 /// Decode to a [`DynamicImage`], also returning the embedded ICC profile for the
 /// formats that carry one (PNG `iCCP`, TIFF ICC tag, WebP `ICCP`). The plain
 /// [`image::load_from_memory_with_format`] path drops the profile, so those three

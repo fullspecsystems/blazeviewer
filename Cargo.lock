@@ -4094,6 +4094,7 @@ dependencies = [
  "objc2-vision",
  "pb-core",
  "pb-decode",
+ "pb-encode",
  "pb-hud",
  "pb-render",
  "pb-source",
@@ -4147,11 +4148,23 @@ dependencies = [
  "kamadak-exif",
  "moxcms",
  "pb-color",
+ "pb-encode",
+ "png 0.18.1",
  "rawloader",
  "resvg",
  "windows 0.62.2",
  "windows-core 0.62.2",
  "zune-jpeg 0.4.21",
+]
+
+[[package]]
+name = "pb-encode"
+version = "0.1.0"
+dependencies = [
+ "image 0.25.10",
+ "moxcms",
+ "png 0.18.1",
+ "proptest",
 ]
 
 [[package]]

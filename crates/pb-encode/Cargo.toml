@@ -1,0 +1,21 @@
+[package]
+name = "pb-encode"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+description = "Blaze Viewer's export pipeline: export pixel/colour types, preparation, ICC sanitizing and encoders (task #89)."
+
+# Codec backends sit behind features so a crate that needs only the types (pb-decode, which
+# returns `ExportSource`) never pulls an encoder in — export-plan.md § 3.1 / review F4.
+[features]
+default = ["png", "jpeg"]
+png = ["dep:png"]
+jpeg = ["dep:image"]
+
+[dependencies]
+moxcms = "0.8"
+png = { version = "0.18", optional = true }
+image = { version = "0.25.10", default-features = false, features = ["jpeg"], optional = true }
+
+[dev-dependencies]
+proptest = "1"

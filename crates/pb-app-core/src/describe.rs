@@ -164,7 +164,7 @@ pub fn prepare_image(rgba: Vec<u8>, w: u32, h: u32) -> Result<PreparedImage, Des
     } else {
         (rgba, w, h)
     };
-    let jpeg = pb_decode::encode_jpeg_rgba8(&rgba, w, h, JPEG_QUALITY)
+    let jpeg = pb_encode::encode_jpeg_rgba8(&rgba, w, h, JPEG_QUALITY)
         .map_err(|e| DescribeError::Prep(e.to_string()))?;
     Ok(PreparedImage { jpeg })
 }

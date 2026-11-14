@@ -368,6 +368,268 @@ unsafe fn imageio_decode_hdr(bytes: &[u8]) -> Option<(Vec<f32>, u32, u32, u32)> 
     result
 }
 
+// --- Export decode (export-plan.md rung 0b, § 3.8 Rule 1 / review F5) ------------------
+//
+// The display path above draws every source into an 8-bit Display-P3 context — right for
+// the in-shader CMS, wrong for a file: it would turn an sRGB HEIC into P3, narrow a 10-bit
+// one to 8 bits, and premultiply alpha at 8 bits. The export draw instead uses the image's
+// **own** colour space (RGB, or gray without alpha), **16 bpc** when the source has more
+// than 8 bits, and reports the space's real ICC bytes. P3 is only the fallback for a space
+// that can't back a bitmap context. Quartz contexts are always premultiplied, so a source
+// with alpha is reported `Premultiplied` and `prepare` un-premultiplies (at 16 bits when
+// the source is deep).
+
+#[link(name = "CoreFoundation", kind = "framework")]
+extern "C" {
+    fn CFDataGetLength(data: CFDataRef) -> isize;
+    fn CFDataGetBytePtr(data: CFDataRef) -> *const u8;
+}
+
+#[link(name = "CoreGraphics", kind = "framework")]
+extern "C" {
+    fn CGImageGetColorSpace(image: CGImageRef) -> CGColorSpaceRef;
+    fn CGImageGetBitsPerComponent(image: CGImageRef) -> usize;
+    fn CGImageGetAlphaInfo(image: CGImageRef) -> u32;
+    fn CGColorSpaceGetModel(space: CGColorSpaceRef) -> i32;
+    fn CGColorSpaceCopyICCData(space: CGColorSpaceRef) -> CFDataRef;
+}
+
+const ALPHA_NONE: u32 = 0; // kCGImageAlphaNone
+const ALPHA_NONE_SKIP_LAST: u32 = 5; // kCGImageAlphaNoneSkipLast
+const BYTE_ORDER_16_LITTLE: u32 = 1 << 12; // kCGBitmapByteOrder16Little
+const MODEL_MONOCHROME: i32 = 0; // kCGColorSpaceModelMonochrome
+const MODEL_RGB: i32 = 1; // kCGColorSpaceModelRGB
+
+/// The export decode for anything Image I/O reads (HEIC/AVIF, and the recovery rung).
+pub(crate) fn export_imageio(
+    bytes: &[u8],
+) -> Result<pb_encode::ExportSource, crate::export::ExportDecodeError> {
+    use pb_encode::{
+        AlphaMode, Channels, ColorDesc, ExportSource, Provenance, SampleEncoding, Samples,
+    };
+    let codec = isobmff_brand(bytes).unwrap_or("image");
+    if colr_transfer(bytes).is_some_and(is_hdr_transfer) {
+        let (floats, w, h, orient) = unsafe { imageio_decode_hdr(bytes) }
+            .ok_or_else(|| DecodeError::Corrupt("Image I/O: HDR decode failed".into()))?;
+        let (samples, w, h) =
+            crate::export::orient(Samples::F32(floats), w, h, Channels::Rgba, orient);
+        return Ok(ExportSource {
+            width: w,
+            height: h,
+            channels: Channels::Rgba,
+            samples,
+            encoding: SampleEncoding::Linear,
+            alpha: AlphaMode::Premultiplied,
+            color: ColorDesc::LinearScRgb,
+            provenance: Provenance {
+                codec,
+                path: "imageio-hdr",
+                recovered: false,
+                raw_preview: false,
+            },
+        });
+    }
+    let drawn = unsafe { export_draw(bytes) }
+        .ok_or_else(|| DecodeError::Corrupt("Image I/O: export decode failed".into()))?;
+    let (samples, w, h) = crate::export::orient(
+        drawn.samples,
+        drawn.w,
+        drawn.h,
+        drawn.channels,
+        drawn.orientation,
+    );
+    Ok(ExportSource {
+        width: w,
+        height: h,
+        channels: drawn.channels,
+        samples,
+        encoding: SampleEncoding::Encoded,
+        alpha: if drawn.channels.has_alpha() {
+            AlphaMode::Premultiplied
+        } else {
+            AlphaMode::Straight
+        },
+        color: ColorDesc::Icc(std::sync::Arc::from(drawn.icc)),
+        provenance: Provenance {
+            codec,
+            path: "imageio-export",
+            recovered: false,
+            raw_preview: false,
+        },
+    })
+}
+
+struct ExportDraw {
+    samples: pb_encode::Samples,
+    w: u32,
+    h: u32,
+    channels: pb_encode::Channels,
+    icc: Vec<u8>,
+    orientation: u32,
+}
+
+/// Copy a colour space's ICC profile (`None` when it has none).
+unsafe fn space_icc(space: CGColorSpaceRef) -> Option<Vec<u8>> {
+    let data = CGColorSpaceCopyICCData(space);
+    if data.is_null() {
+        return None;
+    }
+    let len = CFDataGetLength(data);
+    let ptr = CFDataGetBytePtr(data);
+    let out =
+        (len > 0 && !ptr.is_null()).then(|| std::slice::from_raw_parts(ptr, len as usize).to_vec());
+    CFRelease(data);
+    out
+}
+
+/// Draw `img` into a context with `space`, `comps` components (1 = gray, 4 = RGB(A/X)) at
+/// 8 or 16 bpc. Returns the samples as native values, or `None` if Quartz refuses the
+/// combination.
+unsafe fn draw_into(
+    img: CGImageRef,
+    space: CGColorSpaceRef,
+    w: usize,
+    h: usize,
+    comps: usize,
+    deep: bool,
+    alpha_info: u32,
+) -> Option<pb_encode::Samples> {
+    let count = w.checked_mul(h)?.checked_mul(comps)?;
+    let rect = CGRect {
+        origin: CGPoint { x: 0.0, y: 0.0 },
+        size: CGSize {
+            width: w as f64,
+            height: h as f64,
+        },
+    };
+    if deep {
+        let mut buf = vec![0u16; count];
+        let ctx = CGBitmapContextCreate(
+            buf.as_mut_ptr() as *mut c_void,
+            w,
+            h,
+            16,
+            w.checked_mul(comps * 2)?,
+            space,
+            alpha_info | BYTE_ORDER_16_LITTLE,
+        );
+        if ctx.is_null() {
+            return None;
+        }
+        CGContextDrawImage(ctx, rect, img);
+        CGContextRelease(ctx);
+        // kCGBitmapByteOrder16Little: each sample is little-endian; on every shipping Mac
+        // (arm64 / x86_64) that is already native, but stay explicit.
+        for s in &mut buf {
+            *s = u16::from_le(*s);
+        }
+        Some(pb_encode::Samples::U16(buf))
+    } else {
+        let mut buf = vec![0u8; count];
+        let ctx = CGBitmapContextCreate(
+            buf.as_mut_ptr() as *mut c_void,
+            w,
+            h,
+            8,
+            w.checked_mul(comps)?,
+            space,
+            alpha_info,
+        );
+        if ctx.is_null() {
+            return None;
+        }
+        CGContextDrawImage(ctx, rect, img);
+        CGContextRelease(ctx);
+        Some(pb_encode::Samples::U8(buf))
+    }
+}
+
+/// Drop the skipped 4th component of an RGBX buffer.
+fn drop_x(samples: pb_encode::Samples) -> pb_encode::Samples {
+    fn go<T: Copy>(v: Vec<T>) -> Vec<T> {
+        v.chunks_exact(4).flat_map(|p| [p[0], p[1], p[2]]).collect()
+    }
+    match samples {
+        pb_encode::Samples::U8(v) => pb_encode::Samples::U8(go(v)),
+        pb_encode::Samples::U16(v) => pb_encode::Samples::U16(go(v)),
+        pb_encode::Samples::F32(v) => pb_encode::Samples::F32(go(v)),
+    }
+}
+
+unsafe fn export_draw(bytes: &[u8]) -> Option<ExportDraw> {
+    use pb_encode::Channels;
+    let (img, orientation) = create_cgimage(bytes)?;
+    let result = (|| {
+        let w = CGImageGetWidth(img);
+        let h = CGImageGetHeight(img);
+        if w == 0 || h == 0 || w > MAX_DIM || h > MAX_DIM {
+            return None;
+        }
+        let deep = CGImageGetBitsPerComponent(img) > 8;
+        let has_alpha = !matches!(CGImageGetAlphaInfo(img), 0 | 5 | 6);
+        let own = CGImageGetColorSpace(img); // get rule — not ours to release
+        let model = if own.is_null() {
+            -1
+        } else {
+            CGColorSpaceGetModel(own)
+        };
+
+        // 1. Gray without alpha → its own gray space.
+        if model == MODEL_MONOCHROME && !has_alpha {
+            if let (Some(icc), Some(s)) = (
+                space_icc(own),
+                draw_into(img, own, w, h, 1, deep, ALPHA_NONE),
+            ) {
+                return Some(ExportDraw {
+                    samples: s,
+                    w: w as u32,
+                    h: h as u32,
+                    channels: Channels::Gray,
+                    icc,
+                    orientation,
+                });
+            }
+        }
+        let alpha_info = if has_alpha {
+            ALPHA_PREMULTIPLIED_LAST
+        } else {
+            ALPHA_NONE_SKIP_LAST
+        };
+        let channels = if has_alpha {
+            Channels::Rgba
+        } else {
+            Channels::Rgb
+        };
+        let finish = |s: pb_encode::Samples, icc: Vec<u8>| ExportDraw {
+            samples: if has_alpha { s } else { drop_x(s) },
+            w: w as u32,
+            h: h as u32,
+            channels,
+            icc,
+            orientation,
+        };
+        // 2. RGB → its own space.
+        if model == MODEL_RGB {
+            if let Some(icc) = space_icc(own) {
+                if let Some(s) = draw_into(img, own, w, h, 4, deep, alpha_info) {
+                    return Some(finish(s, icc));
+                }
+            }
+        }
+        // 3. Fallback: Display P3 (still deep when the source is), honestly tagged P3.
+        let p3 = CGColorSpaceCreateWithName(kCGColorSpaceDisplayP3);
+        if p3.is_null() {
+            return None;
+        }
+        let out = space_icc(p3)
+            .and_then(|icc| draw_into(img, p3, w, h, 4, deep, alpha_info).map(|s| finish(s, icc)));
+        CGColorSpaceRelease(p3);
+        out
+    })();
+    CGImageRelease(img);
+    result
+}
+
 // --- Multi-frame (animation) decode ------------------------------------------------
 //
 // `CGImageSource` decodes an animated GIF/APNG/WebP — *and* an AVIF/HEIC image
@@ -598,4 +860,82 @@ unsafe fn cf_dict_get_int(dict: CFDictionaryRef, key: CFStringRef) -> Option<i32
     }
     let mut out: i32 = 0;
     CFNumberGetValue(v, CF_NUMBER_INT_TYPE, &mut out as *mut i32 as *mut c_void).then_some(out)
+}
+
+#[cfg(test)]
+mod export_tests {
+    use super::*;
+    use pb_encode::{AlphaMode, Channels, ColorDesc, Samples};
+
+    /// Encode a test image to HEIC (or any `sips` format) with the OS's own encoder — the
+    /// fixture is produced independently of the code under test.
+    fn sips_convert(png: &[u8], format: &str) -> Option<Vec<u8>> {
+        let dir =
+            std::env::temp_dir().join(format!("pb-export-test-{}-{format}", std::process::id()));
+        std::fs::create_dir_all(&dir).ok()?;
+        let src = dir.join("in.png");
+        let dst = dir.join(format!("out.{format}"));
+        std::fs::write(&src, png).ok()?;
+        let ok = std::process::Command::new("sips")
+            .args(["-s", "format", format])
+            .arg(&src)
+            .arg("--out")
+            .arg(&dst)
+            .output()
+            .ok()?
+            .status
+            .success();
+        let out = ok.then(|| std::fs::read(&dst).ok()).flatten();
+        let _ = std::fs::remove_dir_all(&dir);
+        out
+    }
+
+    fn srgb_png(w: u32, h: u32) -> Vec<u8> {
+        let mut info = png::Info::with_size(w, h);
+        info.color_type = png::ColorType::Rgb;
+        info.bit_depth = png::BitDepth::Eight;
+        info.srgb = Some(png::SrgbRenderingIntent::Perceptual);
+        let mut out = Vec::new();
+        {
+            let mut wr = png::Encoder::with_info(&mut out, info)
+                .unwrap()
+                .write_header()
+                .unwrap();
+            let px: Vec<u8> = (0..w * h)
+                .flat_map(|i| [(i * 37) as u8, (i * 11) as u8, 200])
+                .collect();
+            wr.write_image_data(&px).unwrap();
+        }
+        out
+    }
+
+    #[test]
+    fn an_srgb_heic_exports_in_its_own_space_not_p3() {
+        let Some(heic) = sips_convert(&srgb_png(16, 8), "heic") else {
+            eprintln!("sips unavailable — skipping");
+            return;
+        };
+        let s = export_imageio(&heic).expect("export decode");
+        assert_eq!((s.width, s.height), (16, 8));
+        assert_eq!(s.channels, Channels::Rgb, "opaque → no alpha channel");
+        assert_eq!(s.alpha, AlphaMode::Straight);
+        let ColorDesc::Icc(icc) = &s.color else {
+            panic!("expected the source ICC")
+        };
+        // The display path would have tagged everything Display P3; the export keeps sRGB.
+        let p = moxcms::ColorProfile::new_from_slice(icc).unwrap();
+        let srgb = moxcms::ColorProfile::new_srgb();
+        assert!(
+            (p.red_colorant.x - srgb.red_colorant.x).abs() < 0.01,
+            "sRGB primaries, not P3"
+        );
+        assert!(matches!(s.samples, Samples::U8(_) | Samples::U16(_)));
+    }
+
+    #[test]
+    fn a_png_recovered_through_imageio_has_a_real_profile() {
+        let s = export_imageio(&srgb_png(4, 4)).expect("Image I/O reads PNG");
+        assert!(matches!(s.color, ColorDesc::Icc(_)));
+        assert!(s.is_well_formed());
+    }
 }

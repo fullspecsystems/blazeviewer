@@ -26,6 +26,8 @@ jxl-oxide = "0.12.6"
 # sRGB) + transfer curve, applied in-shader by pb-render. Pure Rust; already in
 # the tree transitively via `image`. Only the parse/matrix/TRC API is used here.
 moxcms = "0.8"
+# Export types only (`ExportSource` and friends) — never an encoder (export-plan.md § 3.1, review F4).
+pb-encode = { path = "../pb-encode", default-features = false }
 # f32 -> f16 packing for HDR (WIC scRGB-linear) buffers handed to the GPU as
 # Rgba16Float. Already in the tree transitively.
 half = "2"
@@ -103,6 +105,9 @@ fuzz-internals = []
 cc = "1"
 
 [dev-dependencies]
+# Test fixtures: encode JPEGs / PNGs to decode back (the encoders live in pb-encode now).
+pb-encode = { path = "../pb-encode", features = ["png", "jpeg"] }
+png = "0.18"
 
 # Throwaway HEIC A/B tools. `heic_compare` calls the feature-gated LibHeifDecoder
 # directly, so it only builds with `--features libheif` (keeps `--all-targets`

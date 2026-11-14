@@ -122,6 +122,81 @@ fn decode_rgba_with_opts(
     Ok((rgba, w, h, icc))
 }
 
+/// One export decode pass: the raw channel layout zune emits (gray stays gray), plus the
+/// ICC. CMYK / YCCK are refused before any pixel work — their RGB conversion is the known
+/// mis-coloured v1 path, and an export must never bake that in (export-plan.md § 3.10).
+#[allow(clippy::type_complexity)]
+fn export_pass(
+    bytes: &[u8],
+    opts: DecoderOptions,
+) -> Result<(Vec<u8>, u32, u32, Option<Vec<u8>>), crate::export::ExportDecodeError> {
+    use zune_jpeg::zune_core::colorspace::ColorSpace;
+    let mut decoder = JpegDecoder::new_with_options(bytes, opts);
+    decoder
+        .decode_headers()
+        .map_err(|e| DecodeError::Corrupt(e.to_string()))?;
+    if matches!(
+        decoder.get_input_colorspace(),
+        Some(ColorSpace::CMYK) | Some(ColorSpace::YCCK)
+    ) {
+        return Err(crate::export::ExportDecodeError::Refused(
+            "CMYK JPEGs can't be exported yet",
+        ));
+    }
+    let out = decoder
+        .decode()
+        .map_err(|e| DecodeError::Corrupt(e.to_string()))?;
+    let (w, h) = decoder
+        .dimensions()
+        .ok_or_else(|| DecodeError::Corrupt("missing dimensions".into()))?;
+    Ok((out, w as u32, h as u32, decoder.icc_profile()))
+}
+
+/// The JPEG **export** decode (rung 0b): full resolution, 8-bit, gray stays gray, the ICC
+/// verbatim, EXIF orientation applied — with the same strict → lenient recovery as the
+/// display decode.
+pub(crate) fn export_jpeg(
+    bytes: &[u8],
+) -> Result<pb_encode::ExportSource, crate::export::ExportDecodeError> {
+    use pb_encode::{AlphaMode, Channels, ExportSource, Provenance, SampleEncoding, Samples};
+    let (out, w, h, icc, recovered) = match export_pass(bytes, DecoderOptions::default()) {
+        Ok((o, w, h, i)) => (o, w, h, i, false),
+        Err(e @ crate::export::ExportDecodeError::Refused(_)) => return Err(e),
+        Err(_) => {
+            let (o, w, h, i) =
+                export_pass(bytes, DecoderOptions::default().set_strict_mode(false))?;
+            (o, w, h, i, true)
+        }
+    };
+    let n = (w as usize) * (h as usize);
+    if n == 0 {
+        return Err(DecodeError::Corrupt("zero-size image".into()).into());
+    }
+    let channels = match out.len() / n {
+        1 => Channels::Gray,
+        3 => Channels::Rgb,
+        4 => Channels::Rgba,
+        other => return Err(DecodeError::Corrupt(format!("unexpected {other} channels")).into()),
+    };
+    let orientation = common::read_orientation(bytes);
+    let (samples, w, h) = crate::export::orient(Samples::U8(out), w, h, channels, orientation);
+    Ok(ExportSource {
+        width: w,
+        height: h,
+        channels,
+        samples,
+        encoding: SampleEncoding::Encoded,
+        alpha: AlphaMode::Straight,
+        color: crate::export::icc_desc(icc),
+        provenance: Provenance {
+            codec: "JPEG",
+            path: "zune",
+            recovered,
+            raw_preview: false,
+        },
+    })
+}
+
 fn rgb_to_rgba(rgb: &[u8], n: usize) -> Vec<u8> {
     let mut out = vec![0u8; n * 4];
     for i in 0..n {
@@ -185,7 +260,7 @@ mod tests {
     #[test]
     fn a_clean_jpeg_decodes_strict_and_is_not_flagged_recovered() {
         let rgba = vec![120u8; 16 * 16 * 4];
-        let jpeg = crate::encode_jpeg_rgba8(&rgba, 16, 16, 90).expect("encode");
+        let jpeg = pb_encode::encode_jpeg_rgba8(&rgba, 16, 16, 90).expect("encode");
         let (_rgba, w, h, _icc, recovered) = decode_rgba_with_icc(&jpeg).expect("decode");
         assert_eq!((w, h), (16, 16));
         assert!(
@@ -197,7 +272,7 @@ mod tests {
     #[test]
     fn a_malformed_jpeg_recovers_lenient_and_carries_the_reason() {
         let rgba = vec![200u8; 16 * 16 * 4];
-        let good = crate::encode_jpeg_rgba8(&rgba, 16, 16, 90).expect("encode");
+        let good = pb_encode::encode_jpeg_rgba8(&rgba, 16, 16, 90).expect("encode");
         let bad = stray_bytes_between_headers(&good);
         // Strict rejects it (that's the whole point); the ladder falls to lenient.
         assert!(

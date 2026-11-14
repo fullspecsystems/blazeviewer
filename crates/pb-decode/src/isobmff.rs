@@ -180,6 +180,53 @@ pub(crate) fn color_from_colr_box(bytes: &[u8]) -> Option<ColorTransform> {
     None
 }
 
+/// The container's real colour description for **export** (rung 0b): the `colr` box's ICC
+/// bytes verbatim, or its nclx code points — not the display reduction
+/// [`color_from_colr_box`] returns. `None` when there is no usable `colr` box.
+#[cfg(any(windows, heic_libheif, test))]
+pub(crate) fn colr_desc(bytes: &[u8]) -> Option<pb_encode::ColorDesc> {
+    let mut i = 4usize;
+    while i + 8 <= bytes.len() {
+        if &bytes[i..i + 4] == b"colr" {
+            if let Some(d) = colr_desc_at(bytes, i) {
+                return Some(d);
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
+#[cfg(any(windows, heic_libheif, test))]
+fn colr_desc_at(bytes: &[u8], pos: usize) -> Option<pb_encode::ColorDesc> {
+    let box_start = pos.checked_sub(4)?;
+    let size = u32::from_be_bytes(bytes[box_start..pos].try_into().ok()?) as usize;
+    if size < 12 || box_start + size > bytes.len() {
+        return None;
+    }
+    let end = box_start + size;
+    match &bytes[pos + 4..pos + 8] {
+        b"prof" | b"rICC" => {
+            let icc = &bytes[pos + 8..end];
+            let icc_size = u32::from_be_bytes(icc.get(0..4)?.try_into().ok()?) as usize;
+            (icc_size == icc.len()).then(|| pb_encode::ColorDesc::Icc(std::sync::Arc::from(icc)))
+        }
+        b"nclx" => {
+            let prim = u16::from_be_bytes(bytes.get(pos + 8..pos + 10)?.try_into().ok()?);
+            let trc = u16::from_be_bytes(bytes.get(pos + 10..pos + 12)?.try_into().ok()?);
+            let matx = u16::from_be_bytes(bytes.get(pos + 12..pos + 14)?.try_into().ok()?);
+            let full = (*bytes.get(pos + 14)? & 0x80) != 0;
+            Some(pb_encode::ColorDesc::Cicp(pb_encode::Cicp {
+                primaries: prim as u8,
+                transfer: trc as u8,
+                matrix: matx as u8,
+                full_range: full,
+            }))
+        }
+        _ => None,
+    }
+}
+
 /// Parse a `colr` box whose type field starts at `pos` (the 4-byte size precedes
 /// it). `None` if it isn't a usable color box (lets the scan keep looking).
 #[cfg(any(windows, heic_libheif, test))]
@@ -233,6 +280,31 @@ pub(crate) fn has_thumbnail_ref(bytes: &[u8]) -> bool {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn colr_desc_returns_nclx_code_points_and_icc_bytes_verbatim() {
+        let file = colr_box(b"nclx", &[0, 12, 0, 13, 0, 0, 0x80]);
+        assert_eq!(
+            colr_desc(&file),
+            Some(pb_encode::ColorDesc::Cicp(pb_encode::Cicp {
+                primaries: 12,
+                transfer: 13,
+                matrix: 0,
+                full_range: true
+            }))
+        );
+        let mut icc = vec![0u8; 140];
+        icc[0..4].copy_from_slice(&140u32.to_be_bytes());
+        let file = colr_box(b"prof", &icc);
+        assert_eq!(
+            colr_desc(&file),
+            Some(pb_encode::ColorDesc::Icc(std::sync::Arc::from(icc)))
+        );
+        // A size that lies is rejected (a stray "colr" in unrelated data).
+        let bad = colr_box(b"prof", &[0, 0, 9, 9, 1, 2]);
+        assert_eq!(colr_desc(&bad), None);
+    }
+
     use super::*;
 
     fn ftyp(major: &[u8; 4], compat: &[&[u8; 4]]) -> Vec<u8> {
