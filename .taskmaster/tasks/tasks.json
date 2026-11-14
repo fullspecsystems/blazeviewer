@@ -2078,6 +2078,34 @@
             "status": "pending"
           }
         ]
+      },
+      {
+        "id": 144,
+        "title": "macOS: MP4/MOV video posters are SDR, so HDR clips look flat until P",
+        "description": "Owner report 2026-11-13 (Studio Display XDR): parked on an HDR10 MP4, Blaze shows a dim, SDR-looking frame; pressing P jumps to full HDR with what looks like a fade-in. HDR MKVs are bright even parked.\n\nCAUSE: the parked frame is the poster. On macOS, MP4/MOV posters come from pb-decode/src/av_poster.rs, which drives the Live Photo streaming reader (livephoto.rs, AVAssetReader) with kCVPixelFormatType_32BGRA output. Asking AVFoundation for 8-bit BGRA makes it tone-map HDR to SDR, and the poster is built as PixelFormat::Rgba8 with peak 1.0. MKV posters go through FFmpeg at 10 bits and our HDR path, hence the inconsistency. On P, AVPlayerLayer shows real HDR and macOS ramps the display's EDR headroom up over about a second; that ramp is the fade-in. With an HDR poster the headroom would already be up.\n\nRULED OUT (2026-11-13, a scratch harness: the same MP4 in 8 presentations side by side on the XDR, compared as stacked strips): AVPlayerLayer's preferredDynamicRange. Since macOS 26 CALayer defaults it to .standard, but a default AVPlayerLayer looked identical to AVPlayerView (QuickTime's view) in every variant, including a Blaze-like CAMetalLayer host with a clipping container. AVFoundation propagates the setting to its internal FigVideoLayer itself. Playback needs no change.\n\nFIX SKETCH: when the track is HDR (PQ/HLG transfer), have the reader output a float or 10-bit format (e.g. kCVPixelFormatType_64RGBAHalf with explicit color properties, or a 10-bit YUV format through our existing HDR conversion) and build the poster as Rgba16F (scene-linear scRGB) with a real peak. That keeps poster = playback, the plan rule. SDR clips must keep the cheap 8-bit path (the poster is the blaze-mode face). The Live Photo motion path shares this reader, but the corpus Live Photos (~/Downloads/test-images/live) are SDR (BT.709 transfer, P3 or 709 primaries), so nothing visible changes there today.\n\nREPRO: ~/Downloads/hdr-test/hdr10_hevc.mp4, a stream-copy remux of hdr10_hevc.mkv (hvc1 tag, colr atom BT.2020/PQ; mastering 1000 nits, MaxCLL 1000, MaxFALL 400). Compare it parked against hdr10_hevc.mkv parked.\n\nSIDE NOTE (owner, same day): IINA shows red as magenta on these test clips, both the MKV and the correctly tagged MP4, while QuickTime and Blaze agree, so IINA's HDR handling is the odd one out. The test MKVs tag only the matrix at container level; transfer and primaries are in the HEVC VUI, which Blaze reads per frame. hdr10_av1.mkv carries no transfer/primaries anywhere ffprobe can see: worth checking what Blaze shows for it.",
+        "status": "pending",
+        "priority": "medium",
+        "dependencies": [],
+        "subtasks": [
+          {
+            "id": 1,
+            "title": "HDR-preserving reader output for HDR tracks; Rgba16F poster",
+            "description": "livephoto.rs reader settings + conversion; av_poster.rs builds Rgba16F with a peak when the source is PQ/HLG. Needs a small HDR MP4 test fixture (the hdr-test clips are ~18 MB, too big to commit).",
+            "status": "pending"
+          },
+          {
+            "id": 2,
+            "title": "Check by eye on the XDR",
+            "description": "Parked HDR MP4 matches playback brightness; no visible ramp on P; SDR MP4 posters unchanged in look and speed.",
+            "status": "pending"
+          },
+          {
+            "id": 3,
+            "title": "Windows: check the Media Foundation poster for the same flattening",
+            "description": "mf_poster decodes MP4 posters on Windows; confirm whether an HDR10 MP4's poster is SDR there too. Needs the Windows session.",
+            "status": "pending"
+          }
+        ]
       }
     ],
     "metadata": {
