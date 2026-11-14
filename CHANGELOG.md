@@ -16,9 +16,11 @@ with any pre-release suffix carried only by the tag.
   16-bit images stay 16-bit. HDR photos are saved as SDR for now, and the
   confirmation says so. Exports carry no metadata — no camera details and no
   location — and never appear in your system's recent files. The save dialog
-  remembers the last folder you exported to, unless Settings ▸ "Open files in" is
-  set to a pinned folder, in which case nothing is remembered after you quit —
-  and pinning a folder forgets any export folder remembered before.
+  opens beside the photo (or in your pinned "Open files in" folder); export from
+  the same folder again and it opens where you put the last one. Nothing about
+  where you export is kept after you quit. On a Mac, click the "Exported …"
+  confirmation to show the file in Finder; File ▸ Show Last Export in Finder (or
+  File Explorer) does the same at any time.
 - **Copy, read text from, describe and export the video frame you're looking at.**
   Pause a video (or let it play) and Copy, Copy Text from Image, Describe, Ask and
   Export as PNG now use the frame on screen, at full resolution, instead of the

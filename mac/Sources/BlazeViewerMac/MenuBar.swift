@@ -153,6 +153,7 @@ final class MenuBar: NSObject {
         items["compare_toggle"]?.isEnabled = s.compare_toggle_enabled
         items["save_rotation"]?.isEnabled = s.save_rotation_enabled
         items["export"]?.isEnabled = s.export_enabled
+        items["reveal_last_export"]?.isEnabled = s.reveal_last_export_enabled
         items["reveal"]?.isEnabled = s.reveal_enabled
         canQuickSort = s.reveal_enabled // same predicate — see the property's doc
         items["cancel_scan"]?.isEnabled = s.cancel_scan_enabled
@@ -365,6 +366,8 @@ final class MenuBar: NSObject {
             // Image export (task #89, rung 1: PNG). ⇧⌘E is Photos' Export shortcut; bare E
             // also works through the keymap.
             item("export", "Export as PNG…", key: "e", mods: [.command, .shift], enabled: false),
+            // The menu route to the export notice's click — works after the pill is gone.
+            item("reveal_last_export", "Show Last Export in Finder", enabled: false),
             item("reveal", "Show in Finder", enabled: false),
             // Quick Sort (task #136) sits with the other on-disk verbs and ABOVE the trash
             // group: "Move to Portraits" is the same verb as "Move to Trash" with a different

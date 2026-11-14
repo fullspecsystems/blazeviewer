@@ -178,6 +178,9 @@ pub struct MenuState {
     /// File ▸ Export… — a still image is on screen (`AppCore::can_export`). Like
     /// `space_toggles_video`, `menu_state_from` leaves it false and the shells set it.
     pub export_enabled: bool,
+    /// File ▸ Show Last Export in Finder/Explorer (task #89): something was exported this
+    /// session.
+    pub reveal_last_export_enabled: bool,
     /// File ▸ Show in Finder/Explorer — enabled only for a real on-disk file (not an
     /// archive entry or the empty deck).
     pub reveal_enabled: bool,

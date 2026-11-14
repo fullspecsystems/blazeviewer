@@ -110,6 +110,9 @@ pub enum Action {
     /// Export the current image to a file (task #89). Rung 1: PNG via the native save
     /// dialog; rung 2 turns this into the Export-mode toggle.
     Export,
+    /// Show the most recent export in the OS file manager (File menu, task #89) — the menu
+    /// route to the export notice's click. Remembered in RAM only; no default key.
+    RevealLastExport,
     Delete,
     DeletePermanent,
     Undo,
@@ -231,6 +234,7 @@ const BASE_ACTIONS: &[Action] = &[
     Action::RevealInFileManager,
     Action::SaveRotation,
     Action::Export,
+    Action::RevealLastExport,
     Action::Delete,
     Action::DeletePermanent,
     Action::Undo,
@@ -383,6 +387,7 @@ impl Action {
             Action::RevealInFileManager => "reveal",
             Action::SaveRotation => "save_rotation",
             Action::Export => "export",
+            Action::RevealLastExport => "reveal_last_export",
             Action::Delete => "delete",
             Action::DeletePermanent => "delete_permanent",
             Action::Undo => "undo",
@@ -479,6 +484,16 @@ impl Action {
             }
             Action::SaveRotation => "Save rotation",
             Action::Export => "Export as PNG",
+            Action::RevealLastExport => {
+                #[cfg(target_os = "macos")]
+                {
+                    "Show last export in Finder"
+                }
+                #[cfg(not(target_os = "macos"))]
+                {
+                    "Show last export in File Explorer"
+                }
+            }
             Action::Delete => "Delete to Recycle Bin",
             Action::DeletePermanent => "Delete permanently",
             Action::Undo => "Undo",

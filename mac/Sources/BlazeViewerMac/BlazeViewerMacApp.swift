@@ -391,6 +391,17 @@ struct ContentView: View {
                 }
             }
             .animation(.easeInOut(duration: 0.22), value: model.playHintVisible)
+            // The export notice (task #89): the clickable "Exported name.png" pill — same
+            // bottom-center spot; interactive (hover holds it, click shows it in Finder).
+            .overlay(alignment: .bottom) {
+                if model.exportNoticeVisible {
+                    ExportNoticeView(model: model)
+                        .id(model.exportNoticeSeq)
+                        .padding(.bottom, toastBottomInset)
+                        .transition(.move(edge: .bottom).combined(with: .opacity))
+                }
+            }
+            .animation(.easeOut(duration: 0.22), value: model.exportNoticeVisible)
             // The unified native toast rides the bottom-center, above where the info line
             // sits, and topmost so transient feedback (copy, rotate, "Scan stopped", …) is
             // never occluded by a panel. Non-interactive; it fades itself out.

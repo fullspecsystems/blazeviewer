@@ -63,6 +63,12 @@ final class CoreModel {
     private(set) var toastIcon = 0
     private(set) var toastSeq: UInt64 = 0
 
+    /// The export notice (task #89) — "Exported name.png", click to show it in Finder. The
+    /// core owns its lifetime (see `ExportNoticeView`); polled each pump like the toast.
+    private(set) var exportNoticeVisible = false
+    private(set) var exportNoticeMessage = ""
+    private(set) var exportNoticeSeq: UInt64 = 0
+
     /// The one-line info readout (`i`) — the last HUD element to go native. `rel · W×H ·
     /// CODEC[· Live]`, in a small bottom-corner pill; `align` is 0 left / 1 center / 2 right.
     private(set) var infoLineVisible = false
@@ -639,6 +645,19 @@ final class CoreModel {
     /// A native menu item fired (by stable Action id) — same dispatch as the keyboard.
     /// Menu bar AND toolbar clicks both land here (mouse-driven), so it's where we mark a
     /// Fullscreen toggle as mouse-initiated (for the exit hint) and re-sync the toolbar.
+    /// The pointer entered / left the export notice — hovering holds it open.
+    func exportNoticeHover(_ hovering: Bool) {
+        core.export_notice_hover(hovering)
+        kick()
+    }
+
+    /// The export notice was clicked: show the file in Finder (a `RevealPath` effect).
+    func exportNoticeClicked() {
+        core.export_notice_click()
+        kick()
+        drainEffects()
+    }
+
     func menuAction(_ id: String) {
         if id == "fullscreen" { fullscreenHintFromMouse = true }
         core.menu_action(id)
@@ -2022,6 +2041,17 @@ final class CoreModel {
         }
         if toastVis != toastVisible {
             toastVisible = toastVis
+        }
+        let noticeVis = core.export_notice_visible()
+        if noticeVis {
+            let seq = core.export_notice_seq()
+            if seq != exportNoticeSeq {
+                exportNoticeMessage = core.export_notice_message().toString()
+                exportNoticeSeq = seq
+            }
+        }
+        if noticeVis != exportNoticeVisible {
+            exportNoticeVisible = noticeVis
         }
         // The native one-line info readout.
         let infoVis = core.info_line_visible()

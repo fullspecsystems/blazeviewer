@@ -283,6 +283,7 @@ pub const EDITOR_GROUPS: &[(&str, &[Action])] = &[
             Action::RevealInFileManager,
             Action::SaveRotation,
             Action::Export,
+            Action::RevealLastExport,
             Action::Delete,
             Action::DeletePermanent,
             Action::Undo,
@@ -670,6 +671,7 @@ fn default_bindings() -> Vec<(Action, Vec<KeyChord>)> {
         // Export (task #89): bare E — the owner's pick, unbound before; rung 2 makes it the
         // Export-mode toggle. The macOS menu also carries the Photos-style ⇧⌘E.
         one(Action::Export, "E"),
+        (Action::RevealLastExport, vec![]),
         one(Action::Delete, "Delete"),
         one(Action::DeletePermanent, "Shift+Delete"),
         // Undo the last reversible edit (currently a saved rotation). Ctrl+Z on Windows;

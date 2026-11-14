@@ -69,10 +69,11 @@ impl AppCore {
             rotation_cw: export::quarter_turns(rotation),
             frame,
         };
+        let remembered = export::source_folder(source_path.as_deref(), container.as_deref())
+            .and_then(|key| self.export.folder_memory.get(&key).cloned());
         let start_dir = export::start_dir(
+            remembered.as_deref(),
             self.settings.picker_dir.as_deref(),
-            self.export.session_folder.as_deref(),
-            self.settings.last_export_folder.as_deref(),
             source_path.as_deref(),
             container.as_deref(),
             &crate::engine::default_picker_dir(),
@@ -128,6 +129,8 @@ impl AppCore {
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default();
+        let source_folder =
+            export::source_folder(request.source_path.as_deref(), request.source.container());
         let job = ExportJob {
             id: request.id,
             source: request.source,
@@ -149,6 +152,7 @@ impl AppCore {
             InFlight {
                 dest,
                 file_name: file_name.clone(),
+                source_folder,
             },
         );
         self.show_toast(&format!("Exporting {file_name}…"));
@@ -219,8 +223,17 @@ impl AppCore {
                 } else {
                     format!("Exported {}", flight.file_name)
                 };
-                self.show_toast(&msg);
-                self.remember_export_folder(done.dest.parent());
+                // The native shell draws a clickable notice (Show in Finder); the HUD shows
+                // the same words as a toast — File ▸ Show Last Export reveals it there.
+                if self.native_toast {
+                    let now = self.now;
+                    let item = self.displayed_item;
+                    self.export.show_notice(msg, done.dest.clone(), item, now);
+                } else {
+                    self.show_toast(&msg);
+                }
+                self.export.last_export = Some(done.dest.clone());
+                self.remember_export_folder(flight.source_folder, done.dest.parent());
             }
             Err(why) => {
                 eprintln!("export failed: {why}");
@@ -229,21 +242,35 @@ impl AppCore {
         }
     }
 
-    /// Remember where the user exports to (export-plan.md § 3.6): on disk only when "Open
-    /// files in" is unpinned (one folder path, never a file name — the ADR-022 addendum); in
-    /// RAM for this session when pinned.
-    fn remember_export_folder(&mut self, dir: Option<&Path>) {
-        let Some(dir) = dir.filter(|d| !d.as_os_str().is_empty()) else {
+    /// Remember where an export from `source` (its folder key) went, for this session —
+    /// RAM only, so nothing about where you export outlives the process (§ 3.6, 2026-11-14).
+    fn remember_export_folder(&mut self, source: Option<PathBuf>, dir: Option<&Path>) {
+        let (Some(source), Some(dir)) = (source, dir.filter(|d| !d.as_os_str().is_empty())) else {
             return;
         };
-        if self.settings.picker_dir.is_some() {
-            self.export.session_folder = Some(dir.to_path_buf());
-        } else if self.settings.last_export_folder.as_deref() != Some(dir) {
-            self.settings.last_export_folder = Some(dir.to_path_buf());
-            if self.persist_prefs {
-                self.settings.save();
-            }
+        self.export.folder_memory.insert(source, dir.to_path_buf());
+    }
+
+    /// File ▸ Show Last Export in Finder/Explorer — and the export notice's click: reveal
+    /// this session's most recent export in the file manager, and dismiss the notice.
+    pub fn reveal_last_export(&mut self) {
+        self.export.notice = None;
+        match self.export.last_export.clone() {
+            Some(path) => self.effects.push(contract::CoreEffect::RevealPath(path)),
+            None => self.show_toast("Nothing exported yet"),
         }
+    }
+
+    /// The pointer entered/left the export notice (macOS): hovering holds it open.
+    pub fn export_notice_hover(&mut self, hovering: bool) {
+        let now = self.now;
+        self.export.hover_notice(hovering, now);
+    }
+
+    /// Expire the export notice (called each tick).
+    pub fn tick_export_notice(&mut self) {
+        let (now, displayed) = (self.now, self.displayed_item);
+        self.export.tick_notice(now, displayed);
     }
 
     /// At quit: give a confirmed export up to `timeout` to land rather than silently dropping
@@ -261,10 +288,8 @@ impl AppCore {
                 .map(ExportWorker::drain)
                 .unwrap_or_default();
             for d in done {
+                // Quitting: nothing to remember (the folder memory dies with the process).
                 self.export.in_flight.remove(&d.id);
-                if let Some(dir) = d.result.is_ok().then(|| d.dest.parent()).flatten() {
-                    self.remember_export_folder(Some(dir));
-                }
             }
             if !self.export.in_flight.is_empty() {
                 std::thread::sleep(Duration::from_millis(20));
@@ -408,10 +433,7 @@ mod tests {
                 .any(|e| matches!(e, contract::CoreEffect::ShowSavePanel { .. }))
         });
         let (id, start_dir, name) = take_save_panel(&mut core).unwrap();
-        assert_eq!(
-            start_dir, lib,
-            "unpinned + nothing remembered → the image's folder"
-        );
+        assert_eq!(start_dir, lib, "nothing remembered → beside the photo");
         assert_eq!(name, "a.png");
         assert_eq!(
             snapshot(&lib),
@@ -439,51 +461,90 @@ mod tests {
             (4, 8),
             "the frozen 90° rotation is baked in"
         );
-        // Unpinned: the folder is remembered (in memory here — persist_prefs is off).
-        assert_eq!(
-            core.settings.last_export_folder.as_deref(),
-            Some(out.as_path())
-        );
+        // Where it went is remembered for this folder, in RAM only, and it is the last export.
+        assert_eq!(core.export.folder_memory.get(&lib), Some(&out));
+        assert_eq!(core.export.last_export, Some(out.join("a.png")));
         let _ = std::fs::remove_dir_all(&lib);
         let _ = std::fs::remove_dir_all(&out);
     }
 
+    /// The dialog starts beside the photo; a second export from the **same** folder goes
+    /// back where the first went; another folder starts beside its own photo (or the pin).
     #[test]
-    fn pinned_remembers_the_folder_only_for_the_session() {
-        let lib = sandbox("pin-lib");
-        let out = sandbox("pin-out");
-        write_jpeg(&lib.join("p.jpg"), 4, 4);
+    fn the_start_folder_is_remembered_per_source_folder_for_the_session() {
+        let lib1 = sandbox("mem-lib1");
+        let lib2 = sandbox("mem-lib2");
+        let out = sandbox("mem-out");
+        write_jpeg(&lib1.join("a.jpg"), 4, 4);
+        write_jpeg(&lib1.join("b.jpg"), 4, 4);
+        write_jpeg(&lib2.join("c.jpg"), 4, 4);
         let mut core = test_core();
         core.persist_prefs = false;
-        core.settings.picker_dir = Some(lib.clone());
-        core.source = Arc::new(pb_source::FsSource::new(vec![lib.join("p.jpg")]));
-        core.displayed_item = Some(0);
-        core.export_cmd();
-        pump_until(&mut core, |c| {
-            c.effects
-                .iter()
-                .any(|e| matches!(e, contract::CoreEffect::ShowSavePanel { .. }))
-        });
-        let (id, start_dir, _) = take_save_panel(&mut core).unwrap();
-        assert_eq!(start_dir, lib, "pinned → the pinned folder");
-        core.save_panel_resolved(id, Some(out.join("p.png")));
+        core.source = Arc::new(pb_source::FsSource::new(vec![
+            lib1.join("a.jpg"),
+            lib1.join("b.jpg"),
+            lib2.join("c.jpg"),
+        ]));
+        let dialog_for = |core: &mut AppCore, item: usize| {
+            core.displayed_item = Some(item);
+            core.export_cmd();
+            pump_until(core, |c| {
+                c.effects
+                    .iter()
+                    .any(|e| matches!(e, contract::CoreEffect::ShowSavePanel { .. }))
+            });
+            take_save_panel(core).unwrap()
+        };
+        let (id, start, _) = dialog_for(&mut core, 0);
+        assert_eq!(start, lib1, "beside the photo");
+        core.save_panel_resolved(id, Some(out.join("a.png")));
         pump_until(&mut core, |c| !c.export.busy());
-        assert_eq!(
-            core.settings.last_export_folder, None,
-            "nothing remembered on disk"
-        );
-        assert_eq!(core.export.session_folder.as_deref(), Some(out.as_path()));
-        // The next export starts in the session folder.
-        core.export_cmd();
-        pump_until(&mut core, |c| {
-            c.effects
+        let (id, start, _) = dialog_for(&mut core, 1);
+        assert_eq!(start, out, "same folder → where its last export went");
+        core.save_panel_resolved(id, None); // cancel
+        let (id, start, _) = dialog_for(&mut core, 2);
+        assert_eq!(start, lib2, "another folder starts beside its own photo");
+        core.save_panel_resolved(id, None);
+        // A pinned "Open files in" folder beats beside-the-photo, not this folder's memory.
+        core.settings.picker_dir = Some(out.join("pin"));
+        let (id, start, _) = dialog_for(&mut core, 2);
+        assert_eq!(start, out.join("pin"));
+        core.save_panel_resolved(id, None);
+        let (_, start, _) = dialog_for(&mut core, 0);
+        assert_eq!(start, out);
+        for d in [&lib1, &lib2, &out] {
+            let _ = std::fs::remove_dir_all(d);
+        }
+    }
+
+    /// File ▸ Show Last Export reveals this session's last export (and clears the notice).
+    #[test]
+    fn show_last_export_reveals_it() {
+        let mut core = test_core();
+        core.reveal_last_export();
+        assert!(
+            !core
+                .effects
                 .iter()
-                .any(|e| matches!(e, contract::CoreEffect::ShowSavePanel { .. }))
-        });
-        let (_, start_dir, _) = take_save_panel(&mut core).unwrap();
-        assert_eq!(start_dir, out);
-        let _ = std::fs::remove_dir_all(&lib);
-        let _ = std::fs::remove_dir_all(&out);
+                .any(|e| matches!(e, contract::CoreEffect::RevealPath(_))),
+            "nothing exported yet"
+        );
+        let p = PathBuf::from("/out/a.png");
+        core.export.last_export = Some(p.clone());
+        let now = core.now;
+        core.export
+            .show_notice("Exported a.png".into(), p.clone(), None, now);
+        core.reveal_last_export();
+        assert!(core
+            .effects
+            .iter()
+            .any(|e| matches!(e, contract::CoreEffect::RevealPath(x) if *x == p)));
+        assert!(core.export.notice.is_none());
+        // Any other command dismisses a notice; Show Last Export itself is the exception.
+        core.export
+            .show_notice("Exported a.png".into(), p, None, now);
+        core.dispatch_action(crate::action::Action::ScaleFit);
+        assert!(core.export.notice.is_none());
     }
 
     #[test]

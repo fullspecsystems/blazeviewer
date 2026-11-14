@@ -98,13 +98,6 @@ impl AppCore {
         // immediately (`tick_subtitles`'s single clearing exit) rather than at next launch.
         self.subtitles.selection.always_forced = self.settings.forced_subtitles;
 
-        // The export folder (task #89, plan Q6): pinning "Open files in" forgets the
-        // remembered folder; otherwise keep the live value, not the form's snapshot.
-        self.settings.last_export_folder = crate::export::export_folder_after_settings(
-            old.last_export_folder.as_deref(),
-            self.settings.picker_dir.is_some(),
-        );
-
         // Persist the whole model (atomic write; best-effort).
         self.settings.save();
 

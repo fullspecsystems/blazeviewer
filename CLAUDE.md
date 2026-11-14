@@ -397,8 +397,8 @@ is persisted unless the user deliberately invokes the action.
   triggers them); and a static audit that no `fs::write`/`File::create` sits on the
   *passive view/decode path* (today the only ones in the tree are `#[cfg(test)]` code
   and the `offscreen_png` example). The Edit-menu commands (delete, save-rotation) and
-  File ▸ Export (task #89 — the export worker's commit, plus `last_export_folder` when
-  "Open files in" is unpinned) are the only places app code writes — each reachable only
+  File ▸ Export (task #89 — the export worker's commit and nothing else; where you export
+  from each folder is remembered in RAM only) are the only places app code writes — each reachable only
   from an explicit user action. A core-level export no-trace test runs on every platform
   (`app_core_impl/export.rs`). Re-run
   the audit before adding any *passive* disk write; any on-disk scratch must be opt-in

@@ -30,6 +30,10 @@ git pull
 A prebuilt app is at `target/swift-host/release/Blaze Viewer.app` (session 2, built from the
 commit that added this line — About shows its build id). Rebuild if you've pulled since.
 
+**What changed in session 4** (2026-11-14, your feedback): the save sheet starts **beside the
+photo** (section 6, rewritten), and the "Exported" confirmation is a **clickable pill** that shows
+the file in Finder, plus File ▸ Show Last Export in Finder (section 6b; W16–W17).
+
 **What changed in session 3** (2026-11-14): **video and animation frames** — Copy, Copy Text,
 Describe/Ask and Export act on the frame on screen (section 11; W9, W12–W15). Rows 1.3, 1.8 and 9.6
 changed with it.
@@ -69,8 +73,8 @@ Have handy:
 
 | # | Do | Expect |
 |---|---|---|
-| 2.1 | On a JPEG, press `E` | A **sheet** slides down from the viewer window: title "Export as PNG", button "Export", name `<photo name>.png`, PNG only. First time: it starts in **the photo's own folder** |
-| 2.2 | Click Export | Toast "Exporting name.png…", then "Exported name.png" within a second or two |
+| 2.1 | On a JPEG, press `E` | A **sheet** slides down from the viewer window: title "Export as PNG", button "Export", name `<photo name>.png`, PNG only. It starts in **the photo's own folder** (section 6) |
+| 2.2 | Click Export | Toast "Exporting name.png…", then the **"Exported name.png" pill** (section 6b) within a second or two |
 | 2.3 | Open the PNG in Preview; ⌘I (Inspector) | Same pixel dimensions as the original; looks identical to Blaze's view of the original |
 | 2.4 | Press `E` again on the same photo, same folder | Suggested name is now `<name>-1.png` (the existing file isn't offered) |
 | 2.5 | Press `E`, then **Cancel** (or `Esc` while the sheet is up) | Sheet closes; **no toast**, no file; the app does **not** quit (`Esc` belongs to the sheet) |
@@ -103,19 +107,33 @@ Have handy:
 | 5.3 | After any export: `defaults read ca.fullspec.BlazeViewer 2>/dev/null \| grep -o -E 'NSOSPLastRootDirectory\|NSNavLastRootDirectory\|NSNavRecentPlaces'` | **No output** (the save panel's folder memory was removed). Note: the **Open** panel still writes it until task #147 — so test right after an export |
 | 5.4 | Check **Recent Items** (Apple menu ▸ Recent Items, and Finder ▸ Go ▸ Recent Folders) | The exported file does **not** appear (NSSavePanel shouldn't add it — confirm) |
 
-## 6. Remembered folder ("Open files in")
+## 6. Where the save sheet starts (revised in session 4)
+
+_Your feedback: opening on the last folder you were in felt wrong. Now: beside the photo; the
+same folder again → where its last export went; nothing kept after quitting._
 
 | # | Do | Expect |
 |---|---|---|
-| 6.1 | Settings ▸ General ▸ "Open files in": **the current image's folder** (default). Export into a *different* folder (e.g. a new `~/Desktop/exports`) | Works |
-| 6.2 | Export another photo | The sheet **starts in `~/Desktop/exports`** |
-| 6.3 | Quit (⌘Q), relaunch, open photos, export | Still starts in `~/Desktop/exports` (remembered across launches) |
-| 6.4 | `grep -c last_export_folder ~/Library/Application\ Support/BlazeViewer/settings.toml` | `1` |
-| 6.5 | Settings ▸ "Open files in": **a pinned folder** → choose one. Export | The sheet starts in the **pinned folder** |
-| 6.6 | Export to a third folder, then export again | Starts in that third folder (remembered **for this session only**) |
-| 6.7 | Quit, relaunch, export | Starts in the **pinned folder** again — nothing was remembered |
-| 6.8 | Re-run the `grep -c` from 6.4 | `0` — **pinning in 6.5 forgot the remembered folder** (plan Q6, implemented in session 2 on your "pinned means don't remember" reasoning). Tell me if you'd rather it kept it |
-| 6.9 | Settings ▸ "Open files in": back to **the current image's folder**. Export | Starts in the **photo's own folder** (nothing remembered); after this export, `grep -c` shows `1` again |
+| 6.1 | Open a folder, `E` on a photo | The sheet starts **in the photo's own folder** |
+| 6.2 | Export it into a *different* folder (e.g. a new `~/Desktop/exports`), then `E` on **another photo in the same folder** | Starts in **`~/Desktop/exports`** — this folder's exports keep landing together |
+| 6.3 | Open a **different folder**, `E` | Starts **beside that photo**, not in `~/Desktop/exports` |
+| 6.4 | Quit, relaunch, `E` in the first folder again | Beside the photo — nothing was remembered across the quit |
+| 6.5 | `grep -c last_export_folder ~/Library/Application\ Support/BlazeViewer/settings.toml` | `0` once settings have been saved since this build (the old key, if any, is dropped at the next save — change any setting to force it) |
+| 6.6 | Settings ▸ "Open files in": **a pinned folder**. Open a folder you haven't exported from, `E` | Starts in the **pinned folder**; after exporting elsewhere, that folder's next export goes back there (6.2's rule wins) |
+| 6.7 | Inside a **zip**: `E` | Beside the archive (its folder); a second export from the same zip goes where the first went |
+
+## 6b. The "Exported" notice (session 4)
+
+| # | Do | Expect |
+|---|---|---|
+| 6b.1 | Export a photo | Instead of a plain toast, a pill: **✓ Exported name.png 🔍**, bottom-centre |
+| 6b.2 | Leave it alone | It stays **~5 s**, then fades |
+| 6b.3 | Export again and **hover** over it | It stays as long as you hover (and glows); move off → ~5 s more |
+| 6b.4 | **Click** it | Finder opens with the PNG selected; the pill goes away |
+| 6b.5 | Export, then press Space (next photo) or any other key | The pill disappears at once |
+| 6b.6 | File ▸ **Show Last Export in Finder** (before any export, then after) | Disabled until the first export; then reveals it in Finder, even after the pill is gone |
+| 6b.7 | Export a **HDR** photo | The pill reads "Exported name.png (HDR as SDR)" |
+| 6b.8 | VoiceOver on (⌘F5), move to the pill | Reads "Exported name.png. Show in Finder"; VO-Space reveals it |
 
 ## 7. Safety
 
@@ -209,3 +227,5 @@ only compile-checked from the Mac.
 | W13 | Same on an **HDR** film | Exports, but **SDR and capped at 4096 px** on Windows for now (MF's replay path); note how it looks |
 | W14 | Pause, Copy Text from Image; then `D` | Both act on the paused frame |
 | W15 | Play an animated GIF, pause on a later frame, Ctrl+C | That frame |
+| W16 | Export, then File ▸ **Show Last Export in File Explorer** | Explorer opens with the PNG selected (disabled before the first export). The toast itself isn't clickable on Windows yet |
+| W17 | `E` twice from the same folder, exporting elsewhere the first time; then from another folder | Same folder → where the last export went; another folder → beside its photo |

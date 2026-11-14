@@ -67,6 +67,7 @@ impl AppCore {
             compare_toggle_enabled: compare_pin.is_some() && displayed_item.is_some(),
             save_rotation_enabled,
             export_enabled: false, // the shells set it from `can_export()`
+            reveal_last_export_enabled: false, // the shells set it from `last_export`
             reveal_enabled,
             cancel_scan_enabled,
             undo,

@@ -79,7 +79,8 @@ the real viewer (GPU zoom, 1:1, instant flick), and it can show true HDR.
 3. **Metadata stripped by default** (*Strip metadata* checkbox; categories when unchecked).
    Location resets to off on every Export-mode entry.
 4. **Wide gamut kept by default**; a "convert to sRGB" option may come later.
-5. **Export folder follows "Open files in"** (*3.6*).
+5. **Export folder:** beside the photo, remembered per source folder for the session only; a
+   pinned "Open files in" folder is the start when there's no memory (*3.6*, revised 2026-11-14).
 6. **Export mode replaces the right-hand Inspector** with export controls + details.
 7. **The area under the panel is handled by zoom/pan.**
 8. **Flick first, wipe later;** tap toggles, hold peeks.
@@ -219,7 +220,7 @@ re-export; `describe.rs` (its only caller) changes its import.
 | `pb-app-core/src/spring.rs` | Tap/hold state machine (rung 3) |
 | `pb-app-core/src/app_core_impl/export.rs` | The `AppCore` export methods (two-halves rule) |
 | `pb-app-core/src/app_core_impl.rs` | **The present gate** (F3): one "what is presented" field and one gate every re-present site goes through — this file's residency-and-present charter, not `export.rs` |
-| `settings.rs` | `ExportPrefs` (lenient section) + `last_export_folder` |
+| `settings.rs` | `ExportPrefs` (lenient section). (`last_export_folder` was removed 2026-11-14 — § 3.6) |
 | `pb-mac-ffi` + `mac/` | Per-call FFI methods, `NSSavePanel`, panel-key cleanup, the SwiftUI panel, key arbitration |
 | `pb-app` | `IFileDialog` wrapper (open + save) on Windows, `rfd` on Linux, the pb-ui egui panel |
 
@@ -346,15 +347,20 @@ cross-platform debt.
 
 ## 3.6 The export folder and OS dialogs
 
-| "Open files in" | Save dialog starts in | Remembered across launches |
-|---|---|---|
-| **The current image's folder** (default) | `last_export_folder`, else the image's folder (archive entry: the archive's folder) | **Yes** — one folder path, never a file name |
-| **A pinned folder** | The pinned folder; then the last export folder **from this session**, held in `ExportState` (RAM only — never in `Settings`, which several paths save unconditionally) | **No** |
+**Revised by the owner, 2026-11-14** (after using it: "the save dialog opens to the last folder I
+was in … doesn't feel like what I'd want most of the time"). The dialog starts, in order:
 
-- **`last_export_folder`** is written only by a completed explicit export, **never while pinned**,
-  never by tests (`persist_prefs`). These rules are **stricter than `last_folder`'s**, which is
-  written even when pinned (F16). Recommended: **switching to pinned clears a stored
-  `last_export_folder`** (*Part 8*). Recorded as an ADR-022 addendum.
+1. where you last exported **from this same source folder** this session (`ExportState::
+   folder_memory`, keyed by the image's folder or the archive; RAM only) — a run of exports
+   from one folder keeps landing together;
+2. else the **pinned** "Open files in" folder, if one is set;
+3. else **beside the photo** — its own folder (an archive entry: the archive's folder), as
+   Preview's Export does.
+
+**Nothing is remembered across launches**, and export writes nothing but the file:
+`Settings::last_export_folder` (rung 1's ADR-022 addendum) and the Q6 "pinning clears it" rule
+are **removed**. An existing `settings.toml` still loads (unknown keys are ignored) and drops the
+stale key at its next save.
 - **Always pass an explicit start folder.**
 - **OS file history is suppressed** (owner decision 9):
   - **macOS:** after **any** open or save panel closes, remove `NSOSPLastRootDirectory`,
@@ -873,10 +879,8 @@ explicit paths only** (shared working copy).
 3. **`E`** toggles Export mode (rung 1: opens the save dialog directly).
 4. **HDR default** — "HDR with SDR fallback" recommended.
 5. **Normal compare tap/hold** — recommended.
-6. ~~**Pinned + save start folder**~~ — implemented 2026-11-14 on the owner's own reasoning
-   ("a pinned folder says *don't remember what folder I was last in*"): pinned folder + RAM-only
-   session memory, and **pinning clears a stored `last_export_folder`**
-   (`export::export_folder_after_settings`). Revert = return `live` unconditionally.
+6. ~~**Pinned + save start folder**~~ — superseded 2026-11-14 by § 3.6's revision: nothing is
+   persisted any more, so there is nothing for pinning to clear.
 7. **Strip-metadata stickiness** — always starts checked (recommended).
 8. **RAW** — match the viewer (embedded full-size preview) recommended; a demosaic option?
 9. **macOS Tab focus into the panel** in rung 2, or later?
@@ -1018,14 +1022,19 @@ test script: `.taskmaster/docs/export-rung1-manual-test.md`. Rung 0a (#81) not s
   pb-decode's test fixtures use it from there.
 - **Session 2:** the right-click item "Export as PNG…" on both shells (`ContextMenuState::can_export`,
   hidden for videos and doors — the menu's existing omit-don't-disable idiom), in a new file group
-  with Show in Finder / Quick Sort. Q6 implemented (Part 8). `apply_settings` now also keeps the
-  **live** `last_export_folder` over the Settings form's snapshot (the winit dialog folds onto the
-  settings it opened with, so an export finishing while Settings is open was reverted).
-- **Not yet:** a Reveal action on the success toast — toasts carry no actions (1.3 s pills on both
-  shells), so it needs a toast-action design first.
-- `last_export_folder` is never written while pinned; the pinned session folder lives in
-  `ExportState` (RAM). The save-panel cleanup removes `NSOSPLastRootDirectory`,
-  `NSNavLastRootDirectory`, `NSNavRecentPlaces` after each export dialog.
+  with Show in Finder / Quick Sort.
+- **Session 4 (owner feedback, 2026-11-14):**
+  - **The start folder** is now beside the photo, with per-source-folder session memory in RAM;
+    `last_export_folder` and the Q6 code are gone (§ 3.6).
+  - **The success toast is clickable** on macOS: an export notice (`ExportState::notice`,
+    `ExportNoticeView.swift`) — "Exported name.png" + a magnifying glass; click → Show in Finder
+    (`RevealPath`); 5 s, held while hovered (leaving restarts the hold), dismissed by navigating
+    or any other command; its expiry rides the core's wake list, not `work_pending`.
+  - **File ▸ Show Last Export in Finder/File Explorer** (`Action::RevealLastExport`, no default
+    key): the keyboard / VoiceOver route, and Windows' reveal — its HUD toast isn't clickable
+    yet. `last_export` is RAM-only.
+- The save-panel cleanup removes `NSOSPLastRootDirectory`, `NSNavLastRootDirectory`,
+  `NSNavRecentPlaces` after each export dialog.
 - Quit waits up to 4 s for an in-flight export (`finish_exports_for_exit`), from both shells.
 
 **Cross-platform debt**

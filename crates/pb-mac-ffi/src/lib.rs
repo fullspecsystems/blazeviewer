@@ -1411,6 +1411,7 @@ impl AppCoreHandle {
             compare_toggle_enabled: s.compare_toggle_enabled,
             save_rotation_enabled: s.save_rotation_enabled,
             export_enabled: s.export_enabled,
+            reveal_last_export_enabled: s.reveal_last_export_enabled,
             reveal_enabled: s.reveal_enabled,
             cancel_scan_enabled: s.cancel_scan_enabled,
             undo_enabled: s.undo.is_some(),
@@ -1689,6 +1690,43 @@ impl AppCoreHandle {
     /// so an identical message firing twice still re-animates.
     fn toast_seq(&self) -> u64 {
         self.core.toast_native.as_ref().map(|t| t.seq).unwrap_or(0)
+    }
+
+    // ── The export notice (task #89): "Exported name.png" as a clickable pill — click shows
+    // the file in Finder. The core owns its lifetime (5 s, held while hovered, dismissed by
+    // navigation or any command); the host polls these each pump like the toast. ──
+
+    /// Whether the export notice is up.
+    fn export_notice_visible(&self) -> bool {
+        self.core.export.notice.is_some()
+    }
+
+    /// Its text ("Exported clip-0h01m23s.png", "… (HDR as SDR)").
+    fn export_notice_message(&self) -> String {
+        self.core
+            .export
+            .notice
+            .as_ref()
+            .map(|n| n.message.clone())
+            .unwrap_or_default()
+    }
+
+    /// Per-notice counter — re-animates even for a repeated name.
+    fn export_notice_seq(&self) -> u64 {
+        self.core.export.notice.as_ref().map(|n| n.seq).unwrap_or(0)
+    }
+
+    /// The pointer entered / left the pill: hovering holds it open.
+    fn export_notice_hover(&mut self, hovering: bool) {
+        self.core.now = Instant::now();
+        self.core.export_notice_hover(hovering);
+    }
+
+    /// The pill was clicked: show the file in Finder (a `RevealPath` effect) and dismiss it.
+    /// The host drains effects afterwards.
+    fn export_notice_click(&mut self) {
+        self.core.now = Instant::now();
+        self.core.reveal_last_export();
     }
 
     // ── The native one-line info readout (`i`): the last HUD element to go native. The core
@@ -2537,6 +2575,7 @@ impl AppCoreHandle {
         );
         // File ▸ Export… (task #89): set here, like `space_toggles_video`.
         next.export_enabled = self.core.can_export();
+        next.reveal_last_export_enabled = self.core.export.last_export.is_some();
         // Show Archives (task #104) is a setting, defaulted off by the pure choke point, so
         // override it here the way the winit shell does (`current_menu_state`).
         let next = contract::MenuState {
@@ -4653,6 +4692,7 @@ mod ffi {
         compare_toggle_enabled: bool,
         save_rotation_enabled: bool,
         export_enabled: bool,
+        reveal_last_export_enabled: bool,
         reveal_enabled: bool,
         cancel_scan_enabled: bool,
         undo_enabled: bool,
@@ -4935,6 +4975,11 @@ mod ffi {
         fn toast_message(&self) -> String;
         fn toast_icon(&self) -> u8;
         fn toast_seq(&self) -> u64;
+        fn export_notice_visible(&self) -> bool;
+        fn export_notice_message(&self) -> String;
+        fn export_notice_seq(&self) -> u64;
+        fn export_notice_hover(&mut self, hovering: bool);
+        fn export_notice_click(&mut self);
         fn info_line_visible(&self) -> bool;
         fn info_line_text(&self) -> String;
         fn info_line_codec(&self) -> String;

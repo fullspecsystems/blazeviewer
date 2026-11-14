@@ -7,16 +7,17 @@
 //! shell runs the native save dialog, and the [write worker](crate::export_worker) decodes,
 //! prepares, encodes and writes off the event loop.
 //!
-//! Privacy (ADR-018): an export is an explicit user edit, never a passive write. The only
-//! state that outlives the process is `Settings::last_export_folder` — one folder path, never
-//! a file name, written only by a completed export and **never while "Open files in" is
-//! pinned** (an ADR-022 addendum, owner-approved 2026-11-13). When pinned, the session's last
-//! export folder lives here, in RAM.
+//! Privacy (ADR-018): an export is an explicit user edit, never a passive write — and it
+//! writes **nothing but the exported file**. Where you exported from each folder is
+//! remembered in RAM for the session ([`ExportState::folder_memory`]) and forgotten at quit.
+//! (Rung 1 first persisted one `last_export_folder` in settings; the owner reversed that on
+//! 2026-11-14 — the dialog now starts beside the photo, see [`start_dir`].)
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::Receiver;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use pb_source::ItemSource;
 
@@ -59,6 +60,8 @@ pub struct InFlight {
     pub dest: PathBuf,
     /// The output file name, for the toast.
     pub file_name: String,
+    /// The source's folder key ([`source_folder`]) — where this export is remembered.
+    pub source_folder: Option<PathBuf>,
 }
 
 /// A suggestion being computed off the event loop (an existence check can block on a
@@ -82,11 +85,88 @@ pub struct ExportState {
     pub in_flight: HashMap<u64, InFlight>,
     /// The write worker, spawned on the first export.
     pub worker: Option<crate::export_worker::ExportWorker>,
-    /// While "Open files in" is pinned: this session's last export folder (RAM only).
-    pub session_folder: Option<PathBuf>,
+    /// Where you last exported **from each source folder** this session — keyed by the
+    /// image's folder (or the archive itself), valued by the folder the export went to. RAM
+    /// only, forgotten at quit.
+    pub folder_memory: HashMap<PathBuf, PathBuf>,
+    /// The most recent successful export this session — File ▸ Show Last Export. RAM only,
+    /// forgotten at quit.
+    pub last_export: Option<PathBuf>,
+    /// The "Exported name.png" notice on screen, if any (macOS draws it as a clickable pill).
+    pub notice: Option<ExportNotice>,
+    notice_seq: u64,
+}
+
+/// How long the export notice stays while the pointer isn't on it.
+pub const NOTICE_HOLD: Duration = Duration::from_secs(5);
+
+/// The "Exported name.png" notice — on the native shell a pill you click to show the file
+/// in Finder. It lives [`NOTICE_HOLD`] (held while hovered), and navigating or any other
+/// command dismisses it: it must never sit over the photo you've moved on to.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExportNotice {
+    /// Bumped per notice so the shell re-animates even for a repeated name.
+    pub seq: u64,
+    pub message: String,
+    pub path: PathBuf,
+    /// The item on screen when it appeared.
+    pub item: Option<usize>,
+    pub shown_at: Instant,
+    pub hovered: bool,
 }
 
 impl ExportState {
+    /// Show the notice for a finished export (replacing any earlier one).
+    pub fn show_notice(
+        &mut self,
+        message: String,
+        path: PathBuf,
+        item: Option<usize>,
+        now: Instant,
+    ) {
+        self.notice_seq = self.notice_seq.wrapping_add(1);
+        self.notice = Some(ExportNotice {
+            seq: self.notice_seq,
+            message,
+            path,
+            item,
+            shown_at: now,
+            hovered: false,
+        });
+    }
+
+    /// Expire the notice: past its hold (unless hovered), or the photo changed. Returns
+    /// whether it changed.
+    pub fn tick_notice(&mut self, now: Instant, displayed: Option<usize>) -> bool {
+        let expired = self.notice.as_ref().is_some_and(|n| {
+            n.item != displayed
+                || (!n.hovered && now.saturating_duration_since(n.shown_at) >= NOTICE_HOLD)
+        });
+        if expired {
+            self.notice = None;
+        }
+        expired
+    }
+
+    /// When the notice next needs a tick to expire (`None` while hovered or absent).
+    pub fn notice_deadline(&self) -> Option<Instant> {
+        self.notice
+            .as_ref()
+            .filter(|n| !n.hovered)
+            .map(|n| n.shown_at + NOTICE_HOLD)
+    }
+
+    /// The pointer entered or left the notice. Leaving restarts the hold, so it doesn't
+    /// vanish the instant you move off it.
+    pub fn hover_notice(&mut self, hovering: bool, now: Instant) {
+        if let Some(n) = self.notice.as_mut() {
+            if n.hovered && !hovering {
+                n.shown_at = now;
+            }
+            n.hovered = hovering;
+        }
+    }
+
     /// A fresh request id.
     pub fn next_id(&mut self) -> u64 {
         self.next_id = self.next_id.wrapping_add(1);
@@ -106,15 +186,27 @@ impl ExportState {
     }
 }
 
-/// Where the save dialog starts (export-plan.md § 3.6), following "Open files in":
-/// - **pinned**: this session's last export folder, else the pinned folder — nothing is
-///   remembered across launches;
-/// - **unpinned** (default): the remembered `last_export_folder`, else the image's own
-///   folder (an archive entry: the archive's folder), else `fallback`.
+/// The key the per-folder memory uses: the image's own folder, or — for an archive entry,
+/// which has no path — the archive itself.
+pub fn source_folder(source_path: Option<&Path>, container: Option<&Path>) -> Option<PathBuf> {
+    source_path
+        .and_then(Path::parent)
+        .or(container)
+        .filter(|p| !p.as_os_str().is_empty())
+        .map(Path::to_path_buf)
+}
+
+/// Where the save dialog starts (export-plan.md § 3.6, revised by the owner 2026-11-14 —
+/// "opening on the last folder I was in doesn't feel like what I'd want most of the time"):
+/// 1. where you last exported **from this same folder** this session (`remembered`, RAM) —
+///    so a run of exports from one folder keeps landing together;
+/// 2. else the pinned "Open files in" folder;
+/// 3. else **beside the photo** — its own folder (an archive entry: the archive's folder),
+///    as Preview's Export does;
+/// 4. else `fallback`.
 pub fn start_dir(
+    remembered: Option<&Path>,
     pinned: Option<&Path>,
-    session_folder: Option<&Path>,
-    last_export_folder: Option<&Path>,
     source_path: Option<&Path>,
     container: Option<&Path>,
     fallback: &Path,
@@ -123,26 +215,11 @@ pub fn start_dir(
         p.filter(|p| !p.as_os_str().is_empty())
             .map(Path::to_path_buf)
     };
-    if let Some(pinned) = usable(pinned) {
-        return usable(session_folder).unwrap_or(pinned);
-    }
-    usable(last_export_folder)
+    usable(remembered)
+        .or_else(|| usable(pinned))
         .or_else(|| usable(source_path.and_then(Path::parent)))
         .or_else(|| usable(container.and_then(Path::parent)))
         .unwrap_or_else(|| fallback.to_path_buf())
-}
-
-/// The remembered export folder once Settings are applied (export-plan.md Part 8 Q6, § 3.6).
-/// A pinned "Open files in" means *don't remember where I was*, so pinning clears a folder
-/// remembered before the pin. The Settings form never edits this field, so otherwise the
-/// **live** value wins over the form's snapshot — an export can finish while Settings is open,
-/// and the winit dialog folds onto the settings it was opened with.
-pub fn export_folder_after_settings(live: Option<&Path>, pinned: bool) -> Option<PathBuf> {
-    if pinned {
-        None
-    } else {
-        live.map(Path::to_path_buf)
-    }
 }
 
 /// The suggested output name: the source's stem + `.png`, suffixed (`-1`, `-2`, …) past any
@@ -189,16 +266,14 @@ mod tests {
     const FALLBACK: &str = "/home/u/Pictures";
 
     fn sd(
+        remembered: Option<&str>,
         pinned: Option<&str>,
-        session: Option<&str>,
-        last: Option<&str>,
         src: Option<&str>,
         cont: Option<&str>,
     ) -> PathBuf {
         start_dir(
+            remembered.map(Path::new),
             pinned.map(Path::new),
-            session.map(Path::new),
-            last.map(Path::new),
             src.map(Path::new),
             cont.map(Path::new),
             Path::new(FALLBACK),
@@ -206,62 +281,95 @@ mod tests {
     }
 
     #[test]
-    fn unpinned_prefers_the_remembered_folder_then_the_image_folder() {
+    fn the_dialog_starts_beside_the_photo() {
         assert_eq!(
-            sd(None, None, Some("/out"), Some("/lib/a.jpg"), None),
-            PathBuf::from("/out")
-        );
-        assert_eq!(
-            sd(None, None, None, Some("/lib/a.jpg"), None),
+            sd(None, None, Some("/lib/a.jpg"), None),
             PathBuf::from("/lib")
         );
         // An archive entry has no path: the archive's folder.
         assert_eq!(
-            sd(None, None, None, None, Some("/arch/set.zip")),
+            sd(None, None, None, Some("/arch/set.zip")),
             PathBuf::from("/arch")
         );
-        assert_eq!(sd(None, None, None, None, None), PathBuf::from(FALLBACK));
-        // A session folder never applies when unpinned (unpinned remembers on disk instead).
-        assert_eq!(
-            sd(None, Some("/sess"), None, Some("/lib/a.jpg"), None),
-            PathBuf::from("/lib")
-        );
+        assert_eq!(sd(None, None, None, None), PathBuf::from(FALLBACK));
     }
 
     #[test]
-    fn pinned_uses_the_session_folder_then_the_pin_and_ignores_the_remembered_one() {
+    fn this_folders_last_export_wins_then_the_pin() {
+        // Exported from this folder before this session → back there.
         assert_eq!(
-            sd(Some("/pin"), None, Some("/out"), Some("/lib/a.jpg"), None),
+            sd(Some("/out"), Some("/pin"), Some("/lib/a.jpg"), None),
+            PathBuf::from("/out")
+        );
+        // Not yet: a pinned "Open files in" folder, else beside the photo.
+        assert_eq!(
+            sd(None, Some("/pin"), Some("/lib/a.jpg"), None),
             PathBuf::from("/pin")
         );
-        assert_eq!(
-            sd(
-                Some("/pin"),
-                Some("/sess"),
-                Some("/out"),
-                Some("/lib/a.jpg"),
-                None
-            ),
-            PathBuf::from("/sess")
-        );
     }
 
     #[test]
-    fn pinning_forgets_the_remembered_export_folder_and_unpinned_keeps_the_live_one() {
-        let live = Path::new("/out");
-        assert_eq!(export_folder_after_settings(Some(live), true), None);
-        assert_eq!(export_folder_after_settings(None, true), None);
+    fn the_memory_key_is_the_photos_folder_or_the_archive() {
         assert_eq!(
-            export_folder_after_settings(Some(live), false).as_deref(),
-            Some(live)
+            source_folder(Some(Path::new("/lib/a.jpg")), Some(Path::new("/x.zip"))),
+            Some(PathBuf::from("/lib"))
         );
-        assert_eq!(export_folder_after_settings(None, false), None);
+        assert_eq!(
+            source_folder(None, Some(Path::new("/arch/set.zip"))),
+            Some(PathBuf::from("/arch/set.zip"))
+        );
+        assert_eq!(source_folder(None, None), None);
+    }
+
+    /// The notice: held 5 s, held longer while hovered (leaving restarts the hold), and
+    /// gone the moment the photo changes.
+    #[test]
+    fn the_export_notice_lifetime() {
+        let t0 = Instant::now();
+        let mut st = ExportState::default();
+        st.show_notice(
+            "Exported a.png".into(),
+            PathBuf::from("/o/a.png"),
+            Some(3),
+            t0,
+        );
+        let seq = st.notice.as_ref().unwrap().seq;
+        assert!(
+            !st.tick_notice(t0 + Duration::from_secs(4), Some(3)),
+            "still up at 4 s"
+        );
+        assert_eq!(st.notice_deadline(), Some(t0 + NOTICE_HOLD));
+        st.hover_notice(true, t0 + Duration::from_secs(4));
+        assert_eq!(st.notice_deadline(), None, "no expiry while hovered");
+        assert!(
+            !st.tick_notice(t0 + Duration::from_secs(30), Some(3)),
+            "held by hover"
+        );
+        st.hover_notice(false, t0 + Duration::from_secs(30));
+        assert!(
+            !st.tick_notice(t0 + Duration::from_secs(33), Some(3)),
+            "a fresh hold"
+        );
+        assert!(
+            st.tick_notice(t0 + Duration::from_secs(35), Some(3)),
+            "then gone"
+        );
+        // Navigating away dismisses at once; a new notice gets a new seq.
+        st.show_notice(
+            "Exported b.png".into(),
+            PathBuf::from("/o/b.png"),
+            Some(3),
+            t0,
+        );
+        assert!(st.notice.as_ref().unwrap().seq > seq);
+        assert!(st.tick_notice(t0, Some(4)));
+        assert!(st.notice.is_none());
     }
 
     #[test]
     fn empty_paths_count_as_absent() {
         assert_eq!(
-            sd(Some(""), None, Some(""), Some("/lib/a.jpg"), None),
+            sd(Some(""), Some(""), Some("/lib/a.jpg"), None),
             PathBuf::from("/lib")
         );
     }
@@ -312,6 +420,7 @@ mod tests {
             InFlight {
                 dest: PathBuf::from("/o/a.png"),
                 file_name: "a.png".into(),
+                source_folder: None,
             },
         );
         assert!(s.busy());

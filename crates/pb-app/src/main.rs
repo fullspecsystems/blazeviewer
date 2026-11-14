@@ -548,6 +548,8 @@ struct App {
     save_rotation_item: Option<muda::MenuItem>,
     /// File ▸ Export as PNG… (task #89), enabled from `AppCore::can_export`.
     export_item: Option<muda::MenuItem>,
+    /// File ▸ Show Last Export in File Explorer (task #89), enabled once something exported.
+    reveal_last_export_item: Option<muda::MenuItem>,
     /// The File ▸ Show in Finder/Explorer menu item, enabled only when a real on-disk file
     /// is displayed (greyed out for archive entries + the empty deck; see `AppCore::can_reveal`).
     reveal_item: Option<muda::MenuItem>,
@@ -1205,6 +1207,7 @@ impl App {
             menu: None,
             save_rotation_item: None,
             export_item: None,
+            reveal_last_export_item: None,
             reveal_item: None,
             compare_pin_item: None,
             compare_toggle_item: None,
@@ -2453,6 +2456,7 @@ impl App {
             self.menu = Some(built.menu);
             self.save_rotation_item = Some(built.save_rotation);
             self.export_item = Some(built.export);
+            self.reveal_last_export_item = Some(built.reveal_last_export);
             self.reveal_item = Some(built.reveal);
             self.cancel_scan_item = Some(built.cancel_scan);
             self.undo_item = Some(built.undo);
@@ -2712,6 +2716,7 @@ impl App {
         );
         // File ▸ Export as PNG… (task #89): set here, like `space_toggles_video`.
         state.export_enabled = self.core.can_export();
+        state.reveal_last_export_enabled = self.core.export.last_export.is_some();
         // The docked toolbar (#61) is a shell-honored setting, not derived view state, so it's
         // set here (the choke point defaults it off). It rides `MenuState` so the View ▸ Show
         // Toolbar checkmark tracks it through the same per-tick diff as every other check.
@@ -2758,6 +2763,9 @@ impl App {
         // File ▸ Export as PNG… enabled state (task #89).
         if let Some(it) = self.export_item.as_ref() {
             it.set_enabled(state.export_enabled);
+        }
+        if let Some(it) = self.reveal_last_export_item.as_ref() {
+            it.set_enabled(state.reveal_last_export_enabled);
         }
         // File ▸ Show in Finder/Explorer enabled state.
         if let Some(it) = self.reveal_item.as_ref() {

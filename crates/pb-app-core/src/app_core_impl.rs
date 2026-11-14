@@ -533,6 +533,10 @@ impl AppCore {
     /// keyboard's held-to-blaze nav and continuous pan/zoom are driven by the hold loop, not this
     /// path.
     pub fn dispatch_action(&mut self, action: Action) {
+        // Any command moves past an export notice (task #89) — except the one that acts on it.
+        if action != Action::RevealLastExport {
+            self.export.notice = None;
+        }
         match action {
             Action::Next | Action::SkipNext => self.advance(Nav::Forward),
             Action::Prev => self.advance(Nav::Backward),
@@ -559,6 +563,7 @@ impl AppCore {
             Action::CompareToggle => self.compare_toggle_cmd(),
             Action::Copy => self.copy_image(),
             Action::Export => self.export_cmd(),
+            Action::RevealLastExport => self.reveal_last_export(),
             Action::CopyPath => self.copy_path(),
             Action::CopyImageDetails => self.copy_image_details(),
             Action::CopyImageText => self.copy_image_text(),
@@ -1332,6 +1337,7 @@ impl AppCore {
         // 0'''. Image export (task #89): open the save dialog once a name suggestion lands, and
         // land finished writes (toast + remembered folder). No-op until the first export.
         self.poll_export();
+        self.tick_export_notice();
         // 1. Absorb finished decodes (uploads; presents the target if it arrived).
         self.drain_results();
         // 1'. macOS archive video (off the event loop): land a finished playback byte read
@@ -1858,9 +1864,12 @@ impl AppCore {
         // Export work (task #89) polls at a low rate — deliberately NOT through `work_pending`,
         // which would hold the pump at the frame rate for the seconds an encode takes (F8).
         let export_wake = self.export.busy().then(|| now + export::EXPORT_POLL);
+        // The export notice's expiry (not while hovered — leaving restarts its hold).
+        let notice_wake = self.export.notice_deadline();
         let wake = [
             base_wake,
             export_wake,
+            notice_wake,
             anim_wake,
             prep_wake,
             revert_wake,
