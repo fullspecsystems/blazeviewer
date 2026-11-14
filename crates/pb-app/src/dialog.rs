@@ -105,7 +105,7 @@ fn len_preset_index(max_tokens: u32) -> usize {
 enum ConnTest {
     #[default]
     Idle,
-    Testing(std::sync::mpsc::Receiver<Result<Vec<String>, String>>),
+    Testing(std::sync::mpsc::Receiver<pb_app_core::describe::ProbeReport>),
     /// A finished probe: `ok` colors the line (green/amber/red), `msg` is the summary.
     Done {
         ok: bool,
@@ -2343,14 +2343,15 @@ fn start_conn_test(conn_test: &mut ConnTest, endpoint: &str) {
     let (tx, rx) = std::sync::mpsc::channel();
     let url = endpoint.trim().to_string();
     std::thread::spawn(move || {
-        let _ = tx.send(pb_app_core::describe::probe_endpoint(&url).map_err(|e| e.user_message()));
+        let _ = tx.send(pb_app_core::describe::probe_report(&url));
     });
     *conn_test = ConnTest::Testing(rx);
 }
 
-/// Poll + render the Test-connection status line: reachability, model count, and a warning
-/// when no served model looks vision-capable (the describe path needs a VLM). On success it
-/// also fills `models` (vision-first) for the Model picker.
+/// Poll + render the Test-connection status line — the core's shared summary
+/// (`describe::probe_report`: reachability, model count, the vision-model check, and the
+/// URL actually used when a missing `/v1` was added). It also fills `models`
+/// (vision-first) for the Model picker, as the Mac's does.
 fn render_conn_test(
     ui: &mut egui::Ui,
     p: &pbui::Palette,
@@ -2371,37 +2372,14 @@ fn render_conn_test(
         None
     };
     if let Some(outcome) = landed {
-        // Capture the fetched models (vision-first) for the picker before summarizing.
-        if let Some(Ok(list)) = &outcome {
-            *models = pb_app_core::describe::sort_models_vision_first(list.clone());
-        }
         *conn_test = match outcome {
-            Some(Ok(models)) if models.is_empty() => ConnTest::Done {
-                ok: false,
-                msg: "Reachable, but no models are loaded.".to_string(),
-            },
-            Some(Ok(models)) => {
-                let n = models.len();
-                let plural = if n == 1 { "" } else { "s" };
-                if models
-                    .iter()
-                    .any(|m| pb_app_core::describe::looks_like_vision_model(m))
-                {
-                    ConnTest::Done {
-                        ok: true,
-                        msg: format!("Reachable · {n} model{plural} · vision model present"),
-                    }
-                } else {
-                    ConnTest::Done {
-                        ok: false,
-                        msg: format!(
-                            "Reachable · {n} model{plural}, but none look vision-capable — \
-                             describe needs a VLM (e.g. qwen2.5-vl)."
-                        ),
-                    }
+            Some(report) => {
+                *models = report.models;
+                ConnTest::Done {
+                    ok: report.ok,
+                    msg: report.message,
                 }
             }
-            Some(Err(msg)) => ConnTest::Done { ok: false, msg },
             None => ConnTest::Done {
                 ok: false,
                 msg: "Test failed.".to_string(),

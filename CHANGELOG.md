@@ -39,9 +39,19 @@ with any pre-release suffix carried only by the tag.
 - **Quicker slideshow speed from the menu.** View ▸ Slideshow Faster and Slower
   now jump between round values like 1, 2, 5, 10, 30 and 60 seconds, instead of
   creeping a tenth at a time.
+- **Easier AI server setup.** Paste the address LM Studio shows, like
+  `http://192.168.1.10:1234`, and Blaze Viewer adds the `/v1` itself. Test & list models
+  shows the address it used.
+- **Clearer AI description errors.** When the model server turns a request down — say,
+  the loaded model can't read images — you now see the server's own explanation instead of
+  a generic error.
 
 ### Fixed
 
+- **AI descriptions work with models that think first.** Models like Qwen 3.5 and 3.6
+  could spend the whole response length thinking and fail with "Couldn't read the
+  endpoint's reply". Blaze Viewer now gives a model that thinks room to finish thinking
+  and still answer at the response length you chose.
 - **Mac: HDR videos look right before you press play.** Parked on an HDR MP4 or MOV, the
   preview frame now shows in full HDR, as MKVs already did, instead of a flat SDR frame
   that brightened once playback started.

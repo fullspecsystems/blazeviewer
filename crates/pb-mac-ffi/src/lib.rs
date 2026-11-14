@@ -3341,44 +3341,17 @@ fn cli_preflight(
     }
 }
 
-/// The AI settings tab's **Test connection** probe (task #44): GET the endpoint's model
-/// list, summarize reachability + model count, and warn when no served model looks
-/// vision-capable (describe needs a VLM). Stateless + blocking — Swift calls it off the
-/// main thread. Mirrors the egui shell's `render_conn_test` wording.
+/// The AI settings tab's **Test connection** probe (task #44): the core's shared summary
+/// (`describe::probe_report` — reachability, model count, the vision-model check, and the
+/// URL actually used when a missing `/v1` was added). Stateless + blocking — Swift calls
+/// it off the main thread.
 fn probe_describe_endpoint(url: String) -> ffi::ProbeResultFfi {
-    match pb_app_core::describe::probe_endpoint(&url) {
-        Ok(models) if models.is_empty() => ffi::ProbeResultFfi {
-            ok: false,
-            message: "Reachable, but no models are loaded.".to_string(),
-            models: String::new(),
-        },
-        Ok(models) => {
-            let n = models.len();
-            let plural = if n == 1 { "" } else { "s" };
-            let has_vision = models
-                .iter()
-                .any(|m| pb_app_core::describe::looks_like_vision_model(m));
-            // Vision-first, newline-joined for the host to split into the Model picker.
-            let list = pb_app_core::describe::sort_models_vision_first(models).join("\n");
-            let message = if has_vision {
-                format!("Reachable · {n} model{plural} · vision model present")
-            } else {
-                format!(
-                    "Reachable · {n} model{plural}, but none look vision-capable — \
-                     describe needs a VLM (e.g. qwen2.5-vl)."
-                )
-            };
-            ffi::ProbeResultFfi {
-                ok: has_vision,
-                message,
-                models: list,
-            }
-        }
-        Err(e) => ffi::ProbeResultFfi {
-            ok: false,
-            message: e.user_message(),
-            models: String::new(),
-        },
+    let r = pb_app_core::describe::probe_report(&url);
+    ffi::ProbeResultFfi {
+        ok: r.ok,
+        message: r.message,
+        // Vision-first, newline-joined for the host to split into the Model picker.
+        models: r.models.join("\n"),
     }
 }
 

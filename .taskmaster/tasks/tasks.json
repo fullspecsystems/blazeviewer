@@ -2247,6 +2247,42 @@
           89
         ],
         "subtasks": []
+      },
+      {
+        "id": 149,
+        "title": "AI describe fails on thinking models (\"Couldn't read the endpoint's reply\") + endpoint /v1 + clearer errors",
+        "description": "Owner report 2026-11-14: describe against LM Studio with qwen3.6-35b-a3b failed with \"Couldn't read the endpoint's reply\". Cause (measured): LM Studio counts reasoning_content against max_tokens; the thinking model spent the whole cap thinking (268/300; 820 reasoning + 132 answer for the default prompt, which fails at Standard's 512) and returned empty content with finish_reason=length, which the parser reported as 'empty description'. Not an LM Studio API change; the model changed. Fix in pb-app-core/src/describe.rs (owner call: thinking is the model's/user's choice, so Blaze makes room rather than turning it off): the length preset budgets the answer; a model seen thinking gets +4096 tokens (REASONING_HEADROOM); one that runs out while thinking is retried once with the headroom and remembered per endpoint+model in RAM. (reasoning_effort:\"none\" is the only skip-thinking switch LM Studio honours — tried and deliberately not used.) Specific error messages (the server's own error text from 4xx bodies, ThoughtTooLong, EmptyReply, 404 → check /v1, not-a-chat-completion). normalize_base adds /v1 (and http://) when the URL has no path; Test connection says 'using …/v1'. Test-connection summary moved to core (describe::probe_report), used by both shells.",
+        "status": "review",
+        "priority": "medium",
+        "dependencies": [
+          44
+        ],
+        "subtasks": [
+          {
+            "id": 1,
+            "title": "Core: thinking headroom + retry, error taxonomy, /v1 normalize, probe_report",
+            "description": "Unit-tested (run_adaptive over a scripted server, the exact LM Studio out-of-budget reply, inline <think>, normalize_base). Live on the Mac via describe_probe against gremlin.local:1234 (no /v1) with qwen3.6-35b-a3b, thinking allowed: full description in 7.6 s.",
+            "status": "done"
+          },
+          {
+            "id": 2,
+            "title": "Mac: owner hand check in the app",
+            "description": "Describe a photo + a video frame with the thinking model loaded; Settings ▸ AI: enter the endpoint without /v1 → Test & list models says 'using …/v1'.",
+            "status": "review"
+          },
+          {
+            "id": 3,
+            "title": "Windows: egui Settings Test-connection now uses probe_report",
+            "description": "dialog.rs ConnTest carries ProbeReport. Verified by `cargo clippy -p pb-app --all-targets --target x86_64-pc-windows-msvc -D warnings` from the Mac only — NOT run. Cross-platform debt: launch Settings ▸ AI on Windows, Test with and without /v1, and describe once.",
+            "status": "pending"
+          },
+          {
+            "id": 4,
+            "title": "Follow-up (not done): superseded describes keep the server busy",
+            "description": "A describe dropped by navigation keeps its blocking ureq call running, so LM Studio (serial) finishes it before the next one. On 2026-11-14 tiny requests sat 75-150 s in Gremlin's queue. Consider closing the connection on supersede (streaming would let us abort), and check whether LM Studio stops generating on client disconnect.",
+            "status": "pending"
+          }
+        ]
       }
     ],
     "metadata": {
