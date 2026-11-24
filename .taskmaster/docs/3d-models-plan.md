@@ -331,6 +331,36 @@ port it.
 
 ## Handoff
 
+### 2026-11-24 (later) — antialiasing: 4× MSAA, budgeted (Mac session)
+
+The live view now renders the mesh into a **4× MSAA** target and resolves it to a
+coverage-premultiplied texture. A composite pass then blends that over the letterbox with
+the scene's SDR scale, so the letterbox is never lifted, matching the photo path.
+
+- **Compact attachments:** 8-bit sRGB colour (the still's own precision) and 16-bit depth
+  (ample over a bounding sphere). That is 24 B/px at 4×, about 354 MB for 5K.
+- **Budget:** over `MSAA_BUDGET_BYTES` (512 MB, so beyond ~5K, e.g. 8K) it renders at 1×,
+  refusing before reserving.
+- **Why 4× only:** WebGPU guarantees 4× for both formats on every backend; 2× and 8× would
+  need adapter-specific features.
+- **A/B lever:** `PB_MESH_MSAA=1|4`.
+
+- **Verified (macOS):**
+  - 7 headless GPU tests. A diagonal edge gives ≥ 30 partially covered pixels at 4× and none
+    at 1×. Lighting still matches the CPU formula within 1% through the 8-bit target.
+    Depth, top inset and the budget (5K → 4×, 8K → 1×) are covered too.
+  - The real app at 2560×1682: a drag activated the live view and 30 frames presented at 4×
+    with no wgpu validation error.
+  - A native-resolution A/B: `aa_report`, an ignored test (`PB_MESH_MODEL=… PB_MESH_OUT=…
+    cargo test -p pb-render aa_report -- --ignored`) renders a real model at 1× and 4×. The
+    staircase at 1× is gone at 4×.
+- **Not verified:** DX12/Vulkan MSAA at runtime (Windows); frame time at 5K fullscreen with
+  4×; Vulkan's sRGB resolve (the spec allows non-linear resolve; Metal and D3D resolve in
+  linear).
+- **Testing note:** cmux-cua's window capture of a backgrounded Metal canvas sometimes returns
+  a black placeholder, and its crop works at the downscaled screenshot resolution. Use the
+  `aa_report` images for pixel-level checks and `PB_TRACE` for "did it draw".
+
 ### 2026-11-24 — phase 2 first cut: the live view works (Mac session)
 
 **Built:**
@@ -368,8 +398,7 @@ port it.
 - **Known gaps (next):**
   - **The "3D" play-hint pill** (D1). Nothing yet tells the user a model can be turned, apart
     from the open-hand cursor.
-  - **MSAA or another antialiasing** for the live view. It's 1× today, fine on Retina, jaggy
-    at 1×.
+  - ~~MSAA or another antialiasing for the live view~~ — done the same day (4× MSAA, above).
   - **Copy / Export / Describe capture the still**, not the turned view (#153.6).
   - **The mesh is parsed twice**, once for the still and once for the live view. Retaining the
     decode's `Model` would make it once.

@@ -4243,6 +4243,7 @@ dependencies = [
  "objc2 0.6.4",
  "pb-color",
  "pb-core",
+ "pb-mesh",
  "pollster",
  "wgpu",
  "windows 0.62.2",

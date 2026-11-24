@@ -19,7 +19,8 @@ with any pre-release suffix carried only by the tag.
 - **Turn 3D models around.** Drag a model, or swipe with two fingers on a trackpad,
   to spin it, and zoom with `+` and `−`, Ctrl+scroll or a pinch. The arrow keys turn
   it too. Press `8` (or `0`, or double-tap) to return to the original view. The model
-  is drawn live on your graphics card and is ready to turn the moment you stop on it.
+  is drawn live on your graphics card, with smooth (antialiased) edges, and is ready
+  to turn the moment you stop on it.
 - **Export.** Press `E` (or File ▸ Export…, ⇧⌘E on a Mac, or right-click the
   photo) for Export mode: a panel in the Inspector's place where you pick PNG or
   JPEG, the JPEG quality (`[` and `]` step it) or PNG compression, and a size —

@@ -2458,7 +2458,7 @@
           {
             "id": 2,
             "title": "pb-render mesh pass",
-            "description": "Vertex/index buffers, Depth32Float, 4x MSAA, drawing into the fp16 scRGB intermediate. Flat normals from screen-space derivatives, so an indexed mesh needs no per-face duplication. Shading constants shared with the CPU rasterizer, plus the headless CPU-vs-GPU parity golden test. DONE 2026-11-24: pb-render/src/mesh.rs (depth, derivative flat normals, the still's lighting, chunked buffers, top-inset NDC remap). 4 headless GPU tests. MSAA not yet (1x).",
+            "description": "Vertex/index buffers, Depth32Float, 4x MSAA, drawing into the fp16 scRGB intermediate. Flat normals from screen-space derivatives, so an indexed mesh needs no per-face duplication. Shading constants shared with the CPU rasterizer, plus the headless CPU-vs-GPU parity golden test. DONE 2026-11-24: pb-render/src/mesh.rs (depth, derivative flat normals, the still's lighting, chunked buffers, top-inset NDC remap). 4 headless GPU tests. AA 2026-11-24: 4x MSAA into compact attachments (8-bit sRGB colour + 16-bit depth, 24 B/px at 4x), resolved and composited premultiplied; falls back to 1x over a 512 MB budget (beyond ~5K); PB_MESH_MSAA=1|4 A/B lever; aa_report ignored test writes 1x/4x PPMs.",
             "status": "done"
           },
           {
