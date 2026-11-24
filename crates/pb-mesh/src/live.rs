@@ -228,7 +228,10 @@ pub fn corners(model: &Model) -> impl Iterator<Item = ([f32; 3], Option<[u8; 3]>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::raster::{CpuRasterizer, MeshRasterizer, RenderOptions};
+    use crate::raster::{
+        render_view_banded, CpuRasterizer, MeshRasterizer, RenderOptions, Rendered,
+    };
+    use crate::DEFAULT_COLOR;
     use crate::{parse, test_util::cube_stl_binary, Limits, ModelFormat};
 
     fn cube() -> Model {
@@ -285,6 +288,100 @@ mod tests {
             assert!((min[a] - lmin[a]).abs() <= 1.5, "min {min:?} vs {lmin:?}");
             assert!((max[a] - lmax[a]).abs() <= 1.5, "max {max:?} vs {lmax:?}");
         }
+    }
+
+    fn alpha(r: &Rendered, x: u32, y: u32) -> u8 {
+        r.rgba[((y * r.width + x) * 4 + 3) as usize]
+    }
+
+    fn opaque(r: &Rendered) -> usize {
+        r.rgba.chunks_exact(4).filter(|p| p[3] > 127).count()
+    }
+
+    /// Export and Copy of a turned model render the live camera on the CPU. At home it must
+    /// agree with the still (shown fitted and centred) on coverage and shading, so a capture
+    /// looks like the screen.
+    #[test]
+    fn the_cpu_view_render_matches_the_still_at_home() {
+        let m = cube();
+        let (w, h) = (400u32, 300u32);
+        let still = CpuRasterizer.render(&m, &RenderOptions::fit(w, h)).unwrap();
+        let frame = LiveView::new(&m).unwrap().frame([w as f32, h as f32]);
+        let view = CpuRasterizer
+            .render_view(&m, &frame, w, h, DEFAULT_COLOR)
+            .unwrap();
+        assert_eq!(
+            (view.width, view.height),
+            (w, h),
+            "the window's shape and size"
+        );
+        let (ox, oy) = ((w - still.width) / 2, (h - still.height) / 2);
+        let (mut covered, mut differ) = (0, 0);
+        for y in 0..h {
+            for x in 0..w {
+                let inside = x >= ox && y >= oy && x - ox < still.width && y - oy < still.height;
+                let s = if inside {
+                    alpha(&still, x - ox, y - oy)
+                } else {
+                    0
+                };
+                let v = alpha(&view, x, y);
+                if s > 127 || v > 127 {
+                    covered += 1;
+                    differ += usize::from((s > 127) != (v > 127));
+                }
+            }
+        }
+        assert!(covered > 10_000, "{covered}");
+        assert!(
+            differ * 50 < covered,
+            "{differ} of {covered} pixels disagree"
+        );
+        let at = |r: &Rendered, x: u32, y: u32| {
+            let i = ((y * r.width + x) * 4) as usize;
+            [r.rgba[i], r.rgba[i + 1], r.rgba[i + 2]]
+        };
+        let (a, b) = (at(&view, w / 2, h / 2), at(&still, w / 2 - ox, h / 2 - oy));
+        for c in 0..3 {
+            assert!(a[c].abs_diff(b[c]) <= 3, "shading {a:?} vs {b:?}");
+        }
+    }
+
+    #[test]
+    fn the_cpu_view_render_follows_the_camera_and_the_colour() {
+        let m = cube();
+        let vp = [320.0, 240.0];
+        let render = |v: &LiveView, color| {
+            CpuRasterizer
+                .render_view(&m, &v.frame(vp), 320, 240, color)
+                .unwrap()
+        };
+        let mut v = LiveView::new(&m).unwrap();
+        let home = render(&v, DEFAULT_COLOR);
+        v.orbit_by(90.0, 30.0, vp);
+        let turned = render(&v, DEFAULT_COLOR);
+        assert_ne!(home.rgba, turned.rgba, "turning changes the picture");
+        v.zoom_by(2.0);
+        assert!(
+            opaque(&render(&v, DEFAULT_COLOR)) > opaque(&turned) * 2,
+            "zoom fills more"
+        );
+        let green = render(&v, [30, 200, 40]);
+        let i = ((120 * 320 + 160) * 4) as usize;
+        let [r, g, b] = [green.rgba[i], green.rgba[i + 1], green.rgba[i + 2]];
+        assert!(g > r * 2 && g > b * 2, "the model colour: {r} {g} {b}");
+    }
+
+    /// A big view renders in bands to bound its scratch memory; the bands must not show.
+    #[test]
+    fn rendering_in_bands_changes_nothing() {
+        let m = cube();
+        let mut v = LiveView::new(&m).unwrap();
+        v.orbit_by(40.0, -20.0, [320.0, 240.0]);
+        let f = v.frame([320.0, 240.0]);
+        let whole = render_view_banded(&m, &f, 320, 240, DEFAULT_COLOR, usize::MAX).unwrap();
+        let banded = render_view_banded(&m, &f, 320, 240, DEFAULT_COLOR, 640 * 6).unwrap();
+        assert_eq!(whole.rgba, banded.rgba);
     }
 
     #[test]

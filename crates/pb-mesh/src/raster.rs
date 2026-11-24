@@ -21,6 +21,7 @@
 use std::sync::OnceLock;
 
 use crate::camera::{cross, dot, sub, Camera};
+use crate::live::LiveFrame;
 use crate::{MeshError, Model, DEFAULT_COLOR};
 
 /// Fraction of the picture the silhouette fills along its limiting axis (the rest is margin).
@@ -170,37 +171,143 @@ impl MeshRasterizer for CpuRasterizer {
         };
 
         let (key, fill) = light_dirs(&cam);
-        let mut target = Target {
-            w: rw as usize,
-            h: rh as usize,
-            depth: vec![0.0; rw as usize * rh as usize],
-            color: vec![0; rw as usize * rh as usize],
+        let mut target = Target::new(rw as usize, rh as usize);
+        let lights = Lights {
+            eye: cam.eye,
+            key,
+            fill,
         };
-        for (ti, tri) in model.triangles.iter().enumerate() {
-            let [a, b, c] = tri.map(|i| model.positions[i as usize]);
-            let n = cross(sub(b, a), sub(c, a));
-            let len = dot(n, n).sqrt();
-            if !(len > 0.0 && len.is_finite()) {
-                continue; // degenerate: no area, nothing to draw
-            }
-            let mut n = [n[0] / len, n[1] / len, n[2] / len];
-            if dot(n, sub(cam.eye, a)) < 0.0 {
-                n = [-n[0], -n[1], -n[2]];
-            }
-            let base = model
-                .triangle_colors
-                .as_ref()
-                .map_or(opts.base_color, |c| c[ti]);
-            let rgba = shade(base, n, key, fill);
-            let [pa, pb, pc] = tri.map(|i| to_screen(proj[i as usize]));
-            target.triangle(pa, pb, pc, rgba);
-        }
+        draw(model, &mut target, opts.base_color, lights, |i| {
+            Some(to_screen(proj[i as usize]))
+        });
 
         Ok(Rendered {
             rgba: target.resolve(ss as usize),
             width: out_w,
             height: out_h,
         })
+    }
+}
+
+/// Supersampling of [`CpuRasterizer::render_view`]: 2×2, the still's look.
+const VIEW_SS: usize = 2;
+
+/// Samples per band of a view render. 2×2 supersampling of a 5K window is ~59 M samples
+/// (~470 MB of scratch at 8 bytes each), so a big view renders in horizontal bands of about
+/// this many samples (~64 MB), walking the triangles once per band.
+const VIEW_BAND_SAMPLES: usize = 8_000_000;
+
+impl CpuRasterizer {
+    /// The model as the live view shows it: `frame` (from [`LiveView::frame`] for a
+    /// `width`×`height` viewport) drawn at that size, in the window's shape with the model
+    /// where the user placed it, supersampled 2×2 on a transparent background. What Export,
+    /// Copy and Describe capture of a turned model.
+    ///
+    /// [`LiveView::frame`]: crate::LiveView::frame
+    pub fn render_view(
+        &self,
+        model: &Model,
+        frame: &LiveFrame,
+        width: u32,
+        height: u32,
+        base_color: [u8; 3],
+    ) -> Result<Rendered, MeshError> {
+        render_view_banded(model, frame, width, height, base_color, VIEW_BAND_SAMPLES)
+    }
+}
+
+/// [`CpuRasterizer::render_view`] with the band size as a parameter, for tests.
+pub(crate) fn render_view_banded(
+    model: &Model,
+    frame: &LiveFrame,
+    width: u32,
+    height: u32,
+    base_color: [u8; 3],
+    band_samples: usize,
+) -> Result<Rendered, MeshError> {
+    if model.triangles.is_empty() {
+        return Err(MeshError::Empty);
+    }
+    let (w, h) = (width.max(1) as usize, height.max(1) as usize);
+    let (rw, rh) = (w * VIEW_SS, h * VIEW_SS);
+    // World → sample space through the live view's own matrix (column-major), so the capture
+    // lands every vertex where the GPU drew it. 1/w is the still's perspective-correct depth.
+    let m = frame.view_proj;
+    let screen: Vec<Option<Vtx>> = model
+        .positions
+        .iter()
+        .map(|&p| {
+            let clip = |r: usize| m[0][r] * p[0] + m[1][r] * p[1] + m[2][r] * p[2] + m[3][r];
+            let cw = clip(3);
+            (cw > 0.0 && cw.is_finite()).then(|| Vtx {
+                x: (clip(0) / cw + 1.0) * 0.5 * rw as f32,
+                y: (1.0 - clip(1) / cw) * 0.5 * rh as f32,
+                iz: 1.0 / cw,
+            })
+        })
+        .collect();
+    let lights = Lights {
+        eye: frame.eye,
+        key: frame.key_dir,
+        fill: frame.fill_dir,
+    };
+    let band_rows = (band_samples / rw).max(VIEW_SS) / VIEW_SS * VIEW_SS;
+    let mut rgba = Vec::with_capacity(w * h * 4);
+    let mut top = 0;
+    while top < rh {
+        let rows = band_rows.min(rh - top);
+        let mut target = Target::new(rw, rows);
+        let shift = top as f32;
+        draw(model, &mut target, base_color, lights, |i| {
+            screen[i as usize].map(|v| Vtx {
+                y: v.y - shift,
+                ..v
+            })
+        });
+        rgba.extend(target.resolve(VIEW_SS));
+        top += rows;
+    }
+    Ok(Rendered {
+        rgba,
+        width: w as u32,
+        height: h as u32,
+    })
+}
+
+/// Where the camera is and where its lights come from, in world space.
+#[derive(Clone, Copy)]
+struct Lights {
+    eye: [f32; 3],
+    key: [f32; 3],
+    fill: [f32; 3],
+}
+
+/// Shade and rasterize every triangle into `target`. `vtx` places vertex `i` in sample space,
+/// or `None` when it is behind the camera (the triangle is skipped).
+fn draw(
+    model: &Model,
+    target: &mut Target,
+    base_color: [u8; 3],
+    lights: Lights,
+    vtx: impl Fn(u32) -> Option<Vtx>,
+) {
+    for (ti, tri) in model.triangles.iter().enumerate() {
+        let [a, b, c] = tri.map(|i| model.positions[i as usize]);
+        let n = cross(sub(b, a), sub(c, a));
+        let len = dot(n, n).sqrt();
+        if !(len > 0.0 && len.is_finite()) {
+            continue; // degenerate: no area, nothing to draw
+        }
+        let [Some(pa), Some(pb), Some(pc)] = tri.map(&vtx) else {
+            continue;
+        };
+        let mut n = [n[0] / len, n[1] / len, n[2] / len];
+        if dot(n, sub(lights.eye, a)) < 0.0 {
+            n = [-n[0], -n[1], -n[2]];
+        }
+        let base = model.triangle_colors.as_ref().map_or(base_color, |c| c[ti]);
+        let rgba = shade(base, n, lights.key, lights.fill);
+        target.triangle(pa, pb, pc, rgba);
     }
 }
 
@@ -227,6 +334,15 @@ struct Target {
 }
 
 impl Target {
+    fn new(w: usize, h: usize) -> Target {
+        Target {
+            w,
+            h,
+            depth: vec![0.0; w * h],
+            color: vec![0; w * h],
+        }
+    }
+
     /// Half-space rasterization with incremental edge functions, sampling at pixel centres.
     fn triangle(&mut self, v0: Vtx, mut v1: Vtx, mut v2: Vtx, rgba: u32) {
         let mut area = edge(v0, v1, v2.x, v2.y);

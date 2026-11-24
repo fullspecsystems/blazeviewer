@@ -331,6 +331,43 @@ port it.
 
 ## Handoff
 
+### 2026-11-25 — Export / Copy / Describe capture the turned view (#153.6, Mac session)
+
+Owner decisions (asked 2026-11-24): a capture of a turned model is **exactly the window**
+(its shape, the user's angle, zoom and pan, empty space included); **Full size = the
+viewport's real pixels** (long-edge sizes resize down from it); **transparent PNG** (JPEG
+flattens as any export does).
+
+- `frame_capture`'s "which frame?" gained a fourth answer: `FrameSource::ModelView { frame,
+  width, height }`, chosen whenever the live view is up on the item
+  (`AppCore::live_view_capture`). `FrameKey::View { id }` hashes the camera, so a cached OCR
+  or description of one view isn't served for another. The file name gets `-view`. The
+  capture bakes in no `R` rotation (`capture_rotation`): the mesh ignores it on screen.
+- Pixels: `pb_decode::decode_model_view` re-parses the bytes and renders the live camera on
+  the CPU (`CpuRasterizer::render_view`). It uses the live view's own world → clip matrix, so
+  every vertex lands where the GPU drew it, 2×2 supersampled like the still, in horizontal
+  bands of about 8 M samples (about 64 MB of scratch at any window size). The still and the
+  view share one triangle loop (`raster::draw`).
+- Settling: a drag changes the view every frame, so the view counts as moving
+  (`frame_is_moving`) while spinning or for 250 ms after any turn, zoom or pan.
+  `work_pending` holds the pump until it settles, so the automatic text scan and describe
+  run once, then. Export mode's panel says "The view on screen · W × H".
+- Dev aid: `model_png` takes `drag_x drag_y` after the size to render a turned view through
+  the same path.
+- **Verified:**
+  - Tests: pb-mesh 49 (at home the CPU view matches the still within 2% of edge pixels and
+    3 levels of shading; camera and colour follow; bands don't show), pb-decode 285,
+    pb-app-core 1148 (capture is the view at viewport size, unrotated, keyed per view, still
+    after Fit; panel dims and label; moving until settled).
+  - Clippy clean; Windows clippy cross-check passes.
+  - In the running Mac app (a separate test instance on 3DBenchy, 5120×2880): after a drag,
+    Export mode showed "The view on screen · 5120 × 2880" and Full size 5120 × 2880, and
+    the save dialog suggested `3DBenchy-view.png` in the model's folder.
+  - Headless, through `decode_model_view`: Benchy (225k triangles) turned, 5120×2880 with
+    alpha, in about 180 ms including the re-parse. The picture was eyeballed.
+- **Not verified:** the saved file from the app (cmux-cua can't drive the out-of-process
+  save dialog), Copy's clipboard result and Describe of a view, and Windows at runtime.
+
 ### 2026-11-24 (late night) — a new colour redraws only the models (Mac session)
 
 Owner ask: a colour change re-decoded every cached picture in a folder with a model in it

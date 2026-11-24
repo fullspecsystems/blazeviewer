@@ -2482,8 +2482,8 @@
           {
             "id": 6,
             "title": "Capture interop",
-            "description": "Copy / Export / Describe of a live model capture the current view: a new answer to frame_capture.rs's 'which frame?'.",
-            "status": "pending"
+            "description": "Copy / Export / Describe of a live model capture the current view: a new answer to frame_capture.rs's 'which frame?'. DONE 2026-11-25: FrameSource::ModelView, rendered on the CPU by decode_model_view at the viewport's pixels (owner: the window exactly, Full = window pixels, transparent PNG). See the plan's Handoff.",
+            "status": "done"
           },
           {
             "id": 7,

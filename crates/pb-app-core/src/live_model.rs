@@ -226,6 +226,9 @@ pub struct LiveModel {
     pub spin_wanted: Option<(usize, u64)>,
     /// The current drag's recent moves, so letting go mid-flick throws the model.
     pub drag: DragVelocity,
+    /// When the user last turned, zoomed or panned the live view: the automatic text scan and
+    /// describe wait until it has held still a moment (`AppCore::live_view_moving`).
+    pub moved_at: Option<std::time::Instant>,
     /// The [look generation](pb_decode::look_generation) the model stills must be drawn at:
     /// set by a colour change (`AppCore::recolor_models`). A decode stamped older may show the
     /// old colour and is dropped on arrival.

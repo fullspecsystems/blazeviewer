@@ -17,6 +17,8 @@ enum FramePos {
     Video(Duration),
     Live(Duration),
     Animation(usize),
+    /// A turned 3D model: its camera and the viewport size in pixels.
+    View(pb_mesh::LiveFrame, [u32; 2]),
 }
 
 impl AppCore {
@@ -48,6 +50,9 @@ impl AppCore {
                 FramePos::Animation(pb.index())
             };
         }
+        if let Some((frame, size)) = self.live_view_capture(item) {
+            return FramePos::View(frame, size);
+        }
         FramePos::Still
     }
 
@@ -59,12 +64,22 @@ impl AppCore {
                 millis: at.as_millis() as u64,
             },
             FramePos::Animation(index) => FrameKey::Animation { index },
+            FramePos::View(frame, [width, height]) => FrameSource::ModelView {
+                frame,
+                width,
+                height,
+            }
+            .key(),
         }
     }
 
-    /// Whether `item`'s frame is changing on its own — a video or animation playing. The
-    /// automatic OCR / describe runs wait for it to stop rather than chase every frame.
+    /// Whether `item`'s frame is changing — a video or animation playing, or a turned model
+    /// spinning or still being turned. The automatic OCR / describe runs wait for it to stop
+    /// rather than chase every frame.
     pub(crate) fn frame_is_moving(&self, item: usize) -> bool {
+        if self.displayed_item == Some(item) && self.live_view_moving() {
+            return true;
+        }
         let video = self
             .video
             .as_ref()
@@ -113,6 +128,20 @@ impl AppCore {
                     native,
                 }
             }
+            FramePos::View(frame, [width, height]) => FrameSource::ModelView {
+                frame,
+                width,
+                height,
+            },
+        }
+    }
+
+    /// The in-RAM rotation a capture of `frame` bakes in: the item's own, except for a turned
+    /// model's view, which is captured as the mesh is on screen (`R` turns the still only).
+    pub(crate) fn capture_rotation(&self, item: usize, frame: &FrameSource) -> Rotation {
+        match frame {
+            FrameSource::ModelView { .. } => Rotation::default(),
+            _ => self.rotations.get(&item).copied().unwrap_or_default(),
         }
     }
 
@@ -132,7 +161,7 @@ impl AppCore {
             return;
         }
         let source = Arc::clone(&self.source);
-        let rot = self.rotations.get(&item).copied().unwrap_or_default();
+        let rot = self.capture_rotation(item, &frame);
         let (tx, rx) = std::sync::mpsc::channel();
         let spawned = std::thread::Builder::new()
             .name("pb-frame-copy".into())

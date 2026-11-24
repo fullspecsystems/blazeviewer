@@ -18,6 +18,10 @@ use std::sync::atomic::AtomicBool;
 use super::*;
 use crate::live_model::{self, Loading, Ready, Spin};
 
+/// How long a turned view must hold still before it counts as settled (see
+/// [`AppCore::live_view_moving`]).
+const VIEW_SETTLE: Duration = Duration::from_millis(250);
+
 impl AppCore {
     /// Per-tick upkeep: drop whatever belongs to an item we've left, land a finished preparation
     /// on the GPU, and start preparing the model the user has settled on (anticipation: the first
@@ -110,6 +114,35 @@ impl AppCore {
     /// show the old colour (see [`Self::recolor_models`]).
     pub(super) fn model_still_outdated(&self, o: &crate::decode_pool::Outcome) -> bool {
         o.look_gen < self.live_model.stills_look && self.item_is_model(o.key.item)
+    }
+
+    /// The turned model on screen, as Export, Copy and Describe capture it (task #153.6): its
+    /// camera, and the viewport size in pixels the capture renders at (owner decision: the
+    /// window as shown, at its real pixels). `None` unless the live view is up on `item`.
+    pub(crate) fn live_view_capture(&self, item: usize) -> Option<(pb_mesh::LiveFrame, [u32; 2])> {
+        if !self.live_model.active || self.displayed_item != Some(item) {
+            return None;
+        }
+        let ready = self.live_model.ready_for(item, self.content_gen)?;
+        let vp = self.live_viewport()?;
+        Some((ready.view.frame(vp), [vp[0] as u32, vp[1] as u32]))
+    }
+
+    /// Whether the turned view is still moving: spinning, or turned, zoomed or panned within
+    /// the last [`VIEW_SETTLE`]. A drag changes the view every frame, and the automatic text
+    /// scan and describe must not render the whole window for each one.
+    pub(crate) fn live_view_moving(&self) -> bool {
+        self.live_model.active && (self.live_model.spin.is_some() || self.live_view_settling())
+    }
+
+    /// The view moved less than [`VIEW_SETTLE`] ago: the pump keeps ticking until it settles,
+    /// so the automatic runs start then rather than at the next input.
+    pub(crate) fn live_view_settling(&self) -> bool {
+        self.live_model.active
+            && self
+                .live_model
+                .moved_at
+                .is_some_and(|t| self.now.saturating_duration_since(t) < VIEW_SETTLE)
     }
 
     /// Whether `item` is a 3D model: an image item with a model extension.
@@ -250,6 +283,7 @@ impl AppCore {
             );
         }
         self.live_model.active = true;
+        self.live_model.moved_at = Some(self.now);
         self.anim_hint_shown_for = Some(item); // engaged: the hint has done its job
         true
     }
@@ -614,6 +648,78 @@ mod tests {
         let ready = core.live_model.ready.as_ref().unwrap();
         assert!(!ready.view.is_home());
         assert_eq!(core.view.pan, [0.0, 0.0], "the photo view never panned");
+    }
+
+    /// #153.6, owner decisions: Export / Copy / Describe of a turned model capture the window
+    /// as shown (its shape, the user's turn, zoom and pan), at its real pixels, unrotated by
+    /// `R` (which turns the still only). Before the first turn and after Fit, the still.
+    #[test]
+    fn a_turned_model_is_captured_as_the_view_on_screen() {
+        use crate::frame_capture::{FrameKey, FrameSource};
+        let (mut core, _) = core_on(0);
+        settle(&mut core);
+        assert!(core.frame_target(0).is_still(), "not turned yet: the still");
+        core.rotations.insert(0, pb_render::Rotation::R90);
+        core.pan_by_pixels(40.0, 10.0);
+
+        let frame = core.frame_target(0);
+        let FrameSource::ModelView { width, height, .. } = frame else {
+            panic!("the turned view, got {frame:?}");
+        };
+        assert_eq!(
+            (width, height),
+            (800, 600),
+            "the viewport at its real pixels"
+        );
+        assert_eq!(frame.name_suffix(), "-view");
+        assert_eq!(
+            core.capture_rotation(0, &frame),
+            pb_render::Rotation::default()
+        );
+        let key = core.frame_key(0);
+        assert!(matches!(key, FrameKey::View { .. }));
+        core.pan_by_pixels(5.0, 0.0);
+        assert_ne!(core.frame_key(0), key, "another turn is another view");
+
+        let cancel = std::sync::atomic::AtomicBool::new(false);
+        let img = crate::frame_capture::capture(core.source.as_ref(), 0, &frame, &cancel).unwrap();
+        assert_eq!((img.width, img.height), (800, 600));
+        assert!(
+            img.pixels.chunks_exact(4).any(|p| p[3] == 255),
+            "the model is in it"
+        );
+        assert_eq!(img.pixels[3], 0, "on a transparent background");
+
+        core.live_model_reset(); // Fit: back to the still
+        assert!(core.frame_target(0).is_still());
+    }
+
+    #[test]
+    fn the_export_panel_offers_the_view_at_the_windows_size() {
+        let (mut core, _) = core_on(0);
+        settle(&mut core);
+        core.pan_by_pixels(40.0, 10.0);
+        core.now += Duration::from_secs(1); // held still
+        let panel = core.export_panel();
+        let source = panel.source.as_ref().expect("a source");
+        assert_eq!(source.dims, Some((800, 600)));
+        assert_eq!(source.frame.as_deref(), Some("The view on screen"));
+    }
+
+    /// A drag changes the view every frame; the automatic text scan and describe wait until
+    /// it holds still, and the pump stays awake until then so they start without new input.
+    #[test]
+    fn the_turned_view_counts_as_moving_until_it_settles() {
+        let (mut core, _) = core_on(0);
+        settle(&mut core);
+        core.pan_by_pixels(40.0, 10.0);
+        assert!(core.frame_is_moving(0) && core.live_view_settling());
+        assert!(core.work_pending(), "keeps ticking until it settles");
+        core.now += Duration::from_millis(300);
+        assert!(!core.frame_is_moving(0) && !core.live_view_settling());
+        core.toggle_play_pause(); // the turntable
+        assert!(core.frame_is_moving(0), "a spinning model is moving");
+        assert!(!core.frame_is_moving(1), "only the item on screen");
     }
 
     #[test]

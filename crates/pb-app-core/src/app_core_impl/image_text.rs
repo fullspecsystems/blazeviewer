@@ -101,7 +101,7 @@ impl AppCore {
         let gen = self.text_gen;
         let source = Arc::clone(&self.source);
         // Bake the in-RAM rotation override: OCR wants the pixels upright as shown.
-        let rot = self.rotations.get(&item).copied().unwrap_or_default();
+        let rot = self.capture_rotation(item, &frame);
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             let _ = tx.send(crate::image_text::scan_job(

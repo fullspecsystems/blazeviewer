@@ -152,7 +152,7 @@ impl AppCore {
         let gen = self.describe_gen;
         let source = Arc::clone(&self.source);
         // Bake the in-RAM rotation override: the model should see the pixels upright.
-        let rot = self.rotations.get(&item).copied().unwrap_or_default();
+        let rot = self.capture_rotation(item, &frame);
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             let _ = tx.send(crate::describe::describe_job(

@@ -43,12 +43,12 @@ impl AppCore {
         // The frame on screen, frozen now (task #81): a video's playback frame (or its
         // poster), an animation's current frame. A photo's still re-decodes the file.
         let frame = self.frame_target(item);
+        let rotation = self.capture_rotation(item, &frame);
         let frame = (is_video || !frame.is_still()).then_some(frame);
         let suffix = frame.as_ref().map(|f| f.name_suffix()).unwrap_or_default();
         let id = self.export.next_id();
         let source_path = self.source.path(item).map(Path::to_path_buf);
         let container = self.source.container().map(Path::to_path_buf);
-        let rotation = self.rotations.get(&item).copied().unwrap_or_default();
         let request = ExportRequest {
             id,
             source: Arc::clone(&self.source),

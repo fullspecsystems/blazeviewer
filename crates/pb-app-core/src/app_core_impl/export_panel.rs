@@ -108,6 +108,10 @@ impl AppCore {
         let kind = crate::video::item_kind(self.source.as_ref(), item);
         let moving = self.frame_is_moving(item);
         let frame = match (kind, self.frame_key(item)) {
+            (_, FrameKey::View { .. }) if moving => {
+                Some("The view on screen when you export".to_string())
+            }
+            (_, FrameKey::View { .. }) => Some("The view on screen".to_string()),
             (_, _) if moving => Some("The frame on screen when you export".to_string()),
             (crate::video::LibraryItemKind::Video(_), FrameKey::Still) => {
                 Some("Poster frame".to_string())
@@ -133,6 +137,10 @@ impl AppCore {
 
     /// `item`'s pixel size **as displayed** (the RAM rotation applied), when known.
     fn export_source_dims(&self, item: usize) -> Option<(u32, u32)> {
+        // A turned model exports the window as shown, at its real pixels.
+        if let Some((_, [w, h])) = self.live_view_capture(item) {
+            return Some((w, h));
+        }
         if matches!(
             crate::video::item_kind(self.source.as_ref(), item),
             crate::video::LibraryItemKind::Archive(_)

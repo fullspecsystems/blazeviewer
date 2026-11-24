@@ -24,7 +24,9 @@ with any pre-release suffix carried only by the tag.
   to set it turning on its own like a turntable, and `P` again to let it glide to a stop.
   Flick it with the mouse and it keeps turning for a moment before it settles. Settings ▸
   Appearance has the color for models whose file doesn't color them (a 3MF's own
-  colors still win) and the spin speed.
+  colors still win) and the spin speed. Export, Copy and Describe of a model you've
+  turned use the view on screen: the window's shape and full size, your angle and zoom,
+  on a transparent background in a PNG.
 - **Export.** Press `E` (or File ▸ Export…, ⇧⌘E on a Mac, or right-click the
   photo) for Export mode: a panel in the Inspector's place where you pick PNG or
   JPEG, the JPEG quality (`[` and `]` step it) or PNG compression, and a size —

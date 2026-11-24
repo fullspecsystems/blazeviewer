@@ -39,6 +39,8 @@ pub enum FrameKey {
     Video { millis: u64 },
     /// An animation frame, by index.
     Animation { index: usize },
+    /// A turned 3D model's view, by camera: any turn, zoom or pan is a new view.
+    View { id: u64 },
 }
 
 /// The frame a command acts on, frozen when it runs — owned, so it travels to a worker.
@@ -66,6 +68,13 @@ pub enum FrameSource {
         shown: Box<DecodedImage>,
         native: bool,
     },
+    /// A 3D model the user has turned (task #153): its camera `frame`, rendered at the
+    /// viewport's `width`×`height` in pixels, so the capture is the window as shown.
+    ModelView {
+        frame: pb_mesh::LiveFrame,
+        width: u32,
+        height: u32,
+    },
 }
 
 impl FrameSource {
@@ -77,6 +86,21 @@ impl FrameSource {
                 millis: at.as_millis() as u64,
             },
             FrameSource::Animation { index, .. } => FrameKey::Animation { index: *index },
+            FrameSource::ModelView {
+                frame,
+                width,
+                height,
+            } => {
+                use std::hash::{Hash, Hasher};
+                let mut h = std::collections::hash_map::DefaultHasher::new();
+                frame
+                    .view_proj
+                    .as_flattened()
+                    .iter()
+                    .for_each(|v| v.to_bits().hash(&mut h));
+                (width, height).hash(&mut h);
+                FrameKey::View { id: h.finish() }
+            }
         }
     }
 
@@ -86,7 +110,7 @@ impl FrameSource {
     }
 
     /// A suffix for an exported file's name: `-0h01m23s` for a video time, `-frame12`
-    /// (1-based) for an animation frame, nothing for the still.
+    /// (1-based) for an animation frame, `-view` for a turned model, nothing for the still.
     pub fn name_suffix(&self) -> String {
         match self {
             FrameSource::Still => String::new(),
@@ -95,6 +119,7 @@ impl FrameSource {
                 format!("-{}h{:02}m{:02}s", s / 3600, (s / 60) % 60, s % 60)
             }
             FrameSource::Animation { index, .. } => format!("-frame{}", index + 1),
+            FrameSource::ModelView { .. } => "-view".to_string(),
         }
     }
 }
@@ -162,6 +187,16 @@ pub fn capture(
                 );
                 Ok((**shown).clone())
             })
+        }
+        FrameSource::ModelView {
+            frame,
+            width,
+            height,
+        } => {
+            let bytes = source
+                .bytes(item)
+                .map_err(|e| DecodeError::Corrupt(format!("read: {e}")))?;
+            pb_decode::decode_model_view(source.name(item), &bytes, frame, *width, *height)
         }
     }
 }

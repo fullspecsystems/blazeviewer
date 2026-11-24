@@ -99,6 +99,38 @@ pub(crate) fn decode_model(
     )
 }
 
+/// A model as the live 3D view shows it: `frame` (the user's camera, from
+/// `pb_mesh::LiveView::frame` for a `width`×`height` viewport) rendered at that size in the
+/// current model colour, on a transparent background. What Export, Copy and Describe capture
+/// of a model the user has turned (task #153). `name` picks the format, as for the still.
+pub fn decode_model_view(
+    name: &str,
+    bytes: &[u8],
+    frame: &pb_mesh::LiveFrame,
+    width: u32,
+    height: u32,
+) -> Result<DecodedImage, DecodeError> {
+    let format = std::path::Path::new(name)
+        .extension()
+        .and_then(|e| e.to_str())
+        .and_then(ModelFormat::from_extension)
+        .ok_or(DecodeError::Unsupported)?;
+    let model = pb_mesh::parse(format, bytes, &Limits::default())
+        .map_err(|e| DecodeError::Corrupt(e.to_string()))?;
+    let view = CpuRasterizer
+        .render_view(&model, frame, width, height, model_color())
+        .map_err(|e| DecodeError::Corrupt(e.to_string()))?;
+    common::finalize(
+        view.rgba,
+        view.width,
+        view.height,
+        None,
+        format.codec_name(),
+        None,
+        false,
+    )
+}
+
 /// The embedded slicer thumbnail (PNG or JPEG), content-sniffed through the ordinary image
 /// path, labelled with the model's codec so the panel says "3MF", not "PNG".
 fn decode_thumbnail(
@@ -185,6 +217,26 @@ mod tests {
         let at = ((img.height / 2 * img.width + img.width / 2) * 4) as usize;
         let [r, g, b] = [img.pixels[at], img.pixels[at + 1], img.pixels[at + 2]];
         assert!(g > r * 2 && g > b * 2, "green: {r} {g} {b}");
+    }
+
+    #[test]
+    fn a_turned_view_renders_at_the_windows_size() {
+        let model = pb_mesh::parse(
+            pb_mesh::ModelFormat::Stl,
+            &cube_stl(),
+            &pb_mesh::Limits::default(),
+        )
+        .unwrap();
+        let mut view = pb_mesh::LiveView::new(&model).unwrap();
+        view.orbit_by(60.0, 20.0, [640.0, 360.0]);
+        let frame = view.frame([640.0, 360.0]);
+        let img =
+            super::decode_model_view("parts/cube.stl", &cube_stl(), &frame, 640, 360).unwrap();
+        assert_eq!((img.width, img.height), (640, 360));
+        assert_eq!(img.codec, "STL");
+        assert!(img.is_well_formed() && !img.is_preview);
+        assert_eq!(img.pixels[3], 0, "a transparent background");
+        assert!(super::decode_model_view("x.png", &cube_stl(), &frame, 8, 8).is_err());
     }
 
     #[test]

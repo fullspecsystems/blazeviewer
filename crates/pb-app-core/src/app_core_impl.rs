@@ -478,6 +478,9 @@ impl AppCore {
             // A thumbnail derive in flight (task #83) keeps the loop polling so
             // `tick` lands it into the strip promptly.
             || self.thumbs.working()
+            // A turned 3D view settling: the automatic text scan / describe start once it
+            // holds still, not at the next input.
+            || self.live_view_settling()
             // An off-thread animation decode in flight keeps the loop polling so
             // `poll_anim_decode` picks it up promptly (active playback drives its own
             // precise next-frame wake via `tick_playback`, not this frame poll).
