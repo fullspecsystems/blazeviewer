@@ -12,8 +12,8 @@ with any pre-release suffix carried only by the tag.
 - **3D models: STL, OBJ and 3MF.** 3D-print files now show up alongside your photos as
   shaded pictures of the model, and you can flick through a folder of them, or a ZIP
   of them straight from Printables or Thingiverse, like any other images. Bambu Studio and
-  OrcaSlicer projects open too, with any colours the 3MF itself declares (filament
-  colours set in the slicer aren't shown yet). A sliced project with no model inside
+  OrcaSlicer projects open too, with any colors the 3MF itself declares (filament
+  colors set in the slicer aren't shown yet). A sliced project with no model inside
   shows its plate thumbnail instead. Blaze Viewer offers itself under Open With for
   these files but never takes them over from your slicer.
 - **Turn 3D models around.** Drag a model, or swipe with two fingers on a trackpad,
@@ -23,8 +23,8 @@ with any pre-release suffix carried only by the tag.
   to turn the moment you stop on it. Press `P` (or click the *Spin* hint that appears)
   to set it turning on its own like a turntable, and `P` again to let it glide to a stop.
   Flick it with the mouse and it keeps turning for a moment before it settles. Settings ▸
-  Appearance has the colour for models whose file doesn't colour them (a 3MF's own
-  colours still win) and the spin speed.
+  Appearance has the color for models whose file doesn't color them (a 3MF's own
+  colors still win) and the spin speed.
 - **Export.** Press `E` (or File ▸ Export…, ⇧⌘E on a Mac, or right-click the
   photo) for Export mode: a panel in the Inspector's place where you pick PNG or
   JPEG, the JPEG quality (`[` and `]` step it) or PNG compression, and a size —
@@ -32,7 +32,7 @@ with any pre-release suffix carried only by the tag.
   photo. Keep browsing with the panel open and your settings stay put; press
   Export… (⌘↩ on a Mac, Ctrl+Enter elsewhere) to save the photo on screen, with
   any rotation applied, and `E` again to leave. Your format, quality and size are
-  remembered for next time. Colours are kept exactly: wide-gamut photos stay
+  remembered for next time. Colors are kept exactly: wide-gamut photos stay
   Display P3, Adobe RGB and so on, and 16-bit PNGs stay 16-bit; resizing is done
   in linear light, and transparency in a JPEG becomes white. HDR photos are saved
   as SDR for now, and the confirmation says so. Exports carry no metadata — no
@@ -92,14 +92,14 @@ with any pre-release suffix carried only by the tag.
 - **Copying a video no longer freezes the app.** Copy used to search for the
   video's poster frame on the main thread, which could stall everything for
   several seconds; it now happens in the background.
-- **Mac: copying a video inside an archive copies a real frame**, not a grey
+- **Mac: copying a video inside an archive copies a real frame**, not a gray
   placeholder.
-- **HDR colours stay true in SDR.** Exporting or copying an HDR photo or video frame, and
-  viewing HDR on a non-HDR screen, could shift bright, saturated colours — reds turned
-  magenta and oranges yellow. Highlights now keep their colour.
+- **HDR colors stay true in SDR.** Exporting or copying an HDR photo or video frame, and
+  viewing HDR on a non-HDR screen, could shift bright, saturated colors — reds turned
+  magenta and oranges yellow. Highlights now keep their color.
 - **HDR PNGs show in HDR.** PNGs tagged as HDR (PQ or HLG — the 2025 PNG standard) used
-  to look flat and grey; they now show with full HDR brightness, like HDR HEIC and AVIF
-  photos. PNGs tagged with a wide-gamut colour space this way get correct colours too.
+  to look flat and gray; they now show with full HDR brightness, like HDR HEIC and AVIF
+  photos. PNGs tagged with a wide-gamut color space this way get correct colors too.
 
 ### Security
 
@@ -176,7 +176,7 @@ frame.
   keypress, then move straight on to the next. Set up to sixteen destination
   folders in **Settings ▸ Quick Sort**; `1`–`7` fill the first seven and
   `Shift+1`–`Shift+7` the next seven (all remappable, and the last two slots are
-  yours to bind). Built for long culling and labelling passes: a whole afternoon
+  yours to bind). Built for long culling and labeling passes: a whole afternoon
   of "this one goes there" becomes one key at a time.
   - Each slot can **move** (the default — the source folder drains as you go) or
     **copy**, and a pill names the destination as it files, so you can see which
@@ -316,7 +316,7 @@ also get the same quiet scanning pill macOS already had.)
   stretched size. They stayed that way until you resized the window; now they don't.
 - The password box no longer draws its "Checking…" spinner underneath the buttons when you
   retry after a wrong password.
-- Cancelling a slow archive part-way through no longer forgets the password you already
+- Canceling a slow archive part-way through no longer forgets the password you already
   entered. Open a smaller archive with the same password next and it just opens.
 - Entering the wrong password for an encrypted archive now tells you so, instead of silently
   clearing the box and leaving you guessing. This only ever worked for plain `.zip` files; for
@@ -324,7 +324,7 @@ also get the same quiet scanning pill macOS already had.)
   was suppressed.
 - After a wrong password, the cursor stays in the password box on macOS, so you can just type
   the next attempt instead of clicking back into the field first.
-- Cancelling a folder scan before any photo has appeared now returns you to the welcome
+- Canceling a folder scan before any photo has appeared now returns you to the welcome
   screen instead of leaving a blank window.
 - The About box's tagline now mentions video, not just images, and the FFmpeg license line no
   longer wraps awkwardly mid-parenthetical on macOS.
@@ -355,15 +355,15 @@ automatically on the next archive in the folder. Nothing is ever unpacked to dis
 ### Added
 
 - **HDR videos play in HDR.** Video mastered in HDR — most 4K movies (HDR10/PQ or HLG) and
-  clips from recent iPhones — used to be flattened to standard range, dulling its colour and
-  highlights. It now plays with full HDR colour and brightness on an HDR display (and is mapped
+  clips from recent iPhones — used to be flattened to standard range, dulling its color and
+  highlights. It now plays with full HDR color and brightness on an HDR display (and is mapped
   correctly on a standard display). The app decodes the 10-bit video and applies the HDR curve
   on the graphics card, so it costs nothing on the way.
 - **Switching between fit-to-screen and 1:1 is instant now.** When you stop on a photo, the
   app keeps its full resolution ready in the background, so toggling to actual pixels (and
   back) is immediate instead of pausing to re-decode each time — the same when you land on the
   next photo. How many nearby photos are kept ready is a new setting (default: the current one
-  plus its immediate neighbours); a slower or lower-memory machine can dial it down. Videos,
+  plus its immediate neighbors); a slower or lower-memory machine can dial it down. Videos,
   archives, vector art and enormous gigapixel images are left out (there's no meaningful "1:1"
   to hold), so they never balloon memory.
 - **Big photos show instantly instead of a black screen.** Opening a large JPEG — especially
@@ -474,7 +474,7 @@ automatically on the next archive in the folder. Nothing is ever unpacked to dis
   only ever when it can prove the text really was mangled, so correctly-written text
   (`café`, `señor`) is never touched.
 - **Subtitle appearance is yours to set**: a new **Settings ▸ Subtitles** tab with
-  font, size, colour and opacity, outline, drop shadow, background, and vertical position —
+  font, size, color and opacity, outline, drop shadow, background, and vertical position —
   including **below the picture, down in the black letterbox bar**, which almost no player
   lets you do. Outline, shadow, and background scale with the text, so changing the size
   keeps everything in proportion. A live preview shows exactly what you'll get, drawn by the
@@ -512,7 +512,7 @@ automatically on the next archive in the folder. Nothing is ever unpacked to dis
   millisecond instead of re-processing the file from disk.
 - **Skipping around in a video lands faster, especially on 4K clips.** To reach the spot you
   seek to, the app has to decode the frames leading up to it — but it used to fully process
-  (colour-convert and copy) every one of those in-between frames only to throw them away. It
+  (color-convert and copy) every one of those in-between frames only to throw them away. It
   now processes just the single frame you land on. Seeks that pass through many frames — big
   jumps, and any seek on a hardware-decoded 4K video — are noticeably quicker (measured on a
   4K60 clip: the skipped-over decode dropped from ~200 ms to ~80 ms).
@@ -548,7 +548,7 @@ automatically on the next archive in the folder. Nothing is ever unpacked to dis
   makes toggles instant for color-managed and RAW photos, which can't use the GPU
   fast path.
 - **Parking on a photo arms its instant fullscreen toggle much sooner.** The full-quality
-  copy that makes toggles instant used to queue behind every neighbouring photo's refill
+  copy that makes toggles instant used to queue behind every neighboring photo's refill
   work, so on large photos the "toggle is now instant" moment could lag many seconds behind
   the loading indicator. It now loads immediately after the photo you're parked on.
 - **Repeated fullscreen toggles no longer blur over and over.** Toggling fullscreen (or
@@ -557,7 +557,7 @@ automatically on the next archive in the folder. Nothing is ever unpacked to dis
   five times in a row, and advancing right after a toggle was blurry too. Work that doesn't
   depend on the window size (full-resolution copies, thumbnails, movie poster picks) now
   survives those changes, so after the first sharpening a toggle is instantly crisp and
-  neighbouring photos stay ready.
+  neighboring photos stay ready.
 - **A failed thumbnail or photo gets a second chance.** A momentary network hiccup used to
   leave that photo's tile blank (or the photo showing an error) for the rest of the session.
   Coming back to it now retries once; only a genuinely unreadable file stays marked failed.
@@ -565,14 +565,14 @@ automatically on the next archive in the folder. Nothing is ever unpacked to dis
   skip-ahead scanning used on normal videos; the poster is now taken from the opening frames
   instead of failing outright.
 - **Moving to the next photo right after a fullscreen change stays sharp.** Toggling
-  fullscreen used to throw away the high-quality copies of the neighbouring photos, so
+  fullscreen used to throw away the high-quality copies of the neighboring photos, so
   pressing next/previous immediately afterwards showed a small blurry thumbnail for a couple
   of seconds. The app now keeps those full-resolution copies across the change and produces
   the sharp view from them instantly.
 - **A photo can no longer get stuck blurry.** Two causes fixed. Paging quickly could
   occasionally make the app decode a photo's small placeholder twice and mistake the second
   copy for proof that no sharper version exists — that photo then stayed blurry until a
-  window change; the duplicate is now recognised and ignored. And as a backstop, the app now
+  window change; the duplicate is now recognized and ignored. And as a backstop, the app now
   notices any photo that has lingered blurry for a couple of seconds and fetches its sharp
   version on its own — even when its own bookkeeping (or the keyboard tracking) claims
   otherwise.
@@ -697,7 +697,7 @@ with correct Dolby Vision, and **video posters appearing 2–4× faster**.
   > deleting the folder by hand isn't enough; macOS: drag it to the Trash; Linux: delete
   > the old AppImage), *then* install Blaze Viewer. Your settings and keyboard shortcuts
   > are not carried over — they live in a new folder — so you'll need to redo any
-  > customised shortcuts once.
+  > customized shortcuts once.
 - **About now links to blazeviewer.app** instead of the source repository, which is private.
 
 ### Added
@@ -1101,7 +1101,7 @@ with correct Dolby Vision, and **video posters appearing 2–4× faster**.
   their own background color around the photo (both pickable in Settings). Available on
   Windows and Mac; on the Mac a pinned theme also restyles the menus and windows.
 - **Folder tree overlay (⇧F)** — press Shift+F for a "you are here" view in the top-left
-  corner: the opened folder shown **among its neighbours** under its parent, then **every
+  corner: the opened folder shown **among its neighbors** under its parent, then **every
   folder at every level** down the path to the current photo's folder — the path expands
   in place, tree-style, so even when opening a big library lands you deep in its first
   folder, all the top-level folders stay one click away, and after hopping into a folder
@@ -1364,7 +1364,7 @@ with correct Dolby Vision, and **video posters appearing 2–4× faster**.
   is ever written to disk).
 - **Show the current photo in Finder / File Explorer.** A new **File ▸ Show in Finder** (macOS)
   / **Show in File Explorer** (Windows) command opens the photo's containing folder with the file
-  selected, so you can jump from the viewer straight to the file on disk. It's greyed out for
+  selected, so you can jump from the viewer straight to the file on disk. It's grayed out for
   photos inside an archive (there's no file to reveal) and on the empty open screen.
 - **Right-click a photo for a context menu.** A secondary-click over the image brings up the
   common per-photo commands — Next / Previous / Random / Previous Random, Rotate Left / Right,
@@ -1514,7 +1514,7 @@ with correct Dolby Vision, and **video posters appearing 2–4× faster**.
   reset framing on each new photo.
 - **Undo** (Ctrl+Z, ⌘Z on macOS, or Edit ▸ Undo) reverses a saved rotation, restoring
   the file's previous EXIF orientation. The Edit menu names what will be undone (e.g.
-  "Undo Save Rotation") and is greyed out when there's nothing to undo. Multiple saves
+  "Undo Save Rotation") and is grayed out when there's nothing to undo. Multiple saves
   can be undone in turn.
 - Fullscreen now also toggles with the **F** key, alongside F11 and Alt+Enter — a
   memorable, discoverable shortcut for the app's most-used view toggle.
@@ -1596,7 +1596,7 @@ with correct Dolby Vision, and **video posters appearing 2–4× faster**.
   another. Those independent blocks now decode in parallel across all CPU cores — the
   way 7-Zip does it — turning a ~3-minute open of a 3,000-image encrypted archive into
   a few seconds, with memory still bounded.
-- Cancelling a large archive open now stops promptly — even partway through a single
+- Canceling a large archive open now stops promptly — even partway through a single
   big block — instead of only at the next block boundary.
 - An archive mixing photos with large non-image files (videos, documents) opens
   faster: blocks containing no images are skipped instead of being decompressed.

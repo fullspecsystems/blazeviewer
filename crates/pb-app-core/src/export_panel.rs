@@ -430,13 +430,13 @@ impl ExportPanel {
         }
         if settings.strip_metadata {
             notes.push(
-                "Camera details, dates and location are left out; the colour profile is kept."
+                "Camera details, dates and location are left out; the color profile is kept."
                     .into(),
             );
         } else {
             // Honest about rung 2's gap: the metadata categories aren't written yet.
             notes.push(
-                "The original colour profile is kept as is. Camera details, dates and location \
+                "The original color profile is kept as is. Camera details, dates and location \
                  aren't copied yet."
                     .into(),
             );

@@ -245,7 +245,7 @@ impl ArchiveOpenError {
             ArchiveOpenError::Empty => "This archive has no images to show.".into(),
             ArchiveOpenError::Unsupported(msg) => msg.clone(),
             ArchiveOpenError::Io(e) => format!("This archive could not be opened. {e}"),
-            ArchiveOpenError::Cancelled => "Archive open cancelled.".into(),
+            ArchiveOpenError::Cancelled => "Archive open canceled.".into(),
         }
     }
 }

@@ -177,7 +177,7 @@ struct ExportPanelView: View {
                 isOn: Binding(get: { p.stripMetadata }, set: { model.exportSetStripMetadata($0) })
             )
             .toggleStyle(.checkbox)
-            .help("Leave out camera details, dates and location. The colour profile is kept.")
+            .help("Leave out camera details, dates and location. The color profile is kept.")
         }
     }
 

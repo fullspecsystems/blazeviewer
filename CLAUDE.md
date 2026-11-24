@@ -696,6 +696,27 @@ it to the Mac — not attempt it blind.
   On release, the `[Unreleased]` block moves under the new version's heading + date
   and a fresh empty `[Unreleased]` is left at the top.
 
+## User-facing copy — US English
+
+**Everything a user reads is US English** (owner decision, 2026-11-24): labels, hints,
+tooltips, toasts, dialogs, error messages, menu items, the help overlay, and `CHANGELOG.md`,
+which becomes the Mac update notes (`generate-mac-appcast.sh`) and the GitHub release text
+(`changelog-section.sh`). So *color*, *center*, *gray*, *canceled*. This overrides any
+general Canadian-spelling preference for user-facing strings. It matches what macOS and
+Windows themselves say, and US English is the natural base locale if the app is ever
+localized: an en-CA or en-GB variant would then override only the words that differ. The app
+isn't localized yet; strings are inline literals in each shell.
+
+Internal prose keeps the Canadian convention: code comments, doc comments, plans, commit
+messages, and the developer docs under `docs/` and `.taskmaster/`. Strings the code matches on
+are not copy either: pb-decode's `"cancelled"` decode-error tag is checked with
+`ends_with("cancelled")`, so never respell it. Test messages don't matter.
+
+House style for in-app copy: plain words that say what the thing does, no em-dashes, Title Case
+section headings, sentence-case setting labels. Write the same string in both shells when they
+show the same thing (the Export hint lives in `ExportPanel.swift`, `panels_ui.rs` and
+`export_panel.rs`).
+
 ## Cutting a release
 
 All three platforms build + sign **locally** (hosted CI is billed money; the

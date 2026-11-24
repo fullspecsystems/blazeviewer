@@ -2800,7 +2800,7 @@ fn export_body(ui: &mut egui::Ui, p: &Palette, ex: &ExportPanel, actions: &mut V
         ui.horizontal(|ui| {
             let mut strip = s.strip_metadata;
             let r = pb_ui::toggle(ui, p, &mut strip).on_hover_text(
-                "Leave out camera details, dates and location. The colour profile is kept.",
+                "Leave out camera details, dates and location. The color profile is kept.",
             );
             ui.label(RichText::new("Strip metadata").color(p.text));
             if r.changed() {
