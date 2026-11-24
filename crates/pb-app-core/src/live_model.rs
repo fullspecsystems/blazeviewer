@@ -36,8 +36,8 @@ pub const SPIN_RADIANS_PER_SEC: f32 = std::f32::consts::PI / 6.0;
 pub const SPIN_EASE_SECS: f32 = 0.4;
 
 /// Turns per minute → radians per second.
-pub fn spin_speed(rpm: u8) -> f32 {
-    f32::from(rpm) * std::f32::consts::TAU / 60.0
+pub fn spin_speed(rpm: f32) -> f32 {
+    rpm * std::f32::consts::TAU / 60.0
 }
 
 /// The turntable: a speed that eases towards its target, so starting and stopping glide.

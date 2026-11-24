@@ -360,11 +360,12 @@ FA Pro `360-degrees` icon.
     pays nothing.
   - A 3MF's own colours win. Its uncoloured triangles in a *partially* coloured file stay
     `DEFAULT_COLOR` (baked by the parser).
-- **Spin speed:** `Settings::model_spin_rpm`, 1–20, default 5 (= 30°/s). A running spin eases
-  to a new value (`Spin::set_cruise`).
+- **Spin speed:** `Settings::model_spin_rpm`, an `f32` from 0.25 to 20 in quarter steps
+  (owner: down to 0.25), default 5 (= 30°/s). Every path into it goes through
+  `settings::clamp_spin_rpm`. A running spin eases to a new value (`Spin::set_cruise`).
 - **UI:** Mac `SettingsView` Appearance, under the background pickers: a `ColorPicker` and a
-  stepped slider. egui `dialog.rs`: two `card_row`s. Labels say "color" to match both shells'
-  existing labels.
+  stepped slider. egui `dialog.rs`: two `card_row`s. Labels say "color": the owner then made
+  US English the rule for all user-facing copy (root `CLAUDE.md`, *User-facing copy*).
 - **Verified (macOS):**
   - All suites: pb-app-core 1138, pb-decode 283, pb-render 79, pb-mesh 46, pb-mac-ffi,
     pb-ui.

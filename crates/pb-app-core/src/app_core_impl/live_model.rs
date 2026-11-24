@@ -904,7 +904,7 @@ mod tests {
         core.toggle_play_pause();
         let mut t = Instant::now();
         spin_for(&mut core, &mut t, 1.0);
-        change_settings(&mut core, |s| s.model_spin_rpm = 10);
+        change_settings(&mut core, |s| s.model_spin_rpm = 10.0);
         spin_for(&mut core, &mut t, 2.0); // eases up to the new speed
                                           // Cruising at 10 rpm, a second turns 60°.
         let mut probe = core.live_model.spin.unwrap();
@@ -912,7 +912,7 @@ mod tests {
             .map(|k| probe.advance(t + Duration::from_millis(8 * k)))
             .sum();
         assert!(
-            (turned - live_model::spin_speed(10)).abs() < 0.02,
+            (turned - live_model::spin_speed(10.0)).abs() < 0.02,
             "{turned}"
         );
     }

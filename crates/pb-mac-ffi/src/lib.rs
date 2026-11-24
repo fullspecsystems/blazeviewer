@@ -3426,10 +3426,7 @@ fn fold_settings_form(
     s.info_opacity = form.info_opacity;
     s.panel_opacity = form.panel_opacity;
     s.model_color = [form.model_color_r, form.model_color_g, form.model_color_b];
-    s.model_spin_rpm = form.model_spin_rpm.clamp(
-        pb_app_core::settings::MODEL_SPIN_RPM_MIN,
-        pb_app_core::settings::MODEL_SPIN_RPM_MAX,
-    );
+    s.model_spin_rpm = pb_app_core::settings::clamp_spin_rpm(form.model_spin_rpm);
     s.startup_mode = match form.startup_mode {
         0 => StartupMode::Fullscreen,
         1 => StartupMode::Windowed,
@@ -4734,11 +4731,11 @@ mod ffi {
         info_opacity: u8,
         panel_opacity: u8,
         // The 3D model look (task #153): uncoloured models' colour, and `P`'s spin speed in
-        // turns per minute (MODEL_SPIN_RPM_MIN..=MAX).
+        // turns per minute (MODEL_SPIN_RPM_MIN..=MAX, in quarter steps).
         model_color_r: u8,
         model_color_g: u8,
         model_color_b: u8,
-        model_spin_rpm: u8,
+        model_spin_rpm: f32,
         startup_mode: u8,
         slideshow_interval_secs: f64,
         picker_fixed: bool,
@@ -6361,7 +6358,7 @@ mod tests {
         form.letterbox_r = 5;
         form.letterbox_light_r = 250;
         form.model_color_g = 99;
-        form.model_spin_rpm = 0; // out of range: clamped
+        form.model_spin_rpm = 0.0; // out of range: clamped
         let folded = fold_settings_form(&h.core.settings, &form, form.refresh_hz);
         assert_eq!(folded.appearance_mode, AppearanceMode::Light);
         assert_eq!(folded.letterbox[0], 5);

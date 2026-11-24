@@ -293,8 +293,8 @@ struct SettingsView: View {
                     "3D model color", selection: $draft.modelColor, supportsOpacity: false
                 )
                 labeledSlider(
-                    "3D model spin speed", value: $draft.modelSpinRpm, in: 1...20, step: 1,
-                    format: "%.0f rpm"
+                    "3D model spin speed", value: $draft.modelSpinRpm, in: 0.25...20, step: 0.25,
+                    format: "%g rpm"
                 )
                 labeledSlider(
                     "Panel opacity", value: $draft.panelOpacity, in: 50...100, format: "%.0f%%"
@@ -993,7 +993,7 @@ struct SettingsDraft: Equatable {
             model_color_r: UInt8((rgbModel.redComponent * 255).rounded().clamped(0, 255)),
             model_color_g: UInt8((rgbModel.greenComponent * 255).rounded().clamped(0, 255)),
             model_color_b: UInt8((rgbModel.blueComponent * 255).rounded().clamped(0, 255)),
-            model_spin_rpm: UInt8(modelSpinRpm.rounded().clamped(1, 20)),
+            model_spin_rpm: Float(modelSpinRpm.clamped(0.25, 20)),
             startup_mode: UInt8(startupMode),
             slideshow_interval_secs: slideshowInterval,
             picker_fixed: pickerFixed,

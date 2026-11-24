@@ -143,7 +143,7 @@ struct SettingsDraft {
     letterbox: [f32; 3], // 0..1 per channel (egui color picker) — the dark fill
     letterbox_light: [f32; 3], // the light-mode fill (#46)
     model_color: [f32; 3], // 3D models the file leaves uncoloured (task #153)
-    model_spin_rpm: u8,  // `P`'s turntable, turns per minute
+    model_spin_rpm: f32, // `P`'s turntable, turns per minute
     info_opacity: u8,    // 0..100
     startup_mode: usize, // 0 = Fullscreen, 1 = Windowed, 2 = Remember
     slideshow_interval: f64, // seconds (default slideshow dwell)
@@ -335,9 +335,7 @@ impl SettingsDraft {
         s.model_color = self
             .model_color
             .map(|c| (c * 255.0).round().clamp(0.0, 255.0) as u8);
-        s.model_spin_rpm = self
-            .model_spin_rpm
-            .clamp(settings::MODEL_SPIN_RPM_MIN, settings::MODEL_SPIN_RPM_MAX);
+        s.model_spin_rpm = settings::clamp_spin_rpm(self.model_spin_rpm);
         s.info_opacity = self.info_opacity;
         s.startup_mode = match self.startup_mode {
             0 => settings::StartupMode::Fullscreen,
@@ -3104,10 +3102,12 @@ fn display_tab(ui: &mut egui::Ui, p: &pbui::Palette, d: &mut SettingsDraft) {
             "3D model spin speed",
             Some("How fast P turns a model, in turns per minute"),
             |ui| {
-                pbui::slider(
+                pbui::slider_stepped(
                     ui,
                     &mut d.model_spin_rpm,
                     settings::MODEL_SPIN_RPM_MIN..=settings::MODEL_SPIN_RPM_MAX,
+                    f64::from(settings::MODEL_SPIN_RPM_STEP),
+                    2,
                     " rpm",
                 );
             },
