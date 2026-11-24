@@ -4627,8 +4627,8 @@ impl ApplicationHandler for App {
                 if pressed && self.core.folder_tree_click() {
                     // A folder-tree row opened a folder / a "… n more" marker paged.
                 } else {
-                    self.core.dragging = pressed;
-                    self.core.refresh_cursor();
+                    // Down grabs; up may throw a 3D model (the core decides).
+                    self.core.set_dragging(pressed);
                 }
             }
 

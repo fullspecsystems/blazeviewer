@@ -57,7 +57,9 @@ pub(crate) fn samples_within_budget(width: u32, height: u32, budget: u64) -> u32
 }
 
 /// One corner of the live view's triangle soup: a world-space position (Z-up) and the
-/// triangle's sRGB colour (alpha ignored).
+/// triangle's sRGB colour. Alpha is a flag, not opacity: `255` = this colour, `0` = the file
+/// leaves it uncoloured, so it takes the frame's [`MeshFrame::base_color`] (the viewer's model
+/// colour, a uniform: changing it never re-uploads the mesh).
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Pod, Zeroable)]
 pub struct MeshVertex {
@@ -78,6 +80,8 @@ pub struct MeshFrame {
     pub fill_dir: [f32; 3],
     /// `[ambient, sky, key, fill]` strengths.
     pub lighting: [f32; 4],
+    /// The sRGB colour for corners flagged uncoloured (alpha 0).
+    pub base_color: [u8; 3],
 }
 
 #[repr(C)]
@@ -92,6 +96,8 @@ struct Uniforms {
     scale: [f32; 4],
     /// Content-area NDC → surface NDC: `(sx, sy, ox, oy)`.
     ndc: [f32; 4],
+    /// The base colour, sRGB in `[0, 1]` (`.rgb`).
+    base: [f32; 4],
 }
 
 /// Shared by both shaders (one uniform buffer feeds both passes).
@@ -104,6 +110,7 @@ struct U {
     light: vec4<f32>,
     scale: vec4<f32>,
     ndc: vec4<f32>,
+    base: vec4<f32>,
 };
 @group(0) @binding(0) var<uniform> u: U;
 "#;
@@ -112,7 +119,7 @@ const MESH_WGSL: &str = r#"
 struct VOut {
     @builtin(position) pos: vec4<f32>,
     @location(0) world: vec3<f32>,
-    @location(1) @interpolate(flat) color: vec3<f32>,
+    @location(1) @interpolate(flat) color: vec4<f32>,
 };
 
 @vertex
@@ -124,7 +131,7 @@ fn vs_mesh(@location(0) p: vec3<f32>, @location(1) c: vec4<f32>) -> VOut {
     var o: VOut;
     o.pos = clip;
     o.world = p;
-    o.color = c.rgb;
+    o.color = c;
     return o;
 }
 
@@ -154,7 +161,9 @@ fn fs_mesh(i: VOut) -> @location(0) vec4<f32> {
     let light = u.light.x + u.light.y * sky
         + u.light.z * max(dot(n, u.key.xyz), 0.0)
         + u.light.w * max(dot(n, u.fill.xyz), 0.0);
-    let albedo = vec3<f32>(srgb_to_linear(i.color.r), srgb_to_linear(i.color.g), srgb_to_linear(i.color.b));
+    // Alpha 0 flags an uncoloured corner: it takes the viewer's model colour.
+    let srgb = select(i.color.rgb, u.base.rgb, i.color.a < 0.5);
+    let albedo = vec3<f32>(srgb_to_linear(srgb.r), srgb_to_linear(srgb.g), srgb_to_linear(srgb.b));
     // Linear, clamped exactly like the still's 8-bit encode; the sRGB target encodes it, and
     // the composite applies the scene scale.
     return vec4<f32>(min(albedo * light, vec3<f32>(1.0)), 1.0);
@@ -504,6 +513,10 @@ impl MeshPass {
             scale: [scale, 0.0, 0.0, 0.0],
             // Content y ∈ [−1, 1] lands on the surface between the inset and the bottom.
             ndc: [1.0, (sh - top) / sh, 0.0, -top / sh],
+            base: {
+                let [r, g, b] = frame.base_color.map(|c| c as f32 / 255.0);
+                [r, g, b, 0.0]
+            },
         };
         queue.write_buffer(&self.uniforms, 0, bytemuck::bytes_of(&u));
         let t = self.targets.as_ref().expect("built above");
@@ -711,6 +724,7 @@ mod tests {
             key_dir: [0.0, 0.0, 1.0],
             fill_dir: [0.0, 0.0, 1.0],
             lighting: [0.13, 0.10, 0.58, 0.22],
+            base_color: pb_mesh::DEFAULT_COLOR,
         }
     }
 
@@ -744,6 +758,23 @@ mod tests {
             [0.0, 0.0, 0.0, 1.0],
             "outside the model is the clear colour"
         );
+    }
+
+    #[test]
+    fn uncoloured_corners_take_the_frames_base_colour() {
+        let f = MeshFrame {
+            base_color: [40, 200, 60],
+            ..frame()
+        };
+        let px = draw(&quad([255, 0, 0, 0], 0.5), f, 0); // alpha 0: "uncoloured"
+        let c = px[(H / 2 * W + W / 2) as usize];
+        assert!(
+            c[1] > c[0] * 2.0 && c[1] > c[2] * 2.0,
+            "green, not red: {c:?}"
+        );
+        // A coloured corner ignores it.
+        let px = draw(&quad([255, 0, 0, 255], 0.5), f, 0);
+        assert!(px[(H / 2 * W + W / 2) as usize][0] > 0.5);
     }
 
     #[test]
@@ -833,11 +864,12 @@ mod tests {
             key_dir: f.key_dir,
             fill_dir: f.fill_dir,
             lighting: f.lighting,
+            base_color: pb_mesh::DEFAULT_COLOR,
         };
         let vertices: Vec<MeshVertex> = pb_mesh::live::corners(&m)
-            .map(|(pos, [r, g, b])| MeshVertex {
+            .map(|(pos, c)| MeshVertex {
                 pos,
-                color: [r, g, b, 255],
+                color: c.map_or([0; 4], |[r, g, b]| [r, g, b, 255]),
             })
             .collect();
         let encode = |l: f32| {

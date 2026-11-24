@@ -287,6 +287,15 @@ struct SettingsView: View {
                 ColorPicker(
                     "Background (light)", selection: $draft.letterboxLight, supportsOpacity: false
                 )
+                // The 3D model look (task #153): the colour of a model whose file colours
+                // nothing (a 3MF's own filament colours win), and how fast `P` spins one.
+                ColorPicker(
+                    "3D model color", selection: $draft.modelColor, supportsOpacity: false
+                )
+                labeledSlider(
+                    "3D model spin speed", value: $draft.modelSpinRpm, in: 1...20, step: 1,
+                    format: "%.0f rpm"
+                )
                 labeledSlider(
                     "Panel opacity", value: $draft.panelOpacity, in: 50...100, format: "%.0f%%"
                 )
@@ -526,12 +535,18 @@ struct SettingsView: View {
         )
     }
 
+    @ViewBuilder
     private func labeledSlider(
-        _ label: String, value: Binding<Double>, in range: ClosedRange<Double>, format: String
+        _ label: String, value: Binding<Double>, in range: ClosedRange<Double>,
+        step: Double? = nil, format: String
     ) -> some View {
         HStack {
             Text(label)
-            Slider(value: value, in: range)
+            if let step {
+                Slider(value: value, in: range, step: step)
+            } else {
+                Slider(value: value, in: range)
+            }
             Text(
                 format.contains("%")
                     ? String(format: format, value.wrappedValue) : format
@@ -866,6 +881,8 @@ struct SettingsDraft: Equatable {
     var letterboxLight: Color = .white
     var infoOpacity: Double = 60
     var panelOpacity: Double = 92
+    var modelColor: Color = Color(red: 200 / 255, green: 204 / 255, blue: 210 / 255)
+    var modelSpinRpm: Double = 5
     var startupMode = 2
     var slideshowInterval: Double = 4
     var pickerFixed = false
@@ -912,6 +929,12 @@ struct SettingsDraft: Equatable {
         )
         infoOpacity = Double(form.info_opacity)
         panelOpacity = Double(form.panel_opacity)
+        modelColor = Color(
+            red: Double(form.model_color_r) / 255.0,
+            green: Double(form.model_color_g) / 255.0,
+            blue: Double(form.model_color_b) / 255.0
+        )
+        modelSpinRpm = Double(form.model_spin_rpm)
         startupMode = Int(form.startup_mode)
         slideshowInterval = form.slideshow_interval_secs
         pickerDir = form.picker_dir.toString()
@@ -941,6 +964,7 @@ struct SettingsDraft: Equatable {
     func toForm() -> SettingsFormFfi {
         let rgb = NSColor(letterbox).usingColorSpace(.sRGB) ?? .black
         let rgbLight = NSColor(letterboxLight).usingColorSpace(.sRGB) ?? .white
+        let rgbModel = NSColor(modelColor).usingColorSpace(.sRGB) ?? .gray
         return SettingsFormFfi(
             start_speed: Float(startSpeed),
             ramp_secs: Float(rampSecs),
@@ -966,6 +990,10 @@ struct SettingsDraft: Equatable {
             letterbox_light_b: UInt8((rgbLight.blueComponent * 255).rounded().clamped(0, 255)),
             info_opacity: UInt8(infoOpacity.rounded()),
             panel_opacity: UInt8(panelOpacity.rounded()),
+            model_color_r: UInt8((rgbModel.redComponent * 255).rounded().clamped(0, 255)),
+            model_color_g: UInt8((rgbModel.greenComponent * 255).rounded().clamped(0, 255)),
+            model_color_b: UInt8((rgbModel.blueComponent * 255).rounded().clamped(0, 255)),
+            model_spin_rpm: UInt8(modelSpinRpm.rounded().clamped(1, 20)),
             startup_mode: UInt8(startupMode),
             slideshow_interval_secs: slideshowInterval,
             picker_fixed: pickerFixed,

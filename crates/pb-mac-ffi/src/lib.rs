@@ -1131,8 +1131,8 @@ impl AppCoreHandle {
             // A folder-tree row opened a folder / a "… n more" marker paged; the
             // open plan's Begin* effects drain below like any other press.
         } else {
-            self.core.dragging = pressed;
-            self.core.refresh_cursor();
+            // Down grabs; up may throw a 3D model (the core decides).
+            self.core.set_dragging(pressed);
         }
     }
 
@@ -2199,6 +2199,10 @@ impl AppCoreHandle {
             letterbox_light_b: s.letterbox_light[2],
             info_opacity: s.info_opacity,
             panel_opacity: s.panel_opacity,
+            model_color_r: s.model_color[0],
+            model_color_g: s.model_color[1],
+            model_color_b: s.model_color[2],
+            model_spin_rpm: s.model_spin_rpm,
             startup_mode: match s.startup_mode {
                 StartupMode::Fullscreen => 0,
                 StartupMode::Windowed => 1,
@@ -3421,6 +3425,11 @@ fn fold_settings_form(
     ];
     s.info_opacity = form.info_opacity;
     s.panel_opacity = form.panel_opacity;
+    s.model_color = [form.model_color_r, form.model_color_g, form.model_color_b];
+    s.model_spin_rpm = form.model_spin_rpm.clamp(
+        pb_app_core::settings::MODEL_SPIN_RPM_MIN,
+        pb_app_core::settings::MODEL_SPIN_RPM_MAX,
+    );
     s.startup_mode = match form.startup_mode {
         0 => StartupMode::Fullscreen,
         1 => StartupMode::Windowed,
@@ -4724,6 +4733,12 @@ mod ffi {
         letterbox_light_b: u8,
         info_opacity: u8,
         panel_opacity: u8,
+        // The 3D model look (task #153): uncoloured models' colour, and `P`'s spin speed in
+        // turns per minute (MODEL_SPIN_RPM_MIN..=MAX).
+        model_color_r: u8,
+        model_color_g: u8,
+        model_color_b: u8,
+        model_spin_rpm: u8,
         startup_mode: u8,
         slideshow_interval_secs: f64,
         picker_fixed: bool,
@@ -6345,10 +6360,17 @@ mod tests {
         form.appearance_mode = 1; // light
         form.letterbox_r = 5;
         form.letterbox_light_r = 250;
+        form.model_color_g = 99;
+        form.model_spin_rpm = 0; // out of range: clamped
         let folded = fold_settings_form(&h.core.settings, &form, form.refresh_hz);
         assert_eq!(folded.appearance_mode, AppearanceMode::Light);
         assert_eq!(folded.letterbox[0], 5);
         assert_eq!(folded.letterbox_light[0], 250);
+        assert_eq!(folded.model_color[1], 99);
+        assert_eq!(
+            folded.model_spin_rpm,
+            pb_app_core::settings::MODEL_SPIN_RPM_MIN
+        );
         // And back out through the getter.
         let mut h2 = test_handle(800, 600, 1.0);
         h2.core.settings = folded;

@@ -16,7 +16,7 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Receiver;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use pb_mesh::{LiveView, ModelFormat};
 use pb_render::MeshVertex;
@@ -27,11 +27,18 @@ use pb_source::ItemSource;
 /// largest is 5.67M triangles).
 pub const LIVE_MAX_TRIANGLES: usize = 6_000_000;
 
-/// The turntable's cruising speed (`P` on a model): a full turn every 12 seconds, slow enough
-/// to read the model as it goes round.
+/// The turntable's default cruising speed (`P` on a model): a full turn every 12 seconds, slow
+/// enough to read the model as it goes round. Settings ▸ Appearance changes it
+/// ([`spin_speed`]).
 pub const SPIN_RADIANS_PER_SEC: f32 = std::f32::consts::PI / 6.0;
-/// How long the turntable takes to reach speed, and to coast to a stop: a glide, not a jerk.
+/// How long the turntable takes to reach cruising speed, and to coast to a stop from it: a
+/// glide, not a jerk.
 pub const SPIN_EASE_SECS: f32 = 0.4;
+
+/// Turns per minute → radians per second.
+pub fn spin_speed(rpm: u8) -> f32 {
+    f32::from(rpm) * std::f32::consts::TAU / 60.0
+}
 
 /// The turntable: a speed that eases towards its target, so starting and stopping glide.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -40,17 +47,29 @@ pub struct Spin {
     speed: f32,
     /// Where `speed` is heading: cruising speed, or 0 while it coasts to a stop.
     target: f32,
+    /// The cruising speed (radians per second), from the setting.
+    cruise: f32,
     /// The last tick, so a step turns by the time actually elapsed.
     last: Option<Instant>,
 }
 
 impl Spin {
-    /// From rest, spinning up. The first [`advance`](Self::advance) only starts the clock.
-    pub fn start() -> Spin {
+    /// From rest, spinning up to `cruise` radians per second. The first
+    /// [`advance`](Self::advance) only starts the clock.
+    pub fn start(cruise: f32) -> Spin {
         Spin {
             speed: 0.0,
-            target: SPIN_RADIANS_PER_SEC,
+            target: cruise,
+            cruise,
             last: None,
+        }
+    }
+
+    /// A new cruising speed (the setting changed): a running spin eases to it.
+    pub fn set_cruise(&mut self, cruise: f32) {
+        self.cruise = cruise;
+        if self.running() {
+            self.target = cruise;
         }
     }
 
@@ -66,7 +85,7 @@ impl Spin {
 
     /// Spin back up (`P` again while it coasts).
     pub fn resume(&mut self) {
-        self.target = SPIN_RADIANS_PER_SEC;
+        self.target = self.cruise;
     }
 
     /// Coasted all the way to rest: nothing left to turn.
@@ -82,6 +101,8 @@ impl Spin {
             None => 0.0,
         };
         let v0 = self.speed;
+        // The same acceleration at any cruising speed: a faster setting takes a little longer
+        // to come up to speed and to stop.
         let step = SPIN_RADIANS_PER_SEC / SPIN_EASE_SECS * dt;
         self.speed = if self.target > v0 {
             (v0 + step).min(self.target)
@@ -89,6 +110,76 @@ impl Spin {
             (v0 - step).max(self.target)
         };
         (v0 + self.speed) * 0.5 * dt
+    }
+}
+
+/// How far back a release looks for the drag's speed.
+const THROW_WINDOW: Duration = Duration::from_millis(80);
+/// A pointer that rested this long before letting go placed the model rather than threw it.
+const THROW_REST: Duration = Duration::from_millis(50);
+/// Ceiling on a throw (physical px/s), so a wild flick turns the model about a turn and a half
+/// rather than ten.
+pub const THROW_MAX_SPEED: f32 = 6000.0;
+const DRAG_SAMPLES: usize = 16;
+
+/// The last few drag moves, for the throw on release: a fixed ring, so sampling a drag never
+/// allocates.
+#[derive(Debug, Default, Clone)]
+pub struct DragVelocity {
+    samples: [Option<(Instant, f32, f32)>; DRAG_SAMPLES],
+    next: usize,
+}
+
+impl DragVelocity {
+    /// Forget the moves (a new press).
+    pub fn clear(&mut self) {
+        *self = DragVelocity::default();
+    }
+
+    /// The pointer moved `(dx, dy)` physical px at `at`.
+    pub fn push(&mut self, at: Instant, dx: f32, dy: f32) {
+        self.samples[self.next] = Some((at, dx, dy));
+        self.next = (self.next + 1) % DRAG_SAMPLES;
+    }
+
+    /// The speed (px/s) of a release at `now`, if it was a throw: the moves of the last
+    /// [`THROW_WINDOW`], capped at [`THROW_MAX_SPEED`]. `None` when the pointer rested first or
+    /// there's too little to measure.
+    pub fn throw(&self, now: Instant) -> Option<[f32; 2]> {
+        let mut earliest: Option<(Instant, f32, f32)> = None;
+        let mut latest: Option<Instant> = None;
+        let (mut sx, mut sy) = (0.0, 0.0);
+        for &(t, dx, dy) in self.samples.iter().flatten() {
+            if t > now || now.duration_since(t) > THROW_WINDOW {
+                continue;
+            }
+            sx += dx;
+            sy += dy;
+            if earliest.is_none_or(|e| t < e.0) {
+                earliest = Some((t, dx, dy));
+            }
+            if latest.is_none_or(|l| t > l) {
+                latest = Some(t);
+            }
+        }
+        let (t0, dx0, dy0) = earliest?;
+        let t1 = latest?;
+        if now.duration_since(t1) > THROW_REST {
+            return None;
+        }
+        // The first move's distance was covered before `t0`, so it is outside the span.
+        let span = (t1 - t0).as_secs_f32();
+        if span <= 0.0 {
+            return None;
+        }
+        let v = [(sx - dx0) / span, (sy - dy0) / span];
+        let speed = v[0].hypot(v[1]);
+        let k = if speed > THROW_MAX_SPEED {
+            THROW_MAX_SPEED / speed
+        } else {
+            1.0
+        };
+        Some([v[0] * k, v[1] * k])
     }
 }
 
@@ -133,6 +224,8 @@ pub struct LiveModel {
     pub spin: Option<Spin>,
     /// `P` came before the model was ready: spin this item (and deck generation) as it lands.
     pub spin_wanted: Option<(usize, u64)>,
+    /// The current drag's recent moves, so letting go mid-flick throws the model.
+    pub drag: DragVelocity,
 }
 
 impl LiveModel {
@@ -195,10 +288,12 @@ pub fn prepare(
         return Err("cancelled".into());
     }
     let view = LiveView::new(&model).ok_or("nothing to draw")?;
+    // Uncoloured corners carry alpha 0: the GPU draws them in the model colour setting, so a
+    // change to it never re-prepares the mesh.
     let vertices = pb_mesh::live::corners(&model)
-        .map(|(pos, [r, g, b])| MeshVertex {
+        .map(|(pos, c)| MeshVertex {
             pos,
-            color: [r, g, b, 255],
+            color: c.map_or([0; 4], |[r, g, b]| [r, g, b, 255]),
         })
         .collect();
     Ok(Prepared { view, vertices })
@@ -244,7 +339,7 @@ mod tests {
     fn the_turntable_spins_up_cruises_and_coasts_to_a_stop() {
         let frame = std::time::Duration::from_millis(8);
         let mut t = Instant::now();
-        let mut spin = Spin::start();
+        let mut spin = Spin::start(SPIN_RADIANS_PER_SEC);
         assert_eq!(spin.advance(t), 0.0, "the first tick only starts the clock");
         // Spinning up covers half the cruising distance of the same time.
         let ease = run(&mut spin, &mut t, SPIN_EASE_SECS, frame);
@@ -264,7 +359,7 @@ mod tests {
     fn p_while_coasting_spins_back_up() {
         let frame = std::time::Duration::from_millis(8);
         let mut t = Instant::now();
-        let mut spin = Spin::start();
+        let mut spin = Spin::start(SPIN_RADIANS_PER_SEC);
         spin.advance(t);
         run(&mut spin, &mut t, 1.0, frame);
         spin.stop();
@@ -278,11 +373,49 @@ mod tests {
     #[test]
     fn a_stalled_loop_never_makes_the_model_jump() {
         let mut t = Instant::now();
-        let mut spin = Spin::start();
+        let mut spin = Spin::start(SPIN_RADIANS_PER_SEC);
         spin.advance(t);
         run(&mut spin, &mut t, 1.0, std::time::Duration::from_millis(8));
         t += std::time::Duration::from_secs(5);
         assert!(spin.advance(t) <= SPIN_RADIANS_PER_SEC * 0.1 + 1e-6);
+    }
+
+    /// A drag at `px_per_frame` for `frames` 8 ms frames from `t`; returns the last move's time.
+    fn drag(v: &mut DragVelocity, t: Instant, frames: u32, px_per_frame: f32) -> Instant {
+        let mut at = t;
+        for _ in 0..frames {
+            at += Duration::from_millis(8);
+            v.push(at, px_per_frame, 0.0);
+        }
+        at
+    }
+
+    #[test]
+    fn a_flick_measures_its_speed() {
+        let mut v = DragVelocity::default();
+        let last = drag(&mut v, Instant::now(), 30, 16.0); // 16 px / 8 ms = 2000 px/s
+        let [vx, vy] = v.throw(last + Duration::from_millis(4)).unwrap();
+        assert!((vx - 2000.0).abs() < 1.0, "{vx}");
+        assert_eq!(vy, 0.0);
+    }
+
+    #[test]
+    fn resting_before_letting_go_is_not_a_throw() {
+        let mut v = DragVelocity::default();
+        let last = drag(&mut v, Instant::now(), 10, 16.0);
+        assert!(v
+            .throw(last + THROW_REST + Duration::from_millis(1))
+            .is_none());
+        v.clear();
+        assert!(v.throw(last).is_none(), "nothing to measure");
+    }
+
+    #[test]
+    fn a_wild_flick_is_capped() {
+        let mut v = DragVelocity::default();
+        let last = drag(&mut v, Instant::now(), 10, 400.0); // 50 000 px/s
+        let [vx, _] = v.throw(last).unwrap();
+        assert!((vx - THROW_MAX_SPEED).abs() < 1.0);
     }
 
     #[test]

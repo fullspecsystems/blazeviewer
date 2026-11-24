@@ -50,6 +50,56 @@ impl AppCore {
         }
     }
 
+    /// Settings ▸ Appearance changed the model look; `old` is what it replaced. A spinning
+    /// model eases to the new speed. A new colour reaches the live view on its next draw (a
+    /// uniform), and the stills baked in the old one are re-rendered.
+    pub(crate) fn apply_model_look(&mut self, old: &crate::settings::Settings) {
+        pb_decode::set_model_color(self.settings.model_color);
+        if old.model_spin_rpm != self.settings.model_spin_rpm {
+            let cruise = live_model::spin_speed(self.settings.model_spin_rpm);
+            if let Some(s) = self.live_model.spin.as_mut() {
+                s.set_cruise(cruise);
+            }
+        }
+        if old.model_color != self.settings.model_color {
+            self.recolor_models();
+        }
+    }
+
+    /// The model colour changed (Settings ▸ Appearance). The live view picks it up on its next
+    /// draw, but every model still already decoded was baked in the old colour, so those are
+    /// re-rendered in the background. A deck with no model in it pays nothing.
+    pub(crate) fn recolor_models(&mut self) {
+        if !(0..self.source.len()).any(|i| self.item_is_model(i)) {
+            return;
+        }
+        let old_gen = self.content_gen;
+        self.invalidate_content();
+        // The live mesh doesn't depend on the colour (uncoloured corners take it per frame), so
+        // it crosses the content bump instead of being re-parsed, and the user keeps their view.
+        let new_gen = self.content_gen;
+        let retag = |g: &mut u64| {
+            if *g == old_gen {
+                *g = new_gen;
+            }
+        };
+        let lm = &mut self.live_model;
+        if let Some(r) = lm.ready.as_mut() {
+            retag(&mut r.content_gen);
+        }
+        if let Some(l) = lm.loading.as_mut() {
+            retag(&mut l.content_gen);
+        }
+        if let Some((_, g)) = lm.failed.as_mut() {
+            retag(g);
+        }
+        if let Some((_, g)) = lm.spin_wanted.as_mut() {
+            retag(g);
+        }
+        self.target_item = self.playlist.current();
+        self.request_prefetch();
+    }
+
     /// Whether `item` is a 3D model: an image item with a model extension.
     fn item_is_model(&self, item: usize) -> bool {
         matches!(
@@ -287,7 +337,8 @@ impl AppCore {
     /// Bring the live view up where the camera is and set the turntable going. The ticks turn it.
     fn start_spin(&mut self) {
         if self.live_model_apply(|_, _| {}) {
-            self.live_model.spin = Some(Spin::start());
+            let cruise = live_model::spin_speed(self.settings.model_spin_rpm);
+            self.live_model.spin = Some(Spin::start(cruise));
             self.draw();
         }
     }
@@ -315,6 +366,31 @@ impl AppCore {
         true
     }
 
+    /// A drag moved the model `(dx, dy)` px at `at`: remember it for the throw on release.
+    pub fn live_model_drag_moved(&mut self, at: Instant, dx: f32, dy: f32) {
+        if self.live_model.active && self.live_model_ready() {
+            self.live_model.drag.push(at, dx, dy);
+        }
+    }
+
+    /// The velocity to throw the model with, for a drag released at `now`, if it was a flick
+    /// (a model that was turning, and a pointer still moving when it let go). Consumes the
+    /// drag's samples either way.
+    pub(crate) fn live_model_throw(&mut self, now: Instant) -> Option<[f32; 2]> {
+        let v = self.live_model.drag.throw(now);
+        self.live_model.drag.clear();
+        (self.live_model.active && self.live_model_ready())
+            .then_some(v)
+            .flatten()
+    }
+
+    /// The on-screen model's camera height, while one is ready: how a glide spots a pole.
+    pub(crate) fn live_model_elevation(&self) -> Option<f32> {
+        self.live_model
+            .ready_for(self.displayed_item?, self.content_gen)
+            .map(|r| r.view.elevation())
+    }
+
     /// The frame to draw this time, while the live view is up for the item on screen.
     /// Recomputed each draw, so a resize or a new top inset re-frames it for free.
     pub(crate) fn live_model_frame(&self) -> Option<pb_render::MeshFrame> {
@@ -331,6 +407,7 @@ impl AppCore {
             key_dir: f.key_dir,
             fill_dir: f.fill_dir,
             lighting: f.lighting,
+            base_color: self.settings.model_color,
         })
     }
 }
@@ -686,6 +763,173 @@ mod tests {
         core.set_scale_mode(pb_render::ScaleMode::Fit);
         core.maybe_show_anim_hint(false);
         assert_eq!(core.play_hint_seq, seq);
+    }
+
+    /// Press, drag at `px` per 8 ms frame for `frames` frames, and release `rest` after the last
+    /// move. Returns the release time.
+    fn flick(core: &mut AppCore, px: f32, frames: u32, rest: Duration) -> Instant {
+        let mut t = Instant::now();
+        core.set_dragging_at(true, t);
+        for _ in 0..frames {
+            t += Duration::from_millis(8);
+            core.pan_by_pixels(px, 0.0);
+            core.live_model_drag_moved(t, px, 0.0);
+        }
+        let up = t + rest;
+        core.set_dragging_at(false, up);
+        up
+    }
+
+    /// Glide ticks every 8 ms from `t` for `secs`; returns how many ticks were still gliding.
+    fn glide_for(core: &mut AppCore, t: &mut Instant, secs: f32) -> usize {
+        let end = *t + Duration::from_secs_f32(secs);
+        let mut live = 0;
+        while *t < end {
+            *t += Duration::from_millis(8);
+            live += usize::from(core.apply_pan_inertia(*t));
+        }
+        live
+    }
+
+    #[test]
+    fn a_flicked_model_keeps_turning_and_slows_to_a_stop() {
+        let (mut core, _) = core_on(0);
+        settle(&mut core);
+        let mut t = flick(&mut core, 16.0, 20, Duration::from_millis(4));
+        let az = |c: &AppCore| c.live_model.ready.as_ref().unwrap().view;
+        let at_release = az(&core);
+        assert!(core.pan_inertia.is_some(), "the flick threw it");
+        glide_for(&mut core, &mut t, 0.1);
+        assert_ne!(
+            az(&core),
+            at_release,
+            "still turning after the button came up"
+        );
+        glide_for(&mut core, &mut t, 4.0);
+        assert!(core.pan_inertia.is_none(), "and it came to rest");
+    }
+
+    #[test]
+    fn a_drag_that_rests_before_letting_go_stays_put() {
+        let (mut core, _) = core_on(0);
+        settle(&mut core);
+        flick(&mut core, 16.0, 20, Duration::from_millis(200));
+        assert!(core.pan_inertia.is_none());
+    }
+
+    #[test]
+    fn a_photo_is_never_thrown_by_the_mouse() {
+        let (mut core, _) = core_on(1);
+        flick(&mut core, 16.0, 20, Duration::from_millis(4));
+        assert!(
+            core.pan_inertia.is_none(),
+            "a mouse drag on a photo stops dead"
+        );
+    }
+
+    #[test]
+    fn a_touch_fling_turns_a_model_instead_of_dying_on_the_first_tick() {
+        let (mut core, _) = core_on(0);
+        settle(&mut core);
+        core.pan_by_pixels(1.0, 0.0); // the live view is up
+        core.fling_pan(2000.0, 0.0);
+        let mut t = Instant::now();
+        assert!(glide_for(&mut core, &mut t, 0.3) > 20);
+        assert!(core.pan_inertia.is_some());
+    }
+
+    #[test]
+    fn a_vertical_glide_stops_at_the_pole() {
+        let (mut core, _) = core_on(0);
+        settle(&mut core);
+        core.pan_by_pixels(0.0, 1.0);
+        core.fling_pan(0.0, 5000.0);
+        let mut t = Instant::now();
+        // Without the pole test it would grind on invisibly for about two seconds.
+        assert!(glide_for(&mut core, &mut t, 2.0) < 30);
+        assert!(core.pan_inertia.is_none());
+    }
+
+    /// Swap in new settings and apply the model look, as `apply_settings` does (without its
+    /// write to the real config file).
+    fn change_settings(core: &mut AppCore, f: impl FnOnce(&mut crate::settings::Settings)) {
+        let mut new = core.settings.clone();
+        f(&mut new);
+        let old = std::mem::replace(&mut core.settings, new);
+        core.apply_model_look(&old);
+    }
+
+    #[test]
+    fn a_new_model_colour_keeps_the_live_view_and_re_renders_the_stills() {
+        let (mut core, _) = core_on(0);
+        settle(&mut core);
+        core.toggle_play_pause();
+        let gen = core.content_gen;
+        change_settings(&mut core, |s| s.model_color = [200, 40, 40]);
+        assert_ne!(core.content_gen, gen, "the baked stills are stale");
+        assert!(core.live_model_ready(), "the mesh crossed over");
+        assert!(core.live_model.active && core.live_model_spinning());
+        let frame = core.live_model_frame().expect("still drawing");
+        assert_eq!(
+            frame.base_color,
+            [200, 40, 40],
+            "the GPU draws the new colour"
+        );
+        assert_eq!(
+            pb_decode::model_color(),
+            [200, 40, 40],
+            "new stills will too"
+        );
+        core.tick_live_model(false);
+        assert!(
+            core.live_model_ready(),
+            "and the next tick doesn't tear it down"
+        );
+        pb_decode::set_model_color(pb_mesh::DEFAULT_COLOR); // process-wide: put it back
+    }
+
+    #[test]
+    fn a_deck_of_photos_pays_nothing_for_a_new_model_colour() {
+        let mut core = test_core();
+        core.source = Arc::new(Photos);
+        let gen = core.content_gen;
+        core.recolor_models();
+        assert_eq!(core.content_gen, gen);
+    }
+
+    #[test]
+    fn a_new_spin_speed_reaches_a_spinning_model() {
+        let (mut core, _) = core_on(0);
+        settle(&mut core);
+        core.toggle_play_pause();
+        let mut t = Instant::now();
+        spin_for(&mut core, &mut t, 1.0);
+        change_settings(&mut core, |s| s.model_spin_rpm = 10);
+        spin_for(&mut core, &mut t, 2.0); // eases up to the new speed
+                                          // Cruising at 10 rpm, a second turns 60°.
+        let mut probe = core.live_model.spin.unwrap();
+        let turned: f32 = (1..=125)
+            .map(|k| probe.advance(t + Duration::from_millis(8 * k)))
+            .sum();
+        assert!(
+            (turned - live_model::spin_speed(10)).abs() < 0.02,
+            "{turned}"
+        );
+    }
+
+    /// Only photos.
+    struct Photos;
+
+    impl ItemSource for Photos {
+        fn len(&self) -> usize {
+            3
+        }
+        fn name(&self, _: usize) -> &str {
+            "photo.jpg"
+        }
+        fn bytes(&self, _: usize) -> std::io::Result<Vec<u8>> {
+            Ok(vec![0xFF, 0xD8])
+        }
     }
 
     #[test]

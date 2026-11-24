@@ -18,7 +18,7 @@ use crate::camera::{dot, Orbit};
 use crate::raster::{
     light_dirs, padded_spans, project, silhouette, AMBIENT, FILL, FILL_LIGHT, KEY, SKY,
 };
-use crate::{Model, DEFAULT_COLOR};
+use crate::Model;
 
 /// Elevation stops just short of straight up/down, where a turntable's basis degenerates.
 const MAX_ELEVATION: f32 = FRAC_PI_2 - 0.01;
@@ -146,6 +146,12 @@ impl LiveView {
         self.zoom
     }
 
+    /// The camera's height angle (radians above the model's equator). It stops short of the
+    /// poles, which is how a glide knows it has run into one.
+    pub fn elevation(&self) -> f32 {
+        self.orbit.elevation
+    }
+
     /// Pixels per tan unit in a `viewport`: the still's fit scale times the zoom.
     fn pixels_per_unit(&self, viewport: [f32; 2]) -> f32 {
         let fit = (viewport[0].max(1.0) * FILL / self.span[0])
@@ -204,18 +210,17 @@ fn mul(a: [[f32; 4]; 4], b: [[f32; 4]; 4]) -> [[f32; 4]; 4] {
 }
 
 /// The model as a GPU-ready triangle soup: three corners per triangle, each with its
-/// triangle's sRGB colour (or [`DEFAULT_COLOR`]). A soup, not an indexed mesh, because colour
-/// is per triangle; flat normals come from screen-space derivatives in the shader.
-pub fn corners(model: &Model) -> impl Iterator<Item = ([f32; 3], [u8; 3])> + '_ {
+/// triangle's sRGB colour, or `None` for a model whose file colours nothing (it is drawn in the
+/// viewer's model colour, which the GPU applies per frame, so changing it never re-uploads). A
+/// soup, not an indexed mesh, because colour is per triangle; flat normals come from
+/// screen-space derivatives in the shader.
+pub fn corners(model: &Model) -> impl Iterator<Item = ([f32; 3], Option<[u8; 3]>)> + '_ {
     model
         .triangles
         .iter()
         .enumerate()
         .flat_map(move |(ti, tri)| {
-            let color = model
-                .triangle_colors
-                .as_ref()
-                .map_or(DEFAULT_COLOR, |c| c[ti]);
+            let color = model.triangle_colors.as_ref().map(|c| c[ti]);
             tri.map(|i| (model.positions[i as usize], color))
         })
 }
@@ -368,8 +373,11 @@ mod tests {
         let mut m = cube();
         let c: Vec<_> = corners(&m).collect();
         assert_eq!(c.len(), 36);
-        assert!(c.iter().all(|(_, col)| *col == DEFAULT_COLOR));
+        assert!(
+            c.iter().all(|(_, col)| col.is_none()),
+            "uncoloured: the viewer's colour"
+        );
         m.triangle_colors = Some(vec![[1, 2, 3]; 12]);
-        assert!(corners(&m).all(|(_, col)| col == [1, 2, 3]));
+        assert!(corners(&m).all(|(_, col)| col == Some([1, 2, 3])));
     }
 }

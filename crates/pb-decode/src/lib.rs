@@ -122,9 +122,11 @@ pub mod png_text;
 /// The one poster walk policy (task #115), shared by the MF / FFmpeg /
 /// AVFoundation backends. Pure: no unsafe, no cfg, no I/O.
 pub mod poster_walk;
+// 3D models (task #151): STL / OBJ / 3MF rendered to a still through pb-mesh.
+mod model;
+pub use model::{model_color, set_model_color};
 // Video playback frame contract (task #79 phase 0): the VideoFrame/VideoColorInfo
 // types every platform video producer emits. Pure data — producers come later.
-mod model;
 mod psd;
 mod raw;
 mod svg;

@@ -841,7 +841,11 @@ impl AppCore {
                 let p = [x, y];
                 if self.dragging {
                     if let Some(prev) = self.last_cursor {
-                        self.pan_by_pixels(p[0] - prev[0], p[1] - prev[1]);
+                        let (dx, dy) = (p[0] - prev[0], p[1] - prev[1]);
+                        self.pan_by_pixels(dx, dy);
+                        // Sampled for a flick's throw (task #153); `Instant::now()` because
+                        // the winit shell's `self.now` is stamped per tick, not per event.
+                        self.live_model_drag_moved(Instant::now(), dx, dy);
                     }
                 }
                 self.last_cursor = Some(p);

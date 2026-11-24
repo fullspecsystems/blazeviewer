@@ -97,6 +97,9 @@ pub struct RenderOptions {
     /// Supersample 2×2 only while the supersampled buffer stays within this many pixels. Each
     /// sample costs 8 bytes (colour + depth), so the default bounds a render's scratch at 64 MB.
     pub max_supersampled_pixels: u64,
+    /// The colour (sRGB) of a model whose file colours nothing: the viewer's model colour
+    /// setting. A file's own colours always win.
+    pub base_color: [u8; 3],
 }
 
 impl RenderOptions {
@@ -105,6 +108,7 @@ impl RenderOptions {
             max_width,
             max_height,
             max_supersampled_pixels: 8_000_000,
+            base_color: DEFAULT_COLOR,
         }
     }
 }
@@ -186,7 +190,7 @@ impl MeshRasterizer for CpuRasterizer {
             let base = model
                 .triangle_colors
                 .as_ref()
-                .map_or(DEFAULT_COLOR, |c| c[ti]);
+                .map_or(opts.base_color, |c| c[ti]);
             let rgba = shade(base, n, key, fill);
             let [pa, pb, pc] = tri.map(|i| to_screen(proj[i as usize]));
             target.triangle(pa, pb, pc, rgba);
@@ -440,6 +444,20 @@ mod tests {
             .unwrap();
         let c = px(&r, r.width / 2, r.height / 2);
         assert!(c[0] > c[1] * 2 && c[0] > c[2] * 2, "red dominates: {c:?}");
+    }
+
+    #[test]
+    fn an_uncoloured_model_takes_the_viewers_colour_but_file_colours_win() {
+        let mut opts = RenderOptions::fit(128, 128);
+        opts.base_color = [30, 30, 220];
+        let mut m = cube();
+        let r = CpuRasterizer.render(&m, &opts).unwrap();
+        let c = px(&r, r.width / 2, r.height / 2);
+        assert!(c[2] > c[0] * 2 && c[2] > c[1] * 2, "blue dominates: {c:?}");
+        m.triangle_colors = Some(vec![[220, 30, 30]; m.triangles.len()]);
+        let r = CpuRasterizer.render(&m, &opts).unwrap();
+        let c = px(&r, r.width / 2, r.height / 2);
+        assert!(c[0] > c[2] * 2, "the file's red wins: {c:?}");
     }
 
     #[test]

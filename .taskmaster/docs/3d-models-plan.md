@@ -331,6 +331,52 @@ port it.
 
 ## Handoff
 
+### 2026-11-24 (night) — flick momentum, model colour and spin speed (Mac session)
+
+Owner asks: a little momentum after a flick; the model's colour in Settings ▸ Appearance with
+a spin-speed slider under it. The owner OK'd the spin speed (30°/s), the pill wording and the
+FA Pro `360-degrees` icon.
+
+- **Momentum:**
+  - Both shells' mouse button now goes through `AppCore::set_dragging`, where it used to write
+    `core.dragging` directly. Down cancels any glide. Up over a turning model throws it, using
+    `live_model::DragVelocity`: a fixed 16-sample ring of drag moves, the last 80 ms, nothing
+    if the pointer rested 50 ms first, capped at 6000 px/s.
+  - The throw reuses the touch fling (`fling_pan` → `apply_pan_inertia`, UIKit's decay).
+    `apply_pan_inertia` no longer kills a glide over a model on its first tick (it watched
+    `view.pan`), and its vertical axis stops at the poles.
+  - Photos still stop dead on a mouse release, the Mac convention.
+  - Trackpad two-finger swipes already carried macOS's own momentum events and are
+    unchanged. A Windows touch fling now turns a model too.
+- **Colour:** `Settings::model_color`, default `pb_mesh::DEFAULT_COLOR`.
+  - Still: `RenderOptions::base_color`, fed from a process-wide value
+    (`pb_decode::set_model_color`, the accent's pattern). `refresh_theme` sets it, and runs
+    before the first prefetch on both shells.
+  - Live view: uncoloured corners carry alpha 0 and the shader substitutes
+    `MeshFrame::base_color`, a uniform. A change never re-uploads, and the camera and spin
+    survive it.
+  - On a change, `recolor_models` re-renders the stills with `invalidate_content` plus a
+    prefetch, and carries the live model across the generation bump. A deck with no model
+    pays nothing.
+  - A 3MF's own colours win. Its uncoloured triangles in a *partially* coloured file stay
+    `DEFAULT_COLOR` (baked by the parser).
+- **Spin speed:** `Settings::model_spin_rpm`, 1–20, default 5 (= 30°/s). A running spin eases
+  to a new value (`Spin::set_cruise`).
+- **UI:** Mac `SettingsView` Appearance, under the background pickers: a `ColorPicker` and a
+  stepped slider. egui `dialog.rs`: two `card_row`s. Labels say "color" to match both shells'
+  existing labels.
+- **Verified (macOS):**
+  - All suites: pb-app-core 1138, pb-decode 283, pb-render 79, pb-mesh 46, pb-mac-ffi,
+    pb-ui.
+  - New tests cover the throw (flick, rest, photo, touch fling, pole), the colour (CPU still,
+    GPU uniform, decode global, the recolour keeping the live view, a photo deck paying
+    nothing), spin speed, and the settings round-trip and clamp.
+  - Windows clippy cross-check passes.
+- **Not verified:**
+  - The flick's feel and the Settings rows in the running app on either shell. A test
+    instance under a scratch `HOME` came up as a first run and never opened the file.
+  - Windows at runtime.
+
 ### 2026-11-24 (evening) — `P` spins a model; the pill advertises it (Mac session)
 
 Owner call: `P` on a model is a turntable, and the play-hint pill doubles as the cue that a

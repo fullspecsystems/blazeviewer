@@ -22,6 +22,9 @@ with any pre-release suffix carried only by the tag.
   is drawn live on your graphics card, with smooth (antialiased) edges, and is ready
   to turn the moment you stop on it. Press `P` (or click the *Spin* hint that appears)
   to set it turning on its own like a turntable, and `P` again to let it glide to a stop.
+  Flick it with the mouse and it keeps turning for a moment before it settles. Settings ▸
+  Appearance has the colour for models whose file doesn't colour them (a 3MF's own
+  colours still win) and the spin speed.
 - **Export.** Press `E` (or File ▸ Export…, ⇧⌘E on a Mac, or right-click the
   photo) for Export mode: a panel in the Inspector's place where you pick PNG or
   JPEG, the JPEG quality (`[` and `]` step it) or PNG compression, and a size —

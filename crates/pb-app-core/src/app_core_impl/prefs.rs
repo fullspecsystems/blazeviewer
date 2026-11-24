@@ -40,6 +40,9 @@ impl AppCore {
         if let Some(h) = self.hud.as_mut() {
             h.set_theme(hud::Theme::of(dark));
         }
+        // The 3D model colour rides along (task #153): it is appearance too, and this runs when
+        // the renderer stands up on both shells, before any model is decoded.
+        pb_decode::set_model_color(self.settings.model_color);
         if dark != self.hud_dark {
             self.hud_dark = dark;
             // Pie / scan card / info panel / tree / open hint all re-rasterize with the
@@ -69,6 +72,9 @@ impl AppCore {
         // Appearance + letterbox / background fill → HUD scheme + renderer (task #46);
         // rebuilds the overlay bitmaps when the resolved theme flipped.
         self.refresh_theme();
+
+        // The 3D model look (task #153): spin speed and colour.
+        self.apply_model_look(&old);
 
         // Default scale mode: apply live if it changed (re-frames + reloads at the new
         // fit). `set_scale_mode` redraws for us.

@@ -131,6 +131,11 @@ pub struct WindowGeometry {
 /// the byte budget is the real gate, this just caps how many originals are *requested*.
 pub const FULL_RES_RADIUS_MAX: u8 = 3;
 
+/// The range of [`Settings::model_spin_rpm`]: from a slow turn a minute to one every three
+/// seconds.
+pub const MODEL_SPIN_RPM_MIN: u8 = 1;
+pub const MODEL_SPIN_RPM_MAX: u8 = 20;
+
 /// All persisted preferences. `#[serde(default)]` makes any missing key fall back to
 /// [`Settings::default`], so partial / older files (e.g. one that only set
 /// `fullscreen`) load cleanly, and unknown keys are ignored — forward/backward
@@ -218,6 +223,13 @@ pub struct Settings {
     /// `50`–`100` — lets the user see more of the photo through the chrome. Defaults high to
     /// preserve contrast (roughly the pre-slider look). Only the macOS native panels read it.
     pub panel_opacity: u8,
+    /// The colour (sRGB) a 3D model is drawn in when its file colours nothing (task #153;
+    /// owner decision D3: neutral grey by default, customizable). A 3MF's own filament
+    /// colours always win.
+    pub model_color: [u8; 3],
+    /// How fast `P` spins a 3D model, in turns per minute ([`MODEL_SPIN_RPM_MIN`]–
+    /// [`MODEL_SPIN_RPM_MAX`]). The default 5 is a turn every 12 seconds.
+    pub model_spin_rpm: u8,
     /// Default slideshow interval in seconds — the per-slide dwell a fresh session
     /// starts at (#31). Clamped to the slideshow's own `[MIN, MAX]_INTERVAL`; the
     /// `[` / `]` keys still adjust it live for the session without rewriting this.
@@ -361,10 +373,12 @@ impl Default for Settings {
             info_show_filename: true,
             info_show_resolution: true,
             info_show_codec: true,
-            letterbox: [10, 10, 12],          // pb_render::LETTERBOX (rgb)
-            letterbox_light: [240, 241, 245], // the light-mode analog (#46)
-            info_opacity: 60,                 // hud::BG alpha 153/255 ≈ 60%
-            panel_opacity: 92,                // conservative-high (≈ today's material look)
+            letterbox: [10, 10, 12],             // pb_render::LETTERBOX (rgb)
+            letterbox_light: [240, 241, 245],    // the light-mode analog (#46)
+            info_opacity: 60,                    // hud::BG alpha 153/255 ≈ 60%
+            panel_opacity: 92,                   // conservative-high (≈ today's material look)
+            model_color: pb_mesh::DEFAULT_COLOR, // neutral grey (owner D3)
+            model_spin_rpm: 5,                   // a turn every 12 s
             slideshow_interval_secs: slideshow::DEFAULT_INTERVAL.as_secs_f64(), // 4.0
             window: None,
             picker_dir: None,       // start in the current photo's folder
@@ -410,6 +424,9 @@ impl Settings {
         self.hold_delay_ms = self.hold_delay_ms.min(2000);
         self.info_opacity = self.info_opacity.min(100);
         self.panel_opacity = self.panel_opacity.clamp(50, 100);
+        self.model_spin_rpm = self
+            .model_spin_rpm
+            .clamp(MODEL_SPIN_RPM_MIN, MODEL_SPIN_RPM_MAX);
         // Keep the response cap sane (a stray 0 would ask for an empty reply; a huge value
         // could stall the panel). Covers the presets 256/512/1024 with headroom.
         self.describe_max_tokens = self.describe_max_tokens.clamp(16, 4096);
@@ -552,6 +569,22 @@ mod tests {
         let text = toml::to_string_pretty(&s).unwrap();
         let back: Settings = toml::from_str(&text).unwrap();
         assert_eq!(s, back);
+    }
+
+    #[test]
+    fn model_look_defaults_round_trips_and_clamps() {
+        let d = Settings::default();
+        assert_eq!(d.model_color, pb_mesh::DEFAULT_COLOR);
+        assert_eq!(d.model_spin_rpm, 5);
+        let s: Settings =
+            toml::from_str("model_color = [10, 20, 30]\nmodel_spin_rpm = 7\n").unwrap();
+        assert_eq!((s.model_color, s.model_spin_rpm), ([10, 20, 30], 7));
+        let mut s: Settings = toml::from_str("model_spin_rpm = 0\n").unwrap();
+        s.clamp();
+        assert_eq!(s.model_spin_rpm, MODEL_SPIN_RPM_MIN);
+        s.model_spin_rpm = 250;
+        s.clamp();
+        assert_eq!(s.model_spin_rpm, MODEL_SPIN_RPM_MAX);
     }
 
     #[test]

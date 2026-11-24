@@ -142,6 +142,8 @@ struct SettingsDraft {
     info_show_codec: bool,
     letterbox: [f32; 3], // 0..1 per channel (egui color picker) — the dark fill
     letterbox_light: [f32; 3], // the light-mode fill (#46)
+    model_color: [f32; 3], // 3D models the file leaves uncoloured (task #153)
+    model_spin_rpm: u8,  // `P`'s turntable, turns per minute
     info_opacity: u8,    // 0..100
     startup_mode: usize, // 0 = Fullscreen, 1 = Windowed, 2 = Remember
     slideshow_interval: f64, // seconds (default slideshow dwell)
@@ -240,6 +242,8 @@ impl SettingsDraft {
                 s.letterbox_light[1] as f32 / 255.0,
                 s.letterbox_light[2] as f32 / 255.0,
             ],
+            model_color: s.model_color.map(|c| c as f32 / 255.0),
+            model_spin_rpm: s.model_spin_rpm,
             info_opacity: s.info_opacity,
             startup_mode: match s.startup_mode {
                 settings::StartupMode::Fullscreen => 0,
@@ -328,6 +332,12 @@ impl SettingsDraft {
             (self.letterbox_light[1] * 255.0).round().clamp(0.0, 255.0) as u8,
             (self.letterbox_light[2] * 255.0).round().clamp(0.0, 255.0) as u8,
         ];
+        s.model_color = self
+            .model_color
+            .map(|c| (c * 255.0).round().clamp(0.0, 255.0) as u8);
+        s.model_spin_rpm = self
+            .model_spin_rpm
+            .clamp(settings::MODEL_SPIN_RPM_MIN, settings::MODEL_SPIN_RPM_MAX);
         s.info_opacity = self.info_opacity;
         s.startup_mode = match self.startup_mode {
             0 => settings::StartupMode::Fullscreen,
@@ -3074,6 +3084,32 @@ fn display_tab(ui: &mut egui::Ui, p: &pbui::Palette, d: &mut SettingsDraft) {
             Some("Fills the screen around an image in the light theme"),
             |ui| {
                 ui.color_edit_button_rgb(&mut d.letterbox_light);
+            },
+        );
+        // The 3D model look (task #153), under the background colours like the macOS pane.
+        pbui::card_row(
+            ui,
+            p,
+            None,
+            "3D model color",
+            Some("For models whose file doesn't color them; a 3MF's own colors win"),
+            |ui| {
+                ui.color_edit_button_rgb(&mut d.model_color);
+            },
+        );
+        pbui::card_row(
+            ui,
+            p,
+            None,
+            "3D model spin speed",
+            Some("How fast P turns a model, in turns per minute"),
+            |ui| {
+                pbui::slider(
+                    ui,
+                    &mut d.model_spin_rpm,
+                    settings::MODEL_SPIN_RPM_MIN..=settings::MODEL_SPIN_RPM_MAX,
+                    " rpm",
+                );
             },
         );
         pbui::card_row(

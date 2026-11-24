@@ -9,9 +9,32 @@
 //! When a 3MF's mesh can't be drawn — none present (a sliced `.gcode.3mf`), over the size
 //! limits, or malformed — its embedded slicer thumbnail is shown instead (owner decision D2).
 
+use std::sync::atomic::{AtomicU32, Ordering};
+
 use pb_mesh::{CpuRasterizer, Limits, MeshError, MeshRasterizer, ModelFormat, RenderOptions};
 
 use crate::{common, DecodeError, DecodeRequest, DecodedImage, FitBox};
+
+/// The viewer's model colour, packed `0x00RR_GGBB`: the colour of a model whose file colours
+/// nothing. Process-wide, like the chrome accent, because it is one user preference read by
+/// every decode worker; the app sets it from Settings ▸ Appearance.
+static MODEL_COLOR: AtomicU32 = AtomicU32::new(pack(pb_mesh::DEFAULT_COLOR));
+
+const fn pack([r, g, b]: [u8; 3]) -> u32 {
+    (r as u32) << 16 | (g as u32) << 8 | b as u32
+}
+
+/// Set the colour models render in when their file doesn't colour them. Stills decoded before
+/// the change keep the old colour; the caller re-decodes what it holds.
+pub fn set_model_color(rgb: [u8; 3]) {
+    MODEL_COLOR.store(pack(rgb), Ordering::Relaxed);
+}
+
+/// The current model colour (see [`set_model_color`]).
+pub fn model_color() -> [u8; 3] {
+    let v = MODEL_COLOR.load(Ordering::Relaxed);
+    [(v >> 16) as u8, (v >> 8) as u8, v as u8]
+}
 
 /// The render's long edge when no fit box is given. A model has no native resolution, so its
 /// "natural size" is a nominal render size, as with an SVG.
@@ -43,8 +66,12 @@ pub(crate) fn decode_model(
     let (w, h) = req.fit.map_or((NOMINAL_EDGE, NOMINAL_EDGE), |f| {
         (f.max_width, f.max_height)
     });
+    let opts = RenderOptions {
+        base_color: model_color(),
+        ..RenderOptions::fit(w, h)
+    };
     let still = CpuRasterizer
-        .render(&model, &RenderOptions::fit(w, h))
+        .render(&model, &opts)
         .map_err(|e| DecodeError::Corrupt(e.to_string()))?;
     // Rendered at the fit already: no decode-to-fit pass, no EXIF.
     common::finalize(
@@ -123,6 +150,21 @@ mod tests {
         assert!(img.width <= 320 && img.height <= 200);
         assert!(img.is_well_formed());
         assert!(!img.is_preview);
+    }
+
+    #[test]
+    fn the_model_colour_setting_reaches_the_still() {
+        let fit = FitBox {
+            max_width: 64,
+            max_height: 64,
+        };
+        super::set_model_color([30, 200, 40]);
+        let img = decode_named_bytes("cube.stl", &cube_stl(), Some(fit), false);
+        super::set_model_color(pb_mesh::DEFAULT_COLOR); // process-wide: put it back first
+        let img = img.unwrap();
+        let at = ((img.height / 2 * img.width + img.width / 2) * 4) as usize;
+        let [r, g, b] = [img.pixels[at], img.pixels[at + 1], img.pixels[at + 2]];
+        assert!(g > r * 2 && g > b * 2, "green: {r} {g} {b}");
     }
 
     #[test]

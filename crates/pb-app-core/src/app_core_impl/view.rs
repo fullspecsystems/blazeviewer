@@ -492,6 +492,31 @@ impl AppCore {
         self.pan_inertia = Some(crate::PanInertia { vx, vy, last: None });
     }
 
+    /// The primary button went down or up over the canvas: the mouse half of drag-to-pan, for
+    /// both shells. Down grabs, which stops any glide. Up over a 3D model that was still moving
+    /// throws it (task #153): it keeps turning and slows to a stop, like a flicked globe, at the
+    /// same rate as a touch flick or the trackpad's own momentum. A photo stops dead, the Mac
+    /// convention for a mouse drag.
+    pub fn set_dragging(&mut self, pressed: bool) {
+        // `Instant::now()`, not `self.now`: the winit shell stamps that once per tick, so it
+        // can be seconds stale by the time a button event arrives.
+        self.set_dragging_at(pressed, Instant::now());
+    }
+
+    pub fn set_dragging_at(&mut self, pressed: bool, now: Instant) {
+        let released = self.dragging && !pressed;
+        self.dragging = pressed;
+        if pressed {
+            self.cancel_pan_inertia();
+            self.live_model.drag.clear();
+        } else if released {
+            if let Some([vx, vy]) = self.live_model_throw(now) {
+                self.fling_pan(vx, vy);
+            }
+        }
+        self.refresh_cursor();
+    }
+
     /// Stop any glide dead — the user grabbed the photo again, or focus was lost. A new
     /// contact must take control instantly; a photo still drifting under a resting finger
     /// is the single worst way this can feel.
@@ -524,14 +549,24 @@ impl AppCore {
         glide.last = Some(now);
 
         if dt > 0.0 {
+            // A ready 3D model turns instead of panning (task #153), and `view.pan` never moves,
+            // so the photo's edge test would kill the glide on its first tick. Turning has no
+            // edge sideways; up and down it stops at the poles.
+            let elevation = self.live_model_elevation();
             let before = self.view.pan;
             self.pan_by_pixels(glide.vx * dt, glide.vy * dt);
-            let after = self.view.pan;
-            if glide.vx != 0.0 && (after[0] - before[0]).abs() < f32::EPSILON {
-                glide.vx = 0.0;
-            }
-            if glide.vy != 0.0 && (after[1] - before[1]).abs() < f32::EPSILON {
-                glide.vy = 0.0;
+            if let Some(e0) = elevation {
+                if glide.vy != 0.0 && self.live_model_elevation() == Some(e0) {
+                    glide.vy = 0.0;
+                }
+            } else {
+                let after = self.view.pan;
+                if glide.vx != 0.0 && (after[0] - before[0]).abs() < f32::EPSILON {
+                    glide.vx = 0.0;
+                }
+                if glide.vy != 0.0 && (after[1] - before[1]).abs() < f32::EPSILON {
+                    glide.vy = 0.0;
+                }
             }
             let decay = crate::engine::pan_inertia_decay(dt);
             glide.vx *= decay;
