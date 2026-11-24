@@ -154,8 +154,9 @@ impl<'a> Package<'a> {
         } else {
             self.zip
                 .file_names()
+                .filter_map(Result::ok)
                 .find(|n| n.eq_ignore_ascii_case(wanted))
-                .map(str::to_string)
+                .map(|n| n.into_owned())
                 .ok_or_else(|| MeshError::Malformed(format!("missing part {wanted}")))?
         };
         let file = self
@@ -820,6 +821,86 @@ pub(crate) mod tests {
         );
         let only_pick = package(&[("Metadata/pick_1.png", b"PICK")]);
         assert_eq!(thumbnail(&only_pick), None);
+    }
+
+    /// A STORED ZIP built by hand the way Bambu Studio writes its 3MFs: every central-directory
+    /// entry carries a ZIP64 extra field, and that field's local-header offset is **wrong**
+    /// while the regular 32-bit offset is right. The spec says the ZIP64 value only applies when
+    /// the 32-bit field is `0xFFFFFFFF`; zip 2.x used it anyway and rejected the whole package
+    /// as "Could not find EOCD" (owner-reported on a real Bambu file, 2026-11-23).
+    fn stale_zip64_package(files: &[(&str, &[u8])]) -> Vec<u8> {
+        fn crc32(data: &[u8]) -> u32 {
+            let mut crc = !0u32;
+            for &b in data {
+                crc ^= b as u32;
+                for _ in 0..8 {
+                    crc = if crc & 1 != 0 {
+                        (crc >> 1) ^ 0xEDB8_8320
+                    } else {
+                        crc >> 1
+                    };
+                }
+            }
+            !crc
+        }
+        let (mut out, mut central) = (Vec::new(), Vec::new());
+        for (name, data) in files {
+            let offset = out.len() as u32;
+            let (crc, len, name_len) = (crc32(data), data.len() as u32, name.len() as u16);
+            out.extend(0x0403_4b50u32.to_le_bytes());
+            for v in [45u16, 0, 0, 0, 0] {
+                out.extend(v.to_le_bytes()); // version, flags, STORED, time, date
+            }
+            for v in [crc, len, len] {
+                out.extend(v.to_le_bytes());
+            }
+            out.extend(name_len.to_le_bytes());
+            out.extend(0u16.to_le_bytes());
+            out.extend(name.as_bytes());
+            out.extend(*data);
+
+            central.extend(0x0201_4b50u32.to_le_bytes());
+            for v in [45u16, 45, 0, 0, 0, 0] {
+                central.extend(v.to_le_bytes());
+            }
+            for v in [crc, len, len] {
+                central.extend(v.to_le_bytes());
+            }
+            for v in [name_len, 28, 0, 0, 0] {
+                central.extend(v.to_le_bytes()); // name, extra, comment, disk, internal attrs
+            }
+            central.extend(0u32.to_le_bytes()); // external attrs
+            central.extend(offset.to_le_bytes()); // the RIGHT offset
+            central.extend(name.as_bytes());
+            central.extend(1u16.to_le_bytes()); // ZIP64 extended information
+            central.extend(24u16.to_le_bytes());
+            central.extend(u64::from(len).to_le_bytes());
+            central.extend(u64::from(len).to_le_bytes());
+            central.extend((u64::from(offset) + 41_013).to_le_bytes()); // the STALE offset
+        }
+        let cd_offset = out.len() as u32;
+        let cd_len = central.len() as u32;
+        out.extend(central);
+        out.extend(0x0605_4b50u32.to_le_bytes());
+        let n = files.len() as u16;
+        for v in [0u16, 0, n, n] {
+            out.extend(v.to_le_bytes());
+        }
+        out.extend(cd_len.to_le_bytes());
+        out.extend(cd_offset.to_le_bytes());
+        out.extend(0u16.to_le_bytes());
+        out
+    }
+
+    #[test]
+    fn bambu_style_stale_zip64_offsets_still_open() {
+        let xml = model_xml(&tetra(1, ""), r#"<item objectid="1"/>"#);
+        let bytes = stale_zip64_package(&[
+            ("_rels/.rels", RELS.as_bytes()),
+            ("3D/3dmodel.model", xml.as_bytes()),
+        ]);
+        let m = parse_default(&bytes).expect("a valid 32-bit offset wins over a stale ZIP64 one");
+        assert_eq!(m.triangles.len(), 4);
     }
 
     #[test]

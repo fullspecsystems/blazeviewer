@@ -101,7 +101,14 @@ date; re-check before adding a dependency.
   dependencies; that is task #155.)
 - `zip` 2.4.2 with `aes-crypto` (what `pb-source` and `pb-app-core` use today) carries
   RUSTSEC-2026-0545 (AES entries accepted without their HMAC when truncated or empty), which is
-  fixed in ≥ 9.0. A 3MF never needs AES, but it rides the same crate. Tracked as #155.
+  fixed in ≥ 9.0. Tracked as #155.
+- **`pb-mesh` is on `zip` 9.8, not the tree's 2.x, and must stay ≥ 4** (2026-11-23). Bambu Studio
+  writes 3MFs whose central directory carries a ZIP64 extra field with a **wrong local-header
+  offset** next to a correct 32-bit one. The spec says the ZIP64 value applies only to fields
+  set to `0xFFFFFFFF`; zip 2.x used it anyway, failed the entry, retried for an earlier end
+  record and reported the misleading `Could not find EOCD`. zip ≥ 4 (and `unzip`) read these
+  files. Pinned by `bambu_style_stale_zip64_offsets_still_open`. `pb-source` has the same bug
+  for any ZIP written this way, which is another reason for #155.
 
 ### Slicer 3MF layouts (for #152 and the thumbnail rung)
 
@@ -366,6 +373,11 @@ STL; `examples/model_png` (renders a model to PNG through the real decode path);
 - **Decisions / corrections:** D1–D5 settled by the owner 2026-11-23 (above). The default grey
   became `#C8CCD2` and peak lighting is capped at ~0.95 after a white-filament Bambu file
   (`#F6F6F3`) clipped flat at the first settings.
+- **Correction (same day, owner test):** real Bambu Studio 3MFs failed to open with `not a 3MF
+  package: … Could not find EOCD`. The bundled calibration files had passed because they don't
+  carry the stale ZIP64 extras (see *Dependency hygiene*). Fixed by moving `pb-mesh` to zip 9.8;
+  all 8 3MFs in the owner's reporting folder (Bambu projects and plain exports) now render.
+  Lesson: the bundled-app corpus is not a stand-in for files the slicer *writes*.
 - **Cross-platform debt:** **Windows must run** `pb-app`'s tests (`viewing_a_folder_writes_nothing_to_disk`
   now seeds `sub/part.stl` and expects 7 items) and **check** that the `.Model` ProgId registers and
   unregisters cleanly. It was added to the one `progids()` list that all four call sites walk.
