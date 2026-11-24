@@ -535,25 +535,34 @@ struct SettingsView: View {
         )
     }
 
-    @ViewBuilder
     private func labeledSlider(
         _ label: String, value: Binding<Double>, in range: ClosedRange<Double>,
         step: Double? = nil, format: String
     ) -> some View {
-        HStack {
-            Text(label)
-            if let step {
-                Slider(value: value, in: range, step: step)
-            } else {
-                Slider(value: value, in: range)
+        // `step` snaps the value, never the control: a stepped `Slider` draws a tick mark for
+        // every step (79 of them for a quarter-rpm spin speed, a grey smear) and swaps to the
+        // notched knob, so it looks like no other slider here.
+        let snapped = step.map { step in
+            Binding(
+                get: { value.wrappedValue },
+                set: { value.wrappedValue = ($0 / step).rounded() * step })
+        } ?? value
+        // `LabeledContent` puts the label in the Form's label column and the slider in its
+        // content column, so every slider gets the same width whatever its label's length
+        // (as a bare HStack, a long label squeezed its own slider shorter).
+        return LabeledContent {
+            HStack {
+                Slider(value: snapped, in: range)
+                Text(
+                    format.contains("%")
+                        ? String(format: format, value.wrappedValue) : format
+                )
+                .monospacedDigit()
+                .foregroundStyle(.secondary)
+                .frame(width: 110, alignment: .trailing)
             }
-            Text(
-                format.contains("%")
-                    ? String(format: format, value.wrappedValue) : format
-            )
-            .monospacedDigit()
-            .foregroundStyle(.secondary)
-            .frame(width: 110, alignment: .trailing)
+        } label: {
+            Text(label)
         }
     }
 
