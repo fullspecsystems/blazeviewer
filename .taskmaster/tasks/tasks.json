@@ -2333,45 +2333,45 @@
         "description": "Browse 3D-print files like photos. STL, OBJ and 3MF (including the Production extension that Bambu Studio and Orca write; without it their projects render empty) parse in a new pure crate, pb-mesh. They render to a shaded still on the decode pool (a CPU rasterizer behind a MeshRasterizer seam) and flow through the existing image path as LibraryItemKind::Image, routed by extension like SVG. So prefetch, blaze, the thumbnail strip, archives (ZIPs of STLs), Copy, Export and Describe work unchanged. The Info panel shows model facts: triangles, size in mm, objects, 3MF metadata. RAM-only, and every parser is fuzzed. Plan: .taskmaster/docs/3d-models-plan.md.",
         "details": "Evaluation 2026-11-23: medium-sized, comparable to adding RAW support; the 3MF parser and a fast, good-looking rasterizer are most of the work. Libraries, architecture and the hostile-input list are in the plan. Owner decisions 2026-11-23 (plan § Owner decisions): D2 embedded thumbnails = thumbnail strip + fallback, preview rung only where our render is measurably slow; D3 default colour neutral grey (customization later); D4 models load by default, no toggle in phase 1; D5 alternate handler only, never the default. Phase 2 (#153) reuses pb-mesh's model and camera, so keep the canonical Model GPU-friendly (flat f32 positions, u32 indices).",
         "testStrategy": "TDD per plan § Tests: in-tree fixtures + proptests per parser; nv-flip golden images for the rasterizer; folder + ZIP integration; '.3mf is never an archive door'; the no-trace test with a model in the sandbox; a cargo-fuzz target per parser; a PB_PERF open -> first-model episode with p50/p95/p99 on the local corpus.",
-        "status": "pending",
+        "status": "in-progress",
         "priority": "high",
         "dependencies": [],
         "subtasks": [
           {
             "id": 1,
             "title": "Corpus, baseline numbers, owner decisions",
-            "description": "Assemble the local corpus (paths in .taskmaster/local/notes.md, never the public repo): Printables/Thingiverse STLs including a ZIP download, a multi-plate painted Bambu Studio project, Orca and PrusaSlicer 3MFs, a .gcode.3mf, and a 1M+ triangle stress mesh. Owner decisions D2-D5 settled 2026-11-23 (see details).",
-            "status": "pending"
+            "description": "Assemble the local corpus (paths in .taskmaster/local/notes.md, never the public repo): Printables/Thingiverse STLs including a ZIP download, a multi-plate painted Bambu Studio project, Orca and PrusaSlicer 3MFs, a .gcode.3mf, and a 1M+ triangle stress mesh. Owner decisions D2-D5 settled 2026-11-23 (see details). 2026-11-23: the 93 models bundled with Bambu Studio served as a first corpus (sweep numbers in the plan's Handoff); the owner's own files (Bambu/Orca projects, a ZIP download, an OBJ, a 1M+ stress mesh) are still to assemble.",
+            "status": "in-progress"
           },
           {
             "id": 2,
             "title": "pb-mesh crate: canonical Model, budget pre-flight, STL",
-            "description": "New pure workspace crate (no std::fs, no GPU, no cfg). Model = f32 positions, u32 triangle indices, optional per-triangle colour, resolved build transforms, bounding box, units, a ModelFacts block for the panel; ModelError; a cancellation hook. budget.rs = refuse-before-reserve triangle/byte caps from cheap header facts. STL binary + ASCII: binary files whose header starts 'solid', counts that lie about the file length, NaN/Inf vertices. Recompute face normals; never trust the stored ones. Hand-rolled, not stl_io (unfuzzed, and we need the pre-flight + cancel hooks). Fuzz target in fuzz/.",
-            "status": "pending"
+            "description": "New pure workspace crate (no std::fs, no GPU, no cfg). Model = f32 positions, u32 triangle indices, optional per-triangle colour, resolved build transforms, bounding box, units, a ModelFacts block for the panel; ModelError; a cancellation hook. budget.rs = refuse-before-reserve triangle/byte caps from cheap header facts. STL binary + ASCII: binary files whose header starts 'solid', counts that lie about the file length, NaN/Inf vertices. Recompute face normals; never trust the stored ones. Hand-rolled, not stl_io (unfuzzed, and we need the pre-flight + cancel hooks). Fuzz target in fuzz/. DONE 2026-11-23: crates/pb-mesh (lib.rs, stl.rs); 37 crate tests incl. a no-panic proptest.",
+            "status": "done"
           },
           {
             "id": 3,
             "title": "OBJ parser",
-            "description": "tobj 4.x (MIT, fuzzed). Its triangulation is fan-only, so load faces untriangulated and ear-clip concave polygons ourselves (or pin fans in a test). Handle negative (relative) indices, flag Y-up. mtllib is ignored for now (the sibling-file seam is #154), so materials fall back to the default. Fuzz target.",
-            "status": "pending"
+            "description": "tobj 4.x (MIT, fuzzed). Its triangulation is fan-only, so load faces untriangulated and ear-clip concave polygons ourselves (or pin fans in a test). Handle negative (relative) indices, flag Y-up. mtllib is ignored for now (the sibling-file seam is #154), so materials fall back to the default. Fuzz target. LANDED 2026-11-23 via tobj 4 (fan triangulation pinned as a known gap; ear-clipping still to do). No real OBJ tested yet.",
+            "status": "review"
           },
           {
             "id": 4,
             "title": "3MF parser: core + Production + materials",
-            "description": "OPC: follow _rels/.rels to the root model part (never hard-code 3D/3dmodel.model). Streaming XML parse (no DOM) that checks the cancel flag every N elements. Build items with 3x4 transforms; components with a depth limit + cycle check; Production-extension p:path parts; units -> mm; basematerials displaycolor + colorgroup -> per-triangle colour; metadata (Title, Designer, Application, CreationDate...) into ModelFacts. Cap inflated part sizes (ZIP bomb), like svg.rs caps SVGZ. Hand-rolled on zip + quick-xml >= 0.41 (older quick-xml has the RUSTSEC-2026-0194/0195 DoS bugs); threemf2 is the reference/A-B candidate. Test against the 3MF Consortium conformance suites. Fuzz target.",
-            "status": "pending"
+            "description": "OPC: follow _rels/.rels to the root model part (never hard-code 3D/3dmodel.model). Streaming XML parse (no DOM) that checks the cancel flag every N elements. Build items with 3x4 transforms; components with a depth limit + cycle check; Production-extension p:path parts; units -> mm; basematerials displaycolor + colorgroup -> per-triangle colour; metadata (Title, Designer, Application, CreationDate...) into ModelFacts. Cap inflated part sizes (ZIP bomb), like svg.rs caps SVGZ. Hand-rolled on zip + quick-xml >= 0.41 (older quick-xml has the RUSTSEC-2026-0194/0195 DoS bugs); threemf2 is the reference/A-B candidate. Test against the 3MF Consortium conformance suites. Fuzz target. LANDED 2026-11-23 (threemf.rs): core, Production p:path parts, basematerials + colorgroup, metadata, OPC thumbnail, caps, cycle/depth checks. Not yet: cancellation inside the parse, conformance suites, real Bambu/Orca project files.",
+            "status": "review"
           },
           {
             "id": 5,
             "title": "CPU rasterizer + camera framing",
-            "description": "A MeshRasterizer trait + CPU impl in pb-mesh: transform vertices once, flat per-triangle shading (constant colour per triangle in the inner loop), two-sided unless the mesh is known closed, half-space raster + z-buffer, transparent background. Antialiasing rides the ladder: the fit rung renders at 1x (blaze-fast), and a parked refined rung supersamples (factor capped by a pixel budget; 2x at a 7680-wide fit would be ~0.5 GB) and downscales through Lanczos finalize. Camera: 3/4 front-right-above view, mild perspective, auto-framed to the bounding sphere, Z-up (STL/3MF) vs Y-up (OBJ), aspect follows the silhouette. Cancel checks throughout. Tile-parallel with rayon only if one thread measures too slow. nv-flip golden images. Measure p50/p95/p99 at display fit on the corpus; if p95 can't keep up, A/B a GPU offscreen still behind the same trait.",
-            "status": "pending"
+            "description": "A MeshRasterizer trait + CPU impl in pb-mesh: transform vertices once, flat per-triangle shading (constant colour per triangle in the inner loop), two-sided unless the mesh is known closed, half-space raster + z-buffer, transparent background. Antialiasing rides the ladder: the fit rung renders at 1x (blaze-fast), and a parked refined rung supersamples (factor capped by a pixel budget; 2x at a 7680-wide fit would be ~0.5 GB) and downscales through Lanczos finalize. Camera: 3/4 front-right-above view, mild perspective, auto-framed to the bounding sphere, Z-up (STL/3MF) vs Y-up (OBJ), aspect follows the silhouette. Cancel checks throughout. Tile-parallel with rayon only if one thread measures too slow. nv-flip golden images. Measure p50/p95/p99 at display fit on the corpus; if p95 can't keep up, A/B a GPU offscreen still behind the same trait. 2026-11-23: CPU rasterizer + framing landed (2x2 supersample under an 8 MP budget, per-row spans). 93-model sweep at 4K fit: p50 12.6 / p95 26.9 / max 63 ms. Still to do: the parked supersampled rung, nv-flip goldens, PB_PERF episode.",
+            "status": "in-progress"
           },
           {
             "id": 6,
             "title": "pb-decode ModelDecoder + routing + scanner",
-            "description": "ModelDecoder: ImageDecoder, routed by extension in decode_named_bytes_inner beside SVG/RAW/TGA, inside catch_panics. Add stl/obj/3mf to is_supported_extension, which also makes the scanner and archive indexing pick them up. Exclude models from full_res_eligible (rasterized per viewport, like SVG; fix its missing 'svgz' at the same time). Embedded 3MF thumbnail per D2, found through the standard OPC thumbnail relationship in _rels/.rels (never Bambu's pick_N.png). A .gcode.3mf with no mesh shows its thumbnail plus an honest panel note. Tests: a ZIP of STLs browses; archive_kind('x.3mf') == None and it classifies as Image; the no-trace test with a model.",
-            "status": "pending"
+            "description": "ModelDecoder: ImageDecoder, routed by extension in decode_named_bytes_inner beside SVG/RAW/TGA, inside catch_panics. Add stl/obj/3mf to is_supported_extension, which also makes the scanner and archive indexing pick them up. Exclude models from full_res_eligible (rasterized per viewport, like SVG; fix its missing 'svgz' at the same time). Embedded 3MF thumbnail per D2, found through the standard OPC thumbnail relationship in _rels/.rels (never Bambu's pick_N.png). A .gcode.3mf with no mesh shows its thumbnail plus an honest panel note. Tests: a ZIP of STLs browses; archive_kind('x.3mf') == None and it classifies as Image; the no-trace test with a model. 2026-11-23: routing, scanner/archive pickup, full_res_eligible (+svgz), thumbnail fallback, never-a-door test, no-trace STL seed all landed. Still to do: the D2 preview rung for slow 3MFs.",
+            "status": "in-progress"
           },
           {
             "id": 7,
@@ -2382,8 +2382,8 @@
           {
             "id": 8,
             "title": "OS integration, settings, notices, changelog",
-            "description": "Picker filters (pb-app IMAGE_FILTER_EXTS gains a '3D models' group; the Mac open panel too). macOS Info.plist document types at Alternate rank + a UTImportedTypeDeclarations entry for 3MF. Windows default_app.rs: OpenWithProgids only, never the default (D5). No Show 3D models toggle in phase 1 (D4: models load by default). THIRD-PARTY-NOTICES for new crates; CHANGELOG 'Added'.",
-            "status": "pending"
+            "description": "Picker filters (pb-app IMAGE_FILTER_EXTS gains a '3D models' group; the Mac open panel too). macOS Info.plist document types at Alternate rank + a UTImportedTypeDeclarations entry for 3MF. Windows default_app.rs: OpenWithProgids only, never the default (D5). No Show 3D models toggle in phase 1 (D4: models load by default). THIRD-PARTY-NOTICES for new crates; CHANGELOG 'Added'. LANDED 2026-11-23: Mac open panel, Info.plist 3D Model type (Alternate) + imported io.3mf.3mf, winit picker filter, Windows .Model ProgId (Open With only), CHANGELOG. Notices: tobj and quick-xml are MIT, covered by the Rust-crate statement. Finder/Explorer Open With not yet checked.",
+            "status": "review"
           },
           {
             "id": 9,

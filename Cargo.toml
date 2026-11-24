@@ -16,6 +16,7 @@ members = [
     "crates/pb-color",
     "crates/pb-decode",
     "crates/pb-encode",
+    "crates/pb-mesh",
     "crates/pb-source",
     "crates/pb-render",
     "crates/pb-ui",
@@ -50,6 +51,7 @@ pb-core = { path = "crates/pb-core" }
 pb-color = { path = "crates/pb-color" }
 pb-decode = { path = "crates/pb-decode" }
 pb-encode = { path = "crates/pb-encode" }
+pb-mesh = { path = "crates/pb-mesh" }
 pb-source = { path = "crates/pb-source" }
 pb-render = { path = "crates/pb-render" }
 pb-ui = { path = "crates/pb-ui" }

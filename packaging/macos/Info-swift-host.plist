@@ -164,6 +164,55 @@
 				<string>public.3gpp2</string>
 			</array>
 		</dict>
+		<!-- 3D models (task #151), rendered to a still. Alternate rank only, never the
+		     default (owner decision D5, 2026-11-23): a slicer or CAD tool owns these. STL and
+		     OBJ have system UTIs. 3MF has none, so it is listed under Bambu Studio's exported
+		     UTI (what .3mf resolves to wherever Bambu Studio is installed) and under the one
+		     imported below (what it resolves to on a Mac with no slicer). -->
+		<dict>
+			<key>CFBundleTypeName</key>
+			<string>3D Model</string>
+			<key>CFBundleTypeRole</key>
+			<string>Viewer</string>
+			<key>LSHandlerRank</key>
+			<string>Alternate</string>
+			<key>CFBundleTypeIconFile</key>
+			<string>BlazeViewer</string>
+			<key>LSItemContentTypes</key>
+			<array>
+				<string>public.standard-tesselated-geometry-format</string>
+				<string>public.geometry-definition-format</string>
+				<string>com.bambulab.3mf</string>
+				<string>io.3mf.3mf</string>
+			</array>
+		</dict>
+	</array>
+	<!-- Imported, not exported: if a slicer exports its own 3MF type, the system prefers
+	     that one and this declaration is only the fallback. -->
+	<key>UTImportedTypeDeclarations</key>
+	<array>
+		<dict>
+			<key>UTTypeIdentifier</key>
+			<string>io.3mf.3mf</string>
+			<key>UTTypeDescription</key>
+			<string>3D Manufacturing Format</string>
+			<key>UTTypeConformsTo</key>
+			<array>
+				<string>public.data</string>
+				<string>public.3d-content</string>
+			</array>
+			<key>UTTypeTagSpecification</key>
+			<dict>
+				<key>public.filename-extension</key>
+				<array>
+					<string>3mf</string>
+				</array>
+				<key>public.mime-type</key>
+				<array>
+					<string>model/3mf</string>
+				</array>
+			</dict>
+		</dict>
 	</array>
 </dict>
 </plist>

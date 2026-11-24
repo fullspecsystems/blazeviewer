@@ -9,6 +9,13 @@ with any pre-release suffix carried only by the tag.
 
 ### Added
 
+- **3D models: STL, OBJ and 3MF.** 3D-print files now show up alongside your photos as
+  shaded pictures of the model, and you can flick through a folder of them, or a ZIP
+  of them straight from Printables or Thingiverse, like any other images. Bambu Studio and
+  OrcaSlicer projects open too, with any colours the 3MF itself declares (filament
+  colours set in the slicer aren't shown yet). A sliced project with no model inside
+  shows its plate thumbnail instead. Blaze Viewer offers itself under Open With for
+  these files but never takes them over from your slicer.
 - **Export.** Press `E` (or File ▸ Export…, ⇧⌘E on a Mac, or right-click the
   photo) for Export mode: a panel in the Inspector's place where you pick PNG or
   JPEG, the JPEG quality (`[` and `]` step it) or PNG compression, and a size —

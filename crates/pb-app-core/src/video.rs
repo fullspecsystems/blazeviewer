@@ -518,6 +518,29 @@ mod tests {
         );
     }
 
+    /// Task #151: a 3MF is a ZIP on disk, and must never become an archive **door** — it is
+    /// an image item whose decoder renders the model. `archive_kind` is extension-only today,
+    /// which is what keeps it so; this pins it against a "smarter" magic-sniffing classifier.
+    #[test]
+    fn three_d_models_are_image_items_never_doors() {
+        use pb_source::FsSource;
+        use std::path::PathBuf;
+        for name in ["part.stl", "scan.obj", "plate.3mf", "Plate.gcode.3MF"] {
+            let path = PathBuf::from(r"C:\prints").join(name);
+            assert_eq!(pb_source::archive_kind(&path), None, "{name}");
+            assert_eq!(
+                classify_library_file(&path),
+                Some(LibraryItemKind::Image),
+                "{name}"
+            );
+            let src = FsSource::new(vec![path]);
+            assert_eq!(item_kind(&src, 0), LibraryItemKind::Image, "{name}");
+        }
+        // And a model inside an archive is indexed like a loose one (a ZIP of STLs).
+        assert!(crate::scan::is_supported_archive_entry("stl"));
+        assert!(crate::scan::is_supported_archive_entry("3mf"));
+    }
+
     #[test]
     fn item_kind_types_fs_videos_by_name() {
         use pb_source::FsSource;

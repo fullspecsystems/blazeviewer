@@ -324,15 +324,49 @@ port it.
 
 ## Handoff
 
-- **Verified:** nothing built. The facts above about the codebase (routing in
-  `decode_named_bytes_inner`, `archive_kind` being extension-only, `full_res_eligible`'s SVG
-  exclusion, `save_rotation` being a JPEG allowlist so models are naturally excluded, `zip` 2
-  and `quick-xml` already in `Cargo.lock`) were read from source on 2026-11-23. The three
-  RustSec advisories were checked against rustsec.org that day. The QuickLook-cache behaviour
-  was observed on macOS 27.2.
-- **Not verified:** every performance figure here is an estimate until the #151 corpus
-  measurement. Slicer layouts come from reading source code, not from real files. Crate
-  versions and health are a 2026-11-23 snapshot.
-- **Decisions / corrections:** D1–D5 settled by the owner 2026-11-23 (above).
-- **Cross-platform debt:** none yet.
+### 2026-11-23 — phase-1 groundwork landed (Mac session)
+
+**Built:** the `pb-mesh` crate (canonical `Model`, `Limits`, STL hand-rolled, OBJ via `tobj`,
+3MF hand-rolled with core + Production + base materials / colour groups + metadata + the OPC
+thumbnail, auto-framing camera, the CPU rasterizer behind `MeshRasterizer`);
+`pb-decode::model` routed by extension, `is_supported_extension` + `is_model_extension`; models
+(and `.svgz`) excluded from `full_res_eligible`; the Mac open panel, Mac `Info.plist` document
+type (Alternate) + imported `io.3mf.3mf` UTI, the winit picker filter, a fourth Windows ProgId
+`<APP_IDENT>.Model` (Open With only); a `mesh_parse` fuzz target; the no-trace test seeds an
+STL; `examples/model_png` (renders a model to PNG through the real decode path); CHANGELOG.
+
+- **Verified (macOS):** `pb-mesh` 37 tests, `pb-decode` 283, `pb-app-core` 1102, `pb-source` 91;
+  clippy `-D warnings` on those crates; the Windows cross-check (`cargo clippy -p pb-app
+  --all-targets --target x86_64-pc-windows-msvc -- -D warnings`), which is **compile-only**; the Swift host
+  builds, and the built `Info.plist` carries the 3D Model type. A real-file sweep: all 93 models
+  bundled with Bambu Studio (STLs + calibration 3MFs, which use Production components and
+  colour groups) decode with no errors. At a 3840×2160 fit the render (release, one thread) takes
+  **p50 12.6 ms, p95 26.9 ms, max 63 ms** (3DBenchy, 11 MB, ~225k triangles). The first cut
+  tested every bounding-box pixel and was 7× slower on thin triangles; the rasterizer now walks
+  per-row spans.
+- **Not verified:**
+  - **The app itself, on either platform.** Nobody has launched it on a folder of models yet.
+    Owner to test on the Mac: a folder of STLs, a ZIP of STLs, a Bambu project 3MF, blaze
+    through them, the thumbnail strip, Export / Copy of a model.
+  - **Finder / Explorer "Open With".** LaunchServices has to pick up the new document type
+    (an installed build or `lsregister`) and Windows has to re-register.
+  - **The fuzz target was never run** (cargo-fuzz isn't installed on this Mac). The proptest
+    "no parser panics on arbitrary bytes" is the only hostile-input sweep so far.
+  - **OBJ on real files** (there were none in the corpus) and **real Bambu / Orca project files**
+    (multi-plate, painted). The calibration 3MFs are small.
+- **Known gaps in this cut (still #151):**
+  - **No cancellation inside a parse**, so a nav input can't abandon a 100 MB 3MF mid-parse.
+  - **The D2 thumbnail is only the fallback.** It isn't the blaze-mode preview rung yet.
+  - **No supersampled refinement rung when parked.** Large fits render at 1×.
+  - **The Info panel's "resolution" row shows the render size.** Model facts are #151.7.
+  - **The limits are fixed constants**, not derived from the machine's RAM.
+  - **Concave OBJ faces fan-triangulate wrongly** (`tobj`).
+  - **No golden images yet.** The rasterizer tests are structural: coverage, shades, aspect,
+    determinism.
+- **Decisions / corrections:** D1–D5 settled by the owner 2026-11-23 (above). The default grey
+  became `#C8CCD2` and peak lighting is capped at ~0.95 after a white-filament Bambu file
+  (`#F6F6F3`) clipped flat at the first settings.
+- **Cross-platform debt:** **Windows must run** `pb-app`'s tests (`viewing_a_folder_writes_nothing_to_disk`
+  now seeds `sub/part.stl` and expects 7 items) and **check** that the `.Model` ProgId registers and
+  unregisters cleanly. It was added to the one `progids()` list that all four call sites walk.
 - **Claimed:** nobody.

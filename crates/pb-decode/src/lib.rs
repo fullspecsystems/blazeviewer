@@ -124,6 +124,7 @@ pub mod png_text;
 pub mod poster_walk;
 // Video playback frame contract (task #79 phase 0): the VideoFrame/VideoColorInfo
 // types every platform video producer emits. Pure data — producers come later.
+mod model;
 mod psd;
 mod raw;
 mod svg;
@@ -744,6 +745,11 @@ fn decode_named_bytes_inner(
     if matches!(ext.as_str(), "svg" | "svgz") {
         return SvgDecoder.decode(&req);
     }
+    // 3D models (task #151): parsed + rendered to a still by `pb-mesh`. A 3MF is a ZIP and
+    // STL/OBJ are arbitrary bytes, so these can only ever be routed by name.
+    if let Some(format) = pb_mesh::ModelFormat::from_extension(&ext) {
+        return model::decode_model(format, &req);
+    }
     // TGA is headerless (no magic number), so content-sniffing can't find it —
     // route by extension with an explicit format hint.
     if ext == "tga" {
@@ -842,6 +848,8 @@ pub fn is_supported_extension(ext: &str) -> bool {
         "psd", //
         // RAW (embedded-preview path)
         "arw", "nef", "cr2", "cr3", "dng", "raf", "rw2", "orf", "srw", "pef", "raw",
+        // 3D models, rendered to a still (task #151; `pb_mesh::ModelFormat`)
+        "stl", "obj", "3mf",
     ];
     if BASE.contains(&e.as_str()) {
         return true;
@@ -865,6 +873,13 @@ pub fn is_supported_extension(ext: &str) -> bool {
         }
     }
     false
+}
+
+/// Whether a file extension (no dot, any case) is a **3D model** (task #151). Models decode
+/// like images, but are rendered per viewport like an SVG, so there is no fixed "original"
+/// to decode at full resolution — `AppCore::full_res_eligible` asks this.
+pub fn is_model_extension(ext: &str) -> bool {
+    pb_mesh::ModelFormat::from_extension(ext).is_some()
 }
 
 #[cfg(test)]

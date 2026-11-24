@@ -2811,7 +2811,7 @@ final class CoreModel {
         panel.allowsMultipleSelection = !choosingFolders
         panel.directoryURL = URL(fileURLWithPath: startDir, isDirectory: true)
         if !choosingFolders {
-            // Images + video + archives — mirror IMAGE_FILTER_EXTS + VIDEO_FILTER_EXTS
+            // Images + video + 3D models + archives — mirror IMAGE_FILTER_EXTS + VIDEO_FILTER_EXTS
             // (+zip/7z) in pb-app/src/main.rs. A container AVFoundation can't play still
             // shows here but fails gracefully on open (nativeVideoFailed → Message dialog),
             // same as an unreadable archive. (No "All files" escape hatch — NSOpenPanel has
@@ -2822,6 +2822,9 @@ final class CoreModel {
                 "arw", "nef", "cr2", "cr3", "dng", "raf", "rw2", "orf", "srw", "pef", "raw",
                 "mp4", "m4v", "mov", "qt", "mkv", "webm", "avi", "wmv", "asf", "mpg", "mpeg",
                 "mts", "m2ts", "3gp", "3g2",
+                // 3D models, rendered to a still (#151). `3mf` resolves to whichever app's
+                // UTI owns it on this Mac (Bambu Studio's, or our imported one).
+                "stl", "obj", "3mf",
                 // Archives (#30 zip/7z, #102 tar family). The panel matches on the
                 // FINAL extension, so `.tar.gz` needs the bare `gz` entry; a picked
                 // bare `photo.jpg.gz` is refused cleanly by the classifier. UTTypes

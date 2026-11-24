@@ -90,7 +90,7 @@ mod win {
     /// path (like a media player) instead of one process per file — which the single-instance
     /// election then reuses. Images and videos get it; archives do not (a multi-select of
     /// `.zip`s has no meaningful playlist and would decode zip bytes as images).
-    fn progids() -> [(&'static [&'static str], String, String, bool); 3] {
+    fn progids() -> [(&'static [&'static str], String, String, bool); 4] {
         [
             (
                 IMAGE_EXTS,
@@ -108,6 +108,12 @@ mod win {
                 VIDEO_EXTS,
                 format!("{APP_IDENT}.Video"),
                 format!("{APP_NAME} Video"),
+                true,
+            ),
+            (
+                MODEL_EXTS,
+                format!("{APP_IDENT}.Model"),
+                format!("{APP_NAME} 3D Model"),
                 true,
             ),
         ]
@@ -147,6 +153,10 @@ mod win {
         ".mp4", ".m4v", ".mov", ".qt", ".mkv", ".webm", ".avi", ".wmv", ".asf", ".mpg", ".mpeg",
         ".mts", ".m2ts", ".3gp", ".3g2",
     ];
+    /// 3D models (task #151) → the `<APP_IDENT>.Model` ProgId. Open-With candidacy only,
+    /// never the default (owner decision D5, 2026-11-23): a slicer owns `.3mf`, a CAD tool
+    /// owns `.stl`. Mirrors `pb_mesh::ModelFormat`.
+    const MODEL_EXTS: &[&str] = &[".stl", ".obj", ".3mf"];
 
     /// An owned `HKEY` that always closes (registry handles leak silently otherwise).
     struct Key(HKEY);

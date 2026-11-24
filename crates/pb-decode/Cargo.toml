@@ -28,6 +28,8 @@ jxl-oxide = "0.12.6"
 moxcms = "0.8"
 # Export types only (`ExportSource` and friends) — never an encoder (export-plan.md § 3.1, review F4).
 pb-encode = { path = "../pb-encode", default-features = false }
+# 3D models (task #151): STL / OBJ / 3MF parsed and rendered to a still. Pure Rust.
+pb-mesh = { path = "../pb-mesh" }
 # f32 -> f16 packing for HDR (WIC scRGB-linear) buffers handed to the GPU as
 # Rgba16Float. Already in the tree transitively.
 half = "2"
@@ -108,6 +110,8 @@ cc = "1"
 # Test fixtures: encode JPEGs / PNGs to decode back (the encoders live in pb-encode now).
 pb-encode = { path = "../pb-encode", features = ["png", "jpeg"] }
 png = "0.18"
+# 3MF fixtures (a 3MF is a ZIP). Same major version as pb-mesh / pb-source.
+zip = { version = "2", default-features = false, features = ["deflate"] }
 
 # Throwaway HEIC A/B tools. `heic_compare` calls the feature-gated LibHeifDecoder
 # directly, so it only builds with `--features libheif` (keeps `--all-targets`

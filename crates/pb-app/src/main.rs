@@ -5058,7 +5058,8 @@ fn scan_images(dir: &Path, recursive: bool) -> Vec<PathBuf> {
 const IMAGE_FILTER_EXTS: &[&str] = &[
     "jpg", "jpeg", "jpe", "jfif", "png", "gif", "bmp", "tif", "tiff", "webp", "tga", "qoi", "jxl",
     "svg", "svgz", "heic", "heif", "avif", "hdr", "exr", "arw", "nef", "cr2", "cr3", "dng", "raf",
-    "rw2", "orf", "srw", "pef", "raw",
+    "rw2", "orf", "srw", "pef", "raw", // 3D models, rendered to a still (task #151)
+    "stl", "obj", "3mf",
 ];
 
 /// Video containers the library lists (task #79) — the picker offers them alongside
@@ -5880,6 +5881,13 @@ mod tests {
         // the same reason as the clip — the door path must not even read them, and
         // never extracts to disk (which is what this test can actually prove).
         fs::write(dir.join("album.zip"), b"not a real zip").expect("seed archive");
+        // Task #151: a 3D model is an image item whose decoder renders a mesh. Parsing and
+        // rendering must leave nothing behind either (no cached render, no scratch file).
+        fs::write(
+            dir.join("sub/part.stl"),
+            b"solid t\nfacet normal 0 0 1\nouter loop\nvertex 0 0 0\nvertex 1 0 0\nvertex 0 1 0\nendloop\nendfacet\nendsolid t\n",
+        )
+        .expect("seed model");
 
         let before = snapshot_tree(&dir);
 
@@ -5890,8 +5898,8 @@ mod tests {
         let paths = scan::dedup_companions(scan_images(&dir, true), None);
         assert_eq!(
             paths.len(),
-            6,
-            "four images + the loose clip + the archive door; the companion .mov is hidden"
+            7,
+            "four images + a 3D model + the loose clip + the archive door; the companion .mov is hidden"
         );
         let source = FsSource::new(paths);
         let fit = FitBox {

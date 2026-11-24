@@ -130,6 +130,9 @@ crates/
               (rotation, HDR→P3 tone-map, colour resolution), the ICC sanitizer behind
               "Strip metadata", PNG/JPEG encoders behind features. Pure; pb-decode uses
               it for types only
+  pb-mesh     3D models (task #151): STL / OBJ / 3MF parsed from bytes into one Z-up mesh,
+              auto-framed, rendered to a still on the CPU (`MeshRasterizer` seam); pure, no
+              I/O or GPU. pb-decode::model routes models to it by extension
   pb-render   the wgpu presenter: swapchain + resident texture ring, view transforms
               (fit/fill/1:1, zoom/pan/rotate), staging-ring uploads, GPU Lanczos
               resample, fp16 scRGB color + HDR output, NV12/P010 video planes,

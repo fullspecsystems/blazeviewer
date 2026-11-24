@@ -3638,8 +3638,8 @@ impl AppCore {
 
     /// Whether `item` may be held at full resolution by the parked tier (#106.7 §8/§9). Only a
     /// real still image has a geometry-independent "original": excludes videos and archive
-    /// doors (no still full-res), SVG (rasterised per-viewport — no fixed original satisfies an
-    /// arbitrary fit), RAW (a slow, uncancellable demosaic — like the ahead-ring), and anything
+    /// doors (no still full-res), SVG and 3D models (rasterised per-viewport — no fixed original
+    /// satisfies an arbitrary fit), RAW (a slow, uncancellable demosaic — like the ahead-ring), and anything
     /// past the gigapixel ceiling (kept fit-only, since 1:1 of a gigapixel is a meaningless crop
     /// and its RGBA8 decode buffer would be multiple GB). The ceiling reads the true resolution
     /// from `meta_cache`; an item not yet metadata-known is admitted and re-checked once known.
@@ -3654,7 +3654,10 @@ impl AppCore {
             .extension()
             .and_then(|e| e.to_str())
             .map(|e| e.to_ascii_lowercase());
-        if ext.as_deref() == Some("svg") || self.is_raw_item(item) {
+        if matches!(ext.as_deref(), Some("svg" | "svgz"))
+            || ext.as_deref().is_some_and(pb_decode::is_model_extension)
+            || self.is_raw_item(item)
+        {
             return false;
         }
         // Gigapixel ceiling: never request/retain an original past the pixel cap.
@@ -6673,6 +6676,17 @@ mod tests {
         assert!(!core.full_res_eligible(2));
         // A video has no still full-res.
         assert!(!core.full_res_eligible(3));
+    }
+
+    #[test]
+    fn full_res_eligible_excludes_3d_models_and_svgz() {
+        // Task #151: a model is rendered per viewport like an SVG, so there is no fixed
+        // original to decode — and `.svgz` is the same SVG, compressed.
+        let mut core = test_core();
+        core.source = photos_named(&["part.stl", "scan.OBJ", "plate.3mf", "logo.svgz"]);
+        for i in 0..4 {
+            assert!(!core.full_res_eligible(i), "item {i}");
+        }
     }
 
     #[test]

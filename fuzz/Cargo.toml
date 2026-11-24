@@ -16,6 +16,7 @@ cargo-fuzz = true
 libfuzzer-sys = "0.4"
 pb-decode = { path = "../crates/pb-decode", features = ["fuzz-internals"] }
 pb-source = { path = "../crates/pb-source", features = ["fuzz-internals"] }
+pb-mesh = { path = "../crates/pb-mesh" }
 
 [[bin]]
 name = "probe_avis"
@@ -53,3 +54,10 @@ doc = false
 bench = false
 
 [workspace]
+
+[[bin]]
+name = "mesh_parse"
+path = "fuzz_targets/mesh_parse.rs"
+test = false
+doc = false
+bench = false

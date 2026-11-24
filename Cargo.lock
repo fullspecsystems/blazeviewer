@@ -4150,11 +4150,13 @@ dependencies = [
  "moxcms",
  "pb-color",
  "pb-encode",
+ "pb-mesh",
  "png 0.18.1",
  "rawloader",
  "resvg",
  "windows 0.62.2",
  "windows-core 0.62.2",
+ "zip 2.4.2",
  "zune-jpeg 0.4.21",
 ]
 
@@ -4193,6 +4195,16 @@ dependencies = [
  "pb-source",
  "swift-bridge",
  "swift-bridge-build",
+]
+
+[[package]]
+name = "pb-mesh"
+version = "0.1.0"
+dependencies = [
+ "proptest",
+ "quick-xml 0.42.0",
+ "tobj",
+ "zip 2.4.2",
 ]
 
 [[package]]
@@ -4545,6 +4557,15 @@ name = "quick-xml"
 version = "0.39.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cdcc8dd4e2f670d309a5f0e83fe36dfdc05af317008fea29144da1a2ac858e5e"
+dependencies = [
+ "memchr",
+]
+
+[[package]]
+name = "quick-xml"
+version = "0.42.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "41b1177fdf999d2321d3fb46ff47159d9c1fb9ad66a4879f8c50a0b504615e9b"
 dependencies = [
  "memchr",
 ]
@@ -5731,6 +5752,12 @@ name = "tinyvec_macros"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1f3ccbac311fea05f86f61904b462b55fb3df8837a366dfc601a0161d0532f20"
+
+[[package]]
+name = "tobj"
+version = "4.0.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6eb8e04167c1c0c76b5de63226fd733485ad63ef71e40de31e16272f47b099e2"
 
 [[package]]
 name = "toml"

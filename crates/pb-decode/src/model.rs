@@ -1,0 +1,171 @@
+//! **3D models** (task #151): STL / OBJ / 3MF decode to a still through `pb-mesh` — parsed
+//! from the item's bytes, then rendered on the CPU at the display fit, like an SVG.
+//!
+//! Routed by **extension** in `decode_named_bytes_inner` (a 3MF is a ZIP and STL/OBJ are
+//! arbitrary bytes, so nothing here can be content-sniffed). The app treats the result as an
+//! ordinary image, which is what makes prefetch, blaze, the thumbnail strip, archives (a ZIP
+//! of STLs), Copy, Export and Describe work unchanged.
+//!
+//! When a 3MF's mesh can't be drawn — none present (a sliced `.gcode.3mf`), over the size
+//! limits, or malformed — its embedded slicer thumbnail is shown instead (owner decision D2).
+
+use pb_mesh::{CpuRasterizer, Limits, MeshError, MeshRasterizer, ModelFormat, RenderOptions};
+
+use crate::{common, DecodeError, DecodeRequest, DecodedImage, FitBox};
+
+/// The render's long edge when no fit box is given. A model has no native resolution, so its
+/// "natural size" is a nominal render size, as with an SVG.
+const NOMINAL_EDGE: u32 = 2048;
+
+pub(crate) fn decode_model(
+    format: ModelFormat,
+    req: &DecodeRequest,
+) -> Result<DecodedImage, DecodeError> {
+    let codec = format.codec_name();
+    let model = match pb_mesh::parse(format, req.bytes, &Limits::default()) {
+        Ok(model) if !model.is_empty() => model,
+        Ok(model) => {
+            return match model.facts.thumbnail {
+                Some(thumb) => decode_thumbnail(&thumb, codec, req.fit),
+                None => Err(DecodeError::Corrupt(MeshError::Empty.to_string())),
+            };
+        }
+        Err(e) => {
+            let thumb = (format == ModelFormat::ThreeMf)
+                .then(|| pb_mesh::threemf_thumbnail(req.bytes))
+                .flatten();
+            return match thumb {
+                Some(thumb) => decode_thumbnail(&thumb, codec, req.fit),
+                None => Err(DecodeError::Corrupt(e.to_string())),
+            };
+        }
+    };
+    let (w, h) = req.fit.map_or((NOMINAL_EDGE, NOMINAL_EDGE), |f| {
+        (f.max_width, f.max_height)
+    });
+    let still = CpuRasterizer
+        .render(&model, &RenderOptions::fit(w, h))
+        .map_err(|e| DecodeError::Corrupt(e.to_string()))?;
+    // Rendered at the fit already: no decode-to-fit pass, no EXIF.
+    common::finalize(
+        still.rgba,
+        still.width,
+        still.height,
+        None,
+        codec,
+        None,
+        false,
+    )
+}
+
+/// The embedded slicer thumbnail (PNG or JPEG), content-sniffed through the ordinary image
+/// path, labelled with the model's codec so the panel says "3MF", not "PNG".
+fn decode_thumbnail(
+    thumb: &[u8],
+    codec: &'static str,
+    fit: Option<FitBox>,
+) -> Result<DecodedImage, DecodeError> {
+    let mut img = crate::decode_bytes_inner(thumb, fit, false)?;
+    img.codec = codec;
+    Ok(img)
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::{decode_named_bytes, is_model_extension, is_supported_extension, FitBox};
+
+    /// A unit cube as binary STL.
+    fn cube_stl() -> Vec<u8> {
+        let v = |x: f32, y: f32, z: f32| [x, y, z];
+        let quads = [
+            [v(0., 0., 0.), v(0., 1., 0.), v(1., 1., 0.), v(1., 0., 0.)],
+            [v(0., 0., 1.), v(1., 0., 1.), v(1., 1., 1.), v(0., 1., 1.)],
+            [v(0., 0., 0.), v(1., 0., 0.), v(1., 0., 1.), v(0., 0., 1.)],
+            [v(0., 1., 0.), v(0., 1., 1.), v(1., 1., 1.), v(1., 1., 0.)],
+            [v(0., 0., 0.), v(0., 0., 1.), v(0., 1., 1.), v(0., 1., 0.)],
+            [v(1., 0., 0.), v(1., 1., 0.), v(1., 1., 1.), v(1., 0., 1.)],
+        ];
+        let tris: Vec<[[f32; 3]; 3]> = quads
+            .iter()
+            .flat_map(|q| [[q[0], q[1], q[2]], [q[0], q[2], q[3]]])
+            .collect();
+        let mut out = vec![0u8; 80];
+        out.extend_from_slice(&(tris.len() as u32).to_le_bytes());
+        for t in &tris {
+            out.extend_from_slice(&[0u8; 12]);
+            for p in t {
+                for c in p {
+                    out.extend_from_slice(&c.to_le_bytes());
+                }
+            }
+            out.extend_from_slice(&[0, 0]);
+        }
+        out
+    }
+
+    #[test]
+    fn model_extensions_are_supported_and_flagged() {
+        for ext in ["stl", "STL", "obj", "3mf"] {
+            assert!(is_supported_extension(ext), "{ext}");
+            assert!(is_model_extension(ext), "{ext}");
+        }
+        assert!(!is_model_extension("png"));
+    }
+
+    #[test]
+    fn stl_routes_by_name_and_renders_within_the_fit() {
+        let fit = FitBox {
+            max_width: 320,
+            max_height: 200,
+        };
+        let img = decode_named_bytes("parts/cube.stl", &cube_stl(), Some(fit), true).unwrap();
+        assert_eq!(img.codec, "STL");
+        assert!(img.width <= 320 && img.height <= 200);
+        assert!(img.is_well_formed());
+        assert!(!img.is_preview);
+    }
+
+    #[test]
+    fn no_fit_renders_at_the_nominal_size() {
+        let img = decode_named_bytes("cube.stl", &cube_stl(), None, false).unwrap();
+        assert!(img.width.max(img.height) <= super::NOMINAL_EDGE);
+        assert!(img.width.max(img.height) >= super::NOMINAL_EDGE - 1);
+    }
+
+    #[test]
+    fn garbage_model_is_a_decode_error_not_a_panic() {
+        assert!(decode_named_bytes("x.stl", b"nope", None, false).is_err());
+        assert!(decode_named_bytes("x.3mf", b"nope", None, false).is_err());
+        assert!(decode_named_bytes("x.obj", b"\xff\xfe\x00", None, false).is_err());
+    }
+
+    #[test]
+    fn a_3mf_without_a_mesh_falls_back_to_its_thumbnail() {
+        use image::ImageEncoder;
+        use std::io::Write;
+        // A 1x1 PNG as the declared thumbnail, and a model part with an empty build.
+        let mut png = Vec::new();
+        image::codecs::png::PngEncoder::new(&mut png)
+            .write_image(&[10, 20, 30, 255], 1, 1, image::ExtendedColorType::Rgba8)
+            .unwrap();
+        let rels = r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Target="/3D/3dmodel.model" Id="r0" Type="http://schemas.microsoft.com/3dmanufacturing/2013/01/3dmodel"/><Relationship Target="/Metadata/plate_1.png" Id="r1" Type="http://schemas.openxmlformats.org/package/2006/relationships/metadata/thumbnail"/></Relationships>"#;
+        let model = r#"<model unit="millimeter" xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02"><resources/><build/></model>"#;
+        let mut buf = std::io::Cursor::new(Vec::new());
+        {
+            let mut z = zip::ZipWriter::new(&mut buf);
+            let o = zip::write::SimpleFileOptions::default();
+            for (n, d) in [
+                ("_rels/.rels", rels.as_bytes()),
+                ("3D/3dmodel.model", model.as_bytes()),
+                ("Metadata/plate_1.png", png.as_slice()),
+            ] {
+                z.start_file(n, o).unwrap();
+                z.write_all(d).unwrap();
+            }
+            z.finish().unwrap();
+        }
+        let img = decode_named_bytes("plate.gcode.3mf", &buf.into_inner(), None, false).unwrap();
+        assert_eq!(img.codec, "3MF");
+        assert_eq!((img.width, img.height), (1, 1));
+    }
+}
