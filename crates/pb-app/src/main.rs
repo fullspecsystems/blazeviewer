@@ -876,6 +876,9 @@ enum DialogOutcome {
     /// The "Ask about image" question submitted (task #44). `None` shouldn't happen on Ask
     /// but folds to an empty question the core ignores.
     AskSubmitted(Option<String>),
+    /// Export mode's Custom… size confirmed (task #89); `None` (an out-of-range entry, which
+    /// OK never allows) folds to a plain close.
+    ExportSizeChosen(Option<pb_app_core::export_panel::SizeChoice>),
     /// A live Settings edit from the auto-saving dialog, carrying the (optionally) edited
     /// settings + keymap for the frame. Applied + persisted immediately; the window stays
     /// open. `settings` is boxed to keep this variant small (the struct grew with the
@@ -2117,6 +2120,8 @@ impl App {
             A::ExportJpegQuality(q) => self.core.export_set_jpeg_quality(q),
             A::ExportPngCompression(c) => self.core.export_set_png_compression(c),
             A::ExportSize(s) => self.core.export_set_size(s),
+            A::ExportCustomSize => self.core.export_custom_size(),
+            A::ExportPreviewSide(side) => self.core.export_set_preview_side(side),
             A::ExportStripMetadata(on) => self.core.export_set_strip_metadata(on),
             A::ExportClose => self.core.export_close(),
             A::ExportCommit => self.core.export_commit(),
@@ -3145,6 +3150,11 @@ impl App {
                     self.dialog.as_mut().and_then(|d| d.take_ask_result()),
                 ),
                 Some(dialog::DialogKind::AskImage) => DialogOutcome::Closed, // Ask cancel = close
+                Some(dialog::DialogKind::ExportSize) if confirmed => {
+                    DialogOutcome::ExportSizeChosen(
+                        self.dialog.as_mut().and_then(|d| d.take_export_size()),
+                    )
+                }
                 // Auto-save dialog: Done (or any close) just clears the open state —
                 // every edit was already applied + persisted live via `live_edit` above.
                 Some(dialog::DialogKind::Settings) => DialogOutcome::SettingsCancelled,
@@ -3177,7 +3187,12 @@ impl App {
             DialogOutcome::SettingsCancelled => contract::DialogResult::SettingsCancelled,
             DialogOutcome::LoadingCancelled => contract::DialogResult::LoadingCancelled,
             DialogOutcome::ConfirmAnswered(c) => contract::DialogResult::ConfirmAnswered(c),
-            DialogOutcome::Closed => contract::DialogResult::Closed,
+            DialogOutcome::ExportSizeChosen(Some(size)) => {
+                contract::DialogResult::ExportSizeChosen(size)
+            }
+            DialogOutcome::ExportSizeChosen(None) | DialogOutcome::Closed => {
+                contract::DialogResult::Closed
+            }
         };
         self.core
             .handle(contract::CoreEvent::DialogResolved(result));
@@ -3654,6 +3669,12 @@ impl App {
                     &self.core.keymap,
                     parent.as_deref(),
                 );
+                // Export mode's Custom… size (task #89) starts from the core's values.
+                if kind == dialog::DialogKind::ExportSize {
+                    if let Some(d) = dlg.as_mut() {
+                        d.seed_export_size(self.core.export_size_dialog());
+                    }
+                }
                 // The empty-archive notice (task #104) grows a "Don't show archives" checkbox.
                 if archive_optout {
                     if let Some(d) = dlg.as_mut() {
@@ -4988,6 +5009,7 @@ fn shell_dialog_kind(kind: contract::DialogKind) -> Option<dialog::DialogKind> {
         // substitute: if that assumption ever stops holding, the effect is dropped visibly
         // here rather than silently opening the wrong window.
         contract::DialogKind::Scanning => None,
+        contract::DialogKind::ExportSize => Some(dialog::DialogKind::ExportSize),
     }
 }
 
@@ -5005,6 +5027,7 @@ fn core_dialog_kind(kind: dialog::DialogKind) -> contract::DialogKind {
         dialog::DialogKind::Password => contract::DialogKind::Password,
         dialog::DialogKind::AskImage => contract::DialogKind::AskImage,
         dialog::DialogKind::Loading => contract::DialogKind::Loading,
+        dialog::DialogKind::ExportSize => contract::DialogKind::ExportSize,
     }
 }
 

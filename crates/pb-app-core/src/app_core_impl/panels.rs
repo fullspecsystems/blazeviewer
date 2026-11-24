@@ -190,6 +190,8 @@ impl AppCore {
                     row("Save rotation", sc(Action::SaveRotation)),
                     row("Export mode", sc(Action::ExportMode)),
                     row("Export…", sc(Action::Export)),
+                    // In Export mode `Y` flicks between the export and the original (rung 3).
+                    row("Export: show the original", sc(Action::CompareToggle)),
                     row("Undo", sc(Action::Undo)),
                     row(trash, sc(Action::Delete)),
                     row("Delete permanently", sc(Action::DeletePermanent)),

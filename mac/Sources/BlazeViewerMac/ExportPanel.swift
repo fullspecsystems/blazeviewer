@@ -5,7 +5,8 @@
 // export at all); this view draws the model and sends each edit straight back.
 //
 // Export mode is a mode, not a modal: the keyboard still drives the photo (Space, R, …), so
-// nothing here takes text input. `E` leaves, `⌘↩` / ⇧⌘E export, `[` / `]` step the quality.
+// nothing here takes text input. `E` leaves, `⌘↩` / ⇧⌘E export, `[` / `]` step the quality,
+// `Y` flicks between the export and the original (rung 3's live preview; a hold peeks).
 // The controls are the stock AppKit-backed SwiftUI ones — segmented pickers, a slider, a
 // pop-up menu, a checkbox, a prominent button — so they behave and read as native controls,
 // VoiceOver included.
@@ -39,6 +40,13 @@ struct ExportPanelModel: Equatable {
     var sizes: [ExportSizeOption] = []
     var stripMetadata = true
     var notes: [String] = []
+    /// The live preview (rung 3): the exact file size, or "Calculating…".
+    var fileSize = ""
+    var previewBusy = false
+    /// Whether the Export / Original control applies.
+    var canFlick = false
+    /// 0 the export on screen, 1 the original.
+    var previewSide = 0
 }
 
 struct ExportPanelView: View {
@@ -46,6 +54,9 @@ struct ExportPanelView: View {
     let maxHeight: CGFloat
 
     private var p: ExportPanelModel { model.exportPanel }
+    /// The Size pop-up's "Custom…" entry — never a real size code (the core's codes keep the
+    /// kind in the top four bits, and kind 15 doesn't exist).
+    static let customSizeTag = UInt32.max
     private let width: CGFloat = 300
     private let labelWidth: CGFloat = 86
 
@@ -133,7 +144,7 @@ struct ExportPanelView: View {
                             Text("Quality")
                         }
                         .labelsHidden()
-                        .help("JPEG quality — [ and ] step it")
+                        .help("JPEG quality. [ and ] step it.")
                         Text("\(p.jpegQuality)")
                             .font(.callout.monospacedDigit())
                             .frame(width: 28, alignment: .trailing)
@@ -150,16 +161,31 @@ struct ExportPanelView: View {
                     }
                     .pickerStyle(.segmented)
                     .labelsHidden()
-                    .help("PNG is lossless at every level — this trades file size against time")
+                    .help("PNG is lossless at every level; this trades file size against time")
                 }
             }
             row("Size") {
                 VStack(alignment: .leading, spacing: 3) {
-                    Picker("Size", selection: binding(\.size, model.exportSetSize)) {
+                    Picker(
+                        "Size",
+                        selection: Binding(
+                            get: { p.size },
+                            set: { code in
+                                // Custom… opens the sheet; the selection stays on the current
+                                // size until the sheet answers.
+                                if code == ExportPanelView.customSizeTag {
+                                    model.exportCustomSize()
+                                } else {
+                                    model.exportSetSize(code)
+                                }
+                            })
+                    ) {
                         ForEach(p.sizes) { option in
                             Text(option.label).tag(option.code)
                                 .disabled(!option.enabled)
                         }
+                        Divider()
+                        Text("Custom…").tag(ExportPanelView.customSizeTag)
                     }
                     .pickerStyle(.menu)
                     .labelsHidden()
@@ -178,6 +204,29 @@ struct ExportPanelView: View {
             )
             .toggleStyle(.checkbox)
             .help("Leave out camera details, dates and location. The color profile is kept.")
+            if !p.fileSize.isEmpty {
+                row("File size") {
+                    HStack(spacing: 6) {
+                        Text(p.fileSize)
+                            .font(.callout.monospacedDigit())
+                        if p.previewBusy {
+                            ProgressView()
+                                .controlSize(.mini)
+                                .accessibilityHidden(true)
+                        }
+                    }
+                }
+            }
+            row("Preview") {
+                Picker("Preview", selection: binding(\.previewSide, model.exportSetPreviewSide)) {
+                    Text("Export").tag(0)
+                    Text("Original").tag(1)
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .disabled(!p.canFlick)
+                .help("Y switches between the export and the original; hold Y to peek")
+            }
         }
     }
 
@@ -219,5 +268,64 @@ struct ExportPanelView: View {
         -> Binding<T>
     {
         Binding(get: { p[keyPath: key] }, set: { set($0) })
+    }
+}
+
+/// Export mode's **Custom…** size sheet (task #89): resize by long edge, width, height or
+/// percentage, with the result for this image read out as you type. Return is OK, Esc is
+/// Cancel — the sheet is a real modal, unlike the panel behind it.
+struct ExportSizeSheetView: View {
+    @Bindable var model: CoreModel
+    @FocusState private var focused: Bool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Custom Size")
+                .font(.headline)
+            Grid(alignment: .leadingFirstTextBaseline, horizontalSpacing: 10, verticalSpacing: 10) {
+                GridRow {
+                    Text("Resize by")
+                        .gridColumnAlignment(.trailing)
+                    Picker("Resize by", selection: $model.exportSizeBy) {
+                        Text("Long edge").tag(0)
+                        Text("Width").tag(1)
+                        Text("Height").tag(2)
+                        Text("Percentage").tag(3)
+                    }
+                    .labelsHidden()
+                    .fixedSize()
+                }
+                GridRow {
+                    Text(model.exportSizeBy == 3 ? "Percentage" : "Pixels")
+                    HStack(spacing: 6) {
+                        TextField("", text: $model.exportSizeText)
+                            .labelsHidden()
+                            .multilineTextAlignment(.trailing)
+                            .frame(width: 90)
+                            .focused($focused)
+                            .onSubmit { model.exportSizeSubmit() }
+                            .accessibilityLabel(model.exportSizeBy == 3 ? "Percentage" : "Pixels")
+                        Text(model.exportSizeBy == 3 ? "%" : "px")
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+            Text(model.exportSizeReadout)
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            HStack(spacing: 8) {
+                Spacer()
+                Button("Cancel") { model.exportSizeCancel() }
+                    .keyboardShortcut(.cancelAction)
+                Button("OK") { model.exportSizeSubmit() }
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(!model.exportSizeValid)
+            }
+        }
+        .padding(20)
+        .frame(width: 340)
+        .onAppear { focused = true }
     }
 }

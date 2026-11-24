@@ -118,6 +118,10 @@ pub enum DialogKind {
     Loading,
     /// Determinate folder-scan progress.
     Scanning,
+    /// Export mode's **Custom…** size (task #89, rung 2): resize by long edge, width, height
+    /// or percentage. The shell pulls its starting values from `AppCore::export_size_dialog`
+    /// and answers [`DialogResult::ExportSizeChosen`].
+    ExportSize,
 }
 
 /// The runtime, app-driven state of the native menu — everything `main.rs` mirrors
@@ -296,6 +300,8 @@ pub enum DialogResult {
     ScanningCancelled,
     /// A Confirm dialog answered (`true` = the destructive action was confirmed).
     ConfirmAnswered(bool),
+    /// The Custom… size dialog's OK (task #89): the size to export at.
+    ExportSizeChosen(crate::export_panel::SizeChoice),
     /// A Message (or any other) dialog's OK / close.
     Closed,
 }

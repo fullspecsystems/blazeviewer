@@ -238,9 +238,38 @@ Run `/mac-arsed-mac-app`-style checks here: native look and feel, light **and** 
 | 12.16 | Leave with `E` (or the ✕), quit, relaunch, `E` | JPEG, the quality and the size are **remembered**; Strip metadata is **checked** again |
 | 12.17 | `Esc` with the mode on | **Quits**, as everywhere (owner decision 11, pinned — say if it felt wrong) |
 | 12.18 | `Enter` with the mode on | A **random** photo, as everywhere (pinned for revisit too) |
-| 12.19 | PNG, **Smallest** vs **Faster**, on a big photo | Smallest is slower and a little smaller; both lossless |
+| 12.19 | PNG, **Smallest** vs **Faster**, on a big photo | Smallest is slower and a little smaller; both lossless (§ 13.3 shows the exact sizes) |
 | 12.20 | Uncheck **Strip metadata**, export a photo with GPS; `exiftool out.jpg` | Still **no** GPS, camera or dates (categories come later); the colour profile is the original's bytes |
 | 12.21 | VoiceOver (⌘F5) over the panel | Every control is named (Format, Quality / Compression, Size, Strip metadata, Export…) |
+
+## 13. Custom size and the live preview (session 7: rung 2's Custom…, rung 3)
+
+| # | Do | Expect |
+|---|---|---|
+| 13.1 | `E` on a big photo (20 MP or more) and wait a moment | The photo **becomes the export**: **File size** reads "Calculating…" with a small spinner, then the exact size (`11 MB`); **Preview** reads **Export** |
+| 13.2 | Pick **JPEG**, drag the quality slider down to 10 and let go | After you let go, one update (not one per step): blocky JPEG artifacts appear **on the photo**, and the size drops. The old picture stays until the new one is ready |
+| 13.3 | Zoom to 1:1 (`1`) and pan | The artifacts are there at full size; zoom and pan work as usual |
+| 13.4 | Tap `Y` | A toast "Original"; the photo is the original. Tap `Y` again: "Export (… KB)", back to the export. The **Preview** control follows |
+| 13.5 | **Hold** `Y` for a second, then let go | The original while held; the export again on release |
+| 13.6 | Click **Original** / **Export** in the Preview control | Same as `Y` |
+| 13.7 | `⇧Y` with the mode on | Toast "Pin for Compare is off in Export mode"; nothing is pinned |
+| 13.8 | Size ▸ **2048 px** on the 20 MP photo | The export is shown **enlarged to the original's size** (softer), and a note says so; the size beneath is `2048 × …` |
+| 13.9 | A PNG with transparency, **JPEG** | The export side shows **white** where it was transparent; `Y` shows the transparency again |
+| 13.10 | Rotate with `R` | Back to the export side; a moment later the size updates (the rotation is baked into the file) |
+| 13.11 | Space to the next photo | The new photo shows as itself first, then becomes its export a moment after you stop |
+| 13.12 | Hold Space to blaze through 30 photos in Export mode | Blazing stays smooth; no preview is made until you stop |
+| 13.13 | ⌘↩ right after the File size appears, and save | The file on disk is **exactly** that size (Finder ⌘I) — it's the same bytes |
+| 13.14 | An **HDR** photo, PNG | A note: "This HDR image is exported as SDR (Display P3)." The export side looks SDR |
+| 13.15 | Play a video in the mode; pause it | While playing, the video plays normally (no preview); paused, the paused frame becomes its export |
+| 13.16 | A **3D model**: turn it, let go | While turning: the live model. A moment after you let go: the export of the view (PNG keeps the transparent background; JPEG makes it white) |
+| 13.17 | `Tab`, then `Tab` | The preview hides with the panel (the real photo); it comes back at once |
+| 13.18 | Leave with `E` | The real photo again, at once |
+| 13.19 | **Size ▸ Custom…** | A sheet **Custom Size**: Resize by (Long edge / Width / Height / Percentage), a number, and "This image exports at W × H." as you type. Return is OK, `Esc` cancels |
+| 13.20 | Custom: **Width 1200**, OK | Size reads "1200 px wide"; the size beneath and the export follow. Next photo (portrait): still 1200 wide |
+| 13.21 | Custom: **Percentage 25** | "25%"; a quarter of each side |
+| 13.22 | Custom: a width **bigger** than the photo | The readout says it exports at full size; after OK, a note says the same |
+| 13.23 | Leave, quit, relaunch, `E` | The custom size is remembered |
+| 13.24 | VoiceOver over the panel and the sheet | File size and Preview are read; the sheet's controls are named |
 
 ---
 
@@ -269,3 +298,4 @@ only compile-checked from the Mac.
 | W16 | Export, then File ▸ **Show Last Export in File Explorer** | Explorer opens with the PNG selected |
 | W17 | Export twice from the same folder, elsewhere the first time; then from another folder | Same folder → where the last export went; another folder → beside its photo |
 | W18 | **Export mode** (`E`): run 12.1–12.16 | The egui panel top-right: combos for Format / Compression / Size (presets bigger than the photo greyed), a Quality slider for JPEG, a **Strip metadata** switch, an **Export…** button. A JPEG export's dialog shows a "JPEG image" filter and `.jpg` |
+| W19 | **Live preview and Custom size**: run 13.1–13.24 | The egui panel adds **File size** (with a spinner while calculating) and a **Preview** combo (Export / Original). Size ▸ **Custom…** opens a "Custom Size" dialog window: a Resize by combo, a number field, the result line, OK / Cancel; Enter is OK, Esc cancels. Check the preview on **DX12**: no shimmer at fit on a big photo, the export appears over the photo and `Y` flicks instantly |

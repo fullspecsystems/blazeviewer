@@ -1884,6 +1884,11 @@ fn create_image_texture(
     // re-uploaded per frame. Source-ICC (mode 1) images are never mipped (their TRC isn't in the
     // mip shader), so they fall back to single-level even when a policy is passed.
     mip: Option<&MipGen>,
+    // Export previews (task #89 rung 3) mip source-ICC (mode 1) images too: the mip shader
+    // linearizes with the sRGB curve, exact for sRGB and Display P3 (which share it) and a
+    // close approximation for other curves — the same trade `pb_encode::resize` makes. A
+    // preview shown at fit from full resolution would shimmer without mips.
+    mip_icc: bool,
 ) -> UploadedImage {
     // HDR images are scene-linear fp16 (Rgba16Float, mode 2); everything else is
     // sRGB/source-encoded RGBA8 (mode 1 if a profile applies, else 0).
@@ -1913,7 +1918,7 @@ fn create_image_texture(
 
     // Mip only the full-res Original rep, and never a source-ICC (mode 1) image (its TRC isn't in
     // the mip shader). `levels == 1` when the image is 1×1.
-    let do_mip = mip.is_some() && mode != 1.0;
+    let do_mip = mip.is_some() && (mode != 1.0 || mip_icc);
     let levels = if do_mip { mip_levels(img_w, img_h) } else { 1 };
 
     let size = wgpu::Extent3d {
@@ -1938,8 +1943,8 @@ fn create_image_texture(
     // The staging-ring upload (`copy_buffer_to_texture`), not `write_texture` — fills mip 0.
     uploader.upload(device, queue, &tex, image, img_w, img_h);
     // Generate the rest of the chain by 2× box-downsampling (linear-light, premultiplied). Runs
-    // after the L0 copy on the same queue, so ordering is guaranteed. `srgb = !hdr` because the
-    // only SDR case reaching here is mode 0 (mode 1 set `do_mip` false).
+    // after the L0 copy on the same queue, so ordering is guaranteed. `srgb = !hdr`: SDR is
+    // mode 0, or mode 1 for an export preview (`mip_icc`), both sRGB-curve encoded RGBA8.
     if levels > 1 {
         generate_mips(device, queue, mip.expect("do_mip"), &tex, levels, !hdr);
     }
@@ -2049,7 +2054,7 @@ fn upload_image(
     mip: Option<&MipGen>,
 ) -> wgpu::BindGroup {
     create_image_texture(
-        device, queue, bgl, uploader, image, img_w, img_h, color, hdr, scale, mip,
+        device, queue, bgl, uploader, image, img_w, img_h, color, hdr, scale, mip, false,
     )
     .bind_group
 }
@@ -2539,6 +2544,25 @@ fn choose_draw_source(blank: bool, ring_slot_live: bool, held_present: bool) -> 
     }
 }
 
+/// What an export-preview aux present covered (task #89 rung 3), restored by `dismiss_aux`.
+/// The ring texture is held by `Arc`, so it survives a ring rebuild or slot reuse meanwhile.
+struct UnderAux {
+    present_idx: Option<usize>,
+    ring: Option<Arc<RingSlot>>,
+    held: Option<Arc<RingSlot>>,
+    img_w: u32,
+    img_h: u32,
+    peak: f32,
+    blank: bool,
+}
+
+/// The identity stamped on an aux texture: never a real item, so no `present_slot` can match it.
+const AUX_IDENTITY: pb_core::SlotIdentity = pb_core::SlotIdentity {
+    item: usize::MAX,
+    content_gen: u64::MAX,
+    rep: pb_core::RepKind::Original,
+};
+
 /// On-screen presenter for a window surface.
 pub struct WgpuRenderer {
     surface: wgpu::Surface<'static>,
@@ -2643,6 +2667,17 @@ pub struct WgpuRenderer {
     /// texture was decoded for exactly the current viewport, so the held draw's GPU refit
     /// is identity.
     stash: [Option<Arc<RingSlot>>; 2],
+    /// Export mode's live preview (task #89 rung 3): two **aux** textures — 0 = the prepared
+    /// original, 1 = the decoded export — uploaded mipped at full resolution so both sides
+    /// of the flick draw the same way. Presenting one *covers* what was on screen (saved in
+    /// `under_aux`); `dismiss_aux` uncovers it, and any other present simply supersedes it.
+    aux: [Option<Arc<RingSlot>>; 2],
+    /// Which aux slot is on screen; cleared by every other present.
+    aux_shown: Option<usize>,
+    /// What an aux present covered, to restore on `dismiss_aux`.
+    under_aux: Option<UnderAux>,
+    /// The present uniform's current peak, so `dismiss_aux` can put it back.
+    present_peak: std::cell::Cell<f32>,
     /// Background (letterbox) fill, sRGB, shown around a non-covering photo.
     /// Defaults to [`LETTERBOX`]; the app overrides it from user settings.
     letterbox: [u8; 3],
@@ -2949,6 +2984,11 @@ impl WgpuRenderer {
             upload,
             ring: Vec::new(),
             stash: [None, None],
+            aux: [None, None],
+            aux_shown: None,
+            under_aux: None,
+            // The constructor's image sets the present uniform's peak; `dismiss_aux` restores it.
+            present_peak: std::cell::Cell::new(peak),
             present_idx: None,
             held: None,
             letterbox: [LETTERBOX[0], LETTERBOX[1], LETTERBOX[2]],
@@ -2974,6 +3014,28 @@ impl WgpuRenderer {
         }
     }
 
+    /// Another present superseded an export-preview aux: forget what it covered.
+    fn leave_aux(&mut self) {
+        self.aux_shown = None;
+        self.under_aux = None;
+    }
+
+    /// Re-place the quad for the current `img_w` × `img_h`.
+    fn write_quad(&self) {
+        self.queue.write_buffer(
+            &self.vbuf,
+            0,
+            bytemuck::cast_slice(&quad_vertices(
+                &self.view,
+                self.img_w,
+                self.img_h,
+                self.config.width,
+                self.config.height,
+                self.content_top_inset,
+            )),
+        );
+    }
+
     /// The per-image output scale: SDR content on an HDR surface is lifted to the
     /// SDR white level; HDR content (and any SDR-surface content) uses 1.0.
     fn scene_scale(&self, hdr: bool) -> f32 {
@@ -2987,6 +3049,7 @@ impl WgpuRenderer {
     /// Update the present uniform's tone-map white point to the displayed image's
     /// peak (only consequential on an SDR surface; harmless on an HDR surface).
     fn set_present_peak(&self, peak: f32) {
+        self.present_peak.set(peak);
         self.queue.write_buffer(
             &self.peak_buf,
             0,
@@ -3058,6 +3121,11 @@ impl Renderer for WgpuRenderer {
     }
 
     fn show_mesh(&mut self, frame: Option<crate::MeshFrame>) {
+        // A model drawn over an export preview would leave the preview as the photo beneath
+        // it: uncover first, so hiding the model later shows the real image.
+        if frame.is_some() && self.aux_shown.is_some() {
+            self.dismiss_aux();
+        }
         if let Some(m) = self.mesh.as_mut() {
             m.frame = frame.filter(|_| m.has_geometry());
         }
@@ -3361,6 +3429,7 @@ impl Renderer for WgpuRenderer {
 
     fn clear_image(&mut self) {
         self.hide_mesh();
+        self.leave_aux();
         // Show the letterbox background only; the kept bind group/ring is simply not
         // drawn until the next set_image / present_slot (see `render`).
         self.blank = true;
@@ -3378,6 +3447,7 @@ impl Renderer for WgpuRenderer {
         peak: f32,
     ) {
         self.hide_mesh();
+        self.leave_aux();
         let scale = self.scene_scale(hdr);
         // The reusable slot (task #79 phase 3): during animation/video playback this
         // is the per-frame path — same-geometry frames upload in place, creating
@@ -3444,6 +3514,7 @@ impl Renderer for WgpuRenderer {
         p: PlanarPresentation,
     ) {
         self.hide_mesh();
+        self.leave_aux();
         let cpu_hatch = std::env::var_os("PB_VIDEO_CPU_CONVERT").is_some_and(|v| v == "1");
         let needs_16bit = p.format.is_ten_bit() && !self.supports_p010;
         if cpu_hatch || needs_16bit {
@@ -3772,6 +3843,7 @@ impl Renderer for WgpuRenderer {
             hdr,
             scale,
             mipgen,
+            false,
         );
         self.ring[slot] = Some(Arc::new(RingSlot {
             bind_group: uploaded.bind_group,
@@ -3834,6 +3906,9 @@ impl Renderer for WgpuRenderer {
             return None;
         }
         let src = match source {
+            // While an export preview is shown, `held` is the preview — never derive the
+            // item's Fit from it. The CPU Fit decode takes over.
+            DeriveSource::Held if self.aux_shown.is_some() => return None,
             DeriveSource::Held => self.held.as_ref()?,
             // Deriving INTO the source slot would drop the Original mid-derive — refuse.
             DeriveSource::Ring(s) if s == dst_slot => return None,
@@ -3928,6 +4003,7 @@ impl Renderer for WgpuRenderer {
             );
             return false;
         }
+        self.leave_aux();
         self.blank = false; // a photo is showing again
         self.message = None; // hide the empty-state hint
         self.held = None; // a real frame supersedes the held one — free its texture
@@ -3977,6 +4053,7 @@ impl Renderer for WgpuRenderer {
         let Some(slot) = self.stash.get(stash_idx).and_then(|s| s.clone()) else {
             return false;
         };
+        self.leave_aux();
         let (w, h, peak) = (slot.w, slot.h, slot.peak);
         // Install via the held path: the stash was decoded for EXACTLY this viewport
         // geometry (caller-verified), so the held draw's GPU refit is identity. The
@@ -4005,6 +4082,128 @@ impl Renderer for WgpuRenderer {
 
     fn clear_stash(&mut self, stash_idx: usize) {
         if let Some(s) = self.stash.get_mut(stash_idx) {
+            *s = None;
+        }
+    }
+
+    fn upload_aux(&mut self, idx: usize, rgba: &[u8], w: u32, h: u32, color: ColorTransform) -> bool {
+        if idx >= self.aux.len() || w == 0 || h == 0 || rgba.len() != w as usize * h as usize * 4 {
+            return false;
+        }
+        let scale = self.scene_scale(false);
+        let uploaded = create_image_texture(
+            &self.device,
+            &self.queue,
+            &self.bgl,
+            self.upload.as_mut(),
+            rgba,
+            w,
+            h,
+            &color,
+            false,
+            scale,
+            Some(&self.mipgen),
+            true,
+        );
+        self.aux[idx] = Some(Arc::new(RingSlot {
+            bind_group: uploaded.bind_group,
+            w,
+            h,
+            identity: AUX_IDENTITY,
+            peak: 1.0,
+            texture: uploaded.texture,
+            was_clamped: uploaded.was_clamped,
+            mode: uploaded.mode,
+            content_hdr: false,
+        }));
+        // Re-uploading the slot on screen: draw the new texture.
+        if self.aux_shown == Some(idx) {
+            self.held = self.aux[idx].clone();
+        }
+        true
+    }
+
+    fn present_aux(&mut self, idx: usize, display_w: u32, display_h: u32) -> bool {
+        let Some(slot) = self.aux.get(idx).and_then(|s| s.clone()) else {
+            return false;
+        };
+        if display_w == 0 || display_h == 0 {
+            return false;
+        }
+        self.hide_mesh();
+        if self.aux_shown.is_none() {
+            self.under_aux = Some(UnderAux {
+                present_idx: self.present_idx,
+                ring: self
+                    .present_idx
+                    .and_then(|i| self.ring.get(i).and_then(|s| s.clone())),
+                held: self.held.clone(),
+                img_w: self.img_w,
+                img_h: self.img_h,
+                peak: self.present_peak.get(),
+                blank: self.blank,
+            });
+        }
+        self.aux_shown = Some(idx);
+        self.blank = false;
+        self.held = Some(slot);
+        self.present_idx = None;
+        self.set_present_peak(1.0);
+        // Laid out at the caller's size (the original's), whatever the texture's: a resized
+        // export is shown at the original's scale, so the flick compares like with like.
+        self.img_w = display_w;
+        self.img_h = display_h;
+        self.write_quad();
+        true
+    }
+
+    fn dismiss_aux(&mut self) {
+        if self.aux_shown.take().is_none() {
+            return;
+        }
+        let Some(u) = self.under_aux.take() else {
+            return;
+        };
+        match (u.present_idx, u.ring) {
+            // The covered ring slot still holds the same texture: present it again.
+            (Some(i), Some(r))
+                if self
+                    .ring
+                    .get(i)
+                    .and_then(|s| s.as_ref())
+                    .is_some_and(|s| Arc::ptr_eq(s, &r)) =>
+            {
+                self.present_idx = Some(i);
+                self.held = None;
+            }
+            // The ring moved on underneath (a rebuild): keep showing the covered frame as
+            // held until the core re-presents.
+            (_, Some(r)) => {
+                self.present_idx = None;
+                self.held = Some(r);
+            }
+            // A held frame, or the single-image path (an animation or video frame).
+            _ => {
+                self.present_idx = None;
+                self.held = u.held;
+            }
+        }
+        self.blank = u.blank;
+        self.img_w = u.img_w;
+        self.img_h = u.img_h;
+        self.set_present_peak(u.peak);
+        self.write_quad();
+    }
+
+    fn aux_presented(&self) -> Option<usize> {
+        self.aux_shown
+    }
+
+    fn clear_aux(&mut self, idx: usize) {
+        if self.aux_shown == Some(idx) {
+            self.dismiss_aux();
+        }
+        if let Some(s) = self.aux.get_mut(idx) {
             *s = None;
         }
     }

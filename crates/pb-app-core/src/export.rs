@@ -44,6 +44,16 @@ pub struct ExportRequest {
     pub frame: Option<crate::frame_capture::FrameSource>,
     /// The Export panel's settings at command time (format, quality, size, Strip).
     pub settings: crate::export_panel::ExportSettings,
+    /// The file already encoded by the preview with exactly these settings (rung 3, F10):
+    /// the worker writes these bytes instead of decoding and encoding again.
+    pub encoded: Option<PreEncoded>,
+}
+
+/// An export the preview already encoded — the file's bytes and what `prepare` noted.
+#[derive(Clone)]
+pub struct PreEncoded {
+    pub bytes: Arc<Vec<u8>>,
+    pub notes: Vec<pb_encode::ExportNote>,
 }
 
 impl std::fmt::Debug for ExportRequest {
@@ -107,6 +117,8 @@ pub struct ExportState {
     pub prefs_dirty: bool,
     /// What the panel showed at the last tick — the native shells re-pull when it changes.
     pub last_panel_key: Option<crate::export_panel::PanelKey>,
+    /// Export mode's live preview (rung 3): the worker, what's on the GPU, the flick.
+    pub preview: crate::export_preview::PreviewState,
 }
 
 /// How long the export notice stays while the pointer isn't on it.

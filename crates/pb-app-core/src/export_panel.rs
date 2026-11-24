@@ -124,13 +124,80 @@ impl PngCompression {
 /// edge is greyed out: exports are never upscaled (review F20).
 pub const SIZE_PRESETS: [u32; 8] = [3840, 2560, 2048, 1920, 1600, 1280, 1024, 800];
 
-/// The export size: the full resolution, or at most `n` pixels on the long edge.
+/// The largest edge the Custom… dialog accepts (JPEG's own limit).
+pub const MAX_EDGE: u32 = 65_535;
+
+/// How a custom size is given — the Custom… dialog's "Resize by" menu.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum SizeBy {
+    #[default]
+    LongEdge,
+    Width,
+    Height,
+    Percent,
+}
+
+impl SizeBy {
+    pub const ALL: [SizeBy; 4] = [SizeBy::LongEdge, SizeBy::Width, SizeBy::Height, SizeBy::Percent];
+
+    /// The menu's name for it.
+    pub fn label(self) -> &'static str {
+        match self {
+            SizeBy::LongEdge => "Long edge",
+            SizeBy::Width => "Width",
+            SizeBy::Height => "Height",
+            SizeBy::Percent => "Percentage",
+        }
+    }
+
+    /// The unit shown after the number field.
+    pub fn unit(self) -> &'static str {
+        match self {
+            SizeBy::Percent => "%",
+            _ => "px",
+        }
+    }
+
+    /// The largest value the field accepts.
+    pub fn max(self) -> u32 {
+        match self {
+            SizeBy::Percent => 100,
+            _ => MAX_EDGE,
+        }
+    }
+
+    /// Stable wire value: 0 long edge, 1 width, 2 height, 3 percentage.
+    pub fn code(self) -> u8 {
+        match self {
+            SizeBy::LongEdge => 0,
+            SizeBy::Width => 1,
+            SizeBy::Height => 2,
+            SizeBy::Percent => 3,
+        }
+    }
+
+    pub fn from_code(code: u8) -> Option<SizeBy> {
+        SizeBy::ALL.into_iter().find(|b| b.code() == code)
+    }
+}
+
+/// The export size, **as displayed** (after the RAM rotation): the full resolution, a long
+/// edge (the presets, or a custom one), or a custom width, height or percentage. Every
+/// choice is downscale-only.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum SizeChoice {
     #[default]
     Full,
     LongEdge(u32),
+    Width(u32),
+    Height(u32),
+    /// 1–99; 100 is [`SizeChoice::Full`].
+    Percent(u16),
 }
+
+/// The tag bits of [`SizeChoice::code`]: the top four bits say which kind, the rest the value.
+const SIZE_TAG_SHIFT: u32 = 28;
+const SIZE_VALUE_MASK: u32 = (1 << SIZE_TAG_SHIFT) - 1;
 
 impl SizeChoice {
     /// The resize `prepare` applies (`None` = full resolution).
@@ -138,21 +205,164 @@ impl SizeChoice {
         match self {
             SizeChoice::Full => None,
             SizeChoice::LongEdge(n) => Some(Resize::LongEdge(n)),
+            SizeChoice::Width(n) => Some(Resize::Width(n)),
+            SizeChoice::Height(n) => Some(Resize::Height(n)),
+            SizeChoice::Percent(p) => Some(Resize::Percent(p)),
         }
     }
 
-    /// Wire / settings value: 0 = full size, else the long edge.
-    pub fn code(self) -> u32 {
+    /// A custom size from the dialog, or `None` when the value is out of range. 100 % is
+    /// the full size.
+    pub fn custom(by: SizeBy, value: u32) -> Option<SizeChoice> {
+        if value == 0 || value > by.max() {
+            return None;
+        }
+        Some(match by {
+            SizeBy::LongEdge => SizeChoice::LongEdge(value),
+            SizeBy::Width => SizeChoice::Width(value),
+            SizeBy::Height => SizeChoice::Height(value),
+            SizeBy::Percent if value == 100 => SizeChoice::Full,
+            SizeBy::Percent => SizeChoice::Percent(value as u16),
+        })
+    }
+
+    /// How this size is given and its number, for the dialog to start from (`None` = full).
+    pub fn by_value(self) -> Option<(SizeBy, u32)> {
         match self {
-            SizeChoice::Full => 0,
-            SizeChoice::LongEdge(n) => n,
+            SizeChoice::Full => None,
+            SizeChoice::LongEdge(n) => Some((SizeBy::LongEdge, n)),
+            SizeChoice::Width(n) => Some((SizeBy::Width, n)),
+            SizeChoice::Height(n) => Some((SizeBy::Height, n)),
+            SizeChoice::Percent(p) => Some((SizeBy::Percent, p as u32)),
         }
     }
 
+    /// One of the menu's ready-made sizes (not a custom one).
+    pub fn is_preset(self) -> bool {
+        match self {
+            SizeChoice::Full => true,
+            SizeChoice::LongEdge(n) => SIZE_PRESETS.contains(&n),
+            _ => false,
+        }
+    }
+
+    /// The menu's label: `Full size`, `2048 px`, `1500 px wide`, `800 px high`, `50%`.
+    pub fn label(self) -> String {
+        match self {
+            SizeChoice::Full => "Full size".into(),
+            SizeChoice::LongEdge(n) => format!("{n} px"),
+            SizeChoice::Width(n) => format!("{n} px wide"),
+            SizeChoice::Height(n) => format!("{n} px high"),
+            SizeChoice::Percent(p) => format!("{p}%"),
+        }
+    }
+
+    /// The output size for a `w` × `h` source (as displayed), or `None` when this choice
+    /// wouldn't shrink it (so it exports at full size).
+    pub fn target(self, (w, h): (u32, u32)) -> Option<(u32, u32)> {
+        self.resize().and_then(|r| r.target(w, h))
+    }
+
+    /// Wire value for the shells (FFI / egui): 0 = full size; otherwise the kind in the top
+    /// four bits (0 long edge, 1 width, 2 height, 3 percentage) and the number below — so a
+    /// long edge is its own number, as rung 2's first build had it.
+    pub fn code(self) -> u32 {
+        match self.by_value() {
+            None => 0,
+            Some((by, v)) => ((by.code() as u32) << SIZE_TAG_SHIFT) | (v & SIZE_VALUE_MASK),
+        }
+    }
+
+    /// The inverse of [`code`](Self::code); a malformed code is the full size.
     pub fn from_code(code: u32) -> SizeChoice {
-        match code {
-            0 => SizeChoice::Full,
-            n => SizeChoice::LongEdge(n),
+        if code == 0 {
+            return SizeChoice::Full;
+        }
+        SizeBy::from_code((code >> SIZE_TAG_SHIFT) as u8)
+            .and_then(|by| SizeChoice::custom(by, code & SIZE_VALUE_MASK))
+            .unwrap_or(SizeChoice::Full)
+    }
+
+    /// How `settings.toml` spells it: `full`, `long 2048`, `width 1500`, `height 800`, `50%`.
+    pub fn spec(self) -> String {
+        match self {
+            SizeChoice::Full => "full".into(),
+            SizeChoice::LongEdge(n) => format!("long {n}"),
+            SizeChoice::Width(n) => format!("width {n}"),
+            SizeChoice::Height(n) => format!("height {n}"),
+            SizeChoice::Percent(p) => format!("{p}%"),
+        }
+    }
+
+    /// The inverse of [`spec`](Self::spec); `None` for anything else.
+    pub fn parse_spec(s: &str) -> Option<SizeChoice> {
+        let s = s.trim();
+        if s.eq_ignore_ascii_case("full") {
+            return Some(SizeChoice::Full);
+        }
+        if let Some(p) = s.strip_suffix('%') {
+            return SizeChoice::custom(SizeBy::Percent, p.trim().parse().ok()?);
+        }
+        let (kind, n) = s.split_once(' ')?;
+        let by = match kind.to_ascii_lowercase().as_str() {
+            "long" => SizeBy::LongEdge,
+            "width" => SizeBy::Width,
+            "height" => SizeBy::Height,
+            _ => return None,
+        };
+        SizeChoice::custom(by, n.trim().parse().ok()?)
+    }
+}
+
+impl Serialize for SizeChoice {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(&self.spec())
+    }
+}
+
+impl<'de> Deserialize<'de> for SizeChoice {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(d)?;
+        SizeChoice::parse_spec(&s)
+            .ok_or_else(|| serde::de::Error::custom(format!("unknown export size {s:?}")))
+    }
+}
+
+/// The Custom… dialog's starting values and what it needs to show the result as you type.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SizeDialog {
+    pub by: SizeBy,
+    pub value: u32,
+    /// The item's size as displayed, when known.
+    pub dims: Option<(u32, u32)>,
+}
+
+impl SizeDialog {
+    /// Start from the current choice; from the full size, offer the image's own long edge.
+    pub fn for_choice(size: SizeChoice, dims: Option<(u32, u32)>) -> SizeDialog {
+        let (by, value) = size
+            .by_value()
+            .unwrap_or((SizeBy::LongEdge, dims.map_or(2048, |(w, h)| w.max(h))));
+        SizeDialog { by, value, dims }
+    }
+
+    /// The line under the field: what `value` `by` gives this image.
+    pub fn readout(by: SizeBy, value: u32, dims: Option<(u32, u32)>) -> String {
+        let Some(choice) = SizeChoice::custom(by, value) else {
+            return match by {
+                SizeBy::Percent => "Enter a percentage from 1 to 100.".into(),
+                _ => format!("Enter a size from 1 to {MAX_EDGE} px."),
+            };
+        };
+        let Some(d) = dims else {
+            return String::new();
+        };
+        match choice.target(d) {
+            Some(out) => format!("This image exports at {}.", dims_label(out)),
+            None => format!(
+                "This image is already {}, so it exports at full size.",
+                dims_label(d)
+            ),
         }
     }
 }
@@ -190,7 +400,7 @@ impl ExportSettings {
             format: p.format,
             jpeg_quality: p.jpeg_quality.clamp(JPEG_QUALITY_MIN, JPEG_QUALITY_MAX),
             png: p.png_compression,
-            size: SizeChoice::from_code(p.long_edge),
+            size: p.size,
             strip_metadata: true,
         }
     }
@@ -201,7 +411,7 @@ impl ExportSettings {
             format: self.format,
             jpeg_quality: self.jpeg_quality,
             png_compression: self.png,
-            long_edge: self.size.code(),
+            size: self.size,
         }
     }
 
@@ -250,8 +460,9 @@ pub struct ExportPrefs {
     pub format: FormatChoice,
     pub jpeg_quality: u8,
     pub png_compression: PngCompression,
-    /// 0 = full size, else the long edge in pixels.
-    pub long_edge: u32,
+    /// Written as `size = "long 2048"` / `"width 1500"` / `"height 800"` / `"50%"` /
+    /// `"full"`. Rung 2's first build wrote `long_edge = 2048` (0 = full); that is still read.
+    pub size: SizeChoice,
 }
 
 impl Default for ExportPrefs {
@@ -260,7 +471,7 @@ impl Default for ExportPrefs {
             format: FormatChoice::Png,
             jpeg_quality: JPEG_QUALITY_DEFAULT,
             png_compression: PngCompression::Balanced,
-            long_edge: 0,
+            size: SizeChoice::Full,
         }
     }
 }
@@ -286,8 +497,14 @@ impl ExportPrefs {
         if let Some(c) = field(t, "png_compression") {
             p.png_compression = c;
         }
-        if let Some(e) = field::<i64>(t, "long_edge") {
-            p.long_edge = e.clamp(0, u32::MAX as i64) as u32;
+        if let Some(size) = field::<String>(t, "size").and_then(|s| SizeChoice::parse_spec(&s)) {
+            p.size = size;
+        } else if let Some(e) = field::<i64>(t, "long_edge") {
+            // Rung 2's first build: 0 = full, else the long edge.
+            p.size = u32::try_from(e)
+                .ok()
+                .and_then(|n| SizeChoice::custom(SizeBy::LongEdge, n))
+                .unwrap_or_default();
         }
         p
     }
@@ -313,6 +530,9 @@ pub fn export_key_override(res: KeyResolution) -> Option<ExportKey> {
         KeyResolution::OneShot(a) | KeyResolution::RepeatStart(a) => match a {
             Action::SlideshowFaster => Some(ExportKey::Quality(-1)),
             Action::SlideshowSlower => Some(ExportKey::Quality(1)),
+            // `Y` (Compare with Pinned) flicks between the export and the original (rung 3);
+            // a hold peeks — the key-up comes through `AppCore::export_flick_up`.
+            Action::CompareToggle => Some(ExportKey::Flick),
             _ => None,
         },
         _ => None,
@@ -324,6 +544,8 @@ pub fn export_key_override(res: KeyResolution) -> Option<ExportKey> {
 pub enum ExportKey {
     /// Quality down (−1) / up (+1).
     Quality(i32),
+    /// Flick between the export and the original (a hold peeks).
+    Flick,
     /// Export… with the current settings (reserved for the pinned `Enter` revisit).
     #[allow(dead_code)]
     Commit,
@@ -343,6 +565,44 @@ pub struct PanelKey {
     pub moving: bool,
     pub rotation: u8,
     pub dims: Option<(u32, u32)>,
+    /// The preview's state (`PreviewStatus::key`) and the side on screen (rung 3).
+    pub preview: (u8, u64, crate::export_preview::Side),
+}
+
+/// What the panel shows about the live preview (rung 3).
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub struct PreviewReadout {
+    pub status: crate::export_preview::PreviewStatus,
+    /// The side of the flick on screen.
+    pub side: crate::export_preview::Side,
+}
+
+impl PreviewReadout {
+    /// The File size row: the exact size once the preview is made, else what's happening.
+    pub fn size_text(&self) -> String {
+        use crate::export_preview::PreviewStatus as S;
+        match &self.status {
+            S::Ready { bytes } => crate::export_preview::size_label(*bytes),
+            S::Working => "Calculating\u{2026}".into(),
+            S::Failed(_) => "Unknown".into(),
+            S::TooLarge => "Shown after export".into(),
+            S::Off => String::new(),
+        }
+    }
+
+    /// Whether a preview is being made (the shells show a spinner).
+    pub fn busy(&self) -> bool {
+        self.status == crate::export_preview::PreviewStatus::Working
+    }
+
+    /// Whether the flick control applies (there's something to flick between).
+    pub fn can_flick(&self) -> bool {
+        matches!(
+            self.status,
+            crate::export_preview::PreviewStatus::Ready { .. }
+                | crate::export_preview::PreviewStatus::Working
+        )
+    }
 }
 
 /// One size choice in the panel's menu.
@@ -382,46 +642,46 @@ pub struct ExportPanel {
     pub notes: Vec<String>,
     /// Whether Export… can run on this item now.
     pub can_export: bool,
+    /// The live preview's state and side (rung 3).
+    pub preview: PreviewReadout,
 }
 
 impl ExportPanel {
     pub fn build(settings: ExportSettings, source: Option<PanelSource>) -> ExportPanel {
-        let long = source.as_ref().and_then(|s| s.dims).map(|(w, h)| w.max(h));
+        let dims = source.as_ref().and_then(|s| s.dims);
+        let long = dims.map(|(w, h)| w.max(h));
         let mut sizes = vec![SizeOption {
             choice: SizeChoice::Full,
-            label: "Full size".into(),
+            label: SizeChoice::Full.label(),
             enabled: true,
         }];
         sizes.extend(SIZE_PRESETS.iter().map(|&n| SizeOption {
             choice: SizeChoice::LongEdge(n),
-            label: format!("{n} px"),
+            label: SizeChoice::LongEdge(n).label(),
             enabled: long.is_none_or(|l| n < l),
         }));
-        // A custom long edge (a hand-edited setting) still shows as the current choice.
-        if let SizeChoice::LongEdge(n) = settings.size {
-            if !SIZE_PRESETS.contains(&n) {
-                sizes.push(SizeOption {
-                    choice: settings.size,
-                    label: format!("{n} px"),
-                    enabled: long.is_none_or(|l| n < l),
-                });
-            }
+        // A custom size is listed as the current choice (the shells add "Custom…" after it).
+        // Always enabled: it's what's selected, and the notes say when it keeps the full size.
+        if !settings.size.is_preset() {
+            sizes.push(SizeOption {
+                choice: settings.size,
+                label: settings.size.label(),
+                enabled: true,
+            });
         }
 
-        let dims = source.as_ref().and_then(|s| s.dims);
-        let output_dims = dims.map(|(w, h)| {
-            settings
-                .size
-                .resize()
-                .and_then(|r| r.target(w, h))
-                .unwrap_or((w, h))
-        });
+        let output_dims = dims.map(|d| settings.size.target(d).unwrap_or(d));
 
         let mut notes = Vec::new();
-        if let (SizeChoice::LongEdge(n), Some(l)) = (settings.size, long) {
-            if n >= l {
+        if let Some((w, h)) = dims {
+            if settings.size != SizeChoice::Full && settings.size.target((w, h)).is_none() {
+                let already = match settings.size {
+                    SizeChoice::Width(_) => format!("{w} px wide or narrower"),
+                    SizeChoice::Height(_) => format!("{h} px high or shorter"),
+                    _ => format!("{} px or smaller", w.max(h)),
+                };
                 notes.push(format!(
-                    "This image is already {l} px or smaller, so it's exported at full size."
+                    "This image is already {already}, so it's exported at full size."
                 ));
             }
         }
@@ -450,7 +710,27 @@ impl ExportPanel {
             output_dims,
             notes,
             can_export,
+            preview: PreviewReadout::default(),
         }
+    }
+
+    /// Add what the live preview knows: its state, the side on screen, and notes only a made
+    /// preview can give (HDR exported as SDR; a resized export shown enlarged). A failure
+    /// says why.
+    pub fn with_preview(mut self, preview: PreviewReadout, notes: Vec<String>) -> ExportPanel {
+        if let crate::export_preview::PreviewStatus::Failed(why) = &preview.status {
+            self.notes.insert(0, format!("Couldn't make a preview: {why}."));
+        }
+        if preview.status == crate::export_preview::PreviewStatus::TooLarge {
+            self.notes
+                .insert(0, "This image is too large to preview; it still exports.".into());
+        }
+        // The preview's notes lead: they describe what's on screen.
+        for (i, n) in notes.into_iter().enumerate() {
+            self.notes.insert(i, n);
+        }
+        self.preview = preview;
+        self
     }
 }
 
@@ -488,7 +768,7 @@ mod tests {
             format: FormatChoice::Jpeg,
             jpeg_quality: 70,
             png_compression: PngCompression::Smallest,
-            long_edge: 2048,
+            size: SizeChoice::LongEdge(2048),
         };
         let s = ExportSettings::from_prefs(&p);
         assert_eq!(s.format, FormatChoice::Jpeg);
@@ -515,13 +795,30 @@ mod tests {
     fn prefs_load_leniently_field_by_field() {
         let parse = |s: &str| ExportPrefs::from_value(&s.parse::<toml::Table>().unwrap().into());
         // A format a later build added, a quality typed as text: each falls back alone.
-        let p = parse("format = \"webp\"\njpeg_quality = \"high\"\nlong_edge = 1920");
+        let p = parse("format = \"webp\"\njpeg_quality = \"high\"\nsize = \"width 1500\"");
         assert_eq!(p.format, FormatChoice::Png);
         assert_eq!(p.jpeg_quality, JPEG_QUALITY_DEFAULT);
-        assert_eq!(p.long_edge, 1920, "the good field survives");
-        // Out-of-range numbers clamp.
-        let p = parse("jpeg_quality = 400\nlong_edge = -5");
-        assert_eq!((p.jpeg_quality, p.long_edge), (100, 0));
+        assert_eq!(p.size, SizeChoice::Width(1500), "the good field survives");
+        // Out-of-range numbers clamp; an unreadable size falls back to full.
+        let p = parse("jpeg_quality = 400\nsize = \"huge\"");
+        assert_eq!((p.jpeg_quality, p.size), (100, SizeChoice::Full));
+        // Rung 2's first build wrote `long_edge` (0 = full): still read.
+        assert_eq!(parse("long_edge = 1920").size, SizeChoice::LongEdge(1920));
+        assert_eq!(parse("long_edge = 0").size, SizeChoice::Full);
+        assert_eq!(parse("long_edge = -5").size, SizeChoice::Full);
+        // `size` wins over a leftover `long_edge`.
+        assert_eq!(
+            parse("long_edge = 1920\nsize = \"50%\"").size,
+            SizeChoice::Percent(50)
+        );
+        // And what's written reads back.
+        let p = ExportPrefs {
+            size: SizeChoice::Height(800),
+            ..ExportPrefs::default()
+        };
+        let text = toml::to_string(&p).unwrap();
+        assert!(text.contains("size = \"height 800\""), "{text}");
+        assert_eq!(parse(&text), p);
         // Not a table at all → defaults.
         assert_eq!(
             ExportPrefs::from_value(&toml::Value::Integer(3)),
@@ -626,17 +923,92 @@ mod tests {
     }
 
     #[test]
-    fn a_custom_long_edge_is_listed_as_the_current_choice() {
+    fn a_custom_size_is_listed_as_the_current_choice() {
+        for (size, label, out) in [
+            (SizeChoice::LongEdge(1500), "1500 px", (1500, 1000)),
+            (SizeChoice::Width(1200), "1200 px wide", (1200, 800)),
+            (SizeChoice::Height(500), "500 px high", (750, 500)),
+            (SizeChoice::Percent(25), "25%", (750, 500)),
+        ] {
+            let s = ExportSettings {
+                size,
+                ..ExportSettings::default()
+            };
+            let p = ExportPanel::build(s, src(3000, 2000));
+            let opt = p.sizes.last().unwrap();
+            assert_eq!((opt.choice, opt.label.as_str(), opt.enabled), (size, label, true));
+            assert_eq!(p.output_dims, Some(out), "{size:?}");
+        }
+        // A preset isn't listed twice.
         let s = ExportSettings {
-            size: SizeChoice::LongEdge(1500),
+            size: SizeChoice::LongEdge(2048),
+            ..ExportSettings::default()
+        };
+        assert_eq!(ExportPanel::build(s, src(3000, 2000)).sizes.len(), 9);
+    }
+
+    #[test]
+    fn a_custom_size_that_would_upscale_keeps_the_full_size_and_says_so() {
+        let s = ExportSettings {
+            size: SizeChoice::Width(4000),
             ..ExportSettings::default()
         };
         let p = ExportPanel::build(s, src(3000, 2000));
-        assert!(p
-            .sizes
-            .iter()
-            .any(|o| o.choice == SizeChoice::LongEdge(1500) && o.enabled));
-        assert_eq!(p.output_dims, Some((1500, 1000)));
+        assert_eq!(p.output_dims, Some((3000, 2000)));
+        assert!(
+            p.notes.iter().any(|n| n.contains("3000 px wide or narrower")),
+            "{:?}",
+            p.notes
+        );
+    }
+
+    #[test]
+    fn custom_sizes_validate_and_round_trip() {
+        assert_eq!(SizeChoice::custom(SizeBy::Width, 0), None);
+        assert_eq!(SizeChoice::custom(SizeBy::Width, MAX_EDGE + 1), None);
+        assert_eq!(SizeChoice::custom(SizeBy::Percent, 101), None);
+        assert_eq!(SizeChoice::custom(SizeBy::Percent, 100), Some(SizeChoice::Full));
+        for c in [
+            SizeChoice::Full,
+            SizeChoice::LongEdge(2048),
+            SizeChoice::LongEdge(MAX_EDGE),
+            SizeChoice::Width(1),
+            SizeChoice::Height(800),
+            SizeChoice::Percent(50),
+        ] {
+            assert_eq!(SizeChoice::from_code(c.code()), c, "code {c:?}");
+            assert_eq!(SizeChoice::parse_spec(&c.spec()), Some(c), "spec {c:?}");
+        }
+        // Rung 2's first codes were the bare long edge: still the long edge.
+        assert_eq!(SizeChoice::from_code(2048), SizeChoice::LongEdge(2048));
+        assert_eq!(SizeChoice::from_code(u32::MAX), SizeChoice::Full, "malformed");
+        for b in SizeBy::ALL {
+            assert_eq!(SizeBy::from_code(b.code()), Some(b));
+        }
+        assert_eq!(SizeChoice::parse_spec(" Width 640 "), Some(SizeChoice::Width(640)));
+        assert_eq!(SizeChoice::parse_spec("width"), None);
+        assert_eq!(SizeChoice::parse_spec("0%"), None);
+    }
+
+    #[test]
+    fn the_custom_dialog_starts_from_the_choice_and_reads_out_the_result() {
+        let d = SizeDialog::for_choice(SizeChoice::Height(800), Some((3000, 2000)));
+        assert_eq!((d.by, d.value), (SizeBy::Height, 800));
+        // From full size it offers the image's own long edge.
+        let d = SizeDialog::for_choice(SizeChoice::Full, Some((3000, 2000)));
+        assert_eq!((d.by, d.value), (SizeBy::LongEdge, 3000));
+        assert_eq!(SizeDialog::for_choice(SizeChoice::Full, None).value, 2048);
+
+        let r = |by, v| SizeDialog::readout(by, v, Some((3000, 2000)));
+        assert_eq!(r(SizeBy::Width, 1500), "This image exports at 1500 × 1000.");
+        assert_eq!(r(SizeBy::Percent, 10), "This image exports at 300 × 200.");
+        assert_eq!(
+            r(SizeBy::LongEdge, 3000),
+            "This image is already 3000 × 2000, so it exports at full size."
+        );
+        assert_eq!(r(SizeBy::Width, 0), "Enter a size from 1 to 65535 px.");
+        assert_eq!(r(SizeBy::Percent, 500), "Enter a percentage from 1 to 100.");
+        assert_eq!(SizeDialog::readout(SizeBy::Width, 10, None), "");
     }
 
     #[test]
@@ -666,6 +1038,7 @@ mod tests {
         }
         assert_eq!(SizeChoice::from_code(0), SizeChoice::Full);
         assert_eq!(SizeChoice::from_code(2048).code(), 2048);
+        assert_eq!(SizeChoice::Width(5).code(), (1 << 28) | 5);
         assert_eq!(clock_label(7), "0:07");
         assert_eq!(clock_label(83), "1:23");
         assert_eq!(clock_label(3723), "1:02:03");

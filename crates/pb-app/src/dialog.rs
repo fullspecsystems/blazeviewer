@@ -66,6 +66,12 @@ pub enum DialogKind {
     /// verified (see [`become_loading`](DialogWindow::become_loading)); the non-password
     /// paths open it fresh.
     Loading,
+    /// Export mode's **Custom…** size (task #89, rung 2): a "Resize by" menu (long edge /
+    /// width / height / percentage), a number field, the result for this image, and an
+    /// OK/Cancel bar. Seeded with [`seed_export_size`](DialogWindow::seed_export_size); OK
+    /// surfaces as [`take_confirm_result`](DialogWindow::take_confirm_result) `Some(true)`
+    /// with the size via [`take_export_size`](DialogWindow::take_export_size).
+    ExportSize,
 }
 
 /// Which section of the Settings dialog is showing. Edits auto-save live across every
@@ -521,6 +527,12 @@ pub struct DialogWindow {
     ///
     /// [`take_ask_result`]: DialogWindow::take_ask_result
     submitted_ask: Option<String>,
+    /// The Custom… size dialog (task #89): its "Resize by", the number field's text, the
+    /// image's size (for the result line), and the size the user just confirmed.
+    size_by: pb_app_core::export_panel::SizeBy,
+    size_input: String,
+    size_dims: Option<(u32, u32)>,
+    submitted_size: Option<pb_app_core::export_panel::SizeChoice>,
     /// One-shot: request keyboard focus for the password field on the next render
     /// (set on open and after a wrong attempt). Done once per request rather than
     /// every frame — re-grabbing focus each frame suppresses the field's Enter-driven
@@ -577,6 +589,7 @@ impl DialogWindow {
             DialogKind::Message => (470.0, 185.0, false, pb_app_core::APP_NAME.to_string()),
             DialogKind::Password => (500.0, 250.0, false, "Password Required".to_string()),
             DialogKind::AskImage => (500.0, 320.0, false, "Ask About Image".to_string()),
+            DialogKind::ExportSize => (400.0, 230.0, false, "Custom Size".to_string()),
             DialogKind::Loading => (500.0, 210.0, false, "Opening Archive".to_string()),
             // A touch taller than Loading for the extra current-folder line under the count.
         };
@@ -749,11 +762,18 @@ impl DialogWindow {
             password_input: String::new(),
             ask_input: String::new(),
             submitted_ask: None,
+            size_by: pb_app_core::export_panel::SizeBy::LongEdge,
+            size_input: String::new(),
+            size_dims: None,
+            submitted_size: None,
             password_error: None,
             checking: false,
             submitted_password: None,
             // Focus the text field on open for the two text-entry dialogs.
-            focus_password: matches!(kind, DialogKind::Password | DialogKind::AskImage),
+            focus_password: matches!(
+                kind,
+                DialogKind::Password | DialogKind::AskImage | DialogKind::ExportSize
+            ),
             next_repaint: None,
             progress: None,
             archive_optout: None,
@@ -820,6 +840,21 @@ impl DialogWindow {
     /// this with a `take_confirm_result()` of `Some(true)`.
     pub fn take_ask_result(&mut self) -> Option<String> {
         self.submitted_ask.take()
+    }
+
+    /// Seed the Custom… size dialog with the core's starting values (the current size, and
+    /// the image's size for the result line).
+    pub fn seed_export_size(&mut self, d: pb_app_core::export_panel::SizeDialog) {
+        self.size_by = d.by;
+        self.size_input = d.value.to_string();
+        self.size_dims = d.dims;
+        self.request_redraw();
+    }
+
+    /// Take the size the user just confirmed on a [`DialogKind::ExportSize`] dialog, set
+    /// during the answering frame. `None` until then (or when the entry was out of range).
+    pub fn take_export_size(&mut self) -> Option<pb_app_core::export_panel::SizeChoice> {
+        self.submitted_size.take()
     }
 
     /// Take a live Settings edit produced this render frame (auto-save): the settings
@@ -990,6 +1025,9 @@ impl DialogWindow {
         let draft = &mut self.draft;
         let password_input = &mut self.password_input;
         let ask_input = &mut self.ask_input;
+        let size_by = &mut self.size_by;
+        let size_input = &mut self.size_input;
+        let size_dims = self.size_dims;
         let mut kb = KbEdit {
             keymap: &mut self.keymap_draft,
             capturing: &mut self.capturing,
@@ -1049,6 +1087,9 @@ impl DialogWindow {
             DialogKind::AskImage => {
                 confirm_click = ask_dialog(ctx, ask_input, take_focus);
             }
+            DialogKind::ExportSize => {
+                confirm_click = export_size_dialog(ctx, size_by, size_input, size_dims, take_focus);
+            }
             DialogKind::Loading => {
                 confirm_click = loading_dialog(ctx, &msg, progress.as_ref());
             }
@@ -1090,6 +1131,10 @@ impl DialogWindow {
             // On Ask, snapshot the typed question for the core to run through describe.
             if confirm_click == Some(true) && kind == DialogKind::AskImage {
                 self.submitted_ask = Some(self.ask_input.clone());
+            }
+            // On OK, the typed size (out-of-range entries never enable OK).
+            if confirm_click == Some(true) && kind == DialogKind::ExportSize {
+                self.submitted_size = parse_size(self.size_by, &self.size_input);
             }
             // Settings' "Done" (and Esc/close) just closes — every edit was already applied
             // + persisted live above, so there is nothing to commit on the way out.
@@ -1664,6 +1709,82 @@ fn ask_dialog(ctx: &egui::Context, input: &mut String, take_focus: bool) -> Opti
                     .size(12.0)
                     .color(p.text_secondary),
             );
+        });
+    result
+}
+
+/// The Custom… size field's value as a size, or `None` when it isn't a whole number in range.
+fn parse_size(
+    by: pb_app_core::export_panel::SizeBy,
+    input: &str,
+) -> Option<pb_app_core::export_panel::SizeChoice> {
+    let v = input.trim().parse::<u32>().ok()?;
+    pb_app_core::export_panel::SizeChoice::custom(by, v)
+}
+
+/// Export mode's **Custom…** size (task #89, rung 2): "Resize by" (long edge / width /
+/// height / percentage), a number field, and the result for this image as you type. Enter
+/// or OK confirms; Esc / Cancel close. The egui twin of `ExportSizeSheetView` on macOS.
+fn export_size_dialog(
+    ctx: &egui::Context,
+    by: &mut pb_app_core::export_panel::SizeBy,
+    input: &mut String,
+    dims: Option<(u32, u32)>,
+    take_focus: bool,
+) -> Option<bool> {
+    use pb_app_core::export_panel::{SizeBy, SizeDialog};
+    let mut result = None;
+    let p = pbui::Palette::new(ctx.style().visuals.dark_mode);
+    let valid = parse_size(*by, input).is_some();
+    button_bar(ctx, "export_size_bar", |ui| {
+        if pbui::secondary_button(ui, "Cancel").clicked() {
+            result = Some(false);
+        }
+        let ok = ui
+            .add_enabled_ui(valid, |ui| pbui::primary_button(ui, &p, "OK"))
+            .inner;
+        if ok.clicked() {
+            result = Some(true);
+        }
+    });
+    egui::CentralPanel::default()
+        .frame(dialog_frame(ctx))
+        .show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new("Resize by").size(MSG_SIZE));
+                ui.add_space(8.0);
+                egui::ComboBox::from_id_salt("export_size_by")
+                    .selected_text(by.label())
+                    .width(150.0)
+                    .show_ui(ui, |ui| {
+                        pbui::apply_to_ui(ui, p.dark);
+                        for b in SizeBy::ALL {
+                            ui.selectable_value(by, b, b.label());
+                        }
+                    });
+            });
+            ui.add_space(12.0);
+            ui.horizontal(|ui| {
+                let resp = ui.add(
+                    pbui::text_field(ui, input, if *by == SizeBy::Percent { "50" } else { "2048" })
+                        .desired_width(110.0),
+                );
+                if take_focus {
+                    resp.request_focus();
+                }
+                // egui's singleline surrenders focus on Enter = the submit signal.
+                if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) && valid {
+                    result = Some(true);
+                }
+                ui.label(egui::RichText::new(by.unit()).color(p.text_secondary));
+            });
+            ui.add_space(10.0);
+            let readout = match input.trim().parse::<u32>() {
+                Ok(v) => SizeDialog::readout(*by, v, dims),
+                Err(_) if *by == SizeBy::Percent => "Enter a percentage from 1 to 100.".into(),
+                Err(_) => "Enter a size in pixels.".into(),
+            };
+            ui.label(egui::RichText::new(readout).size(13.0).color(p.text_secondary));
         });
     result
 }

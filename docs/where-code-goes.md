@@ -60,6 +60,7 @@ an `AppCore` method.
 | the live 3D model view (prepare on park, input → camera, teardown) | `live_model.rs` + `app_core_impl/live_model.rs`; the GPU pass is `pb-render/src/mesh.rs` |
 | image export (save dialog, write worker) | `export.rs`, `export_worker.rs` (pixels: the `pb-encode` crate) |
 | Export mode (the panel's settings, prefs, view model, `[`/`]` key layer) | `export_panel.rs` |
+| Export mode's live preview (identity, the `Y` flick's spring, the preview worker) | `export_preview.rs` |
 | "which frame?" for Copy / OCR / Describe / Export of a video or animation | `frame_capture.rs` |
 | metadata / EXIF / details | `meta.rs`, `media_details.rs` |
 | timing, metrics, perf episodes | `timing.rs`, `metrics.rs`, `perf.rs` |

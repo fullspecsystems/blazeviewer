@@ -1808,7 +1808,8 @@ impl AppCoreHandle {
         self.export_settings().png.code()
     }
 
-    /// The size choice: 0 = full size, else the long edge.
+    /// The size choice as a wire code (`SizeChoice::code`): 0 = full size; else the kind in
+    /// the top four bits (0 long edge, 1 width, 2 height, 3 percentage) and the number below.
     fn export_size(&self) -> u32 {
         self.export_settings().size.code()
     }
@@ -1874,6 +1875,96 @@ impl AppCoreHandle {
     fn export_set_strip_metadata(&mut self, strip: bool) {
         self.core.now = Instant::now();
         self.core.export_set_strip_metadata(strip);
+    }
+
+    /// The live preview's File size row (rung 3): "412 KB" once made, "Calculating…" while
+    /// it's being made, "" with nothing to preview.
+    fn export_file_size(&self) -> String {
+        self.export_snapshot
+            .as_ref()
+            .map(|p| p.preview.size_text())
+            .unwrap_or_default()
+    }
+
+    /// A preview is being made (the panel shows a spinner).
+    fn export_preview_busy(&self) -> bool {
+        self.export_snapshot.as_ref().is_some_and(|p| p.preview.busy())
+    }
+
+    /// Whether the Export / Original control applies.
+    fn export_preview_can_flick(&self) -> bool {
+        self.export_snapshot
+            .as_ref()
+            .is_some_and(|p| p.preview.can_flick())
+    }
+
+    /// The side on screen: 0 the export, 1 the original.
+    fn export_preview_side(&self) -> u8 {
+        match self.export_snapshot.as_ref().map(|p| p.preview.side) {
+            Some(pb_app_core::export_preview::Side::Original) => 1,
+            _ => 0,
+        }
+    }
+
+    /// The panel's Export / Original control (`Y` flicks; a hold peeks).
+    fn export_set_preview_side(&mut self, side: u8) {
+        self.core.now = Instant::now();
+        self.core.export_set_preview_side(if side == 1 {
+            pb_app_core::export_preview::Side::Original
+        } else {
+            pb_app_core::export_preview::Side::Export
+        });
+    }
+
+    /// Whether Export mode's preview covers the screen (rung 3). The host hides a native
+    /// video layer (AVPlayer / sample buffer) meanwhile — it sits above the Metal layer the
+    /// preview is drawn into, so a paused MP4's preview would otherwise be invisible.
+    fn export_preview_covering(&self) -> bool {
+        self.core.export.preview.last_target.is_some()
+    }
+
+    /// The Size menu's **Custom…**: the core answers with `ShowDialog("export_size")`.
+    fn export_custom_size(&mut self) {
+        self.core.now = Instant::now();
+        self.core.export_custom_size();
+    }
+
+    /// The Custom… sheet's starting "Resize by" (0 long edge, 1 width, 2 height, 3 percentage).
+    fn export_size_dialog_by(&self) -> u8 {
+        self.core.export_size_dialog().by.code()
+    }
+
+    /// The Custom… sheet's starting number.
+    fn export_size_dialog_value(&self) -> u32 {
+        self.core.export_size_dialog().value
+    }
+
+    /// The line under the sheet's field for `value` by `by`: "This image exports at 1500 ×
+    /// 1000.", or what range to enter.
+    fn export_size_dialog_readout(&self, by: u8, value: u32) -> String {
+        let Some(by) = pb_app_core::export_panel::SizeBy::from_code(by) else {
+            return String::new();
+        };
+        pb_app_core::export_panel::SizeDialog::readout(
+            by,
+            value,
+            self.core.export_size_dialog().dims,
+        )
+    }
+
+    /// The Custom… sheet's OK. `false` (nothing sent) when the value is out of range — the
+    /// sheet keeps OK disabled then, so this is a backstop.
+    fn export_size_chosen(&mut self, by: u8, value: u32) -> bool {
+        let Some(size) = pb_app_core::export_panel::SizeBy::from_code(by)
+            .and_then(|by| pb_app_core::export_panel::SizeChoice::custom(by, value))
+        else {
+            return false;
+        };
+        self.core.now = Instant::now();
+        self.core.handle(CoreEvent::DialogResolved(
+            contract::DialogResult::ExportSizeChosen(size),
+        ));
+        true
     }
 
     /// The panel's ✕.
@@ -3672,6 +3763,7 @@ fn map_effect(e: contract::CoreEffect) -> ffi::CoreEffectFfi {
                     D::AskImage => "ask_image",
                     D::Loading => "loading",
                     D::Scanning => "scanning",
+                    D::ExportSize => "export_size",
                 }
                 .to_string(),
             )
@@ -5171,6 +5263,17 @@ mod ffi {
         fn export_set_png_compression(&mut self, code: u8);
         fn export_set_size(&mut self, code: u32);
         fn export_set_strip_metadata(&mut self, strip: bool);
+        fn export_custom_size(&mut self);
+        fn export_preview_covering(&self) -> bool;
+        fn export_file_size(&self) -> String;
+        fn export_preview_busy(&self) -> bool;
+        fn export_preview_can_flick(&self) -> bool;
+        fn export_preview_side(&self) -> u8;
+        fn export_set_preview_side(&mut self, side: u8);
+        fn export_size_dialog_by(&self) -> u8;
+        fn export_size_dialog_value(&self) -> u32;
+        fn export_size_dialog_readout(&self, by: u8, value: u32) -> String;
+        fn export_size_chosen(&mut self, by: u8, value: u32) -> bool;
         fn export_close(&mut self);
         fn export_commit(&mut self);
         fn info_line_visible(&self) -> bool;

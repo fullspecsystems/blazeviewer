@@ -29,6 +29,32 @@ impl AppCore {
     /// destination once a name suggestion is ready. Export mode's commit
     /// ([`AppCore::export_commit`]) is the user-facing route.
     pub fn export_cmd(&mut self, settings: crate::export_panel::ExportSettings) {
+        self.export_cmd_with(settings, None);
+    }
+
+    /// What an export (or its preview) of `item` takes, frozen now (task #81): the frame —
+    /// a video's playback frame (or its poster), an animation's current frame, a turned
+    /// model's view; `None` re-decodes the photo's file — and the rotation to bake in.
+    pub(super) fn export_frame(
+        &mut self,
+        item: usize,
+    ) -> (Option<crate::frame_capture::FrameSource>, Rotation) {
+        let is_video = matches!(
+            crate::video::item_kind(self.source.as_ref(), item),
+            crate::video::LibraryItemKind::Video(_)
+        );
+        let frame = self.frame_target(item);
+        let rotation = self.capture_rotation(item, &frame);
+        ((is_video || !frame.is_still()).then_some(frame), rotation)
+    }
+
+    /// [`export_cmd`](Self::export_cmd), writing `encoded` — the preview's file for exactly
+    /// these settings — instead of encoding again when there is one (rung 3).
+    pub(super) fn export_cmd_with(
+        &mut self,
+        settings: crate::export_panel::ExportSettings,
+        encoded: Option<export::PreEncoded>,
+    ) {
         let Some(item) = self.displayed_item else {
             return; // empty deck
         };
@@ -36,15 +62,7 @@ impl AppCore {
             self.show_toast(&why);
             return;
         }
-        let is_video = matches!(
-            crate::video::item_kind(self.source.as_ref(), item),
-            crate::video::LibraryItemKind::Video(_)
-        );
-        // The frame on screen, frozen now (task #81): a video's playback frame (or its
-        // poster), an animation's current frame. A photo's still re-decodes the file.
-        let frame = self.frame_target(item);
-        let rotation = self.capture_rotation(item, &frame);
-        let frame = (is_video || !frame.is_still()).then_some(frame);
+        let (frame, rotation) = self.export_frame(item);
         let suffix = frame.as_ref().map(|f| f.name_suffix()).unwrap_or_default();
         let id = self.export.next_id();
         let source_path = self.source.path(item).map(Path::to_path_buf);
@@ -58,6 +76,7 @@ impl AppCore {
             rotation_cw: export::quarter_turns(rotation),
             frame,
             settings,
+            encoded,
         };
         let remembered = export::source_folder(source_path.as_deref(), container.as_deref())
             .and_then(|key| self.export.folder_memory.get(&key).cloned());
@@ -131,6 +150,7 @@ impl AppCore {
             rotation_cw: request.rotation_cw,
             frame: request.frame,
             settings: request.settings,
+            encoded: request.encoded,
             dest: dest.clone(),
             queued_at: std::time::Instant::now(),
         };
@@ -235,7 +255,7 @@ impl AppCore {
             }
             Err(why) => {
                 eprintln!("export failed: {why}");
-                self.show_toast(&format!("Export failed — {why}"));
+                self.show_toast(&format!("Export failed: {why}"));
             }
         }
     }

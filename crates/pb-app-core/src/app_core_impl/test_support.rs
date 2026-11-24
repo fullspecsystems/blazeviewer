@@ -410,6 +410,130 @@ impl pb_render::Renderer for StashOk {
     }
 }
 
+/// What [`AuxOk`] saw of Export mode's preview textures (rung 3).
+#[derive(Default, Debug)]
+pub(super) struct AuxLog {
+    /// Each aux slot's uploaded size.
+    pub(super) uploaded: [Option<(u32, u32)>; 2],
+    /// The aux slot on screen, and the layout it was presented at.
+    pub(super) shown: Option<(usize, u32, u32)>,
+    /// Viewer presents (ring slots, images, clears) since the start.
+    pub(super) viewer_presents: usize,
+}
+
+/// A `Renderer` double with working aux slots: presenting one covers the screen, any viewer
+/// present supersedes it, `dismiss_aux` uncovers. The log is shared so a test can read it
+/// after the double moves into the core.
+pub(super) struct AuxOk(pub(super) std::sync::Arc<std::sync::Mutex<AuxLog>>);
+
+impl AuxOk {
+    fn viewer_present(&self) {
+        let mut l = self.0.lock().unwrap();
+        l.shown = None;
+        l.viewer_presents += 1;
+    }
+}
+
+impl pb_render::Renderer for AuxOk {
+    fn resize(&mut self, _: u32, _: u32) {}
+    fn set_image(
+        &mut self,
+        _: &[u8],
+        _: u32,
+        _: u32,
+        _: pb_render::ColorTransform,
+        _: bool,
+        _: f32,
+    ) {
+        self.viewer_present();
+    }
+    fn clear_image(&mut self) {
+        self.viewer_present();
+    }
+    fn set_view(&mut self, _: pb_render::ViewTransform) {}
+    fn set_overlay(&mut self, _: Option<(&[u8], u32, u32)>, _: u32, _: u32) {}
+    fn set_info_line(&mut self, _: Option<(&[u8], u32, u32)>, _: u32, _: pb_render::HAlign) {}
+    fn reserve_ring(&mut self, _: usize, _: u32, _: u32) {}
+    #[allow(clippy::too_many_arguments)]
+    fn upload_slot(
+        &mut self,
+        _: usize,
+        _: &[u8],
+        _: u32,
+        _: u32,
+        _: pb_render::ColorTransform,
+        _: bool,
+        _: f32,
+        _: bool,
+        _: pb_core::SlotIdentity,
+    ) -> bool {
+        true
+    }
+    fn present_slot(&mut self, _: usize, _: pb_core::SlotIdentity) -> bool {
+        self.viewer_present();
+        true
+    }
+    fn upload_aux(
+        &mut self,
+        idx: usize,
+        rgba: &[u8],
+        w: u32,
+        h: u32,
+        _: pb_render::ColorTransform,
+    ) -> bool {
+        assert_eq!(rgba.len(), (w * h * 4) as usize, "aux upload is tightly packed RGBA8");
+        self.0.lock().unwrap().uploaded[idx] = Some((w, h));
+        true
+    }
+    fn present_aux(&mut self, idx: usize, w: u32, h: u32) -> bool {
+        let mut l = self.0.lock().unwrap();
+        if l.uploaded[idx].is_none() {
+            return false;
+        }
+        l.shown = Some((idx, w, h));
+        true
+    }
+    fn dismiss_aux(&mut self) {
+        self.0.lock().unwrap().shown = None;
+    }
+    fn aux_presented(&self) -> Option<usize> {
+        self.0.lock().unwrap().shown.map(|(i, _, _)| i)
+    }
+    fn clear_aux(&mut self, idx: usize) {
+        let mut l = self.0.lock().unwrap();
+        if l.shown.is_some_and(|(i, _, _)| i == idx) {
+            l.shown = None;
+        }
+        l.uploaded[idx] = None;
+    }
+    fn surface_size(&self) -> (u32, u32) {
+        (0, 0)
+    }
+    fn set_letterbox(&mut self, _: [u8; 3]) {}
+    fn set_toast(&mut self, _: Option<(&[u8], u32, u32)>, _: u32) {}
+    fn set_pie(&mut self, _: Option<(&[u8], u32, u32)>, _: u32) {}
+    fn set_tree(&mut self, _: Option<(&[u8], u32, u32)>, _: u32) {}
+    fn set_subtitle_overlay(&mut self, _: Option<(&[u8], u32, u32)>, _: f32, _: f32) {}
+    fn device(&self) -> &pb_render::wgpu::Device {
+        unreachable!("headless test double")
+    }
+    fn queue(&self) -> &pb_render::wgpu::Queue {
+        unreachable!("headless test double")
+    }
+    fn set_egui_overlay(&mut self, _: Option<&pb_render::wgpu::Texture>) {}
+    fn image_size(&self) -> (u32, u32) {
+        (0, 0)
+    }
+    fn set_edr_headroom(&mut self, _: f32) {}
+    fn hdr_surface_wants_edr(&self) -> Option<bool> {
+        None
+    }
+    fn poll(&self) {}
+    fn render(&mut self) -> Result<bool, pb_render::RenderError> {
+        Ok(true)
+    }
+}
+
 pub(super) const ARCHIVE: &[&str] = &[
     "a/b/one.jpg",
     "a/b/c/two.jpg",

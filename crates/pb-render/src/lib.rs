@@ -359,6 +359,44 @@ pub trait Renderer {
         let _ = stash_idx;
     }
 
+    /// Export mode's live preview (task #89 rung 3): upload an SDR RGBA8 image into **aux**
+    /// slot `idx` (0 = the prepared original, 1 = the decoded export), mipped at full
+    /// resolution whatever its colour profile, so both sides of the flick draw identically.
+    /// Returns whether it landed. Default (headless/tests): refuse.
+    fn upload_aux(
+        &mut self,
+        idx: usize,
+        rgba: &[u8],
+        w: u32,
+        h: u32,
+        color: ColorTransform,
+    ) -> bool {
+        let _ = (idx, rgba, w, h, color);
+        false
+    }
+
+    /// Show aux slot `idx` **over** whatever is presented, laid out as a `display_w` ×
+    /// `display_h` image under the current view (so a resized export appears at the
+    /// original's scale). What it covers is kept for [`dismiss_aux`](Self::dismiss_aux);
+    /// any other present supersedes it. `false` = the slot is empty. Default: refuse.
+    fn present_aux(&mut self, idx: usize, display_w: u32, display_h: u32) -> bool {
+        let _ = (idx, display_w, display_h);
+        false
+    }
+
+    /// Uncover what the shown aux slot covered. No-op when none is shown.
+    fn dismiss_aux(&mut self) {}
+
+    /// The aux slot on screen, or `None` once anything else has presented.
+    fn aux_presented(&self) -> Option<usize> {
+        None
+    }
+
+    /// Free aux slot `idx` (uncovering it first if it's on screen). Idempotent.
+    fn clear_aux(&mut self, idx: usize) {
+        let _ = idx;
+    }
+
     /// The surface's currently-configured swapchain size (physical px). The shell compares
     /// it to the live window size to detect a stale swapchain — a size drift the renderer
     /// can't self-heal (it holds no window handle), which otherwise leaves the surface

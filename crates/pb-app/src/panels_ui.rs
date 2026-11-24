@@ -14,6 +14,7 @@ use egui::{Align2, Color32, FontFamily, FontId, RichText, Rounding, Stroke};
 use pb_app_core::export_panel::{
     dims_label, ExportPanel, FormatChoice, PngCompression, SizeChoice,
 };
+use pb_app_core::export_preview::Side;
 use pb_app_core::panels::{
     DescribeBody, DescribePanel, DetailRow, DetailsPanel, HelpPanel, InspectorSnapshot, TextBody,
     TextPanel,
@@ -156,6 +157,10 @@ pub enum PanelAction {
     ExportJpegQuality(u8),
     ExportPngCompression(PngCompression),
     ExportSize(SizeChoice),
+    /// The Size menu's **Custom…** — the core opens the Custom Size dialog.
+    ExportCustomSize,
+    /// The preview's Export / Original control (rung 3).
+    ExportPreviewSide(Side),
     ExportStripMetadata(bool),
     /// The panel's ✕ — leave Export mode.
     ExportClose,
@@ -2741,7 +2746,7 @@ fn export_body(ui: &mut egui::Ui, p: &Palette, ex: &ExportPanel, actions: &mut V
                     0,
                     "",
                 )
-                .on_hover_text("JPEG quality — [ and ] step it");
+                .on_hover_text("JPEG quality. [ and ] step it.");
                 if q != s.jpeg_quality {
                     actions.push(PanelAction::ExportJpegQuality(q));
                 }
@@ -2758,7 +2763,7 @@ fn export_body(ui: &mut egui::Ui, p: &Palette, ex: &ExportPanel, actions: &mut V
                         }
                     })
                     .response
-                    .on_hover_text("PNG is lossless at every level — this trades size for time");
+                    .on_hover_text("PNG is lossless at every level; this trades file size against time");
                 if c != s.png {
                     actions.push(PanelAction::ExportPngCompression(c));
                 }
@@ -2773,6 +2778,7 @@ fn export_body(ui: &mut egui::Ui, p: &Palette, ex: &ExportPanel, actions: &mut V
                     .find(|o| o.choice == s.size)
                     .map_or_else(|| "Full size".to_string(), |o| o.label.clone());
                 let mut picked = None;
+                let mut custom = false;
                 egui::ComboBox::from_id_salt("export_size")
                     .selected_text(current)
                     .width(120.0)
@@ -2788,9 +2794,19 @@ fn export_body(ui: &mut egui::Ui, p: &Palette, ex: &ExportPanel, actions: &mut V
                                 picked = Some(o.choice);
                             }
                         }
+                        ui.separator();
+                        if ui
+                            .add(egui::SelectableLabel::new(false, "Custom\u{2026}"))
+                            .clicked()
+                        {
+                            custom = true;
+                        }
                     });
                 if let Some(c) = picked.filter(|c| *c != s.size) {
                     actions.push(PanelAction::ExportSize(c));
+                }
+                if custom {
+                    actions.push(PanelAction::ExportCustomSize);
                 }
                 if let Some(d) = ex.output_dims {
                     ui.label(RichText::new(dims_label(d)).color(panel_secondary(p)));
@@ -2806,6 +2822,38 @@ fn export_body(ui: &mut egui::Ui, p: &Palette, ex: &ExportPanel, actions: &mut V
             if r.changed() {
                 actions.push(PanelAction::ExportStripMetadata(strip));
             }
+        });
+        // The live preview (rung 3): the exact file size once it's made, and which side of
+        // the flick is on screen (`Y` flicks; a hold peeks).
+        let size = ex.preview.size_text();
+        if !size.is_empty() {
+            export_row(ui, p, "File size", |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(size).color(p.text));
+                    if ex.preview.busy() {
+                        ui.spinner();
+                    }
+                });
+            });
+        }
+        export_row(ui, p, "Preview", |ui| {
+            ui.add_enabled_ui(ex.preview.can_flick(), |ui| {
+                let mut side = ex.preview.side;
+                egui::ComboBox::from_id_salt("export_preview_side")
+                    .selected_text(side.label())
+                    .width(120.0)
+                    .show_ui(ui, |ui| {
+                        pb_ui::apply_to_ui(ui, p.dark);
+                        for o in [Side::Export, Side::Original] {
+                            ui.selectable_value(&mut side, o, o.label());
+                        }
+                    })
+                    .response
+                    .on_hover_text("Y switches between the export and the original; hold Y to peek");
+                if side != ex.preview.side {
+                    actions.push(PanelAction::ExportPreviewSide(side));
+                }
+            });
         });
     });
     for note in &ex.notes {

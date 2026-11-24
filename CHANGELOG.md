@@ -29,9 +29,13 @@ with any pre-release suffix carried only by the tag.
   on a transparent background in a PNG.
 - **Export.** Press `E` (or File ▸ Export…, ⇧⌘E on a Mac, or right-click the
   photo) for Export mode: a panel in the Inspector's place where you pick PNG or
-  JPEG, the JPEG quality (`[` and `]` step it) or PNG compression, and a size —
-  full resolution or a long edge from 800 to 3840 pixels, never larger than the
-  photo. Keep browsing with the panel open and your settings stay put; press
+  JPEG, the JPEG quality (`[` and `]` step it) or PNG compression, and a size:
+  full resolution, a long edge from 800 to 3840 pixels, or Custom… for any long
+  edge, width, height or percentage. Exports are never larger than the photo.
+  While the panel is open the photo on screen **is the export**: what the JPEG or
+  PNG will actually look like, at its real quality and size, with the exact file
+  size in the panel. Press `Y` to switch to the original and back, or hold `Y` to
+  peek at it. Keep browsing with the panel open and your settings stay put; press
   Export… (⌘↩ on a Mac, Ctrl+Enter elsewhere) to save the photo on screen, with
   any rotation applied, and `E` again to leave. Your format, quality and size are
   remembered for next time. Colors are kept exactly: wide-gamut photos stay

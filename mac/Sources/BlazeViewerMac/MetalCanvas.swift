@@ -37,6 +37,10 @@ final class MetalCanvasNSView: NSView {
     /// never show through a foreground one. SwiftUI overlays still composite above it. There is
     /// exactly one; a new attach nukes any prior/orphaned video layers.
     private(set) var videoContainer: CALayer?
+    /// The video container has had its first frame revealed (`revealVideoLayer`).
+    private var videoRevealed = false
+    /// Export mode's preview covers the screen (`setVideoCovered`).
+    private var videoCoveredByPreview = false
     /// The identifying `name` on the container, so a stray orphan can always be found + removed.
     private static let videoLayerName = "pb.video.container"
 
@@ -366,6 +370,7 @@ final class MetalCanvasNSView: NSView {
         // one step with nothing solid in between.
         container.isHidden = true
         videoLayer.isHidden = true
+        videoRevealed = false
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         container.frame = layer?.bounds ?? bounds
@@ -382,7 +387,24 @@ final class MetalCanvasNSView: NSView {
     /// `NativeVideoPlayer`'s `isReadyForDisplay` observer). Until this fires the wgpu poster
     /// shows through the hidden container — this is the poster→video swap with no black flash.
     func revealVideoLayer() {
-        videoContainer?.isHidden = false
+        videoRevealed = true
+        applyVideoVisibility()
+    }
+
+    /// Export mode's preview (task #89 rung 3) is drawn into the Metal layer, which the video
+    /// container sits above: hide the video while the preview covers the screen, and bring it
+    /// back (if it was showing) when the preview goes.
+    func setVideoCovered(_ covered: Bool) {
+        guard covered != videoCoveredByPreview else { return }
+        videoCoveredByPreview = covered
+        applyVideoVisibility()
+    }
+
+    private func applyVideoVisibility() {
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        videoContainer?.isHidden = !videoRevealed || videoCoveredByPreview
+        CATransaction.commit()
     }
 
     /// Update the video container's background to the current letterbox color (theme switch /
@@ -396,6 +418,7 @@ final class MetalCanvasNSView: NSView {
     func detachVideoLayer() {
         videoContainer?.removeFromSuperlayer()
         videoContainer = nil
+        videoRevealed = false
         for sub in layer?.sublayers ?? [] where sub.name == Self.videoLayerName {
             sub.removeFromSuperlayer()
         }

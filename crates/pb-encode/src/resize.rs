@@ -21,6 +21,12 @@ pub enum Resize {
     LongEdge(u32),
     /// Fit inside `width` × `height`, keeping the aspect ratio.
     Fit { width: u32, height: u32 },
+    /// This many pixels wide, the height following the aspect ratio.
+    Width(u32),
+    /// This many pixels high, the width following the aspect ratio.
+    Height(u32),
+    /// This percentage of the size, 1–99 (100 and above keep the full size).
+    Percent(u16),
 }
 
 impl Resize {
@@ -35,6 +41,9 @@ impl Resize {
             Resize::Fit { width, height } => {
                 (width as f64 / w as f64).min(height as f64 / h as f64)
             }
+            Resize::Width(width) => width as f64 / w as f64,
+            Resize::Height(height) => height as f64 / h as f64,
+            Resize::Percent(p) => p as f64 / 100.0,
         };
         if scale <= 0.0 || scale >= 1.0 {
             return None;
@@ -218,6 +227,20 @@ mod tests {
             Some((10, 1)),
             "never 0 px"
         );
+    }
+
+    /// Custom sizes (rung 2's Custom…): a width or a height sets that edge exactly, whatever
+    /// the orientation; a percentage scales both. Still downscale only.
+    #[test]
+    fn width_height_and_percent_targets() {
+        assert_eq!(Resize::Width(1500).target(3000, 2000), Some((1500, 1000)));
+        assert_eq!(Resize::Width(1500).target(2000, 3000), Some((1500, 2250)));
+        assert_eq!(Resize::Height(500).target(3000, 2000), Some((750, 500)));
+        assert_eq!(Resize::Percent(50).target(3001, 2001), Some((1501, 1001)));
+        assert_eq!(Resize::Percent(100).target(3000, 2000), None, "100 % is full size");
+        assert_eq!(Resize::Width(3000).target(3000, 2000), None, "never upscale");
+        assert_eq!(Resize::Height(2400).target(3000, 2000), None, "never upscale");
+        assert_eq!(Resize::Percent(0).target(3000, 2000), None, "degenerate");
     }
 
     #[test]

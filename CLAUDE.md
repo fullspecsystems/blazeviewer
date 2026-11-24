@@ -358,8 +358,9 @@ is persisted unless the user deliberately invokes the action.
   GPU texture ring + its `pb-core::ResidentRing` mirror, the decode pool's in-flight
   buffers + `pending_uploads`, `meta_cache` (per-photo panel data), per-image
   `rotations`, the `failed` set, the transient `toast`, on-demand EXIF reads
-  (`Shift+I`), and the **session archive-password cache** (`AppCore::archive_passwords`)
-  — all in memory, never serialized. `pb-core` is pure (no `std::fs`).
+  (`Shift+I`), Export mode's preview (the worker's decoded source and encoded preview files,
+  and the two aux textures — freed when the mode closes), and the **session archive-password
+  cache** (`AppCore::archive_passwords`) — all in memory, never serialized. `pb-core` is pure (no `std::fs`).
   - The password cache (session-archive-password-cache) auto-tries passwords the user has
     successfully used this session on later encrypted archives, so a same-password folder
     asks once. It holds `SecretString`s — **zeroized on drop, redacted `Debug`, never

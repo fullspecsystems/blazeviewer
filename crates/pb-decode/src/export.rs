@@ -29,6 +29,66 @@ use pb_encode::{
 
 use crate::{DecodeError, DecodeRequest, DecodedImage, ImageDecoder, PixelFormat};
 
+/// Export mode's live preview (task #89 rung 3): a prepared [`pb_encode::ExportImage`] as the
+/// renderer draws it — RGBA8 plus the colour transform for its tag, exactly what decoding a
+/// file with these samples and that tag gives (PNG and JPEG both build theirs with
+/// [`ColorTransform::from_icc`](crate::ColorTransform::from_icc)). The flick's "original"
+/// side, so it and the decoded export differ only by the codec and the resize.
+pub fn display_from_export_image(img: &pb_encode::ExportImage) -> DecodedImage {
+    let (w, h) = (img.width, img.height);
+    let px = w as usize * h as usize;
+    let n = img.channels.count();
+    let to8 = |v: u16| ((v as u32 * 255 + 32_767) / 65_535) as u8;
+    let sample = |i: usize| -> u8 {
+        match &img.samples {
+            Samples::U8(v) => v[i],
+            Samples::U16(v) => to8(v[i]),
+            // `prepare` never emits floats; clamp-encode defensively.
+            Samples::F32(v) => (v[i].clamp(0.0, 1.0) * 255.0 + 0.5) as u8,
+        }
+    };
+    let mut rgba = Vec::with_capacity(px * 4);
+    let well_formed = img.samples.len() == px * n;
+    if well_formed {
+        for p in 0..px {
+            let b = p * n;
+            let (r, g, bl, a) = match img.channels {
+                Channels::Gray => {
+                    let v = sample(b);
+                    (v, v, v, 255)
+                }
+                Channels::GrayAlpha => {
+                    let v = sample(b);
+                    (v, v, v, sample(b + 1))
+                }
+                Channels::Rgb => (sample(b), sample(b + 1), sample(b + 2), 255),
+                Channels::Rgba => (sample(b), sample(b + 1), sample(b + 2), sample(b + 3)),
+            };
+            rgba.extend_from_slice(&[r, g, bl, a]);
+        }
+    } else {
+        rgba.resize(px * 4, 0);
+    }
+    let color = match &img.color {
+        pb_encode::OutputColor::Srgb => crate::ColorTransform::srgb(),
+        pb_encode::OutputColor::Icc(icc) => crate::ColorTransform::from_icc(icc),
+    };
+    DecodedImage {
+        width: w,
+        height: h,
+        orig_width: w,
+        orig_height: h,
+        codec: "export",
+        format: PixelFormat::Rgba8,
+        pixels: rgba,
+        is_preview: false,
+        color,
+        peak: 1.0,
+        animated: None,
+        recovered: None,
+    }
+}
+
 /// Why an export decode produced nothing. `Refused` carries a user-facing reason for a
 /// source the export can't handle *yet*; `Decode` is an ordinary decode failure.
 #[derive(Debug, Clone, PartialEq, Eq)]

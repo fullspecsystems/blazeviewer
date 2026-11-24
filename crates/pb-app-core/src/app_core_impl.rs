@@ -23,6 +23,7 @@ mod describe;
 mod dir_scan;
 mod export;
 mod export_panel;
+mod export_preview;
 mod frame_capture;
 mod image_text;
 mod item_kind;
@@ -571,6 +572,12 @@ impl AppCore {
             }
             Action::RotateCw => self.rotate(false),
             Action::RotateCcw => self.rotate(true),
+            // In Export mode `Y` flicks between the export and the original (rung 3), and
+            // compare's pin is off — the flick is the mode's compare.
+            Action::ComparePin if self.export_mode_active() => {
+                self.show_toast("Pin for Compare is off in Export mode")
+            }
+            Action::CompareToggle if self.export_mode_active() => self.export_flick_toggle(),
             Action::ComparePin => self.compare_pin_cmd(),
             Action::CompareToggle => self.compare_toggle_cmd(),
             Action::Copy => self.copy_image(),
@@ -797,8 +804,8 @@ impl AppCore {
             CoreEvent::KeyDown { key, mods, repeat } => {
                 self.mods = mods;
                 let res = contract::resolve_key_down(&self.keymap, key, mods, repeat);
-                // Export mode's contextual layer (`[` / `]` = quality) comes first.
-                if self.export_key(res) {
+                // Export mode's contextual layer (`[` / `]` = quality, `Y` = flick) comes first.
+                if self.export_key(key, res) {
                     return;
                 }
                 match res {
@@ -814,6 +821,8 @@ impl AppCore {
             }
             CoreEvent::KeyUp { key } => {
                 self.held.remove(&key);
+                // A held `Y` in Export mode peeks; its release flicks back.
+                self.export_flick_up(key);
             }
             // Focus loss can swallow the key-up (a known winit hazard) — clear the held set +
             // gesture accumulators so nav never sticks auto-advancing, and drop any stuck drag.
@@ -823,6 +832,7 @@ impl AppCore {
             }
             CoreEvent::FocusLost => {
                 self.held.clear();
+                self.export_flick_release_all();
                 self.pointer_nav = None; // mouse-up normally ends it; this is the safety net
                 self.hold_start = None;
                 self.mods = contract::Modifiers::NONE;
@@ -978,6 +988,11 @@ impl AppCore {
                         }
                     }
                 }
+            }
+            // Export mode's Custom… size (task #89): close, then use it.
+            R::ExportSizeChosen(size) => {
+                self.effects.push(E::CloseDialog);
+                self.export_set_size(size);
             }
             // Message / others just close.
             R::Closed => self.effects.push(E::CloseDialog),
@@ -1633,6 +1648,9 @@ impl AppCore {
                 self.emit_panels_changed();
             }
         }
+        // Export mode's live preview (task #89 rung 3): ask for one once the screen settles,
+        // land it on the GPU, and redraw when the side on screen changes.
+        self.tick_export_preview();
         // Export mode's panel (task #89): both shells draw it natively — re-signal when what
         // it shows changes (navigation, rotation, a video pausing), via a cheap key.
         let key = self.export_panel_key();
@@ -1907,11 +1925,14 @@ impl AppCore {
         // Export work (task #89) polls at a low rate — deliberately NOT through `work_pending`,
         // which would hold the pump at the frame rate for the seconds an encode takes (F8).
         let export_wake = self.export.busy().then(|| now + export::EXPORT_POLL);
+        // The export preview's debounce end, or its short poll while one is being made.
+        let preview_wake = self.export_preview_wake(now);
         // The export notice's expiry (not while hovered — leaving restarts its hold).
         let notice_wake = self.export.notice_deadline();
         let wake = [
             base_wake,
             export_wake,
+            preview_wake,
             notice_wake,
             anim_wake,
             prep_wake,
@@ -2148,8 +2169,11 @@ impl AppCore {
     /// capture time the texture is still ring-committed too, until the settle's rebuild
     /// drops the Fit slots — conservative, ~one settle long.)
     fn sync_stash_external(&mut self) {
-        let sum = self.fit_stash.iter().flatten().map(|s| s.bytes).sum();
-        self.ring.set_external_bytes(sum);
+        // Every texture held outside the ring: the Fit stash and Export mode's two preview
+        // textures (rung 3) — one sum, so neither overwrites the other's charge.
+        let stash: u64 = self.fit_stash.iter().flatten().map(|s| s.bytes).sum();
+        self.ring
+            .set_external_bytes(stash + self.export.preview.vram_bytes());
     }
 
     /// #123 fix 2: drop both stash sides — mirror AND renderer texture (renderer first;
@@ -4901,9 +4925,27 @@ impl AppCore {
         // photo stops the renderer drawing the mesh, so this is what keeps it on screen across a
         // same-item rebind (a resize), and what lets navigation drop it without a teardown race.
         let live = self.live_model_frame();
+        // Export mode's preview (rung 3) covers whatever the viewer presented — one check at
+        // the single render point is the present gate (F3): the viewer's own re-presents
+        // (a sharpen, a resize, a rebind) carry on, and this covers them again before the
+        // frame is drawn. `None` uncovers the photo.
+        let preview = self.export_preview_target();
+        self.export.preview.last_target = preview;
         let drew = if let Some(a) = self.renderer.as_mut() {
-            if live.is_some() {
-                a.show_mesh(live);
+            match preview {
+                Some((slot, w, h)) => {
+                    if a.aux_presented() != Some(slot) {
+                        a.present_aux(slot, w, h);
+                    }
+                }
+                None => {
+                    if a.aux_presented().is_some() {
+                        a.dismiss_aux();
+                    }
+                    if live.is_some() {
+                        a.show_mesh(live);
+                    }
+                }
             }
             match a.render() {
                 Ok(p) => presented = p,

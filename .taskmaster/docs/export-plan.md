@@ -696,6 +696,20 @@ macOS; exFAT / SMB / TCC hand checks pass.
 
 ## Rung 2 — The Export mode panel
 
+**Progress (session 7, 2026-11-24) — Custom… is in, on both shells:** `SizeChoice` gained
+`Width` / `Height` / `Percent` beside `LongEdge` (pb-encode's `Resize` too, all downscale-only);
+`SizeChoice::code` keeps the kind in the top four bits so a bare long edge is still its own number;
+prefs write `size = "width 1500"` (`"long 2048"`, `"height 800"`, `"50%"`, `"full"`) and still
+read rung 2's first `long_edge`. **Custom…** goes through the dialog seam the plan named:
+`AppCore::export_custom_size` → `ShowDialog(DialogKind::ExportSize)`, the shell pulls
+`export_size_dialog()` and answers `DialogResult::ExportSizeChosen`; the result line as you type is
+`SizeDialog::readout` (pure, shared). macOS: a native sheet (`ExportSizeSheetView`, Return = OK,
+Esc = Cancel) from a "Custom…" entry at the foot of the Size pop-up; winit: a "Custom Size" dialog
+window (`dialog::export_size_dialog`). **The pre-export HDR note** now comes from the live preview
+(rung 3): once a preview is made, the panel says "This HDR image is exported as SDR (Display P3)."
+**Still open in rung 2:** the metadata allowlist + categories; the `[`/`]` menu-hint context; a
+View-menu Export Mode item; macOS Tab focus (Q9).
+
 **Progress (session 6, 2026-11-14) — Export mode is in, end to end, on both shells:**
 - **Core** — `export_panel.rs` (pure: `ExportSettings` = format / JPEG quality / PNG compression
   / size / Strip; `ExportPrefs` = the persisted part, `[export]` in settings.toml, read **field
@@ -772,6 +786,77 @@ shells; the rung's notes list exactly which controls are pointer-only on winit; 
 matches the chosen categories (`exiftool`); legible in light and dark.
 
 ## Rung 3 — Live preview + flick
+
+**Progress (session 7, 2026-11-24) — built, core + both shells; the Mac GUI not driven, winit
+compile-checked only.** In Export mode the photo **becomes the export** a moment after the screen
+settles; `Y` flicks to the original; the panel shows the exact **File size**.
+- **Present gate (F3), as a cover rather than a gate.** The renderer has two **aux** textures
+  (`upload_aux` / `present_aux` / `dismiss_aux` / `aux_presented` / `clear_aux`, modelled on the
+  stash). On macOS a native video layer above Metal is hidden while a preview covers.
+  Presenting one *covers* whatever is presented and remembers it (`UnderAux`, the ring
+  texture held by `Arc`); `dismiss_aux` uncovers it exactly; any other present supersedes it. The
+  core decides once per frame in `AppCore::draw` (`export_preview_target`) and covers again after
+  any of the viewer's own re-presents — so none of the seven re-present sites needed touching. A
+  `derive_fit(Held)` is refused while an aux is up (it would derive the item's Fit from the
+  preview). The aux VRAM joins the stash in `sync_stash_external` (one sum).
+- **Both sides from the export pipeline (F2).** Original = `prepare` with `Caps::ALL`, no resize;
+  export = the encoded bytes read back with the display decoder (`decode_bytes`) — **except PNG**,
+  which is lossless, so its prepared pixels are shown and the decode-back skipped. Both upload
+  full-size and **mipped, profiled or not** (`create_image_texture`'s new `mip_icc`: the mip
+  shader's sRGB curve is exact for sRGB/P3, close for others — pb-encode's resize makes the same
+  trade), so the flick differs only by codec and resize.
+- **Deviation: unrotated textures, not "presented at R0".** The export bytes have the rotation
+  baked in (F10 holds); the worker turns the decoded side back to the source's orientation and
+  both draw under the normal view transform. Pan/zoom/clamp math is untouched that way. A resized
+  export is laid out at the source's size (F20's "shown at source size", with a note).
+- **Worker** (`export_preview::PreviewWorker`): one thread, latest-wins with a generation checked
+  between stages; RAM-only caches — the decoded source of the item on screen, and encoded files
+  within 192 MB (going back to a setting reads the file back instead of encoding it). Dropped —
+  caches and all — when the mode closes; the aux textures freed too. Not its own rayon pool: no
+  stage needs one yet.
+- **Scheduling:** a cheap per-tick `TickKey` (`content_gen`, item, frame, rotation, the view's
+  extra turns, settings — no allocation); a request goes once it has held for **120 ms**, so a
+  slider drag or blazing makes none. The full `PreviewKey` (path, or container + name, + frame +
+  `content_gen` — never the index) is built only then. While new settings encode, the last preview stays up and the panel
+  says "Calculating…". Polled at 16 ms through the wake list, never `work_pending` (F8).
+- **Flick:** `export_key_override` maps `CompareToggle` (`Y`) to `ExportKey::Flick`; key-up comes
+  through `CoreEvent::KeyUp`; `FocusLost` resets. The menu's Compare with Pinned toggles in the
+  mode; `⇧Y` (pin) is off there with a toast. **Deviation (F14):** press times are receipt times
+  (`Instant::now()`), not shell event timestamps. The panel's **Preview** control (Export |
+  Original) is a toggle — no pointer hold-to-peek. The "chip" is a toast ("Original" /
+  "Export (412 KB)").
+- **F10:** Export… with the settings on screen writes the preview's bytes as they are
+  (`PreEncoded` through `ExportRequest` / `ExportJob`; the worker skips to the commit).
+- **Measured** (`cargo run --release -p pb-app-core --example preview_bench -- <folder>`, the
+  31-file corpus, M-series Mac): first preview of an item at PNG Balanced p50 **235 ms**, p95
+  **2.2 s** (the 36 MP NEF); a setting change, JPEG 85 full size, p50 **14 ms**, max **292 ms**;
+  JPEG 85 at 2048, p50 14 ms, max 445 ms (the resize dominates). PNG compression levels (fresh
+  `export_bench`): Faster p50 12 ms / p95 109 ms at 1.82 MB/MP; Balanced 155 ms / 1.74 s at
+  1.37 MB/MP; Smallest 454 ms / 4.0 s at 1.36 MB/MP (the NEF: 6.5 s for −3 %).
+- **Tests:** the spring (tap, hold, ownership, reset), sizes, turning back; core: settles then
+  covers (and the gate re-covers after a viewer present), `Y` tap / panel / menu, stale preview
+  kept while the next encodes, navigation uncovers and re-previews, `Tab` suspends and leaving frees
+  everything, Export… writes the previewed bytes byte for byte, doors/empty deck have none.
+- **Independent review (session 7), fixed before commit:** (1) the source key used the item's
+  *name*, which a folder listing gives as the bare file name — two `IMG_0001.JPG` in a recursive
+  scan shared a preview, and Export… could write the other's bytes; it's the **path** now (plus
+  container + name for archive entries). (2) `[` then `]` within one encode let the abandoned
+  quality's result land over the one on screen and stick at "Calculating…" — going back now
+  cancels the job in flight. (3) A result dropped while you were on another photo was never asked
+  for again on return — dropping it now clears `asked`. (4) A new texture behind the slot already
+  on screen didn't draw on macOS (no target change) — landing draws. (5) `R` on a 3D model turned
+  its preview (the capture ignores R, the view doesn't) — both sides are turned back by the view's
+  extra turns (`display_turns`). (6) **macOS:** a paused MP4/MOV on the AVPlayer route sits in a
+  layer above Metal, hiding the preview — the host now hides that layer while a preview covers
+  (`export_preview_covering` → `MetalCanvasNSView.setVideoCovered`). (7) The per-tick key held
+  the deck's `Arc` address, so every streaming-scan swap uncovered the preview and reset the flick
+  — `content_gen` + item suffice (every swap that changes what an index means bumps it). (8)
+  `dismiss_aux` could restore peak 1.0 over the constructor's HDR image — the recorded peak now
+  starts from it. (9) A dead worker left "Calculating…" forever — `drain` reports it and the core
+  starts over. Regression tests for 1–3.
+- **Not done:** `PB_PERF` episodes `ExportPreview` / `ExportFlick` (only per-stage timings print);
+  the export-at-its-own-1:1 toggle (F20); speculative ±5 encodes; viewport-first encoding; a
+  dedicated chip; compare-pin *suspension* (it's refused in the mode instead).
 
 **3.0 Prerequisites.**
 
@@ -1005,6 +1090,16 @@ confirmed directly). **All accepted.**
 
 ## Handoff
 
+**Status (2026-11-24, session 7):** **rung 2's Custom… size and rung 3's live preview are built**
+— see both rungs' session-7 notes. Verified on the Mac: pb-app-core tests all pass (incl. 13 new
+preview tests that run the real worker on real JPEGs — three of them regressions for an
+independent review's findings — and the Custom… dialog flow); pb-render 79 incl. goldens; clippy
+`-D warnings` on pb-encode / pb-render / pb-decode / pb-app-core / pb-mac-ffi; the Swift host
+builds; `preview_bench` on the corpus. **Not verified:** the Mac GUI (the preview on screen, the
+Metal aux path, the sheet, the Preview control) — manual test § 13; **all of winit** — the
+Windows clippy cross-check passes (all targets), nothing run: W19. The WgpuRenderer aux slots have
+no GPU test (they need a surface); the core's logic runs against a recording double (`AuxOk`).
+
 **Status (2026-11-14, session 6):** **rung 2's Export mode is built** — see Rung 2's session-6
 note. Verified on the Mac: pb-app-core 1,100 tests (+4 ignored) incl. the mode × action rows
 and an end-to-end JPEG export; pb-encode 37; clippy `-D warnings` on pb-app-core / pb-encode /
@@ -1095,6 +1190,10 @@ test script: `.taskmaster/docs/export-rung1-manual-test.md`. Rung 0a (#81) not s
 
 **Cross-platform debt**
 
+- **Windows (session 7, rungs 2–3):** the Custom Size dialog window, the panel's File size /
+  Preview rows, and the renderer's aux preview textures on **DX12** (mipped RGBA8, covering the
+  ring / held / single-image paths) are compile-checked only. Manual test W19 — watch for shimmer
+  at fit on a big photo (mips) and an instant `Y`.
 - **Windows (session 6, rung 2):** the egui Export panel (`panels_ui::export_panel`), its
   `PanelAction`s, Ctrl+Enter, the format-aware `IFileSaveDialog` (`save_export`: JPEG filter +
   default extension) are compile-checked only. Manual test W18.

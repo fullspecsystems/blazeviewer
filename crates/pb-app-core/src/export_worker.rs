@@ -40,6 +40,8 @@ pub struct ExportJob {
     pub frame: Option<crate::frame_capture::FrameSource>,
     /// Format, quality, size and Strip, frozen at command time (rung 2).
     pub settings: crate::export_panel::ExportSettings,
+    /// The file the preview already encoded with these settings (rung 3): written as is.
+    pub encoded: Option<crate::export::PreEncoded>,
     pub dest: PathBuf,
     pub queued_at: Instant,
 }
@@ -168,6 +170,17 @@ pub fn run_job(job: ExportJob) -> ExportDone {
 }
 
 fn run_stages(job: &ExportJob, t: &mut ExportTimings) -> Result<ExportOutcome, String> {
+    // The preview already made this exact file (rung 3, F10): write its bytes.
+    if let Some(pre) = &job.encoded {
+        let s = Instant::now();
+        commit_file(&job.dest, &pre.bytes, job.source_path.as_deref())
+            .map_err(|e| e.to_string())?;
+        t.write = s.elapsed();
+        return Ok(ExportOutcome {
+            notes: pre.notes.clone(),
+            bytes: pre.bytes.len() as u64,
+        });
+    }
     let src = match &job.frame {
         // A captured frame (task #81): decode exactly that frame (read + decode in one).
         Some(frame) => {

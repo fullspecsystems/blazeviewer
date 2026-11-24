@@ -9,7 +9,7 @@
 use super::*;
 use crate::export_panel::{
     clock_label, export_key_override, ExportKey, ExportPanel, ExportSettings, FormatChoice,
-    PanelKey, PanelSource, PngCompression, SizeChoice,
+    PanelKey, PanelSource, PngCompression, SizeChoice, SizeDialog,
 };
 use crate::frame_capture::FrameKey;
 use crate::overlay::PanelContent;
@@ -81,7 +81,9 @@ impl AppCore {
         }
         self.save_export_prefs();
         let settings = self.export.draft;
-        self.export_cmd(settings);
+        // The preview's file for exactly these settings, when it's made: written as is.
+        let encoded = self.export_preview_file();
+        self.export_cmd_with(settings, encoded);
     }
 
     /// Why `item` can't be exported, if it can't — the panel says it, Export… refuses.
@@ -101,7 +103,12 @@ impl AppCore {
         let source = self
             .displayed_item
             .map(|item| self.export_panel_source(item));
+        let preview = crate::export_panel::PreviewReadout {
+            status: self.export_preview_status(),
+            side: self.export_preview_side(),
+        };
         ExportPanel::build(self.export.draft, source)
+            .with_preview(preview, self.export_preview_notes())
     }
 
     fn export_panel_source(&self, item: usize) -> PanelSource {
@@ -136,7 +143,7 @@ impl AppCore {
     }
 
     /// `item`'s pixel size **as displayed** (the RAM rotation applied), when known.
-    fn export_source_dims(&self, item: usize) -> Option<(u32, u32)> {
+    pub(super) fn export_source_dims(&self, item: usize) -> Option<(u32, u32)> {
         // A turned model exports the window as shown, at its real pixels.
         if let Some((_, [w, h])) = self.live_view_capture(item) {
             return Some((w, h));
@@ -177,6 +184,10 @@ impl AppCore {
                 .map(crate::export::quarter_turns)
                 .unwrap_or(0),
             dims: item.and_then(|i| self.export_source_dims(i)),
+            preview: {
+                let (state, bytes) = self.export_preview_status_key();
+                (state, bytes, self.export_preview_side())
+            },
         })
     }
 
@@ -209,6 +220,27 @@ impl AppCore {
         self.export_edited(s);
     }
 
+    /// The Size menu's **Custom…**: ask for a size (a sheet on macOS, the dialog window on
+    /// winit). The answer comes back as `DialogResult::ExportSizeChosen`.
+    pub fn export_custom_size(&mut self) {
+        if !self.export_mode_active() {
+            return;
+        }
+        self.effects.push(contract::CoreEffect::ShowDialog(
+            contract::DialogKind::ExportSize,
+        ));
+    }
+
+    /// The Custom… dialog's starting values: the current size (from the full size, the
+    /// image's own long edge) and the image's size, for the live result line
+    /// ([`SizeDialog::readout`]).
+    pub fn export_size_dialog(&self) -> SizeDialog {
+        SizeDialog::for_choice(
+            self.export.draft.size,
+            self.displayed_item.and_then(|i| self.export_source_dims(i)),
+        )
+    }
+
     pub fn export_set_strip_metadata(&mut self, strip: bool) {
         let mut s = self.export.draft;
         s.strip_metadata = strip;
@@ -234,7 +266,11 @@ impl AppCore {
 
     /// A key press in Export mode that means something different there (the contextual
     /// layer, [`export_key_override`]). Returns whether it was consumed.
-    pub(super) fn export_key(&mut self, res: contract::KeyResolution) -> bool {
+    pub(super) fn export_key(
+        &mut self,
+        key: crate::pb_key::PbKey,
+        res: contract::KeyResolution,
+    ) -> bool {
         if !self.export_mode_active() {
             return false;
         }
@@ -243,6 +279,7 @@ impl AppCore {
         };
         match k {
             ExportKey::Quality(dir) => self.export_step_quality(dir),
+            ExportKey::Flick => self.export_flick_down(key),
             ExportKey::Commit => self.export_commit(),
             ExportKey::Leave => self.export_close(),
         }
@@ -335,6 +372,44 @@ mod tests {
         assert!(!core.export.busy(), "and doesn't export yet");
         core.handle(CoreEvent::MenuAction(Action::Export));
         assert!(core.export.busy(), "in the mode it exports");
+    }
+
+    #[test]
+    fn custom_size_asks_with_the_current_size_and_applies_the_answer() {
+        let mut core = core_on(&["a.jpg"]);
+        with_dims(&mut core, 0, 3000, 2000);
+        core.export_custom_size();
+        assert!(core.effects.is_empty(), "outside the mode there's no Size menu");
+        key(&mut core, "E");
+        core.effects.clear();
+        core.export_custom_size();
+        assert!(core.effects.iter().any(|e| matches!(
+            e,
+            contract::CoreEffect::ShowDialog(contract::DialogKind::ExportSize)
+        )));
+        let d = core.export_size_dialog();
+        assert_eq!(
+            (d.by, d.value, d.dims),
+            (crate::export_panel::SizeBy::LongEdge, 3000, Some((3000, 2000))),
+            "from full size, the dialog offers the image's own long edge"
+        );
+        core.effects.clear();
+        core.handle(CoreEvent::DialogResolved(
+            contract::DialogResult::ExportSizeChosen(SizeChoice::Width(1200)),
+        ));
+        assert_eq!(core.export.draft.size, SizeChoice::Width(1200));
+        assert!(core
+            .effects
+            .iter()
+            .any(|e| matches!(e, contract::CoreEffect::CloseDialog)));
+        assert_eq!(core.export_panel().output_dims, Some((1200, 800)));
+        let d = core.export_size_dialog();
+        assert_eq!((d.by, d.value), (crate::export_panel::SizeBy::Width, 1200));
+        // Esc on the dialog changes nothing.
+        core.handle(CoreEvent::DialogResolved(contract::DialogResult::Dismissed(Some(
+            contract::DialogKind::ExportSize,
+        ))));
+        assert_eq!(core.export.draft.size, SizeChoice::Width(1200));
     }
 
     // ---- The mode × action table (export-plan.md § 3.11) — one test per row --------------
