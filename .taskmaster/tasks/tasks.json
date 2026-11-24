@@ -2326,6 +2326,245 @@
             "status": "pending"
           }
         ]
+      },
+      {
+        "id": 151,
+        "title": "3D models phase 1 — still renders of STL / OBJ / 3MF (browse models like photos)",
+        "description": "Browse 3D-print files like photos. STL, OBJ and 3MF (including the Production extension that Bambu Studio and Orca write; without it their projects render empty) parse in a new pure crate, pb-mesh. They render to a shaded still on the decode pool (a CPU rasterizer behind a MeshRasterizer seam) and flow through the existing image path as LibraryItemKind::Image, routed by extension like SVG. So prefetch, blaze, the thumbnail strip, archives (ZIPs of STLs), Copy, Export and Describe work unchanged. The Info panel shows model facts: triangles, size in mm, objects, 3MF metadata. RAM-only, and every parser is fuzzed. Plan: .taskmaster/docs/3d-models-plan.md.",
+        "details": "Evaluation 2026-11-23: medium-sized, comparable to adding RAW support; the 3MF parser and a fast, good-looking rasterizer are most of the work. Libraries, architecture and the hostile-input list are in the plan. Owner decisions 2026-11-23 (plan § Owner decisions): D2 embedded thumbnails = thumbnail strip + fallback, preview rung only where our render is measurably slow; D3 default colour neutral grey (customization later); D4 models load by default, no toggle in phase 1; D5 alternate handler only, never the default. Phase 2 (#153) reuses pb-mesh's model and camera, so keep the canonical Model GPU-friendly (flat f32 positions, u32 indices).",
+        "testStrategy": "TDD per plan § Tests: in-tree fixtures + proptests per parser; nv-flip golden images for the rasterizer; folder + ZIP integration; '.3mf is never an archive door'; the no-trace test with a model in the sandbox; a cargo-fuzz target per parser; a PB_PERF open -> first-model episode with p50/p95/p99 on the local corpus.",
+        "status": "pending",
+        "priority": "high",
+        "dependencies": [],
+        "subtasks": [
+          {
+            "id": 1,
+            "title": "Corpus, baseline numbers, owner decisions",
+            "description": "Assemble the local corpus (paths in .taskmaster/local/notes.md, never the public repo): Printables/Thingiverse STLs including a ZIP download, a multi-plate painted Bambu Studio project, Orca and PrusaSlicer 3MFs, a .gcode.3mf, and a 1M+ triangle stress mesh. Owner decisions D2-D5 settled 2026-11-23 (see details).",
+            "status": "pending"
+          },
+          {
+            "id": 2,
+            "title": "pb-mesh crate: canonical Model, budget pre-flight, STL",
+            "description": "New pure workspace crate (no std::fs, no GPU, no cfg). Model = f32 positions, u32 triangle indices, optional per-triangle colour, resolved build transforms, bounding box, units, a ModelFacts block for the panel; ModelError; a cancellation hook. budget.rs = refuse-before-reserve triangle/byte caps from cheap header facts. STL binary + ASCII: binary files whose header starts 'solid', counts that lie about the file length, NaN/Inf vertices. Recompute face normals; never trust the stored ones. Hand-rolled, not stl_io (unfuzzed, and we need the pre-flight + cancel hooks). Fuzz target in fuzz/.",
+            "status": "pending"
+          },
+          {
+            "id": 3,
+            "title": "OBJ parser",
+            "description": "tobj 4.x (MIT, fuzzed). Its triangulation is fan-only, so load faces untriangulated and ear-clip concave polygons ourselves (or pin fans in a test). Handle negative (relative) indices, flag Y-up. mtllib is ignored for now (the sibling-file seam is #154), so materials fall back to the default. Fuzz target.",
+            "status": "pending"
+          },
+          {
+            "id": 4,
+            "title": "3MF parser: core + Production + materials",
+            "description": "OPC: follow _rels/.rels to the root model part (never hard-code 3D/3dmodel.model). Streaming XML parse (no DOM) that checks the cancel flag every N elements. Build items with 3x4 transforms; components with a depth limit + cycle check; Production-extension p:path parts; units -> mm; basematerials displaycolor + colorgroup -> per-triangle colour; metadata (Title, Designer, Application, CreationDate...) into ModelFacts. Cap inflated part sizes (ZIP bomb), like svg.rs caps SVGZ. Hand-rolled on zip + quick-xml >= 0.41 (older quick-xml has the RUSTSEC-2026-0194/0195 DoS bugs); threemf2 is the reference/A-B candidate. Test against the 3MF Consortium conformance suites. Fuzz target.",
+            "status": "pending"
+          },
+          {
+            "id": 5,
+            "title": "CPU rasterizer + camera framing",
+            "description": "A MeshRasterizer trait + CPU impl in pb-mesh: transform vertices once, flat per-triangle shading (constant colour per triangle in the inner loop), two-sided unless the mesh is known closed, half-space raster + z-buffer, transparent background. Antialiasing rides the ladder: the fit rung renders at 1x (blaze-fast), and a parked refined rung supersamples (factor capped by a pixel budget; 2x at a 7680-wide fit would be ~0.5 GB) and downscales through Lanczos finalize. Camera: 3/4 front-right-above view, mild perspective, auto-framed to the bounding sphere, Z-up (STL/3MF) vs Y-up (OBJ), aspect follows the silhouette. Cancel checks throughout. Tile-parallel with rayon only if one thread measures too slow. nv-flip golden images. Measure p50/p95/p99 at display fit on the corpus; if p95 can't keep up, A/B a GPU offscreen still behind the same trait.",
+            "status": "pending"
+          },
+          {
+            "id": 6,
+            "title": "pb-decode ModelDecoder + routing + scanner",
+            "description": "ModelDecoder: ImageDecoder, routed by extension in decode_named_bytes_inner beside SVG/RAW/TGA, inside catch_panics. Add stl/obj/3mf to is_supported_extension, which also makes the scanner and archive indexing pick them up. Exclude models from full_res_eligible (rasterized per viewport, like SVG; fix its missing 'svgz' at the same time). Embedded 3MF thumbnail per D2, found through the standard OPC thumbnail relationship in _rels/.rels (never Bambu's pick_N.png). A .gcode.3mf with no mesh shows its thumbnail plus an honest panel note. Tests: a ZIP of STLs browses; archive_kind('x.3mf') == None and it classifies as Image; the no-trace test with a model.",
+            "status": "pending"
+          },
+          {
+            "id": 7,
+            "title": "Info / Details facts on both shells",
+            "description": "Format, triangles, vertices, objects/build items, size W x D x H in mm (say when the unit is assumed), 3MF metadata + authoring application. For models these replace the pixel-resolution row. Both the egui panel and the macOS native inspector.",
+            "status": "pending"
+          },
+          {
+            "id": 8,
+            "title": "OS integration, settings, notices, changelog",
+            "description": "Picker filters (pb-app IMAGE_FILTER_EXTS gains a '3D models' group; the Mac open panel too). macOS Info.plist document types at Alternate rank + a UTImportedTypeDeclarations entry for 3MF. Windows default_app.rs: OpenWithProgids only, never the default (D5). No Show 3D models toggle in phase 1 (D4: models load by default). THIRD-PARTY-NOTICES for new crates; CHANGELOG 'Added'.",
+            "status": "pending"
+          },
+          {
+            "id": 9,
+            "title": "Cross-platform verification",
+            "description": "Run on both machines: browse the corpus, blaze p95, thumbnail strip, a ZIP of STLs, Export and Copy of a model, the Info panel. Record verified / not verified in the plan's Handoff.",
+            "status": "pending"
+          }
+        ]
+      },
+      {
+        "id": 152,
+        "title": "Slicer-project 3MF fidelity — Bambu / Orca / Prusa plates, filament colours, painted multi-material",
+        "description": "Make Bambu Studio, OrcaSlicer and PrusaSlicer project 3MFs look like they do in the slicer. Render per plate rather than every plate shrunk into one frame. Apply filament colours from the project settings through each object's or part's extruder assignment. Decode per-triangle multi-material paint. Show .gcode.3mf sliced projects properly. Put print facts in the Info panel: printer, filaments, layer height, and estimated time/weight when sliced. Vendor-specific and loosely documented, so it is its own task after #151's core 3MF. Plan: .taskmaster/docs/3d-models-plan.md.",
+        "details": "Layouts are vendor config files inside the package (Metadata/model_settings.config, project_settings.config, Slic3r_PE.config, plate PNGs); the plan's Libraries section records what the 2026-11-23 research found, but real corpus files are the authority. Synthetic minimal fixtures for every rule, because the corpus cannot be committed (public repo).",
+        "testStrategy": "Synthetic minimal fixtures per slicer for plates, colours, extruder assignment and paint; golden renders compared side by side with the slicer's own plate thumbnail on the corpus (manual); fuzz the config parsers.",
+        "status": "pending",
+        "priority": "medium",
+        "dependencies": [
+          151
+        ],
+        "subtasks": [
+          {
+            "id": 1,
+            "title": "Format notes per slicer",
+            "description": "From the corpus, document in the plan exactly where each slicer stores plates, filament colours, extruder assignment, paint data and thumbnails, and pin a synthetic fixture for each.",
+            "status": "pending"
+          },
+          {
+            "id": 2,
+            "title": "Plates",
+            "description": "Owner decision: frame plate 1 only, or present each plate as its own page (the multi-page question TIFF also has). Implement plate membership and per-plate framing.",
+            "status": "pending"
+          },
+          {
+            "id": 3,
+            "title": "Filament colours + extruder assignment",
+            "description": "Map each object or part to its extruder, and each extruder to the project's filament colour. Fall back to #151's default material when absent.",
+            "status": "pending"
+          },
+          {
+            "id": 4,
+            "title": "Painted multi-material",
+            "description": "Decode Bambu/Orca paint_color and Prusa slic3rpe:mmu_segmentation (same encoding: reverse-nibble hex, recursive triangle subdivision, leaf state = filament index) into per-triangle colour. Subdivision multiplies triangles, so count against the budget before expanding. Implement from the plan's written notes: the slicers are AGPL-3.0, so never port their code. Fuzz it.",
+            "status": "pending"
+          },
+          {
+            "id": 5,
+            "title": ".gcode.3mf + print facts",
+            "description": "Sliced projects: plate thumbnails, plus printer / filament / layer height / estimated time and weight from the slice metadata, in the Info panel on both shells.",
+            "status": "pending"
+          }
+        ]
+      },
+      {
+        "id": 153,
+        "title": "3D models phase 2 — live 3D view (orbit / zoom / pan on the GPU)",
+        "description": "Grab a parked model and turn it at refresh rate: orbit, dolly-zoom to the cursor, pan, reset and preset views, with nav keys always leaving. A mesh pass in pb-render (depth buffer, MSAA, into the existing fp16 scRGB intermediate, so HDR/tone-map stay unchanged) shares its shading with #151's CPU rasterizer so the still -> live hand-off doesn't jump. A ModelSession in pb-app-core owns the camera. Anticipation: on park, the retained mesh is uploaded to the GPU under a VRAM budget, so the first drag is a camera update, never a parse or upload. Plan: .taskmaster/docs/3d-models-plan.md.",
+        "details": "Large: roughly the export arc's rungs 1-3. Entry model, owner decision D1 (2026-11-23): a drag just orbits, P is the keyboard way in, the play-hint pill reads '3D'. Interaction design on the Mac goes through /mac-arsed-mac-app first. Remember the AppCore struct-literal trap: any new AppCore field needs the Windows cross-check.",
+        "testStrategy": "Headless parity golden test (CPU still vs GPU frame at the default camera, nv-flip); camera proptests (target stays on screen, no NaN, no flips); ModelSession unit tests on injected input; PB_PERF episodes park -> first-drag-to-photon and orbit frame time p95 on the stress mesh, held to one refresh interval on both platforms.",
+        "status": "pending",
+        "priority": "medium",
+        "dependencies": [
+          151
+        ],
+        "subtasks": [
+          {
+            "id": 1,
+            "title": "Interaction design (D1 settled) + Mac-assed review",
+            "description": "Bindings as Actions in keymap.rs (reset view, front/top/side/iso presets, up-axis flip); mouse (left drag orbit, right/middle/Shift drag pan, wheel dolly) and trackpad (drag, pinch, two-finger scroll honouring the Scroll wheel setting); how this coexists with 2D zoom/pan; cursor feedback. Load /mac-arsed-mac-app before settling the Mac side.",
+            "status": "pending"
+          },
+          {
+            "id": 2,
+            "title": "pb-render mesh pass",
+            "description": "Vertex/index buffers, Depth32Float, 4x MSAA, drawing into the fp16 scRGB intermediate. Flat normals from screen-space derivatives, so an indexed mesh needs no per-face duplication. Shading constants shared with the CPU rasterizer, plus the headless CPU-vs-GPU parity golden test.",
+            "status": "pending"
+          },
+          {
+            "id": 3,
+            "title": "Camera math in pb-mesh",
+            "description": "Turntable orbit (Z/Y-up aware), dolly to cursor, pan, near/far from the bounding sphere, reset/preset views. Pure and property-tested.",
+            "status": "pending"
+          },
+          {
+            "id": 4,
+            "title": "ModelSession subsystem",
+            "description": "pb-app-core model_session.rs + app_core_impl/model.rs in the same commit (two-halves rule): camera state, CoreEvent routing while live, draw effects only when the camera changes (no idle 120 Hz loop), ends on any nav input. Mesh retention cache (RAM budget, evicted by likelihood) and park-time GPU upload under a VRAM budget (refuse-before-reserve; over budget -> stay a still with an honest toast).",
+            "status": "pending"
+          },
+          {
+            "id": 5,
+            "title": "Shell wiring (winit + Mac)",
+            "description": "Pointer capture and gestures on both shells, the '3D' play-hint pill, View menu entries (Reset View, presets), menu-state sync. Windows cross-check for any AppCore field.",
+            "status": "pending"
+          },
+          {
+            "id": 6,
+            "title": "Capture interop",
+            "description": "Copy / Export / Describe of a live model capture the current view: a new answer to frame_capture.rs's 'which frame?'.",
+            "status": "pending"
+          },
+          {
+            "id": 7,
+            "title": "Perf + cross-platform verification",
+            "description": "PB_PERF episodes park -> first-drag-to-photon and orbit frame time p95 on the stress mesh, on Windows and macOS; record in the plan's Handoff.",
+            "status": "pending"
+          },
+          {
+            "id": 8,
+            "title": "Later",
+            "description": "Inertia, turntable auto-spin, wireframe/edge overlay, axis gizmo, section plane, measuring, textures (3MF texture2d, glTF), per-plate navigation in 3D.",
+            "status": "pending"
+          }
+        ]
+      },
+      {
+        "id": 154,
+        "title": "More 3D formats — glTF/GLB, PLY, AMF, OFF, FBX, G-code thumbnails (+ STEP/USDZ research)",
+        "description": "Once #151's canonical Model and renderer exist, each further format is mostly a parser into it: glTF/GLB (base colour first, PBR + textures later), PLY (scans and photogrammetry, vertex colours, point clouds), AMF and OFF (cheap after 3MF), and FBX through ufbx (a heavily fuzzed, permissive C library). Also an OBJ sibling-file seam (mtllib + textures, folders and archives alike) and embedded thumbnails in G-code / binary G-code (shown as stills, no toolpath render). STEP/IGES, USDZ and Collada get a research verdict only. Plan: .taskmaster/docs/3d-models-plan.md.",
+        "details": "STEP/IGES are B-rep CAD, not meshes, and need a tessellation kernel (OpenCascade is LGPL and large); USDZ has a young pure-Rust reader (openusd, MIT, unfuzzed) and macOS ModelIO as a seam option. Assimp is ruled out for hostile input (see the plan's Libraries section).",
+        "testStrategy": "Same bar as #151 per parser: in-tree fixtures, proptests, golden renders, a cargo-fuzz target.",
+        "status": "pending",
+        "priority": "low",
+        "dependencies": [
+          151
+        ],
+        "subtasks": [
+          {
+            "id": 1,
+            "title": "glTF / GLB",
+            "description": "gltf crate via Gltf::from_slice only: never import(), which follows external URIs to disk; external buffers only through the sibling-file seam. Meshes + node transforms + base colour factor, Y-up; PBR and textures as a follow-up (#153's texture work).",
+            "status": "pending"
+          },
+          {
+            "id": 2,
+            "title": "PLY",
+            "description": "ply-rs-bw (MIT, the maintained fork). ASCII + binary, vertex colours; a face-less PLY is a point cloud, rendered as points.",
+            "status": "pending"
+          },
+          {
+            "id": 3,
+            "title": "AMF + OFF",
+            "description": "AMF is XML (sometimes zipped) like 3MF; OFF is trivial.",
+            "status": "pending"
+          },
+          {
+            "id": 4,
+            "title": "OBJ sibling-file seam",
+            "description": "mtllib and texture lookup through a list of sibling names, the same shape as subtitle sidecar discovery, so folders and archives both work.",
+            "status": "pending"
+          },
+          {
+            "id": 5,
+            "title": "G-code embedded thumbnails",
+            "description": "Slicers write base64 thumbnails into G-code comments, and binary G-code (.bgcode) has thumbnail blocks. Show them as stills; no toolpath render. Verify each slicer's block format first.",
+            "status": "pending"
+          },
+          {
+            "id": 6,
+            "title": "FBX via ufbx",
+            "description": "ufbx Rust bindings (MIT OR Unlicense; C via FFI). First native dependency of the arc, so check the build on all three platforms before committing to it.",
+            "status": "pending"
+          },
+          {
+            "id": 7,
+            "title": "Research verdicts: STEP/IGES, USDZ, Collada",
+            "description": "No build. A short verdict per format (library, licence, cost, value) recorded in the plan.",
+            "status": "pending"
+          }
+        ]
+      },
+      {
+        "id": 155,
+        "title": "Dependency advisories: zip >= 9 (RUSTSEC-2026-0545) and quick-xml >= 0.41 (RUSTSEC-2026-0194/0195)",
+        "description": "Found during the #151 library research, verified on rustsec.org 2026-11-23. (1) zip 2.4.2 with aes-crypto (pb-source, pb-app-core): WinZip-AES entries are accepted without their HMAC check when the data ends early or is empty (CVSS 6.5); this is reachable on the view path, since encrypted ZIPs open as archive doors. Fixed in zip >= 9.0, a major-version jump, so expect API churn in pb-source. (2) quick-xml < 0.41: a quadratic duplicate-attribute check and unbounded namespace allocation (both DoS, CVSS 7.5). In the lock at 0.37.5 via little_exif, which only the explicit Save Rotation command uses, and at 0.30 (zbus_xml) and 0.39 (wayland-scanner), which are build-time, trusted input. Low exposure today, but the #151 3MF parser must start on >= 0.41.",
+        "details": "Check whether velopack's zip 0.6.6 enables AES (probably not; then it is unaffected). Bump little_exif if a release pulls quick-xml >= 0.41, otherwise note the residual. Add a local cargo-audit (or cargo-deny advisories) step to the release checklist: run locally, never as a paid CI job.",
+        "testStrategy": "The existing archive suites (ZIP incl. AES password entries) stay green after the zip bump; cargo audit reports no advisories for zip or quick-xml on the shipped dependency graph.",
+        "status": "pending",
+        "priority": "medium",
+        "dependencies": [],
+        "subtasks": []
       }
     ],
     "metadata": {
