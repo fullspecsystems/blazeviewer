@@ -10,7 +10,7 @@
 //! channel drops the offer — thumbs are best-effort; the warm-window fill
 //! regenerates misses once parked.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::mpsc::{sync_channel, Receiver, Sender, SyncSender};
 use std::time::Instant;
 
@@ -54,12 +54,15 @@ pub struct ThumbPixels {
 
 struct DeriveJob {
     deck_gen: u64,
+    /// The offer's place in line (see [`Thumbs::refresh_where`]'s fence).
+    seq: u64,
     item: usize,
     img: DecodedImage,
 }
 
 struct DeriveResult {
     deck_gen: u64,
+    seq: u64,
     item: usize,
     thumb: DecodedImage,
 }
@@ -107,6 +110,12 @@ pub struct Thumbs {
     /// derive's marker before the generation check rejected it, re-triggering the
     /// very walk the marker guards against.
     pub pending: HashSet<(u64, usize)>,
+    /// The next offer's sequence number, stamped on its derive.
+    next_seq: u64,
+    /// Per-item derive fence for pixels that changed without the deck changing
+    /// ([`Self::refresh_where`]): a derive offered before the item's fence carries the old
+    /// pixels and is dropped on landing. Cleared with the deck generation.
+    fence: HashMap<usize, u64>,
     /// `PB_THUMB_DIAG` stopwatch: when the strip was opened, and how many tiles have
     /// landed since. Measures the metric the user actually feels — *time until you see
     /// thumbnails* — which no existing counter reports. RAM-only, durations and counts
@@ -129,6 +138,8 @@ impl Default for Thumbs {
             rx: None,
             in_flight: 0,
             pending: HashSet::new(),
+            next_seq: 0,
+            fence: HashMap::new(),
         }
     }
 }
@@ -171,6 +182,7 @@ impl Thumbs {
                         if res_tx
                             .send(DeriveResult {
                                 deck_gen: job.deck_gen,
+                                seq: job.seq,
                                 item: job.item,
                                 thumb,
                             })
@@ -219,10 +231,13 @@ impl Thumbs {
         }
         // A resident Full-tier thumb never regresses; skip the queue slot. A
         // preview-tier entry is worth upgrading when a real decode comes through.
-        if self.cache.tier(item) == Some(ThumbTier::Full) && !img.is_preview {
+        if self.cache.tier(item) == Some(ThumbTier::Full)
+            && !img.is_preview
+            && !self.cache.is_stale(item)
+        {
             // Re-deriving an identical full is wasted work UNLESS pixels changed
-            // (rotation-save re-decode) — those arrive after a cache clear, so
-            // the tier check is safe here.
+            // (rotation-save re-decode) — those arrive after a cache clear, or mark
+            // the tile stale (a new model colour), so the tier check is safe here.
             return;
         }
         if img.format == PixelFormat::Nv12 {
@@ -230,12 +245,15 @@ impl Thumbs {
         }
         let Some(tx) = &self.tx else { return };
         let gen = self.cache.deck_gen();
+        let seq = self.next_seq;
         let job = DeriveJob {
             deck_gen: gen,
+            seq,
             item,
             img,
         };
         if tx.try_send(job).is_ok() {
+            self.next_seq += 1;
             self.in_flight += 1;
             self.pending.insert((gen, item));
         }
@@ -257,6 +275,12 @@ impl Thumbs {
         let mut landed = Vec::new();
         while let Ok(r) = rx.try_recv() {
             self.in_flight = self.in_flight.saturating_sub(1);
+            // Derived from pixels a refresh has since outdated: drop it, and leave the
+            // markers alone — the refresh retired this offer's, so any left are the
+            // replacement's.
+            if self.fence.get(&r.item).is_some_and(|&f| r.seq < f) {
+                continue;
+            }
             // Generation-scoped retirement (#119, Codex r2 h2): a late stale result
             // retires only ITS OWN generation's marker, never the replacement's.
             self.pending.remove(&(r.deck_gen, r.item));
@@ -326,6 +350,25 @@ impl Thumbs {
         self.cache.clear();
         self.failed.clear();
         self.pending.clear();
+        self.fence.clear(); // the generation bump fences everything in flight now
+    }
+
+    /// The pixels behind the items matching `pred` changed without the deck changing (a new
+    /// 3D model colour re-renders every model, and no photo). Their tiles stay on show until
+    /// re-derived but are planned for a refill, and a derive already under way from the old
+    /// pixels is dropped when it lands. Everything else is untouched.
+    pub fn refresh_where(&mut self, pred: impl Fn(usize) -> bool) {
+        let stale: Vec<usize> = self
+            .cache
+            .items()
+            .chain(self.pending.iter().map(|&(_, item)| item))
+            .filter(|&item| pred(item))
+            .collect();
+        for item in stale {
+            self.cache.mark_stale(item);
+            self.fence.insert(item, self.next_seq);
+        }
+        self.pending.retain(|&(_, item)| !pred(item));
     }
 }
 
@@ -470,6 +513,59 @@ mod tests {
             "the replacement landed; the stale result installed nothing"
         );
         assert!(!t.pending_now(3), "and retired its own marker");
+    }
+
+    /// A new 3D model colour re-renders the models and nothing else: their tiles stay on
+    /// show until fresh pixels land, a derive already under way from the old pixels never
+    /// installs, and a photo's tile is untouched.
+    #[test]
+    fn refreshing_items_keeps_their_tiles_until_fresh_pixels_land() {
+        let solid = |v: u8| {
+            let mut i = img(64, 64);
+            i.pixels.fill(v);
+            i
+        };
+        let settle = |t: &mut Thumbs| {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while t.working() && std::time::Instant::now() < deadline {
+                t.poll(0);
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+        };
+        let mut t = Thumbs::default();
+        t.enable();
+        t.offer(1, solid(10)); // a model, old colour
+        t.offer(2, solid(10)); // a photo
+        settle(&mut t);
+        let photo = t.cache.get(2).unwrap().gen;
+        t.offer(3, solid(10)); // another model, its old-colour derive still under way
+        let is_model = |i: usize| i != 2;
+
+        t.refresh_where(is_model);
+
+        assert!(t.cache.is_stale(1), "due a refill");
+        assert_eq!(
+            t.cache.get(1).unwrap().payload.rgba[0],
+            10,
+            "but still shown"
+        );
+        assert!(
+            !t.pending_now(3),
+            "the old derive no longer counts as on its way"
+        );
+        t.offer(1, solid(200)); // the new colour, despite a Full tile being cached
+        t.offer(3, solid(200));
+        settle(&mut t);
+        for item in [1, 3] {
+            let e = t.cache.get(item).expect("tile");
+            assert_eq!(e.payload.rgba[0], 200, "item {item} shows the new colour");
+            assert!(!e.stale);
+        }
+        assert_eq!(
+            t.cache.get(2).unwrap().gen,
+            photo,
+            "the photo's tile is untouched"
+        );
     }
 
     #[test]

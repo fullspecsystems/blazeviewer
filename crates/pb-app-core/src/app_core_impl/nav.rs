@@ -364,6 +364,37 @@ mod tests {
     use crate::contract::CoreEvent;
     use crate::PbKey;
 
+    /// Shift+Return steps back through the random walk, end to end from the key the Mac host
+    /// sends ("Return") through the keymap to the playlist.
+    #[test]
+    fn shift_return_steps_back_through_the_random_walk() {
+        let press = |core: &mut AppCore, shift: bool| {
+            let key = PbKey::from_name("Return").unwrap();
+            let mods = crate::contract::Modifiers {
+                shift,
+                ..Default::default()
+            };
+            core.handle(CoreEvent::KeyDown {
+                key,
+                mods,
+                repeat: false,
+            });
+            core.handle(CoreEvent::KeyUp { key });
+            core.displayed_item = core.target_item; // it landed
+        };
+        let mut core = test_core();
+        core.source = five_photos();
+        core.playlist = Playlist::new(5, 7).with_cursor(0);
+        core.displayed_item = Some(0);
+        core.target_item = Some(0);
+        press(&mut core, false);
+        let first = core.target_item;
+        press(&mut core, false);
+        assert_ne!(core.target_item, first);
+        press(&mut core, true);
+        assert_eq!(core.target_item, first, "back to the previous random photo");
+    }
+
     #[test]
     fn rebuild_playlist_records_last_folder_but_only_for_folder_backed_opens() {
         let mut core = test_core();

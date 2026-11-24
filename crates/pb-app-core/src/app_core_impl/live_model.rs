@@ -67,45 +67,54 @@ impl AppCore {
     }
 
     /// The model colour changed (Settings ▸ Appearance). The live view picks it up on its next
-    /// draw, but every model still already decoded was baked in the old colour, so those are
-    /// re-rendered in the background. A deck with no model in it pays nothing.
+    /// draw (a uniform), but every model still already decoded was baked in the old colour.
+    /// Those, and only those, are drawn again: photos, video posters, full-size originals and
+    /// their strip tiles stay put, so a new colour costs the rest of the folder nothing. (It
+    /// used to be a deck-wide content change, which re-decoded everything and re-ran every
+    /// poster search, and the Settings window's auto-apply repeated it while the colour was
+    /// being picked.) A deck with no model in it pays nothing.
+    ///
+    /// - The model on screen keeps showing until its redraw replaces it in place, the way a
+    ///   preview sharpens (`drain_results`), so it never blanks. The other models' stills are
+    ///   dropped, and the prefetch draws them again in its usual order.
+    /// - Strip tiles stay on show until they are derived again from the new pixels.
+    /// - Model decodes already under way in the old colour are stopped; any that were already
+    ///   on their way are dropped when they arrive ([`Self::model_still_outdated`]).
     pub(crate) fn recolor_models(&mut self) {
-        if !(0..self.source.len()).any(|i| self.item_is_model(i)) {
+        let source = Arc::clone(&self.source);
+        let is_model = |item: usize| is_model_item(source.as_ref(), item);
+        if !(0..source.len()).any(is_model) {
             return;
         }
-        let old_gen = self.content_gen;
-        self.invalidate_content();
-        // The live mesh doesn't depend on the colour (uncoloured corners take it per frame), so
-        // it crosses the content bump instead of being re-parsed, and the user keeps their view.
-        let new_gen = self.content_gen;
-        let retag = |g: &mut u64| {
-            if *g == old_gen {
-                *g = new_gen;
-            }
-        };
-        let lm = &mut self.live_model;
-        if let Some(r) = lm.ready.as_mut() {
-            retag(&mut r.content_gen);
+        self.live_model.stills_look = pb_decode::look_generation();
+        self.pool.cancel_where(is_model);
+        self.pending_uploads.retain(|o| !is_model(o.key.item));
+        let on_screen = self
+            .displayed_item
+            .filter(|&d| is_model(d))
+            .and_then(|d| Some((d, self.display_slot(d)?)));
+        self.ring
+            .evict_where(is_model, on_screen.map(|(_, slot)| slot));
+        if let Some((item, _)) = on_screen {
+            self.preview_resident.insert(item);
+            self.upgrade_done.remove(&item);
         }
-        if let Some(l) = lm.loading.as_mut() {
-            retag(&mut l.content_gen);
+        if self.fit_stash.iter().flatten().any(|s| is_model(s.item)) {
+            self.clear_fit_stash();
         }
-        if let Some((_, g)) = lm.failed.as_mut() {
-            retag(g);
-        }
-        if let Some((_, g)) = lm.spin_wanted.as_mut() {
-            retag(g);
-        }
-        self.target_item = self.playlist.current();
+        self.thumbs.refresh_where(is_model);
         self.request_prefetch();
+    }
+
+    /// A model still decoded before the last colour change: dropped on arrival, because it may
+    /// show the old colour (see [`Self::recolor_models`]).
+    pub(super) fn model_still_outdated(&self, o: &crate::decode_pool::Outcome) -> bool {
+        o.look_gen < self.live_model.stills_look && self.item_is_model(o.key.item)
     }
 
     /// Whether `item` is a 3D model: an image item with a model extension.
     fn item_is_model(&self, item: usize) -> bool {
-        matches!(
-            crate::video::item_kind(self.source.as_ref(), item),
-            crate::video::LibraryItemKind::Image
-        ) && live_model::model_format(self.source.name(item)).is_some()
+        is_model_item(self.source.as_ref(), item)
     }
 
     fn start_live_model(&mut self, item: usize) {
@@ -412,12 +421,21 @@ impl AppCore {
     }
 }
 
+/// Whether `item` of `source` is a 3D model: an image item with a model extension.
+fn is_model_item(source: &dyn ItemSource, item: usize) -> bool {
+    matches!(
+        crate::video::item_kind(source, item),
+        crate::video::LibraryItemKind::Image
+    ) && live_model::model_format(source.name(item)).is_some()
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Mutex;
     use std::time::{Duration, Instant};
 
-    use crate::app_core_impl::test_support::test_core;
+    use crate::app_core_impl::test_support::{make_resident, photos_named, rgba_full, test_core};
+    use crate::decode_pool::Outcome;
 
     use super::*;
 
@@ -866,8 +884,12 @@ mod tests {
         core.toggle_play_pause();
         let gen = core.content_gen;
         change_settings(&mut core, |s| s.model_color = [200, 40, 40]);
-        assert_ne!(core.content_gen, gen, "the baked stills are stale");
-        assert!(core.live_model_ready(), "the mesh crossed over");
+        assert_eq!(core.content_gen, gen, "a colour is not a new deck");
+        assert!(
+            core.live_model.stills_look > 0,
+            "the baked stills are stale"
+        );
+        assert!(core.live_model_ready(), "the mesh is untouched");
         assert!(core.live_model.active && core.live_model_spinning());
         let frame = core.live_model_frame().expect("still drawing");
         assert_eq!(
@@ -892,9 +914,217 @@ mod tests {
     fn a_deck_of_photos_pays_nothing_for_a_new_model_colour() {
         let mut core = test_core();
         core.source = Arc::new(Photos);
-        let gen = core.content_gen;
         core.recolor_models();
-        assert_eq!(core.content_gen, gen);
+        assert_eq!(core.live_model.stills_look, 0, "nothing to redraw");
+        assert!(core.pool.enqueued().is_empty());
+    }
+
+    /// A deck of models, a photo and a video, parked on the first model (`a.stl`) in Fit mode
+    /// with everything resident: the photo in both representations.
+    fn mixed_deck() -> AppCore {
+        let mut core = test_core();
+        core.source = photos_named(&["a.stl", "b.jpg", "c.stl", "d.mp4", "e.stl", "f.jpg"]);
+        core.playlist = Playlist::new(6, 0).with_cursor(0);
+        core.ring = ResidentRing::new(8);
+        core.fit = Some(FitBox {
+            max_width: 100,
+            max_height: 100,
+        });
+        core.view.mode = ScaleMode::Fit;
+        core.targets = vec![0, 1, 2, 3, 4, 5];
+        let fit = core.rep_of(pb_core::RepKind::Fit);
+        let keep = core.targets.clone();
+        for item in 0..4 {
+            make_resident(&mut core, item, fit, &keep);
+        }
+        make_resident(&mut core, 1, pb_core::Representation::Original, &keep);
+        core.target_item = Some(0);
+        core.mark_resolved(0);
+        core.ring.set_displayed(core.ring.slot_for(0).unwrap());
+        core
+    }
+
+    fn landed(core: &AppCore, item: usize, rk: pb_core::RepKind) -> Outcome {
+        let img = rgba_full(100, 100, 100, 100);
+        Outcome::synthetic(item, core.epoch, core.content_gen, rk, Ok(img))
+    }
+
+    /// The fix for "a new colour re-decodes every cached picture in the folder": only the models'
+    /// stills are drawn again. The photo keeps both its textures, the video keeps its poster and
+    /// the deck keeps its generation (so poster choices and the strip survive).
+    #[test]
+    fn a_new_model_colour_redraws_only_the_models() {
+        let mut core = mixed_deck();
+        let (epoch, gen) = (core.epoch, core.content_gen);
+        let on_screen = core.ring.slot_for(0).unwrap();
+        core.pending_uploads
+            .push(landed(&core, 4, pb_core::RepKind::Fit)); // a model, decoded in the old colour
+        core.pending_uploads
+            .push(landed(&core, 5, pb_core::RepKind::Fit)); // a photo
+        let tile = |rgba| crate::thumbs::ThumbPixels {
+            rgba,
+            orig_w: 1,
+            orig_h: 1,
+            codec: "t",
+        };
+        let demand = pb_core::ThumbDemand::centered(0, 8);
+        for item in [0, 1] {
+            let px = tile(vec![0; 4]);
+            core.thumbs
+                .cache
+                .insert(item, pb_core::ThumbTier::Full, 1, 1, 4, px, &demand);
+        }
+
+        change_settings(&mut core, |s| s.model_color = [11, 22, 33]);
+
+        assert_eq!(
+            (core.epoch, core.content_gen),
+            (epoch, gen),
+            "no reset of any kind"
+        );
+        assert_eq!(
+            core.ring.slot_for(0),
+            Some(on_screen),
+            "the model on screen stays up"
+        );
+        assert!(
+            core.preview_resident.contains(&0),
+            "until its redraw replaces it in place"
+        );
+        assert!(
+            core.ring.slot_for(2).is_none(),
+            "the model off screen is dropped"
+        );
+        assert!(
+            core.ring.slot_for(1).is_some(),
+            "the photo keeps its picture"
+        );
+        assert!(
+            core.ring.original_slot(1).is_some(),
+            "and its full-size original"
+        );
+        assert!(
+            core.ring.slot_for(3).is_some(),
+            "the video keeps its poster"
+        );
+        let staged: Vec<usize> = core.pending_uploads.iter().map(|o| o.key.item).collect();
+        assert_eq!(
+            staged,
+            vec![5],
+            "the old-colour model still waiting to upload is gone"
+        );
+        let mut asked: Vec<usize> = core
+            .pool
+            .enqueued()
+            .into_iter()
+            .filter(|&(_, p, rk)| {
+                p == crate::decode_pool::Purpose::Display && rk == pb_core::RepKind::Fit
+            })
+            .map(|(item, _, _)| item)
+            .collect();
+        asked.sort();
+        assert_eq!(asked, vec![0, 2, 4], "exactly the models are drawn again");
+        assert!(core.thumbs.cache.is_stale(0) && !core.thumbs.cache.is_stale(1));
+        pb_decode::set_model_color(pb_mesh::DEFAULT_COLOR); // process-wide: put it back
+    }
+
+    /// A model decode under way when the colour changed lands afterwards in the old colour: it
+    /// is dropped, and the photo that arrives with it is not.
+    #[test]
+    fn a_model_still_drawn_in_the_old_colour_is_dropped_on_arrival() {
+        let mut core = mixed_deck();
+        core.ring = ResidentRing::new(8);
+        core.preview_resident.clear();
+        let (old_model, photo) = (
+            landed(&core, 2, pb_core::RepKind::Fit),
+            landed(&core, 1, pb_core::RepKind::Fit),
+        );
+        change_settings(&mut core, |s| s.model_color = [12, 34, 56]);
+        let tx = core.pool.test_sender();
+        tx.send(old_model).unwrap();
+        tx.send(photo).unwrap();
+
+        core.drain_results();
+
+        assert!(core.ring.slot_for(1).is_some(), "the photo lands");
+        assert!(
+            core.ring.slot_for(2).is_none(),
+            "the old-colour model does not"
+        );
+        tx.send(landed(&core, 2, pb_core::RepKind::Fit)).unwrap();
+        core.drain_results();
+        assert!(
+            core.ring.slot_for(2).is_some(),
+            "its redraw in the new colour does"
+        );
+        pb_decode::set_model_color(pb_mesh::DEFAULT_COLOR);
+    }
+
+    /// While the live view is up the new colour is already on screen, so the still redrawing
+    /// behind it is nothing to wait for: no loading pie.
+    #[test]
+    fn the_live_view_shows_no_pie_for_the_still_behind_it() {
+        let (mut core, _) = core_on(0);
+        core.ring = ResidentRing::new(4);
+        core.fit = Some(FitBox {
+            max_width: 100,
+            max_height: 100,
+        });
+        let fit = core.rep_of(pb_core::RepKind::Fit);
+        make_resident(&mut core, 0, fit, &[0]);
+        settle(&mut core);
+        assert!(
+            core.live_model_orbit(5.0, 0.0),
+            "turned: the live view is up"
+        );
+        change_settings(&mut core, |s| s.model_color = [14, 15, 16]);
+        assert_eq!(
+            core.sharpen_now(),
+            Some(0),
+            "the still behind it is being redrawn"
+        );
+        let now = Instant::now() + Duration::from_secs(5);
+        assert!(!core.tick_pie(now), "but nothing is shown waiting on it");
+        core.live_model_reset(); // Fit: back to the still
+        assert!(
+            core.tick_pie(now),
+            "the still itself does wait for its redraw"
+        );
+        pb_decode::set_model_color(pb_mesh::DEFAULT_COLOR);
+    }
+
+    /// The redraw of the model on screen replaces it in the same slot, in Fit mode and at 100%
+    /// (where a model still is an Original, which otherwise never replaces itself).
+    #[test]
+    fn the_model_on_screen_is_redrawn_in_place() {
+        for mode in [ScaleMode::Fit, ScaleMode::Original] {
+            let mut core = mixed_deck();
+            let rk = if mode == ScaleMode::Fit {
+                pb_core::RepKind::Fit
+            } else {
+                core.view.mode = mode;
+                core.ring = ResidentRing::new(8);
+                make_resident(&mut core, 0, pb_core::Representation::Original, &[0]);
+                core.ring.set_displayed(core.ring.original_slot(0).unwrap());
+                pb_core::RepKind::Original
+            };
+            let slot = core.ring.slot_for_rep(0, rk).unwrap();
+            change_settings(&mut core, |s| s.model_color = [13, 57, 91]);
+            core.pool.test_sender().send(landed(&core, 0, rk)).unwrap();
+
+            core.drain_results();
+
+            assert_eq!(
+                core.ring.slot_for_rep(0, rk),
+                Some(slot),
+                "{mode:?}: same slot"
+            );
+            assert!(
+                !core.preview_resident.contains(&0),
+                "{mode:?}: the redraw landed"
+            );
+            pb_decode::set_model_color(pb_mesh::DEFAULT_COLOR);
+        }
     }
 
     #[test]

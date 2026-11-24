@@ -267,6 +267,11 @@ pub struct Outcome {
     /// full request could only produce a preview" (the RAW case) and may end the sharpen loop.
     /// Conflating the two poisoned `upgrade_done` and left photos stuck blurry (2026-07-19).
     pub preview: bool,
+    /// The [look generation](pb_decode::look_generation) read just before the decode ran: a
+    /// pixel-affecting setting that moved past it since (a new 3D model colour) may have
+    /// missed these pixels. The core drops such a model still on arrival rather than show
+    /// the old colour (`AppCore::recolor_models`).
+    pub look_gen: u64,
     /// The pool's byte-budget RAII (freed on drop). `None` for a *synthetic* outcome not
     /// produced by the pool — a macOS archive-video poster the shell generated and fed back
     /// in (`Outcome::synthetic`); it carries no pool budget.
@@ -297,6 +302,7 @@ impl Outcome {
             fit_tag_epoch: epoch,
             fit_tag: None,
             preview: false, // a synthetic poster is a definitive full, not a preview request
+            look_gen: pb_decode::look_generation(),
             _budget: None,
         }
     }
@@ -319,6 +325,7 @@ impl Outcome {
         // is current at fan-out time.
         let mut o = Outcome::synthetic(item, epoch, donor.key.content_gen, rep_kind, result);
         o._budget = donor._budget.take();
+        o.look_gen = donor.look_gen;
         o
     }
 
@@ -336,6 +343,7 @@ impl Outcome {
     ) -> Self {
         // Content generation from the donor, like `synthetic_from` (Codex #119 r2).
         let mut o = Outcome::synthetic(item, epoch, donor.key.content_gen, rep_kind, result);
+        o.look_gen = donor.look_gen;
         if let Some(g) = donor._budget.as_mut() {
             let carved = bytes.min(g.bytes);
             g.bytes -= carved;
@@ -375,6 +383,7 @@ impl Outcome {
             fit_tag_epoch,
             fit_tag,
             preview: false,
+            look_gen: pb_decode::look_generation(),
             _budget: None,
         }
     }
@@ -744,6 +753,24 @@ impl DecodePool {
         self.shared.cv.notify_all();
     }
 
+    /// Stop every queued and in-flight job whose item matches `pred`, so the next
+    /// [`set_targets`](Self::set_targets) starts them afresh instead of deduping against work
+    /// that is now wrong. For pixels that changed without the deck changing (a new 3D model
+    /// colour): the deck generation still matches, so `set_targets` alone would keep them. A
+    /// stopped job's result is discarded unless it was already on its way; those carry an old
+    /// [`Outcome::look_gen`] for the caller to drop.
+    pub fn cancel_where(&self, pred: impl Fn(usize) -> bool) {
+        let mut inner = self.shared.inner.lock().unwrap();
+        inner.queue.retain(|j| !pred(j.key.item));
+        inner.tracked.retain(|&(item, _, _), entry| {
+            let stop = pred(item);
+            if stop {
+                entry.flag.store(true, Ordering::Release);
+            }
+            !stop
+        });
+    }
+
     /// Whether the pool holds ANY live work the host pump must stay awake for:
     /// queued jobs, in-flight jobs, or sent-but-undrained outcomes (#119, Codex r2
     /// h1 — ordinary jobs untrack BEFORE the send, so `outstanding` is the only
@@ -826,6 +853,8 @@ fn worker_loop(shared: Arc<Shared>) {
             continue;
         }
 
+        // Read before the decode, so a setting that moves during it reads as missed.
+        let look_gen = pb_decode::look_generation();
         // Dispatch by work kind: a poster selection runs the injected walk and
         // produces the typed payload; everything else is a plain image decode.
         let (result, selection, bytes) = if job.key.purpose == Purpose::PosterSelect {
@@ -899,6 +928,7 @@ fn worker_loop(shared: Arc<Shared>) {
             fit_tag_epoch: job.fit_tag_epoch,
             fit_tag: job.fit,
             preview: job.preview,
+            look_gen,
             _budget: Some(budget),
         };
         if shared.results_tx.send(outcome).is_err() {
@@ -1115,6 +1145,51 @@ mod tests {
         pool.set_targets(1, CG, &src, &targets(&[0, 1, 2, 3]));
         drain_n(&rx, 4);
         assert_eq!(*order.lock().unwrap(), vec![0, 1, 2, 3]);
+    }
+
+    /// A new 3D model colour outdates the models' decodes but not the deck, so `set_targets`
+    /// alone would keep the old-colour work. `cancel_where` stops exactly those jobs, queued and
+    /// in flight, and the next `set_targets` starts them afresh.
+    #[test]
+    fn cancel_where_restarts_only_the_matching_jobs() {
+        let (started_tx, started_rx) = channel::<()>();
+        let (release_tx, release_rx) = channel::<()>();
+        let gate = Arc::new(AtomicBool::new(true)); // true => next decode gates
+        let release_rx = StdMutex::new(release_rx);
+        let calls = Arc::new(StdMutex::new(Vec::<usize>::new()));
+        let rec = calls.clone();
+        let decode: Arc<DecodeFn> = Arc::new(move |_s, item, _, _, _, _| {
+            rec.lock().unwrap().push(item);
+            if gate.swap(false, Ordering::SeqCst) {
+                started_tx.send(()).unwrap();
+                release_rx.lock().unwrap().recv().unwrap();
+            }
+            Ok(image(item, 16))
+        });
+        let (pool, rx) = DecodePool::new(1, 1 << 20, decode);
+        let src = source();
+        let wants = targets(&[0, 1, 2, 3]);
+        pool.set_targets(1, CG, &src, &wants);
+        started_rx.recv_timeout(Duration::from_secs(5)).unwrap(); // item 0 in flight
+        let is_model = |item: usize| item.is_multiple_of(2);
+
+        pool.cancel_where(is_model); // 0 in flight, 2 queued
+        pool.set_targets(1, CG, &src, &wants); // the same wants: a fresh 0 and 2
+        release_tx.send(()).unwrap();
+
+        let mut got = drain_n(&rx, 4);
+        got.sort();
+        assert_eq!(
+            got,
+            vec![0, 1, 2, 3],
+            "one outcome each: the stopped 0 never arrives"
+        );
+        assert!(rx.recv_timeout(Duration::from_millis(200)).is_err());
+        assert_eq!(
+            *calls.lock().unwrap(),
+            vec![0, 0, 1, 2, 3],
+            "0 restarted, 2 waited its turn, the photos ran once"
+        );
     }
 
     #[test]

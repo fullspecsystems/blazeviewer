@@ -32,6 +32,9 @@ pub struct ThumbEntry<T> {
     pub bytes: u64,
     pub gen: u64,
     pub payload: T,
+    /// The pixels are out of date (see [`ThumbCache::mark_stale`]): still shown, but due a
+    /// refill, and any fresh offer replaces them whatever its tier.
+    pub stale: bool,
 }
 
 /// The demand window the eviction classes and the fill plan are computed
@@ -146,6 +149,27 @@ impl<T> ThumbCache<T> {
         self.entries.get(&item).map(|e| e.tier)
     }
 
+    /// The items holding a tile, in no particular order.
+    pub fn items(&self) -> impl Iterator<Item = usize> + '_ {
+        self.entries.keys().copied()
+    }
+
+    /// The pixels behind `item` changed without its index changing (a new 3D model colour
+    /// re-renders every model). Unlike a drop, the old tile stays on show until the new one
+    /// lands, so the strip never blinks to a placeholder: it is only planned for a refill
+    /// ([`fill_plan`](Self::fill_plan)) and loses its tier protection. A no-op for an item with
+    /// no tile.
+    pub fn mark_stale(&mut self, item: usize) {
+        if let Some(e) = self.entries.get_mut(&item) {
+            e.stale = true;
+        }
+    }
+
+    /// Whether `item`'s tile is out of date (see [`mark_stale`](Self::mark_stale)).
+    pub fn is_stale(&self, item: usize) -> bool {
+        self.entries.get(&item).is_some_and(|e| e.stale)
+    }
+
     /// Drop everything and bump the deck generation — the delete / rebuild rule
     /// (plan §6: clearing is the v1 simplification; indices were reassigned).
     /// Append-only growth (`extend_playlist`) must NOT call this — indices are
@@ -173,7 +197,7 @@ impl<T> ThumbCache<T> {
         demand: &ThumbDemand,
     ) -> InsertOutcome {
         if let Some(existing) = self.entries.get(&item) {
-            if existing.tier > tier {
+            if existing.tier > tier && !existing.stale {
                 return InsertOutcome::AlreadyBetter;
             }
         }
@@ -199,6 +223,7 @@ impl<T> ThumbCache<T> {
                 bytes,
                 gen: self.next_gen,
                 payload,
+                stale: false,
             },
         );
         self.used += bytes;
@@ -277,8 +302,9 @@ impl<T> ThumbCache<T> {
     }
 
     /// The cold cells to fill next (plan: visible → overscan → warm, near-to-far
-    /// within each class), capped at `max_jobs`. Only items with **no** entry —
-    /// tier refinement is T2's job, not the fill plan's. `len` clamps to the deck.
+    /// within each class), capped at `max_jobs`. Only items with **no** current entry
+    /// (none, or a [stale](Self::mark_stale) one) — tier refinement is T2's job, not the
+    /// fill plan's. `len` clamps to the deck.
     pub fn fill_plan(&self, demand: &ThumbDemand, len: usize, max_jobs: usize) -> Vec<usize> {
         if len == 0 || max_jobs == 0 {
             return Vec::new();
@@ -286,7 +312,7 @@ impl<T> ThumbCache<T> {
         let clamp = |i: usize| i.min(len - 1);
         let mut plan: Vec<usize> = Vec::new();
         let push = |it: usize, plan: &mut Vec<usize>| {
-            if !self.entries.contains_key(&it) && !plan.contains(&it) {
+            if !self.entries.get(&it).is_some_and(|e| !e.stale) && !plan.contains(&it) {
                 plan.push(it);
             }
         };
@@ -410,6 +436,32 @@ mod tests {
         c.insert(2, ThumbTier::Full, 512, 341, 100, 2, &d);
         assert_eq!(c.get(2).unwrap().payload, 2);
         assert_eq!(c.get(2).unwrap().tier, ThumbTier::Full);
+    }
+
+    /// A tile whose pixels went out of date (a new 3D model colour) stays on show until its
+    /// replacement lands: still drawn, but planned for a refill and replaceable by any tier.
+    #[test]
+    fn a_stale_tile_stays_visible_until_a_fresh_one_replaces_it() {
+        let d = demand((0, 5), (0, 5), 0);
+        let mut c: ThumbCache<u8> = ThumbCache::new(1000);
+        c.insert(1, ThumbTier::Full, 512, 341, 100, 7, &d);
+        c.insert(2, ThumbTier::Full, 512, 341, 100, 8, &d);
+        let dirty = c.dirty();
+        c.mark_stale(1);
+        c.mark_stale(9); // nothing cached: a no-op
+        assert_eq!(c.dirty(), dirty, "the old pixels are still what's shown");
+        assert_eq!(c.get(1).unwrap().payload, 7);
+        assert!(c.is_stale(1) && !c.is_stale(2) && !c.is_stale(9));
+        let plan = c.fill_plan(&d, 3, 8);
+        assert!(plan.contains(&1) && !plan.contains(&2), "{plan:?}");
+        // Even a lower tier replaces a stale tile, and the replacement is current.
+        assert_eq!(
+            c.insert(1, ThumbTier::Preview, 160, 120, 50, 9, &d),
+            InsertOutcome::Stored
+        );
+        assert_eq!(c.get(1).unwrap().payload, 9);
+        assert!(!c.is_stale(1));
+        assert!(!c.fill_plan(&d, 3, 8).contains(&1));
     }
 
     #[test]

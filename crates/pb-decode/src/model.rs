@@ -9,7 +9,7 @@
 //! When a 3MF's mesh can't be drawn — none present (a sliced `.gcode.3mf`), over the size
 //! limits, or malformed — its embedded slicer thumbnail is shown instead (owner decision D2).
 
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 use pb_mesh::{CpuRasterizer, Limits, MeshError, MeshRasterizer, ModelFormat, RenderOptions};
 
@@ -24,10 +24,24 @@ const fn pack([r, g, b]: [u8; 3]) -> u32 {
     (r as u32) << 16 | (g as u32) << 8 | b as u32
 }
 
+/// Moves whenever a setting that changes decoded pixels does (today only the model colour).
+static LOOK_GEN: AtomicU64 = AtomicU64::new(0);
+
 /// Set the colour models render in when their file doesn't colour them. Stills decoded before
-/// the change keep the old colour; the caller re-decodes what it holds.
+/// the change keep the old colour; the caller re-decodes what it holds. Setting the colour it
+/// already is changes nothing, the [look generation](look_generation) included.
 pub fn set_model_color(rgb: [u8; 3]) {
-    MODEL_COLOR.store(pack(rgb), Ordering::Relaxed);
+    if MODEL_COLOR.swap(pack(rgb), Ordering::AcqRel) != pack(rgb) {
+        LOOK_GEN.fetch_add(1, Ordering::Release);
+    }
+}
+
+/// The generation of the process-wide settings that change decoded pixels (see
+/// [`set_model_color`]). Read it **before** decoding: a decode stamped with a generation older
+/// than the latest change may have been drawn under the old look, and one stamped with the
+/// latest was not (the setting is stored before the generation moves).
+pub fn look_generation() -> u64 {
+    LOOK_GEN.load(Ordering::Acquire)
 }
 
 /// The current model colour (see [`set_model_color`]).
@@ -158,9 +172,15 @@ mod tests {
             max_width: 64,
             max_height: 64,
         };
+        let before = super::look_generation();
         super::set_model_color([30, 200, 40]);
+        let changed = super::look_generation();
+        super::set_model_color([30, 200, 40]);
+        let again = super::look_generation();
         let img = decode_named_bytes("cube.stl", &cube_stl(), Some(fit), false);
         super::set_model_color(pb_mesh::DEFAULT_COLOR); // process-wide: put it back first
+        assert!(changed > before, "a new colour is a new look");
+        assert_eq!(again, changed, "the same colour again is not");
         let img = img.unwrap();
         let at = ((img.height / 2 * img.width + img.width / 2) * 4) as usize;
         let [r, g, b] = [img.pixels[at], img.pixels[at + 1], img.pixels[at + 2]];

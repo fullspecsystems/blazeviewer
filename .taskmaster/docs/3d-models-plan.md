@@ -331,6 +331,48 @@ port it.
 
 ## Handoff
 
+### 2026-11-24 (late night) — a new colour redraws only the models (Mac session)
+
+Owner ask: a colour change re-decoded every cached picture in a folder with a model in it
+(photos, full-size originals, video poster searches, the whole strip), and the Mac Settings
+auto-apply repeated it while the colour was being picked. **This supersedes the night entry's
+"`recolor_models` … `invalidate_content`" line:** a colour is no longer a content change.
+
+- **What `recolor_models` does now** (no epoch or `content_gen` bump):
+  - The model **off screen**: `ResidentRing::evict_where` drops its slots, in any
+    representation. The prefetch draws it again in its usual order.
+  - The model **on screen**: it stays up and is marked `preview_resident`, so the existing
+    sharpen path redraws it in place. At 100% / Fill a model still is an `Original`, and
+    `drain_results` now lets a display-rep Original marked that way take the in-place upgrade
+    and re-present. Before, a resident Original outcome was always a duplicate.
+  - Pool jobs for models: `DecodePool::cancel_where` stops them, queued and in flight, so the
+    next `set_targets` starts them afresh. A result already on its way carries
+    `Outcome::look_gen`, the `pb_decode::look_generation()` read before it decoded. Anything
+    older than `LiveModel::stills_look` is dropped on arrival (`model_still_outdated`, in
+    `absorb_results` and `drain_results`).
+  - Staged model outcomes are dropped.
+  - The Fit stash is cleared if it holds a model.
+  - Strip tiles: `Thumbs::refresh_where` marks them stale (`ThumbCache::mark_stale`). A stale
+    tile stays on show, is re-planned by `fill_plan`, and any fresh tier replaces it. A
+    per-item derive fence (an offer sequence number) drops derives that were already running
+    on the old pixels.
+  - `set_model_color` only moves the look generation when the colour actually changes.
+- **Loading pie:** not shown for the still's redraw while the live view covers it (the new
+  colour is already on screen there).
+- **Verified (macOS):**
+  - Suites: pb-app-core 1145, pb-core 106, pb-decode 284, pb-render 79, pb-mesh 46,
+    pb-mac-ffi 40. Clippy clean.
+  - New tests: ring `evict_where`, stale tiles, the per-item derive fence, pool
+    `cancel_where`, colour-only-redraws-models, the old-colour arrival dropped, in-place redraw
+    in Fit and at 100%, no pie under the live view. Breaking either the arrival gate or the
+    Original exception fails its test.
+  - Windows clippy cross-check (`--all-targets`) passes. No `AppCore` field was added (the
+    fence lives in `LiveModel`).
+- **Not verified, owner to check in the running app:** a colour change in a mixed folder
+  should leave photos and video posters instant (no pie, no poster reload). The on-screen
+  model should swap colour with no blank frame. Model tiles in the strip should update
+  without blinking. Dragging the colour wheel should stay smooth.
+
 ### 2026-11-24 (night) — flick momentum, model colour and spin speed (Mac session)
 
 Owner asks: a little momentum after a flick; the model's colour in Settings ▸ Appearance with

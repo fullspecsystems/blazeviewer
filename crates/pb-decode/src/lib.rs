@@ -124,7 +124,7 @@ pub mod png_text;
 pub mod poster_walk;
 // 3D models (task #151): STL / OBJ / 3MF rendered to a still through pb-mesh.
 mod model;
-pub use model::{model_color, set_model_color};
+pub use model::{look_generation, model_color, set_model_color};
 // Video playback frame contract (task #79 phase 0): the VideoFrame/VideoColorInfo
 // types every platform video producer emits. Pure data — producers come later.
 mod psd;

@@ -164,8 +164,10 @@ impl AppCore {
         // photos, thinking "these are terrible," and deleting them before they sharpen.
         // `sharpen_now()` is exactly this state: parked, displayed is a resident preview not yet
         // upgraded (and it is `None` while blazing and once the full lands, so the pie doesn't
-        // spin during a fast blaze or after sharpening).
-        let not_ready = self.target_pending() || self.sharpen_now().is_some();
+        // spin during a fast blaze or after sharpening). Not while the live 3D view covers the
+        // still, though: a model redrawn in a new colour shows it there already.
+        let not_ready =
+            self.target_pending() || (self.sharpen_now().is_some() && !self.live_model.active);
         if not_ready {
             self.pie_finish = None;
             let start = *self.wait_started.get_or_insert(now);

@@ -2594,8 +2594,9 @@ impl AppCore {
         while let Ok(o) = self.results.try_recv() {
             // #119: staleness is judged AT INGESTION, by the job's validity domain —
             // a stale outcome staged into `pending_uploads` would suppress the very
-            // want that replaces it (`pending_reps` in `request_prefetch`).
-            if outcome_stale(self.epoch, self.content_gen, &o) {
+            // want that replaces it (`pending_reps` in `request_prefetch`). The same
+            // holds for a model still drawn in a colour since replaced.
+            if outcome_stale(self.epoch, self.content_gen, &o) || self.model_still_outdated(&o) {
                 continue;
             }
             self.pending_uploads.push(o);
@@ -4170,7 +4171,9 @@ impl AppCore {
         while let Ok(o) = self.results.try_recv() {
             ready.push(o);
         }
-        ready.retain(|o| !outcome_stale(self.epoch, self.content_gen, o));
+        ready.retain(|o| {
+            !outcome_stale(self.epoch, self.content_gen, o) && !self.model_still_outdated(o)
+        });
         // Poster-selection payloads (task #114) are matched FIRST — before the
         // thumb branch and the display routing. They carry multiple artifacts,
         // their key.epoch is the CONTENT generation (not geometry), and their
@@ -4277,8 +4280,12 @@ impl AppCore {
             }
             if resident {
                 // An Original is full-res only (never a preview), so an already-resident
-                // Original outcome is a pure duplicate — drop it.
-                if rk == pb_core::RepKind::Original {
+                // Original outcome is a pure duplicate — drop it. Unless the display rep was
+                // marked to be drawn again in place: a model still at 100% after a colour
+                // change (`recolor_models`) takes the upgrade path below like a Fit does.
+                if rk == pb_core::RepKind::Original
+                    && !(rk == dk && self.preview_resident.contains(&item))
+                {
                     return false;
                 }
                 // Fit already resident. The only outcome we still want is a *full* decode
@@ -4484,8 +4491,11 @@ impl AppCore {
                 // of the three background rebind paths). The comment above is right that
                 // `present_slot` preserves zoom/pan -- but it says nothing about the
                 // REPRESENTATION, which is exactly what a zoom chose.
+                // An Original upgraded in place (a model still redrawn at 100%) IS the
+                // representation on screen, so it re-presents too.
                 if self.displayed_item == Some(item)
-                    && self.presented_kind != Some(pb_core::RepKind::Original)
+                    && (self.presented_kind != Some(pb_core::RepKind::Original)
+                        || rk == pb_core::RepKind::Original)
                 {
                     let expected = pb_core::SlotIdentity {
                         item,
@@ -4495,7 +4505,7 @@ impl AppCore {
                     if let Some(a) = self.renderer.as_mut() {
                         a.present_slot(slot, expected);
                     }
-                    self.presented_kind = Some(pb_core::RepKind::Fit);
+                    self.presented_kind = Some(rk);
                     self.draw();
                 }
                 self.thumbs_capture(outcome);

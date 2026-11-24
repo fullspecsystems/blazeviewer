@@ -747,6 +747,27 @@ impl ResidentRing {
         }
         occ
     }
+
+    /// Evict every slot, in any representation, whose occupant item matches `pred`, except
+    /// `spare`: the on-screen slot, which the renderer draws straight from, so freeing it would
+    /// let the next upload overwrite the picture being looked at (the caller replaces that one
+    /// in place instead). A targeted drop for pixels that went stale without the deck changing:
+    /// a new 3D model colour outdates every model still and no photo. Returns the evicted
+    /// occupants.
+    pub fn evict_where(
+        &mut self,
+        pred: impl Fn(usize) -> bool,
+        spare: Option<usize>,
+    ) -> Vec<(usize, RepKind)> {
+        let stale: Vec<usize> = (0..self.slots.len())
+            .filter(|&s| Some(s) != spare)
+            .filter(|&s| self.slots[s].occupant().is_some_and(|(item, _)| pred(item)))
+            .collect();
+        stale
+            .into_iter()
+            .filter_map(|s| self.evict_slot(s))
+            .collect()
+    }
 }
 
 #[cfg(test)]
@@ -1006,6 +1027,46 @@ mod tests {
         // Idempotent: an already-empty slot and an out-of-bounds slot are harmless no-ops.
         assert_eq!(r.evict_slot(res.slot), None);
         assert_eq!(r.evict_slot(999), None);
+    }
+
+    /// A new 3D model colour outdates the model stills and nothing else: `evict_where` drops
+    /// exactly the matching occupants, in any representation, and spares the on-screen slot
+    /// (the renderer draws straight from it).
+    #[test]
+    fn evict_where_drops_only_matching_items_and_spares_the_one_on_screen() {
+        let mut r = ResidentRing::new(6);
+        fn slot_of(r: &mut ResidentRing, item: usize, rep: Representation) -> usize {
+            let res = r.reserve(item, CG, rep, &[1, 2, 3, 4, 5]).expect("a slot");
+            assert!(r.mark_resident(item, res.slot, CG, rep));
+            res.slot
+        }
+        let model_on_screen = slot_of(&mut r, 1, fit(1));
+        slot_of(&mut r, 2, fit(1)); // a model off screen
+        slot_of(&mut r, 3, ORIG); // a model held full-size
+        slot_of(&mut r, 4, fit(1)); // a photo
+        slot_of(&mut r, 5, ORIG); // a photo's Original
+        r.set_displayed(model_on_screen);
+        let is_model = |item: usize| item <= 3;
+
+        let mut evicted = r.evict_where(is_model, Some(model_on_screen));
+        evicted.sort_by_key(|&(item, _)| item);
+
+        assert_eq!(evicted, vec![(2, RepKind::Fit), (3, RepKind::Original)]);
+        assert_eq!(
+            r.slot_for(1),
+            Some(model_on_screen),
+            "the on-screen model stays"
+        );
+        assert_eq!(r.displayed, Some(model_on_screen), "and stays pinned");
+        assert!(
+            r.slot_for(4).is_some() && r.original_slot(5).is_some(),
+            "photos keep theirs"
+        );
+        assert!(!r.is_tracked(2) && !r.is_tracked(3));
+        assert!(
+            r.evict_where(is_model, Some(model_on_screen)).is_empty(),
+            "idempotent"
+        );
     }
 
     #[test]
