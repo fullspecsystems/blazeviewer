@@ -100,6 +100,10 @@ pub enum Icon {
     /// Pause action (the playback bar's play/pause button while a video plays —
     /// matches SF `pause.fill`).
     Pause,
+    /// Spin a 3D model on its turntable (the play hint on a model, task #153). FA's `360°`:
+    /// it says "this turns all the way round", where the macOS pill's SF `rotate.3d` says it
+    /// with an arrow; each shell draws from its own symbol set.
+    Spin,
     /// Toolbar: previous photo (matches SF `chevron.left`).
     ChevronLeft,
     /// Toolbar: next photo (matches SF `chevron.right`).
@@ -193,6 +197,7 @@ fn svg(icon: Icon, family: Family) -> &'static str {
         Icon::File => glyph!("file"),
         Icon::Play => glyph!("play"),
         Icon::Pause => glyph!("pause"),
+        Icon::Spin => glyph!("360-degrees"),
         Icon::ChevronLeft => glyph!("chevron-left"),
         Icon::ChevronRight => glyph!("chevron-right"),
         Icon::AnglesLeft => glyph!("angles-left"),
@@ -381,6 +386,7 @@ mod tests {
             Icon::File,
             Icon::Play,
             Icon::Pause,
+            Icon::Spin,
             Icon::ChevronLeft,
             Icon::ChevronRight,
             Icon::AnglesLeft,

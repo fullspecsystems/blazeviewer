@@ -331,6 +331,48 @@ port it.
 
 ## Handoff
 
+### 2026-11-24 (evening) — `P` spins a model; the pill advertises it (Mac session)
+
+Owner call: `P` on a model is a turntable, and the play-hint pill doubles as the cue that a
+model can be turned at all.
+
+- **Turntable:** 30°/s (a turn every 12 s), easing up and down over 0.4 s
+  (`live_model::Spin`, `SPIN_RADIANS_PER_SEC` / `SPIN_EASE_SECS`); `LiveView::spin_by`
+  turns the azimuth the way a drag to the right does.
+- **Rules:**
+  - `P` again coasts it to a stop, leaving the live view where it stopped.
+  - A drag, swipe or arrow takes it off the turntable; zooming leaves it spinning.
+  - `8`/`0`/double-tap stops it and brings the still back.
+  - Navigating away drops it.
+  - `P` before the mesh is on the GPU is remembered (`spin_wanted`) and spins as it lands.
+  - A model too big for the live view isn't claimed, so `P` does nothing on it.
+- **The pill:** `play_hint_kind` = **4** once the model is ready and the live view isn't up.
+  It flashes once per item; any turn, zoom or spin retires it. The Mac shows SF `rotate.3d` +
+  "Spin" + `P`; egui shows `Icon::Spin` (FA `360-degrees`) + "Spin". Kind 3 is skipped: it was
+  the archive door's while that had a pill, and `pb-app-core/CLAUDE.md` still describes that.
+- **The toolbar's Play button** enables on a ready model (`current_has_motion`) and lights
+  while it spins (`motion_playing`), so the context menu's Play also spins.
+- **Tick:** `spin_live_model` turns the camera quietly before the held-key/inertia appliers.
+  The tick draws once for it only when none of them drew. `work_pending` holds the loop at
+  frame rate while a spin exists.
+- **Verified (macOS):**
+  - 8 new core tests: P spins and coasts, P before ready, a forgotten wanted spin, drag vs
+    zoom, Fit, the hint flashing once and retiring, P on a photo.
+  - 3 tests of the pure `Spin` and 1 of `spin_by`.
+  - In the real app a model spun (two screenshots seconds apart differ; `PB_TRACE` shows the
+    live view up and continuous frames).
+  - Windows clippy cross-check passes.
+- **Not verified:**
+  - The pill's look on either shell. cmux-cua caught only a black placeholder for a
+    background-launched window. The SF symbol name resolves.
+  - Windows at runtime.
+- **Noticed, not fixed:**
+  - `pump diag` showed one 190 ms main-thread tick around the first model landing (Benchy,
+    675k corners). Likely the mesh pipelines being built, or the upload, on first use. Worth
+    measuring; pre-building `MeshPass` at renderer start would take it off the settle path.
+  - Pan inertia dies on its first tick over a model, because it watches `view.pan`, which an
+    orbit never moves. There is no flick momentum for models yet.
+
 ### 2026-11-24 (later) — antialiasing: 4× MSAA, budgeted (Mac session)
 
 The live view now renders the mesh into a **4× MSAA** target and resolves it to a

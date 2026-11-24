@@ -20,7 +20,8 @@ with any pre-release suffix carried only by the tag.
   to spin it, and zoom with `+` and `−`, Ctrl+scroll or a pinch. The arrow keys turn
   it too. Press `8` (or `0`, or double-tap) to return to the original view. The model
   is drawn live on your graphics card, with smooth (antialiased) edges, and is ready
-  to turn the moment you stop on it.
+  to turn the moment you stop on it. Press `P` (or click the *Spin* hint that appears)
+  to set it turning on its own like a turntable, and `P` again to let it glide to a stop.
 - **Export.** Press `E` (or File ▸ Export…, ⇧⌘E on a Mac, or right-click the
   photo) for Export mode: a panel in the Inspector's place where you pick PNG or
   JPEG, the JPEG quality (`[` and `]` step it) or PNG compression, and a size —

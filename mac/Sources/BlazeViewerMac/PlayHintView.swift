@@ -1,8 +1,10 @@
-// The play hint (▶ / Live Photo) — the last on-image HUD overlay converted to native SwiftUI.
-// It flashes bottom-center, just above the info line, when you settle on a motion item, and
-// invites you to press P (or click it) to play. Built to match the info line: same pill, and
-// the "P" key hint sits in the same concentric rounded badge as the info line's codec.
-// Fades after ~3s (CoreModel owns the timer) unless the pointer holds it open.
+// The play hint (▶ / Live Photo / 3D spin) — the last on-image HUD overlay converted to native
+// SwiftUI. It flashes bottom-center, just above the info line, when you settle on a motion item,
+// and invites you to press P (or click it) to play. On a 3D model it reads "Spin" once the model
+// is ready to turn (task #153), which doubles as the cue that it can be turned by hand. Built to
+// match the info line: same pill, and the "P" key hint sits in the same concentric rounded badge
+// as the info line's codec. Fades after ~3s (CoreModel owns the timer) unless the pointer holds
+// it open.
 //
 // An archive door has no pill: its affordance is the door card (task #105), still to be
 // built on this shell.
@@ -19,13 +21,17 @@ struct PlayHintView: View {
     private let pillRadius = PanelMetrics.cornerRadius
     private let inset: CGFloat = 6
 
-    /// A Live Photo gets Apple's livephoto mark; any other animation gets play ▶.
-    /// Kinds come from `AppCore::play_hint_kind`.
+    /// A Live Photo gets Apple's livephoto mark, a 3D model the 3D-rotation arrow, any other
+    /// animation play ▶. Kinds come from `AppCore::play_hint_kind`.
     private var symbol: String {
-        model.playHintKind == 1 ? "livephoto" : "play.fill"
+        switch model.playHintKind {
+        case 1: return "livephoto"
+        case 4: return "rotate.3d"
+        default: return "play.fill"
+        }
     }
 
-    private var label: String { "Play" }
+    private var label: String { model.playHintKind == 4 ? "Spin" : "Play" }
 
     var body: some View {
         HStack(spacing: 8) {

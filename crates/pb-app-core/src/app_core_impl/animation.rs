@@ -34,8 +34,11 @@ impl AppCore {
         // Videos show the hint too (task #79: poster + play badge is the UX shape) —
         // deliberately NOT via has_motion, which still gates the animation decode
         // machinery videos must never enter (their bytes never enter RAM). An archive
-        // door gets no pill: its affordance is the door card (task #105).
-        if self.has_motion(item) || self.item_is_video(item) {
+        // door gets no pill: its affordance is the door card (task #105). A 3D model gets
+        // it once it is ready to turn (task #153): `P` spins it, and the pill is also the
+        // cue that it can be turned by hand.
+        let model = self.live_model_ready() && !self.live_model.active;
+        if self.has_motion(item) || self.item_is_video(item) || model {
             self.anim_hint_shown_for = Some(item);
             // Both shells present the play hint natively (the winit egui overlay / the macOS
             // SwiftUI pill): flash-signal it (bump the seq); the shell renders + fades the pill
@@ -47,8 +50,8 @@ impl AppCore {
 
     /// `P`: play/pause the current animation. Uses the eagerly-prepped sequence for
     /// instant playback when it's ready; otherwise (upgrading an in-flight eager prep,
-    /// or kicking a fresh decode) it starts playing the moment frames land. On a still,
-    /// `P` does nothing.
+    /// or kicking a fresh decode) it starts playing the moment frames land. On a 3D model it
+    /// starts or stops the turntable. On a still, `P` does nothing.
     pub fn toggle_play_pause(&mut self) {
         if self.playback.is_some() {
             // Was it parked at the end of a finite loop? Then toggling *restarts* from
@@ -70,6 +73,10 @@ impl AppCore {
                 self.draw(); // paused — just redraw the held frame
                 self.effects.push(contract::CoreEffect::PauseLiveAudio);
             }
+            return;
+        }
+        // A 3D model (task #153): `P` is the turntable.
+        if self.live_model_toggle_spin() {
             return;
         }
         let Some(item) = self.displayed_item else {
@@ -639,6 +646,7 @@ impl AppCore {
     pub fn current_has_motion(&mut self) -> bool {
         self.displayed_item
             .is_some_and(|i| self.has_motion(i) || self.item_is_video(i))
+            || self.live_model_ready() // P spins a 3D model (task #153)
     }
 
     /// Whether an animation / Live Photo is actively playing — the toolbar lights its
@@ -651,7 +659,7 @@ impl AppCore {
     /// 79.9). The toolbar's Play/Pause glyph reads this so it reflects a playing video,
     /// not just an animation (`animation_playing` is video-blind by design).
     pub fn motion_playing(&self) -> bool {
-        self.animation_playing() || self.video_playing()
+        self.animation_playing() || self.video_playing() || self.live_model_spinning()
     }
 
     /// The **displayed** photo's 1-based position and total count, for the toolbar counter

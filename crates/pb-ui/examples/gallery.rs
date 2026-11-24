@@ -191,6 +191,7 @@ impl Gallery {
                 Icon::Images,
                 Icon::Play,
                 Icon::Pause,
+                Icon::Spin,
                 Icon::Captions,
                 Icon::Archive,
             ] {

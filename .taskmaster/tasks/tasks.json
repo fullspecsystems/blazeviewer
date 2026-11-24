@@ -2452,7 +2452,7 @@
           {
             "id": 1,
             "title": "Interaction design (D1 settled) + Mac-assed review",
-            "description": "Bindings as Actions in keymap.rs (reset view, front/top/side/iso presets, up-axis flip); mouse (left drag orbit, right/middle/Shift drag pan, wheel dolly) and trackpad (drag, pinch, two-finger scroll honouring the Scroll wheel setting); how this coexists with 2D zoom/pan; cursor feedback. Load /mac-arsed-mac-app before settling the Mac side. 2026-11-24 first cut: drag/two-finger swipe orbit, pinch/Ctrl+scroll/=/-/Shift+= (+)/menu zoom, arrows orbit, Fit/100%/double-tap = back to the still, nav leaves. Mac-assed review of the gestures still owed.",
+            "description": "Bindings as Actions in keymap.rs (reset view, front/top/side/iso presets, up-axis flip); mouse (left drag orbit, right/middle/Shift drag pan, wheel dolly) and trackpad (drag, pinch, two-finger scroll honouring the Scroll wheel setting); how this coexists with 2D zoom/pan; cursor feedback. Load /mac-arsed-mac-app before settling the Mac side. 2026-11-24 first cut: drag/two-finger swipe orbit, pinch/Ctrl+scroll/=/-/Shift+= (+)/menu zoom, arrows orbit, Fit/100%/double-tap = back to the still, nav leaves. Mac-assed review of the gestures still owed. 2026-11-24 (evening): P = turntable spin (30°/s, eased; P again coasts to a stop; drag takes it off, zoom keeps it; Fit/nav stop it; P before ready spins on landing), and the play-hint pill (kind 4, 'Spin') flashes once the model is ready — the owner's 'cue that you can rotate'. Pill look unverified on both shells.",
             "status": "review"
           },
           {

@@ -8,11 +8,15 @@
 //! swaps the still for the live view. Fit (`8`), 100% (`0`) and the smart-magnify double-tap
 //! put the still back. Navigation leaves, always: presenting any photo stops the renderer
 //! drawing the mesh, and the next tick frees it.
+//!
+//! `P` is the turntable: the model spins on its own until `P` again (it coasts to a stop) or a
+//! drag takes it back in hand. Zooming leaves it spinning. The play-hint pill advertises it once
+//! the model is ready, which is also the cue that a model can be turned at all.
 
 use std::sync::atomic::AtomicBool;
 
 use super::*;
-use crate::live_model::{self, Loading, Ready};
+use crate::live_model::{self, Loading, Ready, Spin};
 
 impl AppCore {
     /// Per-tick upkeep: drop whatever belongs to an item we've left, land a finished preparation
@@ -22,6 +26,13 @@ impl AppCore {
         let (shown, gen) = (self.displayed_item, self.content_gen);
         if self.live_model.holds_other_than(shown, gen) {
             self.leave_live_model();
+        }
+        if self
+            .live_model
+            .spin_wanted
+            .is_some_and(|(i, g)| Some(i) != shown || g != gen)
+        {
+            self.live_model.spin_wanted = None; // P was for a model we've left
         }
         self.poll_live_model();
 
@@ -34,13 +45,17 @@ impl AppCore {
         {
             return;
         }
-        let is_model = matches!(
-            crate::video::item_kind(self.source.as_ref(), item),
-            crate::video::LibraryItemKind::Image
-        ) && live_model::model_format(self.source.name(item)).is_some();
-        if is_model {
+        if self.item_is_model(item) {
             self.start_live_model(item);
         }
+    }
+
+    /// Whether `item` is a 3D model: an image item with a model extension.
+    fn item_is_model(&self, item: usize) -> bool {
+        matches!(
+            crate::video::item_kind(self.source.as_ref(), item),
+            crate::video::LibraryItemKind::Image
+        ) && live_model::model_format(self.source.name(item)).is_some()
     }
 
     fn start_live_model(&mut self, item: usize) {
@@ -109,6 +124,7 @@ impl AppCore {
                 None
             }
         };
+        let wanted_spin = self.live_model.spin_wanted.take() == Some((item, gen));
         match uploaded {
             Some(view) => {
                 self.live_model.ready = Some(Ready {
@@ -117,6 +133,9 @@ impl AppCore {
                     view,
                 });
                 self.refresh_cursor(); // the open hand: this can be grabbed now
+                if wanted_spin {
+                    self.start_spin();
+                }
             }
             None => self.live_model.failed = Some((item, gen)),
         }
@@ -127,6 +146,8 @@ impl AppCore {
         let had_gpu = self.live_model.ready.take().is_some();
         self.live_model.loading = None; // dropping a `Loading` cancels its worker
         self.live_model.active = false;
+        self.live_model.spin = None;
+        self.live_model.spin_wanted = None;
         if had_gpu {
             if let Some(r) = self.renderer.as_mut() {
                 r.show_mesh(None);
@@ -170,12 +191,18 @@ impl AppCore {
             );
         }
         self.live_model.active = true;
+        self.anim_hint_shown_for = Some(item); // engaged: the hint has done its job
         true
     }
 
-    /// Turn the model by a drag or swipe of `(dx, dy)` pixels, without drawing.
+    /// Turn the model by a drag or swipe of `(dx, dy)` pixels, without drawing. Taking the model
+    /// in hand stops the turntable.
     pub fn live_model_orbit_quiet(&mut self, dx: f32, dy: f32) -> bool {
-        self.live_model_apply(|v, vp| v.orbit_by(dx, dy, vp))
+        let took = self.live_model_apply(|v, vp| v.orbit_by(dx, dy, vp));
+        if took {
+            self.live_model.spin = None;
+        }
+        took
     }
 
     /// Turn the model by a drag or swipe of `(dx, dy)` pixels, and draw.
@@ -222,10 +249,69 @@ impl AppCore {
         };
         ready.view.reset();
         self.live_model.active = false;
+        self.live_model.spin = None;
         if let Some(r) = self.renderer.as_mut() {
             r.show_mesh(None);
         }
         self.draw();
+        true
+    }
+
+    /// `P` on a 3D model: start the turntable, or let it coast to a stop. Returns whether the item
+    /// on screen is a model `P` acts on; `false` hands `P` to its other meanings.
+    ///
+    /// A model that isn't on the GPU yet (`P` straight after landing) spins the moment it lands.
+    /// One that can't be turned at all (too big, or broken) isn't claimed.
+    pub fn live_model_toggle_spin(&mut self) -> bool {
+        let Some(item) = self.displayed_item else {
+            return false;
+        };
+        let gen = self.content_gen;
+        if self.live_model.ready_for(item, gen).is_none() {
+            if !self.item_is_model(item) || self.live_model.failed == Some((item, gen)) {
+                return false;
+            }
+            let lm = &mut self.live_model;
+            lm.spin_wanted = (lm.spin_wanted != Some((item, gen))).then_some((item, gen));
+            self.anim_hint_shown_for = Some(item);
+            return true;
+        }
+        match self.live_model.spin.as_mut() {
+            Some(s) if s.running() => s.stop(),
+            Some(s) => s.resume(),
+            None => self.start_spin(),
+        }
+        true
+    }
+
+    /// Bring the live view up where the camera is and set the turntable going. The ticks turn it.
+    fn start_spin(&mut self) {
+        if self.live_model_apply(|_, _| {}) {
+            self.live_model.spin = Some(Spin::start());
+            self.draw();
+        }
+    }
+
+    /// Whether the model on screen is spinning (or spinning up): the toolbar's Play button lights.
+    pub fn live_model_spinning(&self) -> bool {
+        self.live_model.spin.is_some_and(|s| s.running())
+    }
+
+    /// The turntable's tick: turn the model by however far it spun since the last one. Doesn't
+    /// draw (the tick draws once for this and any held key); returns whether it moved, which also
+    /// keeps the loop at frame rate.
+    pub fn spin_live_model(&mut self, now: Instant) -> bool {
+        let Some(spin) = self.live_model.spin.as_mut() else {
+            return false;
+        };
+        let angle = spin.advance(now);
+        if spin.stopped() {
+            self.live_model.spin = None;
+        }
+        if !self.live_model_apply(|v, _| v.spin_by(angle)) {
+            self.live_model.spin = None; // nothing on screen to spin
+            return false;
+        }
         true
     }
 
@@ -490,6 +576,123 @@ mod tests {
         core.tick_live_model(true); // blazing: tears down, doesn't re-prepare
         assert!(core.live_model.ready.is_none());
         assert_eq!(seen.lock().unwrap().resident, None);
+    }
+
+    /// Run the turntable's ticks for `secs` at 120 Hz from `t`.
+    fn spin_for(core: &mut AppCore, t: &mut Instant, secs: f32) {
+        let end = *t + Duration::from_secs_f32(secs);
+        while *t < end {
+            *t += Duration::from_millis(8);
+            core.spin_live_model(*t);
+        }
+    }
+
+    fn azimuth_turned(core: &AppCore) -> bool {
+        !core.live_model.ready.as_ref().unwrap().view.is_home()
+    }
+
+    #[test]
+    fn p_spins_a_ready_model_and_p_again_coasts_it_to_a_stop() {
+        let (mut core, seen) = core_on(0);
+        settle(&mut core);
+        core.toggle_play_pause();
+        assert!(
+            core.live_model.active,
+            "the live view is up from the keypress"
+        );
+        assert!(seen.lock().unwrap().showing);
+        assert!(core.live_model_spinning() && core.motion_playing());
+        let mut t = Instant::now();
+        spin_for(&mut core, &mut t, 1.0);
+        assert!(azimuth_turned(&core));
+        core.toggle_play_pause();
+        assert!(!core.live_model_spinning(), "coasting");
+        spin_for(&mut core, &mut t, 1.0);
+        assert!(core.live_model.spin.is_none(), "came to rest");
+        assert!(core.live_model.active, "and stays where it stopped, live");
+    }
+
+    #[test]
+    fn p_before_the_model_is_ready_spins_it_as_it_lands() {
+        let (mut core, _) = core_on(0);
+        core.toggle_play_pause(); // nothing prepared yet: not even started
+        assert_eq!(core.live_model.spin_wanted, Some((0, core.content_gen)));
+        settle(&mut core);
+        assert!(core.live_model.active && core.live_model_spinning());
+    }
+
+    #[test]
+    fn a_wanted_spin_is_forgotten_when_the_user_moves_on() {
+        let (mut core, _) = core_on(0);
+        core.toggle_play_pause();
+        core.displayed_item = Some(2);
+        settle(&mut core);
+        assert!(core.live_model.spin_wanted.is_none());
+        assert!(core.live_model.spin.is_none() && !core.live_model.active);
+    }
+
+    #[test]
+    fn a_drag_takes_the_model_off_the_turntable_but_zoom_does_not() {
+        let (mut core, _) = core_on(0);
+        settle(&mut core);
+        core.toggle_play_pause();
+        core.zoom_step(1.25);
+        assert!(core.live_model_spinning(), "zooming in on a spinning model");
+        core.pan_by_pixels(30.0, 0.0);
+        assert!(core.live_model.spin.is_none());
+        assert!(core.live_model.active);
+    }
+
+    #[test]
+    fn fit_stops_the_spin_and_puts_the_still_back() {
+        let (mut core, seen) = core_on(0);
+        settle(&mut core);
+        core.toggle_play_pause();
+        let mut t = Instant::now();
+        spin_for(&mut core, &mut t, 0.5);
+        core.set_scale_mode(pb_render::ScaleMode::Fit);
+        assert!(core.live_model.spin.is_none() && !core.live_model.active);
+        assert!(!seen.lock().unwrap().showing);
+        assert!(!core.spin_live_model(t), "no more ticks to drive");
+    }
+
+    #[test]
+    fn the_spin_hint_flashes_once_the_model_is_ready_and_retires_when_used() {
+        let (mut core, _) = core_on(0);
+        let seq = core.play_hint_seq;
+        core.maybe_show_anim_hint(false);
+        assert_eq!(core.play_hint_seq, seq, "not before it can be turned");
+        assert_eq!(core.play_hint_kind(), 0);
+        settle(&mut core);
+        assert!(
+            core.current_has_motion(),
+            "the toolbar's Play button lights up"
+        );
+        core.maybe_show_anim_hint(false);
+        assert_eq!(core.play_hint_seq, seq + 1);
+        assert_eq!(core.play_hint_kind(), 4);
+        core.maybe_show_anim_hint(false);
+        assert_eq!(core.play_hint_seq, seq + 1, "once per item");
+        core.pan_by_pixels(10.0, 0.0);
+        assert_eq!(core.play_hint_kind(), 0, "turned by hand: the pill goes");
+    }
+
+    #[test]
+    fn a_hand_turned_model_never_flashes_the_hint_later() {
+        let (mut core, _) = core_on(0);
+        settle(&mut core);
+        core.pan_by_pixels(10.0, 0.0); // engaged before the tick got to the hint
+        let seq = core.play_hint_seq;
+        core.set_scale_mode(pb_render::ScaleMode::Fit);
+        core.maybe_show_anim_hint(false);
+        assert_eq!(core.play_hint_seq, seq);
+    }
+
+    #[test]
+    fn p_on_a_photo_is_not_the_turntable() {
+        let (mut core, _) = core_on(1);
+        assert!(!core.live_model_toggle_spin());
+        assert!(core.live_model.spin_wanted.is_none());
     }
 
     #[test]

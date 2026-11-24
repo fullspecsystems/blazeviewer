@@ -286,8 +286,9 @@ pub struct WelcomePanel {
 /// reusing the welcome button design. The shell owns the flash/fade timing (`alpha`).
 #[derive(Clone)]
 pub struct PlayHintFrame {
-    /// `1` = Live Photo (livephoto glyph), `2` = animation (play ▶). An archive door has
-    /// no pill: its whole affordance is the door card (task #105).
+    /// `1` = Live Photo (livephoto glyph), `2` = animation (play ▶), `4` = a 3D model (360°,
+    /// reads *Spin*). An archive door has no pill: its whole affordance is the door card
+    /// (task #105).
     pub kind: u8,
     /// The keyboard shortcut hint for play/pause (e.g. `P`).
     pub shortcut: String,
@@ -1889,10 +1890,10 @@ fn play_hint_panel(
     } else {
         EDGE
     };
-    let (icon, label) = if frame.kind == 1 {
-        (Icon::LivePhoto, "Play")
-    } else {
-        (Icon::Play, "Play")
+    let (icon, label) = match frame.kind {
+        1 => (Icon::LivePhoto, "Play"),
+        4 => (Icon::Spin, "Spin"), // a 3D model's turntable (task #153)
+        _ => (Icon::Play, "Play"),
     };
     egui::Area::new(egui::Id::new("pb_play_hint"))
         .anchor(Align2::CENTER_BOTTOM, egui::vec2(0.0, -bottom))

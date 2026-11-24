@@ -90,6 +90,15 @@ impl LiveView {
             (self.orbit.elevation + dy * per_px).clamp(-MAX_ELEVATION, MAX_ELEVATION);
     }
 
+    /// Turn the model about its vertical axis by `radians`: the turntable (`P`). Positive turns
+    /// it the way a drag to the right does. Elevation, zoom and pan are left alone, so a spin
+    /// keeps whatever view the user set up.
+    pub fn spin_by(&mut self, radians: f32) {
+        if radians.is_finite() {
+            self.orbit.azimuth = (self.orbit.azimuth - radians).rem_euclid(2.0 * PI);
+        }
+    }
+
     /// Zoom by `factor` (> 1 is closer) about the viewport's centre.
     pub fn zoom_by(&mut self, factor: f32) {
         if factor.is_finite() && factor > 0.0 {
@@ -324,6 +333,26 @@ mod tests {
         v.zoom_about(3.0, before, vp);
         let after = to_px(&v.frame(vp), p, vp);
         assert!((before[0] - after[0]).abs() < 0.01 && (before[1] - after[1]).abs() < 0.01);
+    }
+
+    #[test]
+    fn spinning_turns_like_a_drag_to_the_right_and_keeps_the_rest() {
+        let vp = [800.0, 600.0];
+        let mut dragged = LiveView::new(&cube()).unwrap();
+        dragged.zoom_by(2.0);
+        let mut spun = dragged;
+        // A drag across the short side (600 px) is half a turn.
+        dragged.orbit_by(150.0, 0.0, vp);
+        spun.spin_by(PI / 4.0);
+        assert!((dragged.orbit.azimuth - spun.orbit.azimuth).abs() < 1e-5);
+        assert_eq!(spun.orbit.elevation, dragged.orbit.elevation);
+        assert_eq!(spun.zoom(), 2.0);
+        // A whole turn comes back round; nonsense is ignored.
+        let before = spun.orbit.azimuth;
+        spun.spin_by(2.0 * PI);
+        assert!((spun.orbit.azimuth - before).abs() < 1e-4);
+        spun.spin_by(f32::NAN);
+        assert!(spun.orbit.azimuth.is_finite());
     }
 
     #[test]

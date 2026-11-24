@@ -483,8 +483,10 @@ impl AppCore {
             // precise next-frame wake via `tick_playback`, not this frame poll).
             || self.anim_decode.is_some()
             // A live-3D model preparation in flight (task #153) keeps the loop polling so it
-            // lands on the GPU before the user's first drag.
+            // lands on the GPU before the user's first drag; a spinning model (`P`) keeps it
+            // at frame rate from the keypress on.
             || self.live_model.loading.is_some()
+            || self.live_model.spin.is_some()
             // A streaming Live Photo decode (task #69) likewise keeps the loop polling so
             // `poll_anim_stream` drains newly decoded frames as they arrive.
             || self.anim_stream.is_some()
@@ -1407,10 +1409,17 @@ impl AppCore {
         // 2. Continuous zoom/pan while their keys are held (accelerating ramp).
         // Also glide any eased scroll-zoom toward its target — OR'd into `transforming` so it
         // keeps the loop ticking + suppresses the info panel like a held ramp.
-        let transforming = self.apply_view_holds(now)
+        // The 3D turntable (task #153) turns its camera first and quietly; each of the others
+        // draws when it reports a change, so the spin needs its own draw only when none did.
+        let spun = self.spin_live_model(now);
+        let held = self.apply_view_holds(now)
             | self.apply_zoom_ease(now)
             | self.apply_pan_inertia(now)
             | self.apply_zoom_inertia(now);
+        if spun && !held {
+            self.draw();
+        }
+        let transforming = spun || held;
 
         // 3. Gated self-paced advance while a nav key (space/backspace) is held. The initial tap
         // delay gates *repeat*, not draining/presenting, so a first-press miss shows the moment

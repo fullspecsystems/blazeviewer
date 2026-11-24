@@ -2160,8 +2160,8 @@ final class CoreModel {
             if on != subtitlesOn { subtitlesOn = on }
         }
         syncSubtitle()
-        // The native play hint: kind 0 = playing / a still (hide), 1/2 = a motion item. A seq
-        // bump is the "fresh motion item — flash it" trigger.
+        // The native play hint: kind 0 = playing / a still (hide), 1/2 = a motion item, 4 = a 3D
+        // model ready to spin. A seq bump is the "fresh motion item — flash it" trigger.
         let phKind = Int(core.play_hint_kind())
         let phSeq = core.play_hint_seq()
         if phKind == 0 {

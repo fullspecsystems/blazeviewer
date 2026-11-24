@@ -29,10 +29,12 @@ impl AppCore {
 
     /// The native play-hint kind for the current item: `0` = none (a still, or already
     /// playing — the hint's job is done), `1` = Live Photo (the livephoto mark), `2` = another
-    /// animation (play ▶). An archive door has **no pill** — its affordance is the door card
-    /// (task #105), which is the only thing on screen for it. Stays consistent with
-    /// `has_motion` (which bumps `play_hint_seq`): a fresh motion item is a Live Photo (→1) or
-    /// has an `animated` container (→2).
+    /// animation (play ▶), `4` = a 3D model ready to turn (360°, reads *Spin*; task #153). An
+    /// archive door has **no pill** — its affordance is the door card (task #105), which is the
+    /// only thing on screen for it. (`3` was the door's while it had one; it stays unused.)
+    /// Stays consistent with `maybe_show_anim_hint` (which bumps `play_hint_seq`): a fresh motion
+    /// item is a Live Photo (→1) or has an `animated` container (→2), and a model shows the pill
+    /// until the user turns, zooms or spins it (→0 once the live view is up).
     pub fn play_hint_kind(&self) -> u8 {
         if self.playback.is_some() {
             return 0; // engaged — no hint while it plays/pauses
@@ -46,6 +48,8 @@ impl AppCore {
             || self.item_is_video(item)
         {
             2
+        } else if self.live_model_ready() && !self.live_model.active {
+            4
         } else {
             0
         }
