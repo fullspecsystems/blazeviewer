@@ -7,9 +7,9 @@
 use crate::Bounds;
 
 /// Degrees the camera sits to the right of straight-on-front.
-const AZIMUTH_DEG: f32 = 40.0;
+pub(crate) const AZIMUTH_DEG: f32 = 40.0;
 /// Degrees the camera sits above the horizon.
-const ELEVATION_DEG: f32 = 28.0;
+pub(crate) const ELEVATION_DEG: f32 = 28.0;
 /// Vertical field of view: a mild perspective.
 pub(crate) const FOV_Y_DEG: f32 = 30.0;
 
@@ -23,24 +23,48 @@ pub(crate) struct Camera {
     pub fwd: [f32; 3],
 }
 
-impl Camera {
-    /// The default pose for `bounds`: far enough back that the whole bounding sphere is in front
-    /// of the camera (every vertex has positive depth, so no near-plane clipping is needed).
-    pub fn framing(bounds: &Bounds) -> Camera {
-        let center = bounds.center();
+/// Where a camera sits relative to the model: a turntable around `target`. The still uses the
+/// home pose; the live view (#153) turns it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct Orbit {
+    pub target: [f32; 3],
+    /// The bounding sphere's radius (floored; see [`Orbit::home`]).
+    pub radius: f32,
+    /// Radians to the right of straight-on-front (front is −Y).
+    pub azimuth: f32,
+    /// Radians above the horizon.
+    pub elevation: f32,
+    pub distance: f32,
+}
+
+impl Orbit {
+    /// The default pose for `bounds`: a 3/4 view from front-right-above, far enough back that the
+    /// whole bounding sphere is in front of the camera (every vertex has positive depth, so no
+    /// near-plane clipping is needed).
+    pub fn home(bounds: &Bounds) -> Orbit {
+        let target = bounds.center();
         let s = bounds.size();
         // Floor the radius relative to the model's distance from the origin: a tiny part far
         // from the origin would otherwise put the eye within an f32 ULP of the centre.
-        let magnitude = center.iter().fold(1.0f32, |m, c| m.max(c.abs()));
+        let magnitude = target.iter().fold(1.0f32, |m, c| m.max(c.abs()));
         let radius = (0.5 * (s[0] * s[0] + s[1] * s[1] + s[2] * s[2]).sqrt()).max(1e-4 * magnitude);
-        let (az, el) = (AZIMUTH_DEG.to_radians(), ELEVATION_DEG.to_radians());
+        Orbit {
+            target,
+            radius,
+            azimuth: AZIMUTH_DEG.to_radians(),
+            elevation: ELEVATION_DEG.to_radians(),
+            distance: radius / (FOV_Y_DEG.to_radians() * 0.5).sin() * 1.05,
+        }
+    }
+
+    pub fn camera(&self) -> Camera {
+        let (az, el) = (self.azimuth, self.elevation);
         // From the target towards the eye: right of front (front is −Y), and up.
         let to_eye = [el.cos() * az.sin(), -el.cos() * az.cos(), el.sin()];
-        let distance = radius / (FOV_Y_DEG.to_radians() * 0.5).sin() * 1.05;
         let eye = [
-            center[0] + to_eye[0] * distance,
-            center[1] + to_eye[1] * distance,
-            center[2] + to_eye[2] * distance,
+            self.target[0] + to_eye[0] * self.distance,
+            self.target[1] + to_eye[1] * self.distance,
+            self.target[2] + to_eye[2] * self.distance,
         ];
         let fwd = scale(to_eye, -1.0);
         let right = normalize(cross(fwd, [0.0, 0.0, 1.0]));
@@ -51,6 +75,13 @@ impl Camera {
             up,
             fwd,
         }
+    }
+}
+
+impl Camera {
+    /// The still's camera for `bounds`: the home orbit pose.
+    pub fn framing(bounds: &Bounds) -> Camera {
+        Orbit::home(bounds).camera()
     }
 
     /// Camera-space `(x, y, depth)` of world point `p`; depth is along `fwd`.

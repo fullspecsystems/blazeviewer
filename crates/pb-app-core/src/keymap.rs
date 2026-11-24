@@ -629,7 +629,8 @@ fn default_bindings() -> Vec<(Action, Vec<KeyChord>)> {
         (Action::PanRight, vec![p("Right"), p("Shift+Right")]),
         one(Action::PanUp, "Up"),
         one(Action::PanDown, "Down"),
-        (Action::ZoomIn, vec![p("="), p("NumpadAdd")]),
+        // `Shift+=` is `+` on a US layout: the key people reach for (task #153 owner ask).
+        (Action::ZoomIn, vec![p("="), p("Shift+="), p("NumpadAdd")]),
         (Action::ZoomOut, vec![p("-"), p("NumpadSubtract")]),
         one(Action::ScaleFit, "8"),
         one(Action::ScaleFill, "9"),

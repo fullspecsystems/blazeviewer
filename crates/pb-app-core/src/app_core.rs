@@ -890,6 +890,9 @@ pub struct AppCore {
     pub anim_frame_shown_at: Option<Instant>,
     /// An in-flight off-thread animation decode, or `None`.
     pub anim_decode: Option<AnimDecode>,
+    /// The live 3D model view (task #153): the parsed-and-uploaded model on screen, its camera,
+    /// and whether it's showing in place of the still. RAM/VRAM only; dropped on navigation.
+    pub live_model: crate::live_model::LiveModel,
     /// An in-flight **streaming** Live Photo motion decode (task #69) — frames play as they
     /// arrive. Set on every platform with a motion decoder: the Linux FFmpeg, macOS
     /// AVAssetReader, and Windows Media Foundation paths.

@@ -56,7 +56,8 @@ an `AppCore` method.
 | settings, keymap, launch flags | `settings.rs`, `keymap.rs`, `launch.rs`, `config.rs` |
 | file edits (delete, rotation, sidecars) | `delete.rs`, `save_rotation.rs`, `sidecar.rs`, `undo.rs` |
 | AI description, OCR | `describe.rs`, `image_text.rs` |
-| 3D models: parsing, framing, the still render (pure) | the `pb-mesh` crate; its decode entry is `pb-decode/src/model.rs` |
+| 3D models: parsing, framing, the still render, the live camera (pure) | the `pb-mesh` crate; its decode entry is `pb-decode/src/model.rs` |
+| the live 3D model view (prepare on park, input → camera, teardown) | `live_model.rs` + `app_core_impl/live_model.rs`; the GPU pass is `pb-render/src/mesh.rs` |
 | image export (save dialog, write worker) | `export.rs`, `export_worker.rs` (pixels: the `pb-encode` crate) |
 | Export mode (the panel's settings, prefs, view model, `[`/`]` key layer) | `export_panel.rs` |
 | "which frame?" for Copy / OCR / Describe / Export of a video or animation | `frame_capture.rs` |

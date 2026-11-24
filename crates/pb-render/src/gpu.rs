@@ -23,7 +23,7 @@ pub const LETTERBOX: [u8; 4] = [10, 10, 12, 255];
 /// primaries, extended range (scRGB). Wide-gamut / HDR values survive here as
 /// numbers outside [0,1]; the tone-map pass (SDR) or native scRGB swapchain (HDR,
 /// later) turns it into final pixels.
-const INTERMEDIATE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
+pub(crate) const INTERMEDIATE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 
 /// Scene pass: photo texel → scene-linear scRGB, written to the fp16 intermediate.
 /// `mode` (cx.p1.w): 0 = sRGB-encoded (linearize sRGB, identity primaries),
@@ -2671,6 +2671,9 @@ pub struct WgpuRenderer {
     /// What `bind_group` currently holds — picks the scene pipeline for the
     /// single-image draw (`set_image` sets `Rgba`, ring slots are always RGBA).
     scene_kind: SceneKind,
+    /// The live 3D view (task #153), built on first use: drawn instead of the photo while its
+    /// `frame` is set.
+    mesh: Option<crate::mesh::MeshPass>,
     /// Whether this device was created with `TEXTURE_FORMAT_16BIT_NORM` — P010's
     /// `R16Unorm`/`Rg16Unorm` textures need it. When false, the producer must fall
     /// back to CPU convert for P010 (task #91 Phase 2, Codex Q3).
@@ -2959,6 +2962,15 @@ impl WgpuRenderer {
             planar_bgl: pipelines.planar_bgl,
             scene_kind: SceneKind::Rgba,
             supports_p010,
+            mesh: None,
+        }
+    }
+
+    /// Stop drawing the live 3D view (task #153); the geometry stays resident. Called by every
+    /// photo present, so navigation can never leave a model on screen.
+    fn hide_mesh(&mut self) {
+        if let Some(m) = self.mesh.as_mut() {
+            m.frame = None;
         }
     }
 
@@ -3030,6 +3042,27 @@ impl WgpuRenderer {
 }
 
 impl Renderer for WgpuRenderer {
+    fn set_mesh(&mut self, vertices: Option<&[crate::MeshVertex]>) -> bool {
+        match vertices {
+            None => {
+                if let Some(m) = self.mesh.as_mut() {
+                    m.clear();
+                }
+                true
+            }
+            Some(v) => self
+                .mesh
+                .get_or_insert_with(|| crate::mesh::MeshPass::new(&self.device))
+                .upload(&self.device, v),
+        }
+    }
+
+    fn show_mesh(&mut self, frame: Option<crate::MeshFrame>) {
+        if let Some(m) = self.mesh.as_mut() {
+            m.frame = frame.filter(|_| m.has_geometry());
+        }
+    }
+
     /// Override the letterbox / background fill color (sRGB), shown around a photo
     /// that doesn't cover the screen. Takes effect on the next `render`. Off the
     /// photo hot path — set from user settings, not per frame.
@@ -3327,6 +3360,7 @@ impl Renderer for WgpuRenderer {
     }
 
     fn clear_image(&mut self) {
+        self.hide_mesh();
         // Show the letterbox background only; the kept bind group/ring is simply not
         // drawn until the next set_image / present_slot (see `render`).
         self.blank = true;
@@ -3343,6 +3377,7 @@ impl Renderer for WgpuRenderer {
         hdr: bool,
         peak: f32,
     ) {
+        self.hide_mesh();
         let scale = self.scene_scale(hdr);
         // The reusable slot (task #79 phase 3): during animation/video playback this
         // is the per-frame path — same-geometry frames upload in place, creating
@@ -3408,6 +3443,7 @@ impl Renderer for WgpuRenderer {
         height: u32,
         p: PlanarPresentation,
     ) {
+        self.hide_mesh();
         let cpu_hatch = std::env::var_os("PB_VIDEO_CPU_CONVERT").is_some_and(|v| v == "1");
         let needs_16bit = p.format.is_ten_bit() && !self.supports_p010;
         if cpu_hatch || needs_16bit {
@@ -3873,6 +3909,7 @@ impl Renderer for WgpuRenderer {
     }
 
     fn present_slot(&mut self, slot: usize, expected: pb_core::SlotIdentity) -> bool {
+        self.hide_mesh();
         let Some((w, h, peak, identity)) = self
             .ring
             .get(slot)
@@ -3936,6 +3973,7 @@ impl Renderer for WgpuRenderer {
     }
 
     fn present_stash(&mut self, stash_idx: usize) -> bool {
+        self.hide_mesh();
         let Some(slot) = self.stash.get(stash_idx).and_then(|s| s.clone()) else {
             return false;
         };
@@ -4025,7 +4063,26 @@ impl Renderer for WgpuRenderer {
         // is presented, else the single image — a keypress rebinds via `present_idx`,
         // no upload here. When blank (no image loaded), clear to the letterbox
         // background and draw no photo quad — a plain, image-free screen.
-        if self.blank {
+        // Pass 1 (live 3D view, task #153): a shown mesh replaces the photo quad entirely —
+        // same intermediate, same letterbox clear, so every pass after this is unchanged.
+        let mesh_scale = self.scene_scale(false);
+        let (iw, ih) = (self.intermediate.width(), self.intermediate.height());
+        let mesh_drawn = match self.mesh.as_mut() {
+            Some(m) => m.draw(
+                &self.device,
+                &self.queue,
+                &mut encoder,
+                &intermediate_view,
+                (iw, ih),
+                self.content_top_inset,
+                letterbox_linear(self.letterbox),
+                mesh_scale,
+            ),
+            None => false,
+        };
+        if mesh_drawn {
+            // Drawn above.
+        } else if self.blank {
             clear_scene(
                 &mut encoder,
                 &intermediate_view,
@@ -4395,6 +4452,23 @@ pub fn render_offscreen_nv12(
         screen_h,
         ColorTransform::srgb(),
     ))
+}
+
+/// A headless device for the crate's own GPU tests (the live-3D mesh pass, task #153).
+#[cfg(test)]
+pub(crate) fn test_device() -> (wgpu::Device, wgpu::Queue) {
+    pollster::block_on(async {
+        let adapter = instance()
+            .request_adapter(&wgpu::RequestAdapterOptions {
+                power_preference: wgpu::PowerPreference::HighPerformance,
+                force_fallback_adapter: false,
+                compatible_surface: None,
+            })
+            .await
+            .expect("no GPU adapter");
+        let (device, queue, _p010) = request_device_p010(&adapter).await;
+        (device, queue)
+    })
 }
 
 /// What [`render_offscreen_async`] draws: an RGBA8 image or a planar plane pair.

@@ -12,6 +12,7 @@
 pub mod display;
 pub mod fit;
 pub mod gpu;
+pub mod mesh;
 pub mod resample;
 pub mod upload;
 pub mod view;
@@ -22,6 +23,7 @@ pub use gpu::{
     render_offscreen, render_offscreen_color, render_offscreen_nv12, test_pattern, WgpuRenderer,
     LETTERBOX,
 };
+pub use mesh::{MeshFrame, MeshVertex};
 pub use upload::{StagingUpload, UploadStrategy};
 pub use view::{Placement, Rotation, ViewTransform, MAX_ZOOM, MIN_ZOOM};
 pub use yuv::{PlanarFormat, PlanarTransfer, YuvMatrix, YuvParams};
@@ -444,6 +446,19 @@ pub trait Renderer {
     /// otherwise the compositor keeps showing the previous frame indefinitely (the
     /// Mac host's "unfilled background after a fullscreen toggle" bug, 2026-07-04).
     fn render(&mut self) -> Result<bool, RenderError>;
+
+    /// Upload the live 3D view's triangle soup (task #153), replacing any previous one, or free
+    /// it with `None`. Returns whether geometry is now resident. Default (headless/tests): not
+    /// supported.
+    fn set_mesh(&mut self, _vertices: Option<&[MeshVertex]>) -> bool {
+        false
+    }
+
+    /// Draw the uploaded mesh from `frame` **instead of** the photo, or `None` to draw the photo
+    /// again. Presenting any photo (a ring slot, the stash, an image, a video frame, a clear)
+    /// also stops it, so navigating away can never leave a model on screen; the core re-asserts
+    /// the frame on each draw while the live view is up. Default: no-op.
+    fn show_mesh(&mut self, _frame: Option<MeshFrame>) {}
 }
 
 /// A renderer error the app layer can handle without depending on wgpu.

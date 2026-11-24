@@ -24,15 +24,69 @@ use crate::camera::{cross, dot, sub, Camera};
 use crate::{MeshError, Model, DEFAULT_COLOR};
 
 /// Fraction of the picture the silhouette fills along its limiting axis (the rest is margin).
-const FILL: f32 = 0.92;
+/// Shared with the live view, which must frame the model exactly as the still did.
+pub(crate) const FILL: f32 = 0.92;
 
 // Lighting, in linear-light multiples of the material colour. The brightest a face can get is
 // ~0.95, so a white filament still shows its shading instead of clipping flat (a Bambu
-// calibration print colours its parts #F6F6F3).
-const AMBIENT: f32 = 0.13;
-const SKY: f32 = 0.10;
-const KEY: f32 = 0.58;
-const FILL_LIGHT: f32 = 0.22;
+// calibration print colours its parts #F6F6F3). The live view's shader uses the same numbers
+// (through `live::LiveFrame`), so the still → live hand-off doesn't change brightness.
+pub(crate) const AMBIENT: f32 = 0.13;
+pub(crate) const SKY: f32 = 0.10;
+pub(crate) const KEY: f32 = 0.58;
+pub(crate) const FILL_LIGHT: f32 = 0.22;
+
+/// The key and fill light directions for a camera, in world space: camera-relative, so they
+/// turn with the view.
+pub(crate) fn light_dirs(cam: &Camera) -> ([f32; 3], [f32; 3]) {
+    (
+        cam.world_dir(-0.45, 0.65, 0.6),
+        cam.world_dir(0.8, 0.1, 0.6),
+    )
+}
+
+/// The model's silhouette on the image plane of `cam`, in tan units (x/z, y/z):
+/// `(min_x, max_x, min_y, max_y)` over the vertices a triangle uses, or `None` when it has no
+/// extent.
+pub(crate) fn silhouette(model: &Model, proj: &[[f32; 3]]) -> Option<[f32; 4]> {
+    let (mut min_x, mut max_x) = (f32::INFINITY, f32::NEG_INFINITY);
+    let (mut min_y, mut max_y) = (f32::INFINITY, f32::NEG_INFINITY);
+    for tri in &model.triangles {
+        for &i in tri {
+            let p = proj[i as usize];
+            min_x = min_x.min(p[0]);
+            max_x = max_x.max(p[0]);
+            min_y = min_y.min(p[1]);
+            max_y = max_y.max(p[1]);
+        }
+    }
+    let span = (max_x - min_x).max(max_y - min_y);
+    (span.is_finite() && span > 0.0).then_some([min_x, max_x, min_y, max_y])
+}
+
+/// Every vertex projected through `cam`: `(x/z, y/z, 1/z)`.
+pub(crate) fn project(model: &Model, cam: &Camera) -> Vec<[f32; 3]> {
+    model
+        .positions
+        .iter()
+        .map(|&p| {
+            let v = cam.view_space(p);
+            let iz = 1.0 / v[2];
+            [v[0] * iz, v[1] * iz, iz]
+        })
+        .collect()
+}
+
+/// The padded spans the framing divides by: a flat part seen exactly edge-on has zero extent on
+/// one axis, so it gets a sliver.
+pub(crate) fn padded_spans(sil: [f32; 4]) -> (f32, f32) {
+    let [min_x, max_x, min_y, max_y] = sil;
+    let span = (max_x - min_x).max(max_y - min_y);
+    (
+        (max_x - min_x).max(span * 1e-3),
+        (max_y - min_y).max(span * 1e-3),
+    )
+}
 
 /// How big a picture to render.
 #[derive(Debug, Clone, Copy)]
@@ -85,35 +139,10 @@ impl MeshRasterizer for CpuRasterizer {
         // Project every vertex once: (x/z, y/z, 1/z). Perspective-correct depth interpolates
         // 1/z linearly in screen space. Only referenced vertices are ever read back, and the
         // framing guarantees those have positive depth.
-        let proj: Vec<[f32; 3]> = model
-            .positions
-            .iter()
-            .map(|&p| {
-                let v = cam.view_space(p);
-                let iz = 1.0 / v[2];
-                [v[0] * iz, v[1] * iz, iz]
-            })
-            .collect();
-
-        // The silhouette's extent on the image plane, over referenced vertices only.
-        let (mut min_x, mut max_x) = (f32::INFINITY, f32::NEG_INFINITY);
-        let (mut min_y, mut max_y) = (f32::INFINITY, f32::NEG_INFINITY);
-        for tri in &model.triangles {
-            for &i in tri {
-                let p = proj[i as usize];
-                min_x = min_x.min(p[0]);
-                max_x = max_x.max(p[0]);
-                min_y = min_y.min(p[1]);
-                max_y = max_y.max(p[1]);
-            }
-        }
-        let span = (max_x - min_x).max(max_y - min_y);
-        if !(span.is_finite() && span > 0.0) {
-            return Err(MeshError::Empty);
-        }
-        // A flat part seen exactly edge-on has zero extent on one axis: give it a sliver.
-        let span_x = (max_x - min_x).max(span * 1e-3);
-        let span_y = (max_y - min_y).max(span * 1e-3);
+        let proj = project(model, &cam);
+        let sil = silhouette(model, &proj).ok_or(MeshError::Empty)?;
+        let [min_x, max_x, min_y, max_y] = sil;
+        let (span_x, span_y) = padded_spans(sil);
 
         let box_w = opts.max_width.max(1);
         let box_h = opts.max_height.max(1);
@@ -136,8 +165,7 @@ impl MeshRasterizer for CpuRasterizer {
             iz: p[2],
         };
 
-        let key = cam.world_dir(-0.45, 0.65, 0.6);
-        let fill = cam.world_dir(0.8, 0.1, 0.6);
+        let (key, fill) = light_dirs(&cam);
         let mut target = Target {
             w: rw as usize,
             h: rh as usize,

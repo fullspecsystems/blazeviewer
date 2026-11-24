@@ -78,6 +78,7 @@ pub mod genmeta;
 pub mod image_text;
 pub mod keymap;
 pub mod launch;
+pub mod live_model;
 // The off-thread video Details probe (task #98): opening a container is an unbounded
 // wait, so it never happens on the event loop.
 pub mod media_details;

@@ -36,6 +36,10 @@ impl AppCore {
     /// continuous hold-to-zoom). Multiplies the current zoom, clamps to the allowed
     /// range, and re-frames. `factor` > 1 zooms in, < 1 zooms out.
     pub fn zoom_step(&mut self, factor: f32) {
+        if self.live_model_zoom_quiet(factor) {
+            self.draw(); // menu / toolbar zoom on a ready 3D model (task #153)
+            return;
+        }
         self.view.zoom = (self.view.zoom * factor).clamp(MIN_ZOOM, MAX_ZOOM);
         // #124: past 1:1 the fit-sized texture no longer has the pixels; bind the resident
         // full-res Original. After the zoom math, never before (see `reconcile_zoom_rep`).
@@ -79,7 +83,7 @@ impl AppCore {
             contract::CursorKind::Grabbing
         } else if over_button {
             contract::CursorKind::Pointer
-        } else if self.pannable() {
+        } else if self.pannable() || self.live_model_ready() {
             contract::CursorKind::Grab
         } else {
             contract::CursorKind::Default
@@ -91,6 +95,9 @@ impl AppCore {
     /// trackpad pinch and mouse-wheel zoom. Anchors on the last cursor position,
     /// falling back to the screen center before the pointer has moved.
     pub fn zoom_about_cursor(&mut self, factor: f32) {
+        if self.live_model_zoom(factor) {
+            return; // pinch / wheel over a ready 3D model zooms the model (task #153)
+        }
         let Some((iw, ih, sw, sh)) = self.screen_and_image() else {
             return;
         };
@@ -125,6 +132,10 @@ impl AppCore {
     /// epoch and re-buffers neighbors (the decode resolution can change); pressing
     /// the current mode's key just re-frames, no re-decode.
     pub fn set_scale_mode(&mut self, mode: ScaleMode) {
+        // Fit / Fill / 100% while a 3D model is being turned: put its still back (task #153).
+        if self.live_model_reset() {
+            return;
+        }
         let changed = self.view.mode != mode;
         self.view.mode = mode;
         self.view.zoom = 1.0;
@@ -317,6 +328,10 @@ impl AppCore {
         if dx == 0.0 && dy == 0.0 {
             return;
         }
+        // A drag or two-finger swipe over a ready 3D model turns it (task #153, owner D1).
+        if self.live_model_orbit(dx, dy) {
+            return;
+        }
         self.view.pan[0] += dx;
         self.view.pan[1] += dy;
         if let Some((iw, ih, sw, sh)) = self.screen_and_image() {
@@ -342,13 +357,16 @@ impl AppCore {
                 let t = (now - start).as_secs_f32();
                 let rate = ZOOM_MIN_RATE
                     + (ZOOM_MAX_RATE - ZOOM_MIN_RATE) * crate::engine::hold_ramp(t, ZOOM_RAMP_SECS);
-                // Exponential (multiplicative) zoom about the screen center.
-                self.view.zoom =
-                    (self.view.zoom * (rate * dir * dt).exp()).clamp(MIN_ZOOM, MAX_ZOOM);
-                // #124: cheap -- `reconcile_zoom_rep` returns immediately unless the
-                // representation decision actually flips, so a held ramp rebinds once on the
-                // way past 1:1 rather than every tick.
-                self.reconcile_zoom_rep();
+                // Exponential (multiplicative) zoom about the screen center. A ready 3D model
+                // zooms its camera instead (task #153).
+                let factor = (rate * dir * dt).exp();
+                if !self.live_model_zoom_quiet(factor) {
+                    self.view.zoom = (self.view.zoom * factor).clamp(MIN_ZOOM, MAX_ZOOM);
+                    // #124: cheap -- `reconcile_zoom_rep` returns immediately unless the
+                    // representation decision actually flips, so a held ramp rebinds once on
+                    // the way past 1:1 rather than every tick.
+                    self.reconcile_zoom_rep();
+                }
                 changed = true;
             }
             None => {
@@ -383,8 +401,13 @@ impl AppCore {
             let t = (now - start).as_secs_f32();
             let speed = PAN_MIN_SPEED
                 + (PAN_MAX_SPEED - PAN_MIN_SPEED) * crate::engine::hold_ramp(t, PAN_RAMP_SECS);
-            self.view.pan[0] += px * speed * dt;
-            self.view.pan[1] += py * speed * dt;
+            // The arrows turn a ready 3D model (task #153); otherwise they pan.
+            if self.live_model_orbit_quiet(px * speed * dt, py * speed * dt) {
+                // turned; drawn below
+            } else {
+                self.view.pan[0] += px * speed * dt;
+                self.view.pan[1] += py * speed * dt;
+            }
             if let Some((iw, ih, sw, sh)) = self.screen_and_image() {
                 let mp = self.view.max_pan(iw, ih, sw, sh);
                 self.view.pan[0] = self.view.pan[0].clamp(-mp[0], mp[0]);

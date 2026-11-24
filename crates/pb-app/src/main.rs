@@ -1154,6 +1154,7 @@ impl App {
             playback: None,
             anim_frame_shown_at: None,
             anim_decode: None,
+            live_model: Default::default(),
             anim_stream: None,
             video: None,
             video_seq: 0,

@@ -16,6 +16,10 @@ with any pre-release suffix carried only by the tag.
   colours set in the slicer aren't shown yet). A sliced project with no model inside
   shows its plate thumbnail instead. Blaze Viewer offers itself under Open With for
   these files but never takes them over from your slicer.
+- **Turn 3D models around.** Drag a model, or swipe with two fingers on a trackpad,
+  to spin it, and zoom with `+` and `−`, Ctrl+scroll or a pinch. The arrow keys turn
+  it too. Press `8` (or `0`, or double-tap) to return to the original view. The model
+  is drawn live on your graphics card and is ready to turn the moment you stop on it.
 - **Export.** Press `E` (or File ▸ Export…, ⇧⌘E on a Mac, or right-click the
   photo) for Export mode: a panel in the Inspector's place where you pick PNG or
   JPEG, the JPEG quality (`[` and `]` step it) or PNG compression, and a size —

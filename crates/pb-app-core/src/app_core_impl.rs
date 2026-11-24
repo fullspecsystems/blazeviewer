@@ -26,6 +26,7 @@ mod export_panel;
 mod frame_capture;
 mod image_text;
 mod item_kind;
+mod live_model;
 mod menu;
 mod meta;
 mod nav;
@@ -360,6 +361,7 @@ impl AppCore {
             playback: None,
             anim_frame_shown_at: None,
             anim_decode: None,
+            live_model: Default::default(),
             anim_stream: None,
             video: None,
             video_seq: 0,
@@ -480,6 +482,9 @@ impl AppCore {
             // `poll_anim_decode` picks it up promptly (active playback drives its own
             // precise next-frame wake via `tick_playback`, not this frame poll).
             || self.anim_decode.is_some()
+            // A live-3D model preparation in flight (task #153) keeps the loop polling so it
+            // lands on the GPU before the user's first drag.
+            || self.live_model.loading.is_some()
             // A streaming Live Photo decode (task #69) likewise keeps the loop polling so
             // `poll_anim_stream` drains newly decoded frames as they arrive.
             || self.anim_stream.is_some()
@@ -1288,6 +1293,9 @@ impl AppCore {
     /// The anchor tracks the current cursor so the ease zooms toward wherever the
     /// pointer is. The tick's `apply_zoom_ease` does the actual per-frame motion.
     fn queue_zoom_ease(&mut self, factor: f32) {
+        if self.live_model_zoom(factor) {
+            return; // a live 3D model zooms immediately (task #153)
+        }
         // A wheel notch takes over from a touch glide rather than compounding with it.
         self.cancel_zoom_inertia();
         let base = self.zoom_ease.map_or(self.view.zoom, |z| z.target);
@@ -1500,6 +1508,9 @@ impl AppCore {
         let blazing = nav.is_some() && past_delay;
         // 4a′. Flash the "Press P to play" hint once on settling on an animated still.
         self.maybe_show_anim_hint(blazing);
+        // 4a″. The live 3D view (task #153): free a model we've left, land a finished
+        // preparation on the GPU, and start preparing the model the user has settled on.
+        self.tick_live_model(blazing);
         // 4a. The basic info line (`i`) — its own ephemeral layer, so it runs before
         // the rich panel (whose bottom lift reads the line's shown state). Same
         // blaze-hide + settle-track behavior as the panel, but never needs Help's
@@ -4860,7 +4871,14 @@ impl AppCore {
         let t0 = Instant::now();
         let mut fatal = false;
         let mut presented = false;
+        // The live 3D view (task #153) is re-asserted on every draw while it is up: presenting a
+        // photo stops the renderer drawing the mesh, so this is what keeps it on screen across a
+        // same-item rebind (a resize), and what lets navigation drop it without a teardown race.
+        let live = self.live_model_frame();
         let drew = if let Some(a) = self.renderer.as_mut() {
+            if live.is_some() {
+                a.show_mesh(live);
+            }
             match a.render() {
                 Ok(p) => presented = p,
                 Err(e) => {

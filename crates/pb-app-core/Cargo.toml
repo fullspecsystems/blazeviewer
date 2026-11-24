@@ -28,6 +28,8 @@ half = "2"
 pb-core = { workspace = true }
 pb-render = { workspace = true }
 pb-decode = { workspace = true }
+# The live 3D model view's camera + mesh (task #153). Pure.
+pb-mesh = { workspace = true }
 pb-encode = { workspace = true }
 pb-source = { workspace = true }
 # The HUD CPU compositor — AppCore owns `hud: Option<Hud>` so it drives the overlay

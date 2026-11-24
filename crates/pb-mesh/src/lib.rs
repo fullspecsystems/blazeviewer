@@ -13,11 +13,13 @@
 //! `catch_unwind`.
 
 mod camera;
+pub mod live;
 mod obj;
 pub mod raster;
 mod stl;
 mod threemf;
 
+pub use live::{LiveFrame, LiveView};
 pub use raster::{CpuRasterizer, MeshRasterizer, RenderOptions, Rendered};
 
 /// The default material colour (owner decision D3, 2026-11-23): a neutral light grey, used

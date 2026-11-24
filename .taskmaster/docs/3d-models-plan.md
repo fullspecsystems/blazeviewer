@@ -331,6 +331,54 @@ port it.
 
 ## Handoff
 
+### 2026-11-24 — phase 2 first cut: the live view works (Mac session)
+
+**Built:**
+- **`pb-mesh::live`**: `LiveView`, a turntable `Orbit` that starts at the still's exact pose
+  and framing. The still and the live view now share `Orbit::home`, `silhouette`, `FILL` and
+  the lighting constants, so they can't drift.
+- **`pb-render::mesh`**: a depth-tested triangle-soup pass drawn into the fp16 intermediate in
+  place of the photo quad. It uses flat normals from screen-space derivatives and the still's
+  lighting verbatim. The geometry is chunked to the device's buffer limit. Every photo present
+  hides it.
+- **`pb-app-core`**: `live_model.rs` and `app_core_impl/live_model.rs`:
+  - The mesh is prepared on a worker as soon as the user settles on a model (not while
+    blazing), then uploaded.
+  - Following D1, a drag or two-finger swipe orbits; pinch, Ctrl+scroll, `=`/`-` (and now
+    `Shift+=`, i.e. `+`) and the menu zoom; the arrows orbit; Fit, 100% and double-tap put
+    the still back.
+  - `draw()` re-asserts the frame each time, so a resize re-frames for free and navigation
+    can't leave a mesh on screen.
+  - Everything for a model is freed on the next tick once the user moves on.
+- **`PB_TRACE=1`** logs the lifecycle by item index only.
+
+- **Verified (macOS, real app):** a separate instance on 3DBenchy (225k triangles) prepared and
+  uploaded the mesh on settle with no input. A real drag turned it live, under the glass
+  toolbar, lit like the still. `8` restored the still's pose. Also verified: 10 core tests (the
+  routing, prepare-on-settle, navigation teardown and a new deck at the same index), 6 `pb-mesh`
+  live tests (including "the home frame lands where the still drew", within 1.5 px), 4 headless
+  GPU tests on Metal (shader validates, a lit face matches the CPU formula within 1%, the depth
+  test, top-inset mapping), and the Windows clippy cross-check with tests (compile-only; the new
+  `AppCore` field is in `pb-app`'s struct literal).
+- **Not verified:**
+  - **Windows at runtime.** The pass is plain wgpu; DX12 is untested.
+  - **Pinch, the scroll gestures and held-key zoom** in the real app (unit-tested only).
+  - **Huge meshes:** VRAM use and frame time on a 5M-triangle model.
+  - **Windows touchpad eased zoom** (`queue_zoom_ease` routes to the live view; untested).
+- **Known gaps (next):**
+  - **The "3D" play-hint pill** (D1). Nothing yet tells the user a model can be turned, apart
+    from the open-hand cursor.
+  - **MSAA or another antialiasing** for the live view. It's 1× today, fine on Retina, jaggy
+    at 1×.
+  - **Copy / Export / Describe capture the still**, not the turned view (#153.6).
+  - **The mesh is parsed twice**, once for the still and once for the live view. Retaining the
+    decode's `Model` would make it once.
+  - **Right-drag / Shift-drag pan**, inertia, a turntable spin on `P`.
+  - **A live-view triangle cap**, `LIVE_MAX_TRIANGLES` = 6M. It's fixed; it should come from
+    the machine's VRAM.
+- **Cross-platform debt:** Windows must launch a model and check drag, wheel zoom, `+`/`−`, the
+  arrows and `8`, and that navigating away shows the next photo (no stuck mesh).
+
 ### 2026-11-23 — phase-1 groundwork landed (Mac session)
 
 **Built:** the `pb-mesh` crate (canonical `Model`, `Limits`, STL hand-rolled, OBJ via `tobj`,
