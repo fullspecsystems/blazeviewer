@@ -237,9 +237,21 @@ mod tests {
         assert_eq!(Resize::Width(1500).target(2000, 3000), Some((1500, 2250)));
         assert_eq!(Resize::Height(500).target(3000, 2000), Some((750, 500)));
         assert_eq!(Resize::Percent(50).target(3001, 2001), Some((1501, 1001)));
-        assert_eq!(Resize::Percent(100).target(3000, 2000), None, "100 % is full size");
-        assert_eq!(Resize::Width(3000).target(3000, 2000), None, "never upscale");
-        assert_eq!(Resize::Height(2400).target(3000, 2000), None, "never upscale");
+        assert_eq!(
+            Resize::Percent(100).target(3000, 2000),
+            None,
+            "100 % is full size"
+        );
+        assert_eq!(
+            Resize::Width(3000).target(3000, 2000),
+            None,
+            "never upscale"
+        );
+        assert_eq!(
+            Resize::Height(2400).target(3000, 2000),
+            None,
+            "never upscale"
+        );
         assert_eq!(Resize::Percent(0).target(3000, 2000), None, "degenerate");
     }
 

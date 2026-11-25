@@ -4086,7 +4086,14 @@ impl Renderer for WgpuRenderer {
         }
     }
 
-    fn upload_aux(&mut self, idx: usize, rgba: &[u8], w: u32, h: u32, color: ColorTransform) -> bool {
+    fn upload_aux(
+        &mut self,
+        idx: usize,
+        rgba: &[u8],
+        w: u32,
+        h: u32,
+        color: ColorTransform,
+    ) -> bool {
         if idx >= self.aux.len() || w == 0 || h == 0 || rgba.len() != w as usize * h as usize * 4 {
             return false;
         }

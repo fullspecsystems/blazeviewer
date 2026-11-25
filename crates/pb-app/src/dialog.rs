@@ -1766,8 +1766,12 @@ fn export_size_dialog(
             ui.add_space(12.0);
             ui.horizontal(|ui| {
                 let resp = ui.add(
-                    pbui::text_field(ui, input, if *by == SizeBy::Percent { "50" } else { "2048" })
-                        .desired_width(110.0),
+                    pbui::text_field(
+                        ui,
+                        input,
+                        if *by == SizeBy::Percent { "50" } else { "2048" },
+                    )
+                    .desired_width(110.0),
                 );
                 if take_focus {
                     resp.request_focus();
@@ -1784,7 +1788,11 @@ fn export_size_dialog(
                 Err(_) if *by == SizeBy::Percent => "Enter a percentage from 1 to 100.".into(),
                 Err(_) => "Enter a size in pixels.".into(),
             };
-            ui.label(egui::RichText::new(readout).size(13.0).color(p.text_secondary));
+            ui.label(
+                egui::RichText::new(readout)
+                    .size(13.0)
+                    .color(p.text_secondary),
+            );
         });
     result
 }
