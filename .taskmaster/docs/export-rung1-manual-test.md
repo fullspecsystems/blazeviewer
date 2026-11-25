@@ -285,10 +285,11 @@ Use a big, detailed photo (a 20 MP JPEG or NEF) and a PNG with transparency.
 | 14.6 | Export one file per format (⌘↩ each time) | The save sheet says "Export as WebP" (AVIF, JPEG XL, HEIC, TIFF), offers that extension only; each file opens in Preview and Finder shows its size = the panel's File size |
 | 14.7 | A **Display P3** photo (an iPhone HEIC or `WideGamut-*-DisplayP3.jpg`) to WebP, AVIF, JPEG XL and HEIC; open each in Preview, ⌘I | The colours match the original (saturated reds stay red, not dull); Preview's info shows the Display P3 profile |
 | 14.8 | The transparent PNG to WebP, AVIF, HEIC, TIFF and JPEG XL | Transparency kept in all five (JPEG is the only one that turns it white) |
-| 14.9 | A huge photo (over 16383 px wide, or a panorama), **WebP** at Full size | A note: "WebP images can be at most 16383 pixels on a side. Choose a smaller size." Export… is disabled until you pick a smaller size |
+| 14.9 | A huge photo (over 16383 px wide, or a panorama), **WebP** at Full size | A note: "WebP images can be at most 16383 pixels on a side. Choose a smaller size." Export… is disabled until you pick a smaller size, and ⌘↩ shows the same words as a toast instead of the save sheet |
 | 14.10 | Leave the mode on JPEG XL Lossless, quit, relaunch, `E` | JPEG XL, Lossless still checked |
 | 14.11 | Browse while an AVIF of a big photo is being made | Browsing stays smooth (the encoder uses half the cores, at low priority) |
 | 14.12 | VoiceOver over Format, Lossless, Quality | Each is named; a greyed Quality reads as dimmed |
+| 14.13 | **TIFF**, ⌘↩, type the name `scan.tiff` | Saved as `scan.tiff` (not `scan.tiff.tif`); the same for JPEG named `x.jpeg` |
 
 ---
 

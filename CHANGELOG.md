@@ -43,7 +43,8 @@ with any pre-release suffix carried only by the tag.
   remembered for next time. Colors are kept exactly: wide-gamut photos stay
   Display P3, Adobe RGB and so on (in every format), and 16-bit images stay 16-bit
   in PNG, TIFF and JPEG XL; resizing is done in linear light, and transparency in a
-  JPEG becomes white. The Linux build doesn't write WebP or JPEG XL yet. HDR photos are saved
+  JPEG becomes white. WebP and JPEG XL are Mac-only in this release; Windows and
+  Linux get them next. HDR photos are saved
   as SDR for now, and the confirmation says so. Exports carry no metadata — no
   camera details and no location — and never appear in your system's recent
   files. The save dialog

@@ -30,6 +30,7 @@ is linked, and why that linkage complies). It points here; this is the legal tex
 | `brotli-LICENSE.txt` | Brotli (libjxl's compression) | MIT |
 | `skcms-LICENSE.txt` | skcms (libjxl's colour management) | BSD-3-Clause |
 | `rav1e-LICENSE.txt`, `rav1e-PATENTS.txt` | rav1e 0.8.1 (AVIF export's AV1 encoder) | BSD-2-Clause + AOM Patent License 1.0 |
+| `rav1e-asm-NOTICES.txt` | rav1e's assembly (much of it from dav1d: VideoLAN, Two Orioles, Martin Storsjo, …) | BSD-2-Clause; the notices generated from the files' own headers |
 | `ravif-LICENSE.txt` | ravif 0.13.0 (AVIF export) | BSD-3-Clause |
 | `avif-serialize-LICENSE.txt` | avif-serialize 0.8.9 (AVIF container) | BSD-3-Clause |
 

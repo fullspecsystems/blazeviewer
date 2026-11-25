@@ -17,23 +17,23 @@
   paths + libclang) and `VCPKG_ROOT` exported — this script enters one for you when you aren't
   already inside it, so a plain pwsh prompt works. Pass -NoFfmpeg to drop back to
   `libheif,dav1d` (no FFmpeg, no Developer shell needed — films will be silent). Skip the native
-  decode libs entirely with -NoNative (a plain `cargo build -p pb-app`) when you don't need HEIC /
+  decode libs with -NoNative (add -NoCodecs for a plain `cargo build -p pb-app`) when you don't need HEIC /
   animated AVIF / film audio and don't have vcpkg set up. (-NoHeif is the old alias for -NoNative.)
 
   Export's C/C++ codecs (task #89 rung 4) are on too: `export-codecs` = WebP (libwebp, built with
   cc) + JPEG XL (libjxl, built with CMake; its bindings need libclang, so the Developer shell is
   entered for it as for FFmpeg). CMake must be on PATH (Visual Studio's "C++ CMake tools", or
-  `winget install Kitware.CMake`). With nasm on PATH (x64), `avif-asm` adds rav1e's assembly — AVIF
-  exports several times faster. -NoCodecs leaves the C codecs out (PNG, JPEG, TIFF and AVIF still
-  export); -NoNative implies it.
+  `winget install Kitware.CMake`). With NASM 2.15 or newer on PATH (x64), `avif-asm` adds rav1e's
+  assembly — AVIF exports several times faster. The codecs build from source (no vcpkg), so
+  -NoNative leaves them in; -NoCodecs leaves them out (PNG, JPEG, TIFF and AVIF still export).
 
 .EXAMPLE
   pwsh scripts/build-windows.ps1               # debug build, libheif + dav1d + ffprobe (film audio)
   pwsh scripts/build-windows.ps1 -Run          # ...then launch it
   pwsh scripts/build-windows.ps1 -Release -Run # optimized build, then launch
   pwsh scripts/build-windows.ps1 -NoFfmpeg -Run # no FFmpeg (films silent), no Developer shell
-  pwsh scripts/build-windows.ps1 -NoNative -Run # skip every native lib (no vcpkg needed)
-  pwsh scripts/build-windows.ps1 -NoCodecs -Run # no WebP / JPEG XL export (no CMake needed)
+  pwsh scripts/build-windows.ps1 -NoNative -Run # skip the vcpkg libs (no vcpkg needed)
+  pwsh scripts/build-windows.ps1 -NoNative -NoCodecs -Run # no native code at all (no vcpkg, no CMake)
 #>
 [CmdletBinding()]
 param(
@@ -85,16 +85,24 @@ if (-not ($NoNative -or $NoHeif)) {
     }
 }
 
-# ── Export's C/C++ codecs (task #89 rung 4): WebP + JPEG XL. rav1e's assembly for AVIF needs nasm
-#    on x64 (ARM64 is left to the pure-Rust path until that box has tried it).
-$withCodecs = -not ($NoCodecs -or $NoNative -or $NoHeif)
+# ── Export's C/C++ codecs (task #89 rung 4): WebP + JPEG XL, built from source (not vcpkg), so
+#    independent of -NoNative. rav1e's assembly for AVIF needs NASM >= 2.15 on x64 (ARM64 is left
+#    to the pure-Rust path until that box has tried it).
+$withCodecs = -not $NoCodecs
 if ($withCodecs) {
     $features += "export-codecs"
     if ($env:PROCESSOR_ARCHITECTURE -ne "ARM64") {
+        $nasmVersion = $null
         if (Get-Command nasm -ErrorAction SilentlyContinue) {
+            $banner = (& nasm -v 2>$null) -join " "
+            if ($banner -match 'version (\d+)\.(\d+)') {
+                $nasmVersion = [version]::new([int]$Matches[1], [int]$Matches[2])
+            }
+        }
+        if ($nasmVersion -and $nasmVersion -ge [version]"2.15") {
             $features += "avif-asm"
         } else {
-            Write-Host "    (no nasm on PATH: AVIF exports use rav1e's slower pure-Rust path; winget install NASM.NASM)" -ForegroundColor Yellow
+            Write-Host "    (no NASM 2.15+ on PATH: AVIF exports use rav1e's slower pure-Rust path; winget install NASM.NASM)" -ForegroundColor Yellow
         }
     }
 }

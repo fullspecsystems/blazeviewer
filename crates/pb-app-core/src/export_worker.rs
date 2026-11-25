@@ -43,6 +43,9 @@ pub struct ExportJob {
     /// The file the preview already encoded with these settings (rung 3): written as is.
     pub encoded: Option<crate::export::PreEncoded>,
     pub dest: PathBuf,
+    /// `dest` is exactly the path the save dialog approved, so replacing a file there was
+    /// confirmed. False when an extension had to be appended: never replace then.
+    pub may_replace: bool,
     pub queued_at: Instant,
 }
 
@@ -173,8 +176,13 @@ fn run_stages(job: &ExportJob, t: &mut ExportTimings) -> Result<ExportOutcome, S
     // The preview already made this exact file (rung 3, F10): write its bytes.
     if let Some(pre) = &job.encoded {
         let s = Instant::now();
-        commit_file(&job.dest, &pre.bytes, job.source_path.as_deref())
-            .map_err(|e| e.to_string())?;
+        commit_file(
+            &job.dest,
+            &pre.bytes,
+            job.source_path.as_deref(),
+            job.may_replace,
+        )
+        .map_err(|e| e.to_string())?;
         t.write = s.elapsed();
         return Ok(ExportOutcome {
             notes: pre.notes.clone(),
@@ -241,7 +249,13 @@ fn run_stages(job: &ExportJob, t: &mut ExportTimings) -> Result<ExportOutcome, S
     t.encode = s.elapsed();
 
     let s = Instant::now();
-    commit_file(&job.dest, &bytes, job.source_path.as_deref()).map_err(|e| e.to_string())?;
+    commit_file(
+        &job.dest,
+        &bytes,
+        job.source_path.as_deref(),
+        job.may_replace,
+    )
+    .map_err(|e| e.to_string())?;
     t.write = s.elapsed();
 
     Ok(ExportOutcome {
@@ -254,6 +268,8 @@ fn run_stages(job: &ExportJob, t: &mut ExportTimings) -> Result<ExportOutcome, S
 #[derive(Debug)]
 pub enum WriteError {
     SameAsSource,
+    /// A file is already at a destination the dialog didn't approve replacing.
+    Exists,
     Collision,
     NoFolder,
     Io(std::io::Error),
@@ -263,9 +279,10 @@ impl std::fmt::Display for WriteError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             WriteError::SameAsSource => {
-                write!(f, "that's the original file — choose a different name")
+                write!(f, "that's the original file. Choose a different name")
             }
-            WriteError::Collision => write!(f, "a file with that name appeared — try again"),
+            WriteError::Exists => write!(f, "a file with that name already exists"),
+            WriteError::Collision => write!(f, "a file with that name appeared. Try again"),
             WriteError::NoFolder => write!(f, "the destination folder doesn't exist"),
             WriteError::Io(e) => write!(f, "couldn't write the file ({e})"),
         }
@@ -314,9 +331,17 @@ fn temp_path(dest: &Path) -> PathBuf {
 
 /// Write `data` to `dest` safely (see the module docs). `source` is the exported item's own
 /// file — never overwritten.
-pub fn commit_file(dest: &Path, data: &[u8], source: Option<&Path>) -> Result<(), WriteError> {
+pub fn commit_file(
+    dest: &Path,
+    data: &[u8],
+    source: Option<&Path>,
+    may_replace: bool,
+) -> Result<(), WriteError> {
     if source.is_some_and(|s| same_file(s, dest)) {
         return Err(WriteError::SameAsSource);
+    }
+    if !may_replace && dest.exists() {
+        return Err(WriteError::Exists);
     }
     let dir = dest
         .parent()
@@ -436,7 +461,7 @@ mod tests {
     fn a_new_file_is_written_and_no_temp_is_left() {
         let d = tmpdir("new");
         let dest = d.join("out.png");
-        commit_file(&dest, b"hello", None).unwrap();
+        commit_file(&dest, b"hello", None, true).unwrap();
         assert_eq!(std::fs::read(&dest).unwrap(), b"hello");
         assert_eq!(entries(&d), vec!["out.png"]);
         let _ = std::fs::remove_dir_all(&d);
@@ -447,9 +472,27 @@ mod tests {
         let d = tmpdir("replace");
         let dest = d.join("out.png");
         std::fs::write(&dest, b"old").unwrap();
-        commit_file(&dest, b"new", None).unwrap();
+        commit_file(&dest, b"new", None, true).unwrap();
         assert_eq!(std::fs::read(&dest).unwrap(), b"new");
         assert_eq!(entries(&d), vec!["out.png"]);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// A path the dialog didn't approve (an extension was appended) never replaces a file.
+    #[test]
+    fn an_unapproved_path_never_replaces_a_file() {
+        let d = tmpdir("unapproved");
+        let dest = d.join("scan.tiff.tif");
+        std::fs::write(&dest, b"someone else's").unwrap();
+        assert!(matches!(
+            commit_file(&dest, b"export", None, false),
+            Err(WriteError::Exists)
+        ));
+        assert_eq!(std::fs::read(&dest).unwrap(), b"someone else's");
+        assert_eq!(entries(&d), vec!["scan.tiff.tif"], "no temp left");
+        let fresh = d.join("new.tif");
+        commit_file(&fresh, b"export", None, false).unwrap();
+        assert_eq!(std::fs::read(&fresh).unwrap(), b"export");
         let _ = std::fs::remove_dir_all(&d);
     }
 
@@ -459,7 +502,7 @@ mod tests {
         let src = d.join("photo.png");
         std::fs::write(&src, b"original").unwrap();
         assert!(matches!(
-            commit_file(&src, b"x", Some(&src)),
+            commit_file(&src, b"x", Some(&src), true),
             Err(WriteError::SameAsSource)
         ));
         #[cfg(unix)]
@@ -467,7 +510,7 @@ mod tests {
             let alias = d.join("alias.png");
             std::fs::hard_link(&src, &alias).unwrap();
             assert!(matches!(
-                commit_file(&alias, b"x", Some(&src)),
+                commit_file(&alias, b"x", Some(&src), true),
                 Err(WriteError::SameAsSource)
             ));
         }
@@ -494,7 +537,7 @@ mod tests {
     fn a_missing_folder_is_reported() {
         let d = tmpdir("nofolder");
         assert!(matches!(
-            commit_file(&d.join("nope/out.png"), b"x", None),
+            commit_file(&d.join("nope/out.png"), b"x", None, true),
             Err(WriteError::NoFolder)
         ));
         let _ = std::fs::remove_dir_all(&d);

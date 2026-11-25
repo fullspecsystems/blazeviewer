@@ -59,11 +59,18 @@ pub fn encode_avif(img: &ExportImage, quality: u8) -> Result<Vec<u8>, EncodeErro
 pub fn encode_avif_at(img: &ExportImage, quality: u8, speed: u8) -> Result<Vec<u8>, EncodeError> {
     let (px, alpha) = crate::px::rgb8(img)?;
     let q = quality.clamp(1, 100) as f32;
+    // With alpha, ravif encodes colour and alpha at once, each with this many threads: split
+    // the budget so the two together still take half the machine.
+    let threads = if alpha {
+        (threads() / 2).max(1)
+    } else {
+        threads()
+    };
     let enc = ravif::Encoder::new()
         .with_quality(q)
         .with_alpha_quality(q.max(90.0))
         .with_speed(speed.clamp(1, 10))
-        .with_num_threads(Some(threads()));
+        .with_num_threads(Some(threads));
     let (w, h) = (img.width as usize, img.height as usize);
     let encoded = if alpha {
         let px: &[ravif::RGBA8] =

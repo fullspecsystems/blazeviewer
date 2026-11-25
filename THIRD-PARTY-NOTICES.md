@@ -130,7 +130,10 @@ texts, verbatim, are in `licenses/`.
   `jxl-sys` crate (MIT OR Apache-2.0) vendors — never `jpegxl-rs` / `jpegxl-sys`, which are GPL.
   Homepage: https://github.com/libjxl/libjxl
 - **rav1e** 0.8.1 (AV1 encoding for AVIF) — BSD-2-Clause, plus the Alliance for Open Media Patent
-  License 1.0 (`rav1e-PATENTS.txt`). Pure Rust (with optional assembly).
+  License 1.0 (`rav1e-PATENTS.txt`). Rust, built with its hand-written assembly on the Mac (ARM64)
+  and on Windows when nasm is present (x86-64); much of that assembly comes from dav1d and carries
+  its own BSD-2-Clause notices — VideoLAN and the dav1d authors, Two Orioles, Martin Storsjo,
+  Janne Grunau and others — listed in `rav1e-asm-NOTICES.txt`.
   Homepage: https://github.com/xiph/rav1e
 - **ravif** 0.13.0 and **avif-serialize** 0.8.9 (the AVIF encoder and container) — BSD-3-Clause.
 

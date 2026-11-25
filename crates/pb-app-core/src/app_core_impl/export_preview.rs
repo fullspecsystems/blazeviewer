@@ -71,7 +71,8 @@ impl AppCore {
             frame,
             rotation_cw,
             display_turns,
-            settings: self.export.draft,
+            // Only what shapes this format's file, so tuning another format keeps its cache.
+            settings: self.export.draft.normalized(),
         })
     }
 
@@ -756,7 +757,35 @@ mod tests {
     fn every_offered_format_previews_and_exports() {
         let (mut core, log, lib) = preview_core("formats");
         let out = sandbox("formats-out");
+        // A lossy format this machine can't decode can't be previewed (AVIF on a Linux build
+        // without libheif, or Windows without the AV1 extension): the panel says so, and the
+        // export still works — but this test can't wait for its preview.
+        let readable = |format: FormatChoice| {
+            let s = crate::export_panel::ExportSettings {
+                format,
+                ..crate::export_panel::ExportSettings::default()
+            };
+            let Ok(enc) = s.export_format().encoder() else {
+                return false;
+            };
+            let probe = pb_encode::ExportImage {
+                width: 16,
+                height: 16,
+                channels: pb_encode::Channels::Rgb,
+                samples: pb_encode::Samples::U8(vec![128; 16 * 16 * 3]),
+                color: pb_encode::OutputColor::Srgb,
+                notes: Vec::new(),
+            };
+            enc.lossless()
+                || enc
+                    .encode(&probe)
+                    .is_ok_and(|b| pb_decode::decode_bytes(&b, None, false).is_ok())
+        };
         for format in FormatChoice::offered() {
+            if !readable(format) {
+                eprintln!("{format:?}: no decoder on this machine; not previewable here");
+                continue;
+            }
             core.export_set_format(format);
             tick_until(&mut core, ready);
             assert_eq!(

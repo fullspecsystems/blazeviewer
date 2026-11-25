@@ -79,6 +79,12 @@ impl AppCore {
             self.show_toast(&why);
             return;
         }
+        // The same limit the panel shows (and disables Export… for): ⌘↩ mustn't get past it.
+        let dims = self.displayed_item.and_then(|i| self.export_source_dims(i));
+        if let Some(why) = dims.and_then(|d| self.export.draft.size_limit(d)) {
+            self.show_toast(&why);
+            return;
+        }
         self.save_export_prefs();
         let settings = self.export.draft;
         // The preview's file for exactly these settings, when it's made: written as is.
@@ -356,6 +362,29 @@ mod tests {
                 recovered: None,
             },
         );
+    }
+
+    /// Review finding: ⌘↩ / Ctrl+Enter mustn't get past the limit the panel disables Export…
+    /// for (WebP stops at 16383 px). A smaller size gets through.
+    #[test]
+    fn the_commit_keys_respect_the_formats_size_limit() {
+        let mut core = core_on(&["pano.jpg"]);
+        core.native_toast = true; // read the toast's text
+        with_dims(&mut core, 0, 20_000, 1_000);
+        key(&mut core, "E");
+        core.export_set_format(FormatChoice::Webp);
+        core.effects.clear();
+        core.export_commit();
+        assert!(!core.export.busy(), "no request, no save dialog");
+        assert!(
+            core.toast_native
+                .as_ref()
+                .is_some_and(|t| t.message.contains("16383 pixels")),
+            "the panel's reason, as a toast"
+        );
+        core.export_set_size(SizeChoice::LongEdge(3840));
+        core.export_commit();
+        assert!(core.export.busy(), "a size that fits goes ahead");
     }
 
     #[test]

@@ -943,7 +943,8 @@ through a batch of them". mozjpeg and oxipng are not in this batch.
     `blazes_avif_and_heic_exports_keep_their_profile_and_alpha`). Speed 6, half the cores.
   - **JPEG XL** (`jxl-sys` 0.1.12 → vendored libjxl 0.12.0, cmake + bindgen; never `jpegxl-rs` /
     `jpegxl-sys`, GPL): lossy (libjxl's quality → distance; quality 100 clamps to its smallest lossy
-    distance, 0.01 — libjxl refuses 0 there) or lossless; 8/16-bit, gray, alpha; effort 7, half the
+    distance, 0.05 — distance 0 means "switch to lossless", refused with the lossy setup) or
+    lossless; 8/16-bit, gray, alpha; effort 7, half the
     cores. `jxl::decode_rgba8` (libjxl, into the file's own space) for the preview — below.
   - **HEIC** (macOS only, Image I/O through a hand-rolled FFI like `pb-decode/imageio.rs`): 8-bit +
     alpha, profile via the `CGImage`'s colour space. Image I/O quantizes quality to a few steps
@@ -985,13 +986,50 @@ through a batch of them". mozjpeg and oxipng are not in this batch.
   | Format | Default | Median | p10 | bits/px | vs JPEG 85 |
   |---|---|---|---|---|---|
   | JPEG | 85 | 83.6 | 80.9 | 1.414 | — |
-  | WebP | 90 | 82.5 | 73.3 | 1.185 | −16 % |
+  | WebP | 90 | 83.7 | 80.5 | 1.276 | −10 % |
   | AVIF | 85 | 80.6 | 79.1 | 0.759 | −46 % |
   | JPEG XL | 85 | 82.5 | 75.6 | 0.886 | −37 % |
   | HEIC | 90 | 84.1 | 65.6 | 1.832 | **+30 %** |
 
-  WebP's and HEIC's tails (p10) stay low at every quality: both are 4:2:0, which smears saturated
-  edges (the RGB-CMY chart, a logo). Image I/O's HEIC is larger than JPEG at equal quality.
+  HEIC's tail (p10) stays low at every quality: it is 4:2:0, which smears saturated edges (the
+  RGB-CMY chart, a logo), and Image I/O's HEIC is larger than JPEG at equal quality. WebP had the
+  same tail (73.3) until the review found sharp YUV wasn't actually on (lossy input was imported as
+  YUV); with it, 80.5 — at −10 % rather than −16 %, and ~45 % slower to encode.
+- **Independent review** (Codex, gpt-6.2-astra at xhigh, read-only, of b0e0c01d): no
+  use-after-free, leak, ABI or buffer-size problem in the WebP / libjxl / CoreFoundation FFI, and
+  `add_icc` verified against avif-serialize's opaque and alpha layouts. Twelve findings, all fixed
+  in the follow-up commit, each with a test where one applies:
+  1. **A TIFF export could replace a file the dialog never approved:** the Mac's panel accepts
+     `.tiff`; the core appended `.tif`, and the worker replaced an unrelated `x.tiff.tif`. Now the
+     format's aliases (`.tiff`, `.jpeg`/`.jpe`, `.heif`/`.hif`) are its own, and an appended
+     extension sets `ExportJob::may_replace = false` — `commit_file` refuses an existing file there
+     (`WriteError::Exists`). (`WriteError`'s texts also lost their em-dashes.)
+  2. **Gray + alpha TIFF kept a GRAY profile on RGBA samples** — now converted like `Caps.gray`.
+  3. **The ICC-outranks-nclx scan crossed items** (a thumbnail's or alpha plane's profile could
+     colour the photo; an sRGB profile was skipped for a wide-gamut nclx). `isobmff` now resolves
+     the **primary item's** `colr` through `pitm` → `ipma` → `ipco` (a profile wins within the
+     item; sRGB is an answer); the byte scan is only the fallback for an unwalkable `meta`.
+  4. **rav1e's assembly carries dav1d's BSD-2 notices** (VideoLAN, Two Orioles, Martin Storsjo, …)
+     — now `licenses/rav1e-asm-NOTICES.txt`, generated from the 93 files' own headers.
+  5. **A default Linux build (no libheif) can encode AVIF but not read it back**, so it can't be
+     previewed there (the export still works); the end-to-end test now probes each format's
+     read-back and skips what this machine can't decode.
+  6. **Gray profiles displayed as sRGB** (pre-existing, preview and viewer): `ColorTransform` now
+     uses a gray profile's own curve (identity matrix); sRGB-like curves stay a passthrough.
+  7. **WebP's sharp YUV was never on** (lossy input imported as YUV) — now ARGB; re-measured above.
+  8. **AVIF with alpha doubled its thread budget** (ravif encodes colour and alpha at once, each
+     with the count) — split when there's alpha.
+  9. **⌘↩ / Ctrl+Enter bypassed the WebP size limit** the disabled button showed —
+     `ExportSettings::size_limit` now gates `export_commit` too.
+  10. **Tuning one format evicted another's cached preview** — the preview keys on
+      `ExportSettings::normalized()` (only what shapes the current format's file).
+  11. **`build-windows.ps1`:** the codecs no longer hang off `-NoNative` (they build from source,
+      not vcpkg), and `avif-asm` needs NASM ≥ 2.15 (rav1e's floor), not just any nasm.
+  12. **The CHANGELOG promised WebP / JPEG XL on Windows** (the release script doesn't build them):
+      now "Mac-only in this release". libjxl's smallest lossy distance is **0.05**, not 0.01.
+
+  Codex's two macOS runtime notes (the HEIC test failing at `CGImageDestinationFinalize`, the
+  Image I/O read-back seeing zeros) came from its sandboxed process; both pass in a normal run.
 - **Encode times at full size** (what the preview waits for; `codec_bench --timing`, the same 23
   images, M5 Ultra, release, the codecs at half the cores):
 
@@ -1001,8 +1039,8 @@ through a batch of them". mozjpeg and oxipng are not in this batch.
   | HEIC 90 | 25 ms | 72 ms | 122 ms | Apple's hardware encoder |
   | JPEG XL 85 (effort 7) | 36 ms | 513 ms | 866 ms | effort 5: −45 %; kept 7 |
   | JPEG XL lossless | 72 ms | 749 ms | 984 ms | |
-  | WebP 90 | 57 ms | 1.0 s | 1.1 s | |
-  | AVIF 85 (speed 6) | 101 ms | 1.4 s | 2.0 s | speed 7/8 only ~25 % faster; kept 6 |
+  | WebP 90 | 83 ms | 1.5 s | 2.0 s | sharp YUV; 1.1 s without |
+  | AVIF 85 (speed 6) | 96 ms | 1.2 s | 2.3 s | speed 7/8 only ~25 % faster; kept 6 |
   | TIFF | 34 ms | 529 ms | 773 ms | |
   | WebP lossless | — | — | 7.1 s (effort 50) | 9.6 s at libwebp's default 75 |
 
@@ -1192,7 +1230,8 @@ gamut squeeze — the last now task #156). Verified on the Mac: pb-encode 61 tes
 alpha, pb-app-core incl. every offered format previewing and exporting end to end and a P3 photo's
 JPEG XL previewing in full gamut; clippy `-D warnings` on pb-encode / pb-decode / pb-app-core /
 pb-mac-ffi with every codec; the Swift host builds with them; `codec_bench` on the corpus (the
-defaults). **Not verified:** the Mac GUI (manual test § 14); **all of Windows and Linux** — the
+defaults). An independent Codex review (gpt-6.2-astra, xhigh) found twelve issues — all fixed in
+the follow-up commit (Rung 4's note lists them). **Not verified:** the Mac GUI (manual test § 14); **all of Windows and Linux** — the
 Windows clippy cross-check passes *without* the C codecs (it can't build them), nothing run: W20.
 `build-windows.ps1`'s edits weren't even parsed (no PowerShell here).
 
@@ -1297,13 +1336,15 @@ test script: `.taskmaster/docs/export-rung1-manual-test.md`. Rung 0a (#81) not s
 **Cross-platform debt**
 
 - **Windows (session 8, rung 4):** `build-windows.ps1` now builds `export-codecs` (libwebp via cc;
-  libjxl via **CMake + bindgen**, so the Developer shell is entered for it too) and `avif-asm` when
-  nasm is on PATH (x64). **Unbuilt and unparsed** — run it; if `jxl-sys` or `libwebp-sys` fails,
+  libjxl via **CMake + bindgen**, so the Developer shell is entered for it too — and now regardless
+  of `-NoNative`) and `avif-asm` when NASM ≥ 2.15 is on PATH (x64). **Unbuilt and never run** —
+  Codex's PowerShell-grammar parse is the only check it has had — run it; if `jxl-sys` or `libwebp-sys` fails,
   `-NoCodecs` is the lever, and report the error here. Then W20 (the egui Format combo, the Lossless
   switch, Quality greying, the dialog filters). **`release-windows.ps1` was deliberately left
   alone** (still `libheif,dav1d,ffprobe`): add `export-codecs` (and `avif-asm` on x64 with nasm)
-  there once the dev script has built them on that box, or a Windows release ships without WebP /
-  JPEG XL (the panel just doesn't list them — graceful, but the CHANGELOG says otherwise).
+  there once the dev script has built them on that box — and change the CHANGELOG's "WebP and
+  JPEG XL are Mac-only in this release" when it does. Until then a Windows release lists PNG,
+  JPEG, AVIF and TIFF.
   `avif-asm` on Windows ARM64 is untried (rav1e's aarch64 assembly under MSVC).
 - **Linux (session 8):** the AppImage build (`release-linux.sh`) has no `export-codecs` — it needs
   cmake in `appimage.Dockerfile` and a container run to prove it. Until then Linux exports PNG,

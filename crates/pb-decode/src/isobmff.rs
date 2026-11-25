@@ -156,56 +156,159 @@ pub(crate) fn colr_transfer(bytes: &[u8]) -> Option<u8> {
 /// container decoders (WIC, Image I/O drawn into a matching space, libheif) hand
 /// back source-native pixels, so this transform tells the shader how to convert
 /// them to BT.709. Handles `prof`/`rICC` (embedded ICC — the common iPhone
-/// Display-P3 case) and `nclx` (CICP code points). Returns an *enabled* transform
-/// only, so an sRGB/unparseable box leaves the caller on its fallback.
+/// Display-P3 case) and `nclx` (CICP code points).
 ///
-/// The box lives in `meta`→`iprp`→`ipco` near the file head; we scan for the `colr`
-/// signature and validate the candidate (an embedded ICC's own size header must
-/// match the box).
+/// **The primary image's own** `colr` (`pitm` → `ipma` → `ipco`), never a thumbnail's or the
+/// alpha plane's. With both kinds on it, the profile is the colour and the nclx only adds the
+/// YUV matrix (HEIF allows one of each; libavif's reading) — and a profile that says sRGB is an
+/// answer (`Some`, disabled), not a reason to fall through to the nclx. A file whose `meta`
+/// can't be walked falls back to the first usable `colr` anywhere, enabled ones only.
 ///
 /// Only the WIC/libheif backends (Windows) consult this — the macOS Image I/O backend
 /// lets CoreGraphics color-manage into a fixed Display-P3 space instead — so it's
 /// gated to its real consumers (plus `test`, so the parser tests run everywhere).
 #[cfg(any(windows, heic_libheif, test))]
 pub(crate) fn color_from_colr_box(bytes: &[u8]) -> Option<ColorTransform> {
-    // A profile outranks code points (HEIF allows one `colr` of each kind; with both, the
-    // profile is the colour and the nclx only adds the YUV matrix — libavif's reading).
-    let mut nclx = None;
-    for i in colr_positions(bytes) {
-        let icc = matches!(&bytes[i + 4..i + 8], b"prof" | b"rICC");
-        if let Some(t) = parse_colr_at(bytes, i) {
-            if icc {
-                return Some(t);
-            }
-            nclx.get_or_insert(t);
-        }
+    if let Some(primary) = primary_colr_positions(bytes) {
+        let pick = |want_icc: bool| {
+            primary
+                .iter()
+                .filter(|&&p| is_icc_colr(bytes, p) == want_icc)
+                .find_map(|&p| colr_transform_at(bytes, p))
+        };
+        return pick(true).or_else(|| pick(false));
     }
-    nclx
+    colr_positions(bytes).find_map(|i| parse_colr_at(bytes, i))
 }
 
-/// Where each `colr` type field sits (the box's 4-byte size precedes it).
+/// The container's real colour description for **export** (rung 0b): the primary image's
+/// `colr` ICC bytes verbatim, or its nclx code points — not the display reduction
+/// [`color_from_colr_box`] returns, and chosen the same way. `None` when there is no usable
+/// `colr` box.
+#[cfg(any(windows, heic_libheif, test))]
+pub(crate) fn colr_desc(bytes: &[u8]) -> Option<pb_encode::ColorDesc> {
+    if let Some(primary) = primary_colr_positions(bytes) {
+        let pick = |want_icc: bool| {
+            primary
+                .iter()
+                .filter(|&&p| is_icc_colr(bytes, p) == want_icc)
+                .find_map(|&p| colr_desc_at(bytes, p))
+        };
+        return pick(true).or_else(|| pick(false));
+    }
+    colr_positions(bytes).find_map(|i| colr_desc_at(bytes, i))
+}
+
+/// Where each `colr` type field sits (the box's 4-byte size precedes it) — the fallback
+/// scan for a file whose `meta` can't be walked.
 #[cfg(any(windows, heic_libheif, test))]
 fn colr_positions(bytes: &[u8]) -> impl Iterator<Item = usize> + '_ {
     (4..bytes.len().saturating_sub(7)).filter(|&i| &bytes[i..i + 4] == b"colr")
 }
 
-/// The container's real colour description for **export** (rung 0b): the `colr` box's ICC
-/// bytes verbatim, or its nclx code points — not the display reduction
-/// [`color_from_colr_box`] returns. `None` when there is no usable `colr` box.
 #[cfg(any(windows, heic_libheif, test))]
-pub(crate) fn colr_desc(bytes: &[u8]) -> Option<pb_encode::ColorDesc> {
-    // As `color_from_colr_box`: a profile outranks code points.
-    let mut nclx = None;
-    for i in colr_positions(bytes) {
-        match colr_desc_at(bytes, i) {
-            Some(d @ pb_encode::ColorDesc::Icc(_)) => return Some(d),
-            Some(d) => {
-                nclx.get_or_insert(d);
+fn is_icc_colr(bytes: &[u8], pos: usize) -> bool {
+    matches!(bytes.get(pos + 4..pos + 8), Some(b"prof") | Some(b"rICC"))
+}
+
+/// A box: (start, end, type, header length).
+#[cfg(any(windows, heic_libheif, test))]
+type BoxSpan = (usize, usize, [u8; 4], usize);
+
+/// The boxes laid end to end in `b[start..end]`.
+#[cfg(any(windows, heic_libheif, test))]
+fn child_boxes(b: &[u8], start: usize, end: usize) -> Option<Vec<BoxSpan>> {
+    let mut out = Vec::new();
+    let mut pos = start;
+    while pos + 8 <= end {
+        let size = u32::from_be_bytes(b.get(pos..pos + 4)?.try_into().ok()?) as usize;
+        let typ: [u8; 4] = b.get(pos + 4..pos + 8)?.try_into().ok()?;
+        let (size, hdr) = match size {
+            0 => (end - pos, 8),
+            1 => (
+                usize::try_from(u64::from_be_bytes(
+                    b.get(pos + 8..pos + 16)?.try_into().ok()?,
+                ))
+                .ok()?,
+                16,
+            ),
+            n => (n, 8),
+        };
+        if size < hdr || pos.checked_add(size)? > end {
+            return None;
+        }
+        out.push((pos, pos + size, typ, hdr));
+        pos += size;
+    }
+    Some(out)
+}
+
+/// The primary item's `colr` properties, in its association order, as the offsets of their
+/// type fields (what [`colr_transform_at`] / [`colr_desc_at`] take). `None` when the `meta` →
+/// `pitm` / `iprp` → `ipco` / `ipma` chain can't be walked.
+#[cfg(any(windows, heic_libheif, test))]
+fn primary_colr_positions(b: &[u8]) -> Option<Vec<usize>> {
+    let find = |boxes: &[BoxSpan], t: &[u8; 4]| {
+        boxes.iter().copied().find(|bx| &bx.2 == t)
+    };
+    let be = |at: usize, n: usize| -> Option<u32> {
+        Some(
+            b.get(at..at + n)?
+                .iter()
+                .fold(0u32, |a, &x| a << 8 | x as u32),
+        )
+    };
+    let top = child_boxes(b, 0, b.len())?;
+    let meta = find(&top, b"meta")?;
+    let kids = child_boxes(b, meta.0 + meta.3 + 4, meta.1)?; // meta is a FullBox
+    let pitm = find(&kids, b"pitm")?;
+    let pitm_body = pitm.0 + pitm.3;
+    let primary = if *b.get(pitm_body)? == 0 {
+        be(pitm_body + 4, 2)?
+    } else {
+        be(pitm_body + 4, 4)?
+    };
+    let iprp = find(&kids, b"iprp")?;
+    let iprp_kids = child_boxes(b, iprp.0 + iprp.3, iprp.1)?;
+    let ipco = find(&iprp_kids, b"ipco")?;
+    let props = child_boxes(b, ipco.0 + ipco.3, ipco.1)?;
+    let mut out = Vec::new();
+    // Several ipma boxes are allowed; an item's entry is in one of them.
+    for ipma in iprp_kids.iter().filter(|bx| &bx.2 == b"ipma") {
+        let body = ipma.0 + ipma.3;
+        let (version, flags) = (*b.get(body)?, be(body + 1, 3)?);
+        let mut at = body + 4;
+        let count = be(at, 4)?;
+        at += 4;
+        for _ in 0..count {
+            let id_len = if version < 1 { 2 } else { 4 };
+            let id = be(at, id_len)?;
+            at += id_len;
+            let n = *b.get(at)? as usize;
+            at += 1;
+            for _ in 0..n {
+                let index = if flags & 1 == 1 {
+                    let v = be(at, 2)? & 0x7FFF;
+                    at += 2;
+                    v
+                } else {
+                    let v = be(at, 1)? & 0x7F;
+                    at += 1;
+                    v
+                } as usize;
+                if id == primary && index > 0 {
+                    let (start, _, typ, _) = *props.get(index - 1)?;
+                    if &typ == b"colr" {
+                        out.push(start + 4);
+                    }
+                }
             }
-            None => {}
+            if at > ipma.1 {
+                return None;
+            }
         }
     }
-    nclx
+    Some(out)
 }
 
 #[cfg(any(windows, heic_libheif, test))]
@@ -239,9 +342,16 @@ fn colr_desc_at(bytes: &[u8], pos: usize) -> Option<pb_encode::ColorDesc> {
 }
 
 /// Parse a `colr` box whose type field starts at `pos` (the 4-byte size precedes
-/// it). `None` if it isn't a usable color box (lets the scan keep looking).
+/// it) into an *enabled* transform. `None` if it isn't a usable color box or says sRGB
+/// (lets the fallback scan keep looking).
 #[cfg(any(windows, heic_libheif, test))]
 fn parse_colr_at(bytes: &[u8], pos: usize) -> Option<ColorTransform> {
+    colr_transform_at(bytes, pos).filter(|t| t.enabled)
+}
+
+/// A `colr` box's transform, sRGB (disabled) included; `None` only if it isn't a valid box.
+#[cfg(any(windows, heic_libheif, test))]
+fn colr_transform_at(bytes: &[u8], pos: usize) -> Option<ColorTransform> {
     let box_start = pos.checked_sub(4)?;
     let size = u32::from_be_bytes(bytes[box_start..pos].try_into().ok()?) as usize;
     if size < 12 || box_start + size > bytes.len() {
@@ -257,8 +367,7 @@ fn parse_colr_at(bytes: &[u8], pos: usize) -> Option<ColorTransform> {
             if icc_size != icc.len() {
                 return None;
             }
-            let t = ColorTransform::from_icc(icc);
-            t.enabled.then_some(t)
+            Some(ColorTransform::from_icc(icc))
         }
         b"nclx" => {
             // primaries:u16, transfer:u16, matrix:u16, then full-range flag (bit 7).
@@ -266,8 +375,9 @@ fn parse_colr_at(bytes: &[u8], pos: usize) -> Option<ColorTransform> {
             let trc = u16::from_be_bytes(bytes.get(pos + 10..pos + 12)?.try_into().ok()?);
             let matx = u16::from_be_bytes(bytes.get(pos + 12..pos + 14)?.try_into().ok()?);
             let full = (*bytes.get(pos + 14)? & 0x80) != 0;
-            let t = ColorTransform::from_cicp(prim as u8, trc as u8, matx as u8, full);
-            t.enabled.then_some(t)
+            Some(ColorTransform::from_cicp(
+                prim as u8, trc as u8, matx as u8, full,
+            ))
         }
         _ => None,
     }
@@ -435,6 +545,107 @@ mod tests {
         assert!(color_from_colr_box(&buf).is_none());
     }
 
+    fn bx(typ: &[u8; 4], payload: &[u8]) -> Vec<u8> {
+        let mut v = ((8 + payload.len()) as u32).to_be_bytes().to_vec();
+        v.extend_from_slice(typ);
+        v.extend_from_slice(payload);
+        v
+    }
+
+    /// A minimal HEIF: `props` in `ipco`, and `assoc` as (item, 1-based property indices).
+    fn heif(primary: u16, props: &[Vec<u8>], assoc: &[(u16, &[u8])]) -> Vec<u8> {
+        let pitm = bx(
+            b"pitm",
+            &[&[0u8, 0, 0, 0][..], &primary.to_be_bytes()].concat(),
+        );
+        let ipco = bx(b"ipco", &props.concat());
+        let mut ipma = vec![0u8, 0, 0, 0];
+        ipma.extend_from_slice(&(assoc.len() as u32).to_be_bytes());
+        for (item, idx) in assoc {
+            ipma.extend_from_slice(&item.to_be_bytes());
+            ipma.push(idx.len() as u8);
+            ipma.extend_from_slice(idx);
+        }
+        let iprp = bx(b"iprp", &[ipco, bx(b"ipma", &ipma)].concat());
+        let meta = bx(b"meta", &[&[0u8, 0, 0, 0][..], &pitm, &iprp].concat());
+        [ftyp(b"heic", &[b"mif1"]), meta].concat()
+    }
+
+    fn colr(kind: &[u8; 4], payload: &[u8]) -> Vec<u8> {
+        bx(b"colr", &[&kind[..], payload].concat())
+    }
+
+    /// Review finding: the profile must be the **primary image's**. A thumbnail's Adobe RGB
+    /// profile (or an alpha plane's colour box) never colours the photo, and a primary whose
+    /// own profile says sRGB is sRGB, whatever an nclx says.
+    #[test]
+    fn only_the_primary_items_colour_counts() {
+        let adobe = {
+            let mut p = moxcms::ColorProfile::new_srgb();
+            p.cicp = None;
+            p.red_colorant = moxcms::Xyzd {
+                x: 0.6097,
+                y: 0.3111,
+                z: 0.0195,
+            };
+            p.encode().unwrap()
+        };
+        let p3_nclx = colr(b"nclx", &[0, 12, 0, 13, 0, 6, 0x80]);
+        // Item 1 (primary): P3 by code points. Item 2 (a thumbnail): an ICC.
+        let file = heif(
+            1,
+            &[p3_nclx.clone(), colr(b"prof", &adobe)],
+            &[(1, &[1]), (2, &[2])],
+        );
+        assert_eq!(
+            colr_desc(&file),
+            Some(pb_encode::ColorDesc::Cicp(pb_encode::Cicp {
+                primaries: 12,
+                transfer: 13,
+                matrix: 6,
+                full_range: true
+            })),
+            "the thumbnail's profile never wins"
+        );
+        assert!(color_from_colr_box(&file).unwrap().matrix[1][0] < 0.0, "P3");
+        // The primary's own sRGB profile is an answer, not a reason to use its nclx.
+        let srgb = moxcms::ColorProfile::new_srgb().encode().unwrap();
+        let file = heif(1, &[p3_nclx, colr(b"prof", &srgb)], &[(1, &[1, 2])]);
+        assert!(
+            !color_from_colr_box(&file).unwrap().enabled,
+            "sRGB: no conversion"
+        );
+        assert!(matches!(
+            colr_desc(&file),
+            Some(pb_encode::ColorDesc::Icc(_))
+        ));
+        // A primary with no colr at all: nothing (the caller's fallback), not another item's.
+        let file = heif(1, &[colr(b"prof", &adobe)], &[(1, &[]), (2, &[1])]);
+        assert_eq!(colr_desc(&file), None);
+        assert!(color_from_colr_box(&file).is_none());
+    }
+
+    /// Blaze's own AVIF export (P3, with an alpha item) resolves to its profile through the
+    /// primary item — the path a re-export takes on Windows.
+    #[test]
+    fn blazes_avif_export_resolves_to_its_profile() {
+        let p3 = pb_encode::icc::display_p3_profile();
+        let img = pb_encode::ExportImage {
+            width: 16,
+            height: 16,
+            channels: pb_encode::Channels::Rgba,
+            samples: pb_encode::Samples::U8([200, 30, 40, 128].repeat(256)),
+            color: pb_encode::OutputColor::Icc(p3.clone()),
+            notes: Vec::new(),
+        };
+        let avif = pb_encode::avif::encode_avif(&img, 80).unwrap();
+        assert!(primary_colr_positions(&avif).is_some_and(|p| p.len() == 1));
+        assert_eq!(
+            colr_desc(&avif),
+            Some(pb_encode::ColorDesc::Icc(std::sync::Arc::from(p3)))
+        );
+    }
+
     /// A file with both (libavif writes both when given a profile; so does Blaze's AVIF
     /// export): the profile describes the colour, the nclx only the YUV matrix — whichever
     /// comes first.
@@ -442,13 +653,14 @@ mod tests {
     fn a_profile_outranks_an_nclx_in_the_same_file() {
         let icc = moxcms::ColorProfile::new_display_p3().encode().unwrap();
         for nclx_first in [true, false] {
-            let nclx = colr_box(b"nclx", &[0, 2, 0, 2, 0, 6, 0x80]);
-            let prof = colr_box(b"prof", &icc);
-            let file = if nclx_first {
-                [nclx, prof].concat()
+            let nclx = colr(b"nclx", &[0, 2, 0, 2, 0, 6, 0x80]);
+            let prof = colr(b"prof", &icc);
+            let (props, order): (Vec<Vec<u8>>, &[u8]) = if nclx_first {
+                (vec![nclx, prof], &[1, 2])
             } else {
-                [prof, nclx].concat()
+                (vec![prof, nclx], &[1, 2])
             };
+            let file = heif(1, &props, &[(1, order)]);
             assert_eq!(
                 colr_desc(&file),
                 Some(pb_encode::ColorDesc::Icc(std::sync::Arc::from(icc.clone()))),

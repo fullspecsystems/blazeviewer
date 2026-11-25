@@ -1,0 +1,83 @@
+rav1e 0.8.1: notices carried by its hand-written assembly
+=========================================================
+
+Blaze Viewer builds rav1e (the AV1 encoder behind AVIF export) with its assembly: the
+ARM64 files (src/arm) on Apple Silicon, the x86-64 files (src/x86) on Windows when nasm
+is present. Much of it comes from dav1d, and its files carry these notices under the
+BSD-2-Clause license reproduced at the end (generated from the files' own headers):
+
+    Copyright © 2019, B Krishnan Iyer
+    Copyright © 2015 Janne Grunau
+    Copyright © 2018, Janne Grunau
+    Copyright © 2015 Martin Storsjo
+    Copyright © 2018, Martin Storsjo
+    Copyright © 2019, Martin Storsjo
+    Copyright © 2020, Martin Storsjo
+    Copyright © 2021, Matthias Dressel
+    Copyright © 2020, Nathan Egge
+    Copyright (c) 2021, Nathan Egge
+    Copyright (c) 2017-2021, The rav1e contributors
+    Copyright © 2017-2021, The rav1e contributors
+    Copyright © 2018, Two Orioles, LLC
+    Copyright © 2018-2021, Two Orioles, LLC
+    Copyright © 2019, Two Orioles, LLC
+    Copyright © 2019-2022, Two Orioles, LLC
+    Copyright © 2020, Two Orioles, LLC
+    Copyright © 2020-2023, Two Orioles, LLC
+    Copyright © 2021, Two Orioles, LLC
+    Copyright © 2021-2022, Two Orioles, LLC
+    Copyright © 2022, Two Orioles, LLC
+    Copyright © 2022-2023, Two Orioles, LLC
+    Copyright © 2018, VideoLabs
+    Copyright © 2019, VideoLabs
+    Copyright © 2018, VideoLAN and dav1d authors
+    Copyright © 2018-2021, VideoLAN and dav1d authors
+    Copyright © 2019, VideoLAN and dav1d authors
+    Copyright © 2019-2021, VideoLAN and dav1d authors
+    Copyright © 2019-2022, VideoLAN and dav1d authors
+    Copyright © 2020, VideoLAN and dav1d authors
+    Copyright © 2020-2023, VideoLAN and dav1d authors
+    Copyright © 2021, VideoLAN and dav1d authors
+    Copyright © 2021-2022, VideoLAN and dav1d authors
+    Copyright © 2022, VideoLAN and dav1d authors
+    Copyright © 2022-2023, VideoLAN and dav1d authors
+
+rav1e's own assembly files carry these, under rav1e's BSD-2-Clause license and the
+Alliance for Open Media Patent License 1.0 (rav1e-LICENSE.txt, rav1e-PATENTS.txt):
+
+    Copyright (c) 2016, Alliance for Open Media. All rights reserved
+    Copyright (c) 2018, The rav1e contributors. All rights reserved
+    Copyright (c) 2019, The rav1e contributors. All rights reserved
+    Copyright (c) 2019-2022, The rav1e contributors. All rights reserved
+    Copyright (c) 2020-2022, The rav1e contributors. All rights reserved
+    Copyright (c) 2020-2023, The rav1e contributors. All rights reserved
+    Copyright (c) 2022, The rav1e contributors. All rights reserved
+    Copyright (c) 2022-2023, The rav1e contributors. All rights reserved
+    Copyright (c) 2023, The rav1e contributors. All rights reserved
+    Copyright © 2018, Two Orioles, LLC
+    Copyright © 2018, VideoLAN and dav1d authors
+
+The BSD-2-Clause license, as it appears in those files:
+
+All rights reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are met:
+
+1. Redistributions of source code must retain the above copyright notice, this
+   list of conditions and the following disclaimer.
+
+2. Redistributions in binary form must reproduce the above copyright notice,
+   this list of conditions and the following disclaimer in the documentation
+   and/or other materials provided with the distribution.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR
+ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+(INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
+ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.

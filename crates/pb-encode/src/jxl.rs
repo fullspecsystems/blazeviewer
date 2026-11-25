@@ -168,11 +168,12 @@ pub fn encode_jxl_at(
                 "lossless setup failed",
             )?;
         } else {
-            // Quality 100 maps to distance 0, which libjxl only takes in lossless mode: use
-            // its smallest lossy distance instead.
+            // Quality 100 maps to distance 0, which libjxl takes as "switch to lossless" — and
+            // refuses here, the lossy setup having left the original profile off. Use its
+            // smallest lossy distance, 0.05 (it raises anything smaller to that anyway).
             let distance = j::JxlEncoderDistanceFromQuality(quality.clamp(1, 100) as f32);
             ok(
-                j::JxlEncoderSetFrameDistance(fs, distance.max(0.01)),
+                j::JxlEncoderSetFrameDistance(fs, distance.max(0.05)),
                 "bad quality",
             )?;
         }

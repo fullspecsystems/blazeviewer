@@ -439,7 +439,7 @@ pub const JPEG_QUALITY_DEFAULT: u8 = 85;
 /// The other lossy formats' defaults, each codec on its own scale: the grid setting whose
 /// median SSIMULACRA2 over the corpus is closest to JPEG 85's (83.6), so switching formats
 /// keeps a typical photo looking the same (`examples/codec_bench.rs`, rung 4, 2048 px):
-/// WebP 90 scores 82.5 at −16 % of JPEG 85's size, AVIF 85 80.6 at −46 %, JPEG XL 85 82.5 at
+/// WebP 90 scores 83.7 at −10 % of JPEG 85's size, AVIF 85 80.6 at −46 %, JPEG XL 85 82.5 at
 /// −37 %, and HEIC 90 84.1 at **+30 %** — Image I/O's HEIC is no smaller than JPEG.
 pub const WEBP_QUALITY_DEFAULT: u8 = 90;
 pub const AVIF_QUALITY_DEFAULT: u8 = 85;
@@ -594,6 +594,59 @@ impl ExportSettings {
         if let Some(slot) = self.quality_slot() {
             *slot = clamp_quality(q);
         }
+    }
+
+    /// Only what shapes the current format's file: the other formats' qualities, a quality
+    /// Lossless ignores, PNG's compression for another format — all set to one fixed value. The
+    /// live preview keys its files on this, so tuning WebP never evicts the AVIF just made.
+    pub fn normalized(&self) -> ExportSettings {
+        let mut n = ExportSettings {
+            format: self.format,
+            jpeg_quality: 0,
+            webp_quality: 0,
+            avif_quality: 0,
+            jxl_quality: 0,
+            heic_quality: 0,
+            webp_lossless: false,
+            jxl_lossless: false,
+            png: PngCompression::Balanced,
+            size: self.size,
+            strip_metadata: self.strip_metadata,
+        };
+        match self.format {
+            FormatChoice::Png => n.png = self.png,
+            FormatChoice::Jpeg => n.jpeg_quality = self.jpeg_quality,
+            FormatChoice::Webp => {
+                n.webp_lossless = self.webp_lossless;
+                if !self.webp_lossless {
+                    n.webp_quality = self.webp_quality;
+                }
+            }
+            FormatChoice::Avif => n.avif_quality = self.avif_quality,
+            FormatChoice::Jxl => {
+                n.jxl_lossless = self.jxl_lossless;
+                if !self.jxl_lossless {
+                    n.jxl_quality = self.jxl_quality;
+                }
+            }
+            FormatChoice::Heic => n.heic_quality = self.heic_quality,
+            FormatChoice::Tiff => {}
+        }
+        n
+    }
+
+    /// Why the format can't write an image of `dims` (as displayed) at the chosen size, if it
+    /// can't: WebP stops at 16383 px. The panel shows it and disables Export…; the commit
+    /// (⌘↩ / Ctrl+Enter) refuses with it too.
+    pub fn size_limit(&self, dims: (u32, u32)) -> Option<String> {
+        let max = self.format.max_edge()?;
+        let (w, h) = self.size.target(dims).unwrap_or(dims);
+        (w.max(h) > max).then(|| {
+            format!(
+                "{} images can be at most {max} pixels on a side. Choose a smaller size.",
+                self.format.label()
+            )
+        })
     }
 
     /// `[` / `]` in the mode: the quality by [`QUALITY_STEP`], or PNG compression one level.
@@ -880,19 +933,9 @@ impl ExportPanel {
             notes.push("JPEG has no transparency: transparent areas become white.".into());
         }
         // A format with a smaller limit than the image: say so, and don't offer to export.
-        let too_big = match (settings.format.max_edge(), output_dims) {
-            (Some(max), Some((w, h))) => w.max(h) > max,
-            _ => false,
-        };
-        if too_big {
-            notes.insert(
-                0,
-                format!(
-                    "{} images can be at most {} pixels on a side. Choose a smaller size.",
-                    settings.format.label(),
-                    settings.format.max_edge().unwrap_or_default()
-                ),
-            );
+        let too_big = dims.and_then(|d| settings.size_limit(d));
+        if let Some(why) = &too_big {
+            notes.insert(0, why.clone());
         }
         if settings.strip_metadata {
             notes.push(
@@ -908,7 +951,7 @@ impl ExportPanel {
             );
         }
 
-        let can_export = source.as_ref().is_some_and(|s| s.blocked.is_none()) && !too_big;
+        let can_export = source.as_ref().is_some_and(|s| s.blocked.is_none()) && too_big.is_none();
         ExportPanel {
             source,
             settings,
@@ -1131,6 +1174,42 @@ mod tests {
         assert!(!s.step_quality(1));
         assert_eq!(s.export_format(), ExportFormat::Tiff);
         assert_eq!(s.extension(), "tif");
+    }
+
+    /// Review finding: only the current format's own settings shape its file, so the preview
+    /// cache keyed on [`ExportSettings::normalized`] survives tuning another format — and the
+    /// normalized settings still make exactly the same file.
+    #[test]
+    fn normalized_keeps_only_what_shapes_the_file() {
+        let mut s = ExportSettings {
+            format: FormatChoice::Avif,
+            ..ExportSettings::default()
+        };
+        let avif = s.normalized();
+        s.webp_quality = 55;
+        s.jpeg_quality = 60;
+        s.png = PngCompression::Smallest;
+        s.jxl_lossless = true;
+        assert_eq!(s.normalized(), avif, "other formats' settings don't matter");
+        assert_eq!(
+            s.normalized().export_format(),
+            s.export_format(),
+            "same file"
+        );
+        s.avif_quality = 40;
+        assert_ne!(s.normalized(), avif, "AVIF's own does");
+        s.format = FormatChoice::Webp;
+        s.webp_lossless = true;
+        let lossless = s.normalized();
+        s.webp_quality = 80;
+        assert_eq!(s.normalized(), lossless, "Lossless ignores the quality");
+        // (Lossless WebP / JPEG XL never read the quality: their effort is fixed in pb-encode.)
+        s.webp_lossless = false;
+        s.jxl_lossless = false;
+        for f in FormatChoice::ALL {
+            s.format = f;
+            assert_eq!(s.normalized().export_format(), s.export_format(), "{f:?}");
+        }
     }
 
     /// The menu lists what this build writes; a saved format it can't write starts as PNG.

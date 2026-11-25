@@ -58,6 +58,19 @@ pub fn encode_tiff(img: &ExportImage) -> Result<Vec<u8>, EncodeError> {
         OutputColor::Srgb => None,
         OutputColor::Icc(p) => Some(p.as_slice()),
     };
+    // Gray + alpha is written as RGBA (the crate has no gray-alpha layout), so a gray profile
+    // must become the RGB one with the same curve — a GRAY profile can't describe RGB samples.
+    let widened_icc;
+    let icc = match icc {
+        Some(p)
+            if img.channels == Channels::GrayAlpha
+                && crate::icc::data_color_space(p) == Some(crate::icc::IccSpace::Gray) =>
+        {
+            widened_icc = crate::icc::rgb_for_gray(p).filter(|rgb| !crate::icc::is_srgb(rgb));
+            widened_icc.as_deref()
+        }
+        other => other,
+    };
     let (w, h) = (img.width, img.height);
     let mut out = Cursor::new(Vec::new());
     {
@@ -236,6 +249,42 @@ mod tests {
             .expect("decodes")
             .to_rgb8();
         assert_eq!(back.into_raw(), px);
+    }
+
+    /// Review finding: gray + alpha widens to RGBA, so its gray profile becomes the RGB one
+    /// with the same curve — never a GRAY profile on RGB samples. Plain gray keeps its own.
+    #[test]
+    fn gray_alpha_carries_an_rgb_profile_and_gray_keeps_its_own() {
+        let gray22 = moxcms::ColorProfile::new_gray_with_gamma(2.2)
+            .encode()
+            .unwrap();
+        let color = OutputColor::Icc(gray22.clone());
+        let t = encode_tiff(&image(
+            2,
+            1,
+            Channels::GrayAlpha,
+            Samples::U8(vec![40, 255, 200, 9]),
+            color.clone(),
+        ))
+        .unwrap();
+        let (ct, _, icc, _) = decode(&t);
+        assert_eq!(ct, tiff::ColorType::RGBA(8));
+        let icc = icc.expect("a profile");
+        assert_eq!(
+            crate::icc::data_color_space(&icc),
+            Some(crate::icc::IccSpace::Rgb)
+        );
+        let t = encode_tiff(&image(
+            2,
+            1,
+            Channels::Gray,
+            Samples::U8(vec![40, 200]),
+            color,
+        ))
+        .unwrap();
+        let (ct, _, icc, _) = decode(&t);
+        assert_eq!(ct, tiff::ColorType::Gray(8));
+        assert_eq!(icc.as_deref(), Some(gray22.as_slice()));
     }
 
     #[test]

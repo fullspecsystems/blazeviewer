@@ -130,7 +130,9 @@ impl AppCore {
         let Some(path) = path.filter(|p| !p.as_os_str().is_empty()) else {
             return; // cancelled
         };
-        let dest = export::ensure_extension(path, request.settings.extension());
+        let dest = export::ensure_extension(path.clone(), request.settings.extension());
+        // The dialog approved replacing `path` only; an appended extension makes a new path.
+        let may_replace = dest == path;
         if self.export.pending_destinations().contains(&dest) {
             self.show_toast("Another export is already writing that file");
             return;
@@ -152,6 +154,7 @@ impl AppCore {
             settings: request.settings,
             encoded: request.encoded,
             dest: dest.clone(),
+            may_replace,
             queued_at: std::time::Instant::now(),
         };
         let worker = self.export.worker.get_or_insert_with(ExportWorker::new);

@@ -111,6 +111,21 @@ impl ColorTransform {
     /// Reduce a parsed [`ColorProfile`] to the shader transform. Non-RGB or
     /// non-matrix profiles (no usable colorants) fall back to passthrough.
     pub fn from_profile(profile: &ColorProfile) -> Self {
+        // A gray profile: the pixels arrive as R = G = B, so an identity matrix keeps them
+        // neutral and the profile's own curve linearizes them. A curve close to sRGB's (Gray
+        // Gamma 2.2) stays a bit-exact passthrough; a linear or dot-gain gray no longer shows
+        // as if it were sRGB (it used to: every gray profile was passthrough).
+        if profile.color_space == DataColorSpace::Gray {
+            let Some(curve) = profile.gray_trc.as_ref() else {
+                return Self::srgb();
+            };
+            let trc = trc_from_curve(curve);
+            return Self {
+                matrix: IDENTITY,
+                trc,
+                enabled: !trc_is_srgb_like(&trc),
+            };
+        }
         if profile.color_space != DataColorSpace::Rgb {
             return Self::srgb();
         }
@@ -467,6 +482,35 @@ mod tests {
         assert!(
             !trc_is_srgb_like(&gamma_trc(1.8)),
             "1.8 gamma is not sRGB-like"
+        );
+    }
+
+    /// Review finding: a gray profile's curve is honoured. Linear gray mid-gray (0.5 linear)
+    /// is about 188 on an sRGB screen, not 128; a gamma-2.2 gray stays a passthrough.
+    #[test]
+    fn a_gray_profiles_curve_is_used() {
+        let mut linear = ColorProfile::new_gray_with_gamma(1.0);
+        linear.color_space = DataColorSpace::Gray;
+        let t = ColorTransform::from_icc(&linear.encode().unwrap());
+        assert!(t.enabled, "linear gray converts");
+        assert_eq!(t.matrix, IDENTITY);
+        let [g, a, b, c, d, e, f] = t.trc;
+        let lin = |x: f32| {
+            if x < d {
+                c * x + f
+            } else {
+                (a * x + b).powf(g) + e
+            }
+        };
+        assert!((lin(0.5) - 0.5).abs() < 0.01, "linear: {}", lin(0.5));
+        let mut gamma22 = ColorProfile::new_gray_with_gamma(2.2);
+        gamma22.color_space = DataColorSpace::Gray;
+        let t = ColorTransform::from_icc(&gamma22.encode().unwrap());
+        assert!(!t.enabled, "≈ sRGB: passthrough");
+        assert!(
+            (t.trc[0] - 2.2).abs() < 0.01,
+            "but read as gray gamma 2.2: {:?}",
+            t.trc
         );
     }
 

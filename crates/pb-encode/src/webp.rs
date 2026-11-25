@@ -122,7 +122,9 @@ unsafe fn encode_bitstream(
     let mut pic = unsafe { pic.assume_init() };
     pic.width = width as c_int;
     pic.height = height as c_int;
-    pic.use_argb = lossless as c_int;
+    // ARGB input for lossy too: importing as YUV converts right away with the ordinary
+    // conversion, before `use_sharp_yuv` is consulted (libwebp 1.6.0 picture_csp_enc.c).
+    pic.use_argb = 1;
     let imported = unsafe {
         if alpha {
             w::WebPPictureImportRGBA(&mut pic, px.as_ptr(), (width * 4) as c_int)

@@ -258,11 +258,27 @@ pub fn suggested_name(display_name: &str, ext: &str, is_taken: impl Fn(&str) -> 
     crate::quick_sort::unique_name(&format!("{stem}.{ext}"), is_taken)
 }
 
-/// Make sure the chosen path carries the format's extension (Linux's dialog doesn't enforce
-/// the filter). JPEG accepts `.jpeg` as well as `.jpg`.
+/// The other extensions a format's file may carry — the ones a save dialog accepts for the
+/// same type (macOS registers `.tiff` beside `.tif`, `.jpeg` beside `.jpg`).
+pub fn extension_aliases(ext: &str) -> &'static [&'static str] {
+    match ext {
+        "jpg" => &["jpeg", "jpe"],
+        "tif" => &["tiff"],
+        "heic" => &["heif", "hif"],
+        _ => &[],
+    }
+}
+
+/// Make sure the chosen path carries the format's extension or one of its
+/// [aliases](extension_aliases) (Linux's dialog doesn't enforce the filter). When it has to
+/// be appended, the result is a path the dialog never approved: the caller must not let the
+/// export replace a file there (`ExportJob::may_replace`).
 pub fn ensure_extension(path: PathBuf, ext: &str) -> PathBuf {
     let ok = path.extension().and_then(|e| e.to_str()).is_some_and(|e| {
-        e.eq_ignore_ascii_case(ext) || (ext == "jpg" && e.eq_ignore_ascii_case("jpeg"))
+        e.eq_ignore_ascii_case(ext)
+            || extension_aliases(ext)
+                .iter()
+                .any(|a| e.eq_ignore_ascii_case(a))
     });
     if ok {
         path
@@ -433,6 +449,13 @@ mod tests {
         assert_eq!(e("/o/a.jpg", "jpg"), PathBuf::from("/o/a.jpg"));
         assert_eq!(e("/o/a.JPEG", "jpg"), PathBuf::from("/o/a.JPEG"));
         assert_eq!(e("/o/a.png", "jpg"), PathBuf::from("/o/a.png.jpg"));
+        // Review finding: the Mac's save panel takes `.tiff` for TIFF; appending `.tif` made a
+        // path the dialog never approved (and could replace an unrelated `a.tiff.tif`).
+        assert_eq!(e("/o/a.tiff", "tif"), PathBuf::from("/o/a.tiff"));
+        assert_eq!(e("/o/a.TIF", "tif"), PathBuf::from("/o/a.TIF"));
+        assert_eq!(e("/o/a.heif", "heic"), PathBuf::from("/o/a.heif"));
+        assert_eq!(e("/o/a.jxl", "jxl"), PathBuf::from("/o/a.jxl"));
+        assert_eq!(e("/o/a.webp", "avif"), PathBuf::from("/o/a.webp.avif"));
     }
 
     #[test]
