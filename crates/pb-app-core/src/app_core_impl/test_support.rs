@@ -481,7 +481,11 @@ impl pb_render::Renderer for AuxOk {
         h: u32,
         _: pb_render::ColorTransform,
     ) -> bool {
-        assert_eq!(rgba.len(), (w * h * 4) as usize, "aux upload is tightly packed RGBA8");
+        assert_eq!(
+            rgba.len(),
+            (w * h * 4) as usize,
+            "aux upload is tightly packed RGBA8"
+        );
         self.0.lock().unwrap().uploaded[idx] = Some((w, h));
         true
     }

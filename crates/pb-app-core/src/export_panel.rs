@@ -138,7 +138,12 @@ pub enum SizeBy {
 }
 
 impl SizeBy {
-    pub const ALL: [SizeBy; 4] = [SizeBy::LongEdge, SizeBy::Width, SizeBy::Height, SizeBy::Percent];
+    pub const ALL: [SizeBy; 4] = [
+        SizeBy::LongEdge,
+        SizeBy::Width,
+        SizeBy::Height,
+        SizeBy::Percent,
+    ];
 
     /// The menu's name for it.
     pub fn label(self) -> &'static str {
@@ -719,11 +724,14 @@ impl ExportPanel {
     /// says why.
     pub fn with_preview(mut self, preview: PreviewReadout, notes: Vec<String>) -> ExportPanel {
         if let crate::export_preview::PreviewStatus::Failed(why) = &preview.status {
-            self.notes.insert(0, format!("Couldn't make a preview: {why}."));
+            self.notes
+                .insert(0, format!("Couldn't make a preview: {why}."));
         }
         if preview.status == crate::export_preview::PreviewStatus::TooLarge {
-            self.notes
-                .insert(0, "This image is too large to preview; it still exports.".into());
+            self.notes.insert(
+                0,
+                "This image is too large to preview; it still exports.".into(),
+            );
         }
         // The preview's notes lead: they describe what's on screen.
         for (i, n) in notes.into_iter().enumerate() {
@@ -936,7 +944,10 @@ mod tests {
             };
             let p = ExportPanel::build(s, src(3000, 2000));
             let opt = p.sizes.last().unwrap();
-            assert_eq!((opt.choice, opt.label.as_str(), opt.enabled), (size, label, true));
+            assert_eq!(
+                (opt.choice, opt.label.as_str(), opt.enabled),
+                (size, label, true)
+            );
             assert_eq!(p.output_dims, Some(out), "{size:?}");
         }
         // A preset isn't listed twice.
@@ -956,7 +967,9 @@ mod tests {
         let p = ExportPanel::build(s, src(3000, 2000));
         assert_eq!(p.output_dims, Some((3000, 2000)));
         assert!(
-            p.notes.iter().any(|n| n.contains("3000 px wide or narrower")),
+            p.notes
+                .iter()
+                .any(|n| n.contains("3000 px wide or narrower")),
             "{:?}",
             p.notes
         );
@@ -967,7 +980,10 @@ mod tests {
         assert_eq!(SizeChoice::custom(SizeBy::Width, 0), None);
         assert_eq!(SizeChoice::custom(SizeBy::Width, MAX_EDGE + 1), None);
         assert_eq!(SizeChoice::custom(SizeBy::Percent, 101), None);
-        assert_eq!(SizeChoice::custom(SizeBy::Percent, 100), Some(SizeChoice::Full));
+        assert_eq!(
+            SizeChoice::custom(SizeBy::Percent, 100),
+            Some(SizeChoice::Full)
+        );
         for c in [
             SizeChoice::Full,
             SizeChoice::LongEdge(2048),
@@ -981,11 +997,18 @@ mod tests {
         }
         // Rung 2's first codes were the bare long edge: still the long edge.
         assert_eq!(SizeChoice::from_code(2048), SizeChoice::LongEdge(2048));
-        assert_eq!(SizeChoice::from_code(u32::MAX), SizeChoice::Full, "malformed");
+        assert_eq!(
+            SizeChoice::from_code(u32::MAX),
+            SizeChoice::Full,
+            "malformed"
+        );
         for b in SizeBy::ALL {
             assert_eq!(SizeBy::from_code(b.code()), Some(b));
         }
-        assert_eq!(SizeChoice::parse_spec(" Width 640 "), Some(SizeChoice::Width(640)));
+        assert_eq!(
+            SizeChoice::parse_spec(" Width 640 "),
+            Some(SizeChoice::Width(640))
+        );
         assert_eq!(SizeChoice::parse_spec("width"), None);
         assert_eq!(SizeChoice::parse_spec("0%"), None);
     }

@@ -379,7 +379,10 @@ mod tests {
         let mut core = core_on(&["a.jpg"]);
         with_dims(&mut core, 0, 3000, 2000);
         core.export_custom_size();
-        assert!(core.effects.is_empty(), "outside the mode there's no Size menu");
+        assert!(
+            core.effects.is_empty(),
+            "outside the mode there's no Size menu"
+        );
         key(&mut core, "E");
         core.effects.clear();
         core.export_custom_size();
@@ -390,7 +393,11 @@ mod tests {
         let d = core.export_size_dialog();
         assert_eq!(
             (d.by, d.value, d.dims),
-            (crate::export_panel::SizeBy::LongEdge, 3000, Some((3000, 2000))),
+            (
+                crate::export_panel::SizeBy::LongEdge,
+                3000,
+                Some((3000, 2000))
+            ),
             "from full size, the dialog offers the image's own long edge"
         );
         core.effects.clear();
@@ -406,9 +413,9 @@ mod tests {
         let d = core.export_size_dialog();
         assert_eq!((d.by, d.value), (crate::export_panel::SizeBy::Width, 1200));
         // Esc on the dialog changes nothing.
-        core.handle(CoreEvent::DialogResolved(contract::DialogResult::Dismissed(Some(
-            contract::DialogKind::ExportSize,
-        ))));
+        core.handle(CoreEvent::DialogResolved(
+            contract::DialogResult::Dismissed(Some(contract::DialogKind::ExportSize)),
+        ));
         assert_eq!(core.export.draft.size, SizeChoice::Width(1200));
     }
 

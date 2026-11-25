@@ -255,7 +255,12 @@ impl TickKey {
     /// applies to the unrotated textures).
     pub fn same_source(&self, other: &TickKey) -> bool {
         (self.content_gen, self.item, self.frame, self.display_turns)
-            == (other.content_gen, other.item, other.frame, other.display_turns)
+            == (
+                other.content_gen,
+                other.item,
+                other.frame,
+                other.display_turns,
+            )
     }
 }
 
@@ -510,7 +515,12 @@ fn run_preview(
                 .map_err(|e| pb_encode::EncodeError::Codec(e.to_string()))
         })
         .ok()
-        .map(|i| turn_back(pb_decode::export::display_from_export_image(&i), req.display_turns));
+        .map(|i| {
+            turn_back(
+                pb_decode::export::display_from_export_image(&i),
+                req.display_turns,
+            )
+        });
         t.original = s.elapsed();
         img
     } else {
@@ -709,7 +719,11 @@ mod tests {
         let at = t0();
         let y = SpringOwner::Key(PbKey::KeyY);
         s.down(y, at);
-        assert_eq!(s.shown(), Side::Original, "the press shows the other side at once");
+        assert_eq!(
+            s.shown(),
+            Side::Original,
+            "the press shows the other side at once"
+        );
         assert!(s.up(y, at + SPRING_HOLD));
         assert_eq!(s.shown(), Side::Export, "the release flicks back");
     }
@@ -720,8 +734,14 @@ mod tests {
         let at = t0();
         let y = SpringOwner::Key(PbKey::KeyY);
         s.down(y, at);
-        assert!(!s.down(SpringOwner::Pointer, at), "a second press is ignored");
-        assert!(!s.up(SpringOwner::Pointer, at + SPRING_HOLD), "so is its release");
+        assert!(
+            !s.down(SpringOwner::Pointer, at),
+            "a second press is ignored"
+        );
+        assert!(
+            !s.up(SpringOwner::Pointer, at + SPRING_HOLD),
+            "so is its release"
+        );
         assert!(!s.set(Side::Export), "a toggle waits for the press to end");
         assert_eq!(s.shown(), Side::Original);
         assert!(s.up(y, at + SPRING_HOLD));
@@ -739,7 +759,10 @@ mod tests {
         s.down(y, t0());
         assert!(s.reset());
         assert!(!s.held());
-        assert!(!s.up(y, t0() + SPRING_HOLD), "the stale release does nothing");
+        assert!(
+            !s.up(y, t0() + SPRING_HOLD),
+            "the stale release does nothing"
+        );
         assert_eq!(s.shown(), Side::Export);
     }
 
@@ -777,8 +800,7 @@ mod tests {
         let blue = [0u8, 0, 255, 255];
         let src: Vec<u8> = [red, blue].concat();
         for turns in 0..4u8 {
-            let (rot, w, h) =
-                pb_encode::prepare::rotate(Samples::U8(src.clone()), 2, 1, 4, turns);
+            let (rot, w, h) = pb_encode::prepare::rotate(Samples::U8(src.clone()), 2, 1, 4, turns);
             let Samples::U8(rot) = rot else { panic!() };
             let back = turn_back(img(rot, w as u32, h as u32), turns);
             assert_eq!((back.width, back.height), (2, 1), "turns {turns}");

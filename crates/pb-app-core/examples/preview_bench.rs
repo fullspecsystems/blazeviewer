@@ -36,9 +36,18 @@ fn main() {
     let source: Arc<dyn ItemSource> = Arc::new(pb_source::FsSource::new(files.clone()));
 
     let cases: [(&str, ExportSettings); 4] = [
-        ("PNG Balanced full", settings(FormatChoice::Png, 85, SizeChoice::Full)),
-        ("JPEG 85 full", settings(FormatChoice::Jpeg, 85, SizeChoice::Full)),
-        ("JPEG 70 full", settings(FormatChoice::Jpeg, 70, SizeChoice::Full)),
+        (
+            "PNG Balanced full",
+            settings(FormatChoice::Png, 85, SizeChoice::Full),
+        ),
+        (
+            "JPEG 85 full",
+            settings(FormatChoice::Jpeg, 85, SizeChoice::Full),
+        ),
+        (
+            "JPEG 70 full",
+            settings(FormatChoice::Jpeg, 70, SizeChoice::Full),
+        ),
         (
             "JPEG 85 2048",
             settings(FormatChoice::Jpeg, 85, SizeChoice::LongEdge(2048)),

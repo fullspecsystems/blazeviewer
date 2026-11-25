@@ -14,8 +14,8 @@
 use super::*;
 use crate::export_preview::{
     size_label, ExportShown, OriginalShown, PreviewKey, PreviewRequest, PreviewResult,
-    PreviewState, PreviewStatus, PreviewWorker, Side, SourceKey, SpringOwner, TickKey,
-    AUX_EXPORT, AUX_ORIGINAL, PREVIEW_DEBOUNCE, PREVIEW_MAX_PIXELS, PREVIEW_POLL,
+    PreviewState, PreviewStatus, PreviewWorker, Side, SourceKey, SpringOwner, TickKey, AUX_EXPORT,
+    AUX_ORIGINAL, PREVIEW_DEBOUNCE, PREVIEW_MAX_PIXELS, PREVIEW_POLL,
 };
 use crate::frame_capture::FrameKey;
 
@@ -291,8 +291,7 @@ impl AppCore {
                     source_dims: e.source_dims,
                 });
                 if !ok {
-                    self.export.preview.failed =
-                        Some((tk, "the preview couldn't be shown".into()));
+                    self.export.preview.failed = Some((tk, "the preview couldn't be shown".into()));
                 }
             }
             Err(why) => {
@@ -576,14 +575,26 @@ mod tests {
         assert!(shown(&log).is_none(), "nothing covers the photo yet");
         tick_until(&mut core, ready);
         let l = log.lock().unwrap();
-        assert_eq!(l.uploaded, [Some((64, 48)), Some((64, 48))], "both sides, full size");
-        assert_eq!(l.shown, Some((AUX_EXPORT, 64, 48)), "the export covers the photo");
+        assert_eq!(
+            l.uploaded,
+            [Some((64, 48)), Some((64, 48))],
+            "both sides, full size"
+        );
+        assert_eq!(
+            l.shown,
+            Some((AUX_EXPORT, 64, 48)),
+            "the export covers the photo"
+        );
         drop(l);
         let PreviewStatus::Ready { bytes } = core.export_preview_status() else {
             unreachable!()
         };
         let file = core.export.preview.export.as_ref().unwrap();
-        assert_eq!(bytes, file.bytes.len() as u64, "the size is the file's, exactly");
+        assert_eq!(
+            bytes,
+            file.bytes.len() as u64,
+            "the size is the file's, exactly"
+        );
         assert_eq!(&file.bytes[..8], b"\x89PNG\r\n\x1a\n", "PNG by default");
         // Only parked work: a viewer re-present is simply covered again on the next draw.
         core.renderer.as_mut().unwrap().present_slot(
@@ -611,7 +622,11 @@ mod tests {
             repeat: false,
         });
         assert_eq!(core.export_preview_side(), Side::Original);
-        assert_eq!(shown(&log).map(|s| s.0), Some(AUX_ORIGINAL), "at once — a rebind");
+        assert_eq!(
+            shown(&log).map(|s| s.0),
+            Some(AUX_ORIGINAL),
+            "at once — a rebind"
+        );
         core.handle(contract::CoreEvent::KeyUp { key: y });
         assert_eq!(core.export_preview_side(), Side::Original, "a tap stays");
         assert!(core.compare_pin.is_none(), "Y doesn't pin in the mode");
@@ -619,7 +634,11 @@ mod tests {
         core.export_set_preview_side(Side::Export);
         assert_eq!(shown(&log).map(|s| s.0), Some(AUX_EXPORT));
         core.handle(contract::CoreEvent::MenuAction(Action::CompareToggle));
-        assert_eq!(core.export_preview_side(), Side::Original, "the menu toggles");
+        assert_eq!(
+            core.export_preview_side(),
+            Side::Original,
+            "the menu toggles"
+        );
         // A settings change shows the export again.
         core.export_set_format(FormatChoice::Jpeg);
         core.now = Instant::now();
@@ -646,9 +665,10 @@ mod tests {
         assert_eq!(&file.bytes[..2], &[0xFF, 0xD8], "now a JPEG");
         let jpeg85 = file.bytes.len();
         core.export_set_jpeg_quality(30);
-        tick_until(&mut core, |c| {
-            matches!(c.export_preview_status(), PreviewStatus::Ready { bytes } if bytes as usize != jpeg85)
-        });
+        tick_until(
+            &mut core,
+            |c| matches!(c.export_preview_status(), PreviewStatus::Ready { bytes } if bytes as usize != jpeg85),
+        );
         let _ = std::fs::remove_dir_all(&lib);
     }
 
@@ -673,12 +693,22 @@ mod tests {
         core.dispatch_action(Action::TogglePanels);
         core.now = Instant::now();
         core.tick();
-        assert!(shown(&log).is_none(), "Tab hides the preview with the panel");
-        assert!(log.lock().unwrap().uploaded[AUX_EXPORT].is_some(), "but keeps it");
+        assert!(
+            shown(&log).is_none(),
+            "Tab hides the preview with the panel"
+        );
+        assert!(
+            log.lock().unwrap().uploaded[AUX_EXPORT].is_some(),
+            "but keeps it"
+        );
         core.dispatch_action(Action::TogglePanels);
         core.now = Instant::now();
         core.tick();
-        assert_eq!(shown(&log).map(|s| s.0), Some(AUX_EXPORT), "back, no re-encode");
+        assert_eq!(
+            shown(&log).map(|s| s.0),
+            Some(AUX_EXPORT),
+            "back, no re-encode"
+        );
         core.dispatch_action(Action::ExportMode);
         core.now = Instant::now();
         core.tick();
@@ -745,7 +775,11 @@ mod tests {
         let first = core.export.preview.export.as_ref().unwrap().bytes.clone();
         core.displayed_item = Some(1);
         tick_until(&mut core, ready);
-        assert_eq!(shown(&log), Some((AUX_EXPORT, 40, 30)), "the second file's own preview");
+        assert_eq!(
+            shown(&log),
+            Some((AUX_EXPORT, 40, 30)),
+            "the second file's own preview"
+        );
         let second = core.export_preview_file().unwrap().bytes;
         assert_ne!(*second, *first, "and its own bytes for Export…");
         let _ = std::fs::remove_dir_all(&lib);
@@ -771,12 +805,18 @@ mod tests {
         core.tick();
         core.now = t + PREVIEW_DEBOUNCE * 5;
         core.tick(); // settled back on 85: already on screen
-        assert!(core.export.preview.in_flight.is_none(), "the 80 encode is dropped");
+        assert!(
+            core.export.preview.in_flight.is_none(),
+            "the 80 encode is dropped"
+        );
         std::thread::sleep(Duration::from_millis(200)); // let any 80 result arrive
         core.now = t + PREVIEW_DEBOUNCE * 6;
         core.tick();
         assert_eq!(core.export.preview.export.as_ref().unwrap().key, q85);
-        assert!(ready(&core), "85 is on screen and ready, not stuck calculating");
+        assert!(
+            ready(&core),
+            "85 is on screen and ready, not stuck calculating"
+        );
         let _ = std::fs::remove_dir_all(&lib);
     }
 
