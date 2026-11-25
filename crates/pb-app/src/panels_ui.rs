@@ -2763,7 +2763,9 @@ fn export_body(ui: &mut egui::Ui, p: &Palette, ex: &ExportPanel, actions: &mut V
                         }
                     })
                     .response
-                    .on_hover_text("PNG is lossless at every level; this trades file size against time");
+                    .on_hover_text(
+                        "PNG is lossless at every level; this trades file size against time",
+                    );
                 if c != s.png {
                     actions.push(PanelAction::ExportPngCompression(c));
                 }
@@ -2826,16 +2828,21 @@ fn export_body(ui: &mut egui::Ui, p: &Palette, ex: &ExportPanel, actions: &mut V
         // The live preview (rung 3): the exact file size once it's made, and which side of
         // the flick is on screen (`Y` flicks; a hold peeks).
         let size = ex.preview.size_text();
-        if !size.is_empty() {
-            export_row(ui, p, "File size", |ui| {
-                ui.horizontal(|ui| {
+        // One fixed CONTROL_H line, centred on the row's label like the controls above it, with
+        // a text-sized spinner (the default one is CONTROL_H tall). Always present, blank while
+        // there's nothing to say (browsing, turning a model), so the rows below never move.
+        export_row(ui, p, "File size", |ui| {
+            ui.allocate_ui_with_layout(
+                egui::vec2(ui.available_width(), pb_ui::CONTROL_H),
+                egui::Layout::left_to_right(egui::Align::Center),
+                |ui| {
                     ui.label(RichText::new(size).color(p.text));
                     if ex.preview.busy() {
-                        ui.spinner();
+                        ui.add(egui::Spinner::new().size(14.0));
                     }
-                });
-            });
-        }
+                },
+            );
+        });
         export_row(ui, p, "Preview", |ui| {
             ui.add_enabled_ui(ex.preview.can_flick(), |ui| {
                 let mut side = ex.preview.side;
@@ -2849,7 +2856,9 @@ fn export_body(ui: &mut egui::Ui, p: &Palette, ex: &ExportPanel, actions: &mut V
                         }
                     })
                     .response
-                    .on_hover_text("Y switches between the export and the original; hold Y to peek");
+                    .on_hover_text(
+                        "Y switches between the export and the original; hold Y to peek",
+                    );
                 if side != ex.preview.side {
                     actions.push(PanelAction::ExportPreviewSide(side));
                 }

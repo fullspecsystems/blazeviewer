@@ -246,7 +246,7 @@ Run `/mac-arsed-mac-app`-style checks here: native look and feel, light **and** 
 
 | # | Do | Expect |
 |---|---|---|
-| 13.1 | `E` on a big photo (20 MP or more) and wait a moment | The photo **becomes the export**: **File size** reads "Calculating…" with a small spinner, then the exact size (`11 MB`); **Preview** reads **Export** |
+| 13.1 | `E` on a big photo (20 MP or more) and wait a moment | The photo **becomes the export**: **File size** reads "Calculating…" with a small spinner, then the exact size (`11 MB`); **Preview** reads **Export**. Nothing below File size moves when the spinner comes and goes (change the quality a few times), or while you hold a key to browse |
 | 13.2 | Pick **JPEG**, drag the quality slider down to 10 and let go | After you let go, one update (not one per step): blocky JPEG artifacts appear **on the photo**, and the size drops. The old picture stays until the new one is ready |
 | 13.3 | Zoom to 1:1 (`1`) and pan | The artifacts are there at full size; zoom and pan work as usual |
 | 13.4 | Tap `Y` | A toast "Original"; the photo is the original. Tap `Y` again: "Export (… KB)", back to the export. The **Preview** control follows |
