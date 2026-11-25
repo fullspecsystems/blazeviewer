@@ -217,8 +217,12 @@ fn run_stages(job: &ExportJob, t: &mut ExportTimings) -> Result<ExportOutcome, S
 
     let s = Instant::now();
     // The codec decides what `prepare` reduces to: JPEG flattens alpha onto white and
-    // narrows to 8-bit; PNG keeps everything.
-    let encoder = job.settings.export_format().encoder();
+    // narrows to 8-bit; PNG keeps everything. A codec this build lacks says so here.
+    let encoder = job
+        .settings
+        .export_format()
+        .encoder()
+        .map_err(|e| e.to_string())?;
     let spec = pb_encode::PrepareSpec {
         caps: encoder.caps(),
         resize: job.settings.size.resize(),

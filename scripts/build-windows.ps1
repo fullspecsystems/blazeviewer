@@ -20,12 +20,20 @@
   decode libs entirely with -NoNative (a plain `cargo build -p pb-app`) when you don't need HEIC /
   animated AVIF / film audio and don't have vcpkg set up. (-NoHeif is the old alias for -NoNative.)
 
+  Export's C/C++ codecs (task #89 rung 4) are on too: `export-codecs` = WebP (libwebp, built with
+  cc) + JPEG XL (libjxl, built with CMake; its bindings need libclang, so the Developer shell is
+  entered for it as for FFmpeg). CMake must be on PATH (Visual Studio's "C++ CMake tools", or
+  `winget install Kitware.CMake`). With nasm on PATH (x64), `avif-asm` adds rav1e's assembly — AVIF
+  exports several times faster. -NoCodecs leaves the C codecs out (PNG, JPEG, TIFF and AVIF still
+  export); -NoNative implies it.
+
 .EXAMPLE
   pwsh scripts/build-windows.ps1               # debug build, libheif + dav1d + ffprobe (film audio)
   pwsh scripts/build-windows.ps1 -Run          # ...then launch it
   pwsh scripts/build-windows.ps1 -Release -Run # optimized build, then launch
   pwsh scripts/build-windows.ps1 -NoFfmpeg -Run # no FFmpeg (films silent), no Developer shell
   pwsh scripts/build-windows.ps1 -NoNative -Run # skip every native lib (no vcpkg needed)
+  pwsh scripts/build-windows.ps1 -NoCodecs -Run # no WebP / JPEG XL export (no CMake needed)
 #>
 [CmdletBinding()]
 param(
@@ -33,6 +41,7 @@ param(
     [switch]$Run,
     [switch]$NoFfmpeg,
     [switch]$NoNative,
+    [switch]$NoCodecs,
     [switch]$NoHeif # legacy alias for -NoNative
 )
 $ErrorActionPreference = "Stop"
@@ -76,13 +85,31 @@ if (-not ($NoNative -or $NoHeif)) {
     }
 }
 
+# ── Export's C/C++ codecs (task #89 rung 4): WebP + JPEG XL. rav1e's assembly for AVIF needs nasm
+#    on x64 (ARM64 is left to the pure-Rust path until that box has tried it).
+$withCodecs = -not ($NoCodecs -or $NoNative -or $NoHeif)
+if ($withCodecs) {
+    $features += "export-codecs"
+    if ($env:PROCESSOR_ARCHITECTURE -ne "ARM64") {
+        if (Get-Command nasm -ErrorAction SilentlyContinue) {
+            $features += "avif-asm"
+        } else {
+            Write-Host "    (no nasm on PATH: AVIF exports use rav1e's slower pure-Rust path; winget install NASM.NASM)" -ForegroundColor Yellow
+        }
+    }
+}
+
 # FFmpeg's bindgen needs the MSVC/SDK include paths + libclang (task #100) — a plain cargo build
 # never did, so enter a VS Developer shell when the caller isn't already in one. No-op inside a VS
 # prompt (INCLUDE already set), and this also exports VCPKG_ROOT, which ffmpeg-sys-next's vcpkg
-# lookup has no ~/vcpkg fallback for. Only needed when actually building FFmpeg.
-if ($withFfmpeg -and (-not $env:INCLUDE -or -not $env:LIBCLANG_PATH)) {
-    Write-Host "==> entering VS Developer shell (FFmpeg bindgen needs it)" -ForegroundColor Cyan
+# lookup has no ~/vcpkg fallback for. Needed for FFmpeg, and for libjxl (jxl-sys runs bindgen and
+# CMake, which the Developer shell puts on PATH).
+if (($withFfmpeg -or $withCodecs) -and (-not $env:INCLUDE -or -not $env:LIBCLANG_PATH)) {
+    Write-Host "==> entering VS Developer shell (FFmpeg / libjxl bindgen needs it)" -ForegroundColor Cyan
     & "$PSScriptRoot\vs-dev-env.ps1"
+}
+if ($withCodecs -and -not (Get-Command cmake -ErrorAction SilentlyContinue)) {
+    throw "JPEG XL export (libjxl) builds with CMake, which isn't on PATH. Install Visual Studio's 'C++ CMake tools' or ``winget install Kitware.CMake``, or pass -NoCodecs to build without WebP / JPEG XL export."
 }
 
 $profileArgs = if ($Release) { @("--release") } else { @() }

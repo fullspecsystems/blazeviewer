@@ -1,9 +1,9 @@
 # Third-party notices
 
-Blaze Viewer bundles and **dynamically links** the third-party components below. This file is
-the human-readable summary: what is used, how it is linked, and why that linkage complies. The
-verbatim upstream license texts live in `licenses/` beside it — that is the legal text; this is
-the map.
+Blaze Viewer bundles the third-party components below — the LGPL ones **dynamically linked**,
+the permissive export encoders statically. This file is the human-readable summary: what is
+used, how it is linked, and why that linkage complies. The verbatim upstream license texts live
+in `licenses/` beside it — that is the legal text; this is the map.
 
 Both ship with every binary distribution, and each release script **hard-fails** if they are
 missing rather than shipping a binary without them:
@@ -23,6 +23,9 @@ missing rather than shipping a binary without them:
 | dav1d | 1.5.3 | same vcpkg commit |
 | FFmpeg | **8.1.3** | Windows: the vcpkg port, moved to the version + source SHA512 in `scripts/ffmpeg-windows.psd1` · macOS: pinned tarball + sha256 in `scripts/build-ffmpeg-macos.sh` |
 | Sparkle (macOS only) | 2.9.4 | `mac/Package.resolved` (SwiftPM) |
+| libwebp (export) | 1.6.0 | vendored in the `libwebp-sys` 0.14.4 crate (`Cargo.lock`) |
+| libjxl (export) | 0.12.0 | vendored in the `jxl-sys` 0.1.12+libjxl-0.12.0 crate (`Cargo.lock`), with its Highway, Brotli and skcms |
+| rav1e / ravif / avif-serialize (export) | 0.8.1 / 0.13.0 / 0.8.9 | `Cargo.lock` |
 
 Linux takes libheif/FFmpeg from the build distro and bundles the resulting shared objects, so
 its versions track that distro rather than the vcpkg pin.
@@ -110,6 +113,29 @@ ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ```
+
+## Image export encoders (task #89 rung 4) — BSD-3-Clause, BSD-2-Clause, MIT
+
+Export writes WebP, AVIF and JPEG XL through these, all **statically linked** and all
+permissive — the house rule is that we encode only with permissive code (CLAUDE.md, *Licensing*),
+and every crate in each chain was checked before it landed (export-plan.md rung 4). Their license
+texts, verbatim, are in `licenses/`.
+
+- **libwebp** 1.6.0 (WebP) — BSD-3-Clause, plus Google's additional patent grant for VP8
+  (`libwebp-PATENTS.txt`). Built from the source the `libwebp-sys` crate (MIT) vendors.
+  Homepage: https://chromium.googlesource.com/webm/libwebp
+- **libjxl** 0.12.0 (JPEG XL) — BSD-3-Clause, plus Google's patent grant (`libjxl-PATENTS.txt`),
+  with its bundled **Highway** (SIMD; dual Apache-2.0 / BSD-3-Clause, used under BSD-3-Clause),
+  **Brotli** (MIT) and **skcms** (colour management; BSD-3-Clause). Built from the source the
+  `jxl-sys` crate (MIT OR Apache-2.0) vendors — never `jpegxl-rs` / `jpegxl-sys`, which are GPL.
+  Homepage: https://github.com/libjxl/libjxl
+- **rav1e** 0.8.1 (AV1 encoding for AVIF) — BSD-2-Clause, plus the Alliance for Open Media Patent
+  License 1.0 (`rav1e-PATENTS.txt`). Pure Rust (with optional assembly).
+  Homepage: https://github.com/xiph/rav1e
+- **ravif** 0.13.0 and **avif-serialize** 0.8.9 (the AVIF encoder and container) — BSD-3-Clause.
+
+The macOS HEIC export uses the system's Image I/O encoder: an operating-system component (see
+below), not redistributed.
 
 ## Sparkle (macOS auto-update) — MIT
 

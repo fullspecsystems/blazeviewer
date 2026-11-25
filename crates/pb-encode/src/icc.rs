@@ -303,10 +303,54 @@ pub fn sanitize(icc: &[u8]) -> Result<Vec<u8>, IccError> {
 
 /// A clean Display P3 profile (the tone-mapped-HDR output space, § 3.8).
 pub fn display_p3_profile() -> Vec<u8> {
-    let encoded = moxcms::ColorProfile::new_display_p3()
-        .encode()
-        .expect("moxcms encodes its own Display P3 profile");
-    sanitize(&encoded).unwrap_or(encoded)
+    // Built from the code points (P3-D65 primaries, the sRGB curve), not moxcms's own
+    // `new_display_p3`, whose slightly-off D50 white and curve skcms (libjxl's CMS, and
+    // Chrome's) can't put a name to — it then has to treat the profile as an arbitrary one.
+    profile_for_cicp(crate::Cicp {
+        primaries: 12,
+        transfer: 13,
+        matrix: 0,
+        full_range: true,
+    })
+    .expect("Display P3 has code points")
+}
+
+/// An honest `desc` for a profile we build: "Display P3" when it is exactly that, else none
+/// (the sanitizer then writes "RGB profile"). moxcms starts every RGB profile from sRGB's, so
+/// without this a P3 or BT.2020 profile went out described as "sRGB IEC61966-2.1".
+fn describe(p: &mut moxcms::ColorProfile, display_p3: bool) {
+    p.description = display_p3.then(|| {
+        moxcms::ProfileText::Localizable(vec![moxcms::LocalizableString::new(
+            "en".into(),
+            "US".into(),
+            "Display P3".into(),
+        )])
+    });
+}
+
+/// Correct a moxcms-built profile's `chad` tag. moxcms 0.8.1 writes its Bradford **cone
+/// response** matrix there for every RGB profile it constructs (fixed upstream in 0.9), where
+/// the ICC spec wants the matrix adapting the profile's own white (`white`) to the D50 PCS.
+/// Most colour engines ignore `chad` for a matrix/TRC profile, which hid it; a reader that
+/// recovers the primaries through it — jxl-oxide, Blaze's JPEG XL decoder — got P3 red at xy
+/// (0.58, 0.42) instead of (0.68, 0.32). Profiles copied from a file keep their own `chad`.
+fn fix_chad(p: &mut moxcms::ColorProfile, white: moxcms::Chromaticity) {
+    p.chromatic_adaptation = Some(moxcms::adaption_matrix_d(
+        white.to_xyz(),
+        moxcms::Chromaticity::D50.to_xyz(),
+    ));
+}
+
+/// The white point a CICP primaries code is defined with (H.273): D65 for all but the few
+/// below.
+fn cicp_white(primaries: u8) -> moxcms::Chromaticity {
+    use moxcms::Chromaticity as C;
+    match primaries {
+        4 | 8 => C::new(0.310, 0.316), // Illuminant C (BT.470 M, generic film)
+        10 => C::new(1.0 / 3.0, 1.0 / 3.0), // E (SMPTE ST 428-1, XYZ)
+        11 => C::new(0.314, 0.351),    // DCI (SMPTE RP 431-2)
+        _ => C::D65,
+    }
 }
 
 /// A clean profile for CICP code points (HEIF/AVIF `nclx` sources). `None` when the code
@@ -327,8 +371,26 @@ pub fn profile_for_cicp(c: crate::Cicp) -> Option<Vec<u8>> {
     profile.cicp = None;
     profile.update_rgb_colorimetry_from_cicp(cicp);
     profile.cicp?;
+    fix_chad(&mut profile, cicp_white(c.primaries));
+    describe(&mut profile, c.primaries == 12 && c.transfer == 13);
     let encoded = profile.encode().ok()?;
     sanitize(&encoded).ok()
+}
+
+/// An RGB profile whose neutral axis is `gray`'s: the gray profile's tone curve on all three
+/// channels (with sRGB's primaries, which R = G = B never reaches). For formats without a gray
+/// layout, where gray pixels are widened to RGB. `None` if `gray` has no readable curve.
+pub fn rgb_for_gray(gray: &[u8]) -> Option<Vec<u8>> {
+    let g = moxcms::ColorProfile::new_from_slice(gray).ok()?;
+    let trc = g.gray_trc?;
+    let mut p = moxcms::ColorProfile::new_srgb();
+    p.cicp = None; // sRGB's code points would override the curves below
+    fix_chad(&mut p, moxcms::Chromaticity::D65);
+    describe(&mut p, false);
+    p.red_trc = Some(trc.clone());
+    p.green_trc = Some(trc.clone());
+    p.blue_trc = Some(trc);
+    sanitize(&p.encode().ok()?).ok()
 }
 
 /// Whether `icc` describes plain sRGB closely enough that an `sRGB` chunk says the same
@@ -373,6 +435,73 @@ pub fn is_srgb(icc: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The `chad` tag of every profile we build adapts its white to D50 (moxcms 0.8.1 wrote
+    /// its cone matrix instead). Checked the way jxl-oxide reads a profile: un-adapting the
+    /// colorants through `chad` must give back the real primaries and white.
+    #[test]
+    fn built_profiles_recover_their_primaries_through_chad() {
+        let check = |icc: &[u8], want: [[f64; 2]; 3], white: [f64; 2], what: &str| {
+            let p = moxcms::ColorProfile::new_from_slice(icc).unwrap();
+            let chad = p.chromatic_adaptation.expect("a chad tag");
+            let inv = chad.inverse();
+            let cols = [p.red_colorant, p.green_colorant, p.blue_colorant];
+            let un = |v: moxcms::Xyzd| {
+                let m = inv.v;
+                [
+                    m[0][0] * v.x + m[0][1] * v.y + m[0][2] * v.z,
+                    m[1][0] * v.x + m[1][1] * v.y + m[1][2] * v.z,
+                    m[2][0] * v.x + m[2][1] * v.y + m[2][2] * v.z,
+                ]
+            };
+            let xy = |v: [f64; 3]| [v[0] / (v[0] + v[1] + v[2]), v[1] / (v[0] + v[1] + v[2])];
+            for (c, w) in cols.into_iter().zip(want) {
+                let got = xy(un(c));
+                assert!(
+                    (got[0] - w[0]).abs() < 2e-3 && (got[1] - w[1]).abs() < 2e-3,
+                    "{what}: primary {got:?} want {w:?}"
+                );
+            }
+            let wp = xy(un(p.white_point));
+            assert!(
+                (wp[0] - white[0]).abs() < 2e-3 && (wp[1] - white[1]).abs() < 2e-3,
+                "{what}: white {wp:?}"
+            );
+        };
+        let p3 = [[0.680, 0.320], [0.265, 0.690], [0.150, 0.060]];
+        let d65 = [0.3127, 0.3290];
+        check(&display_p3_profile(), p3, d65, "Display P3");
+        let cicp = |primaries| {
+            profile_for_cicp(crate::Cicp {
+                primaries,
+                transfer: 13,
+                matrix: 0,
+                full_range: true,
+            })
+            .unwrap()
+        };
+        check(&cicp(12), p3, d65, "CICP 12");
+        let bt2020 = [[0.708, 0.292], [0.170, 0.797], [0.131, 0.046]];
+        check(&cicp(9), bt2020, d65, "CICP 9");
+        check(&cicp(11), p3, [0.314, 0.351], "CICP 11 (DCI white)");
+        let gray = moxcms::ColorProfile::new_gray_with_gamma(2.2)
+            .encode()
+            .unwrap();
+        let srgb = [[0.640, 0.330], [0.300, 0.600], [0.150, 0.060]];
+        check(&rgb_for_gray(&gray).unwrap(), srgb, d65, "gray as RGB");
+
+        // And each says what it is: never "sRGB" on a profile that isn't.
+        assert_eq!(
+            description(&display_p3_profile()).as_deref(),
+            Some("Display P3")
+        );
+        assert_eq!(description(&cicp(12)).as_deref(), Some("Display P3"));
+        assert_eq!(description(&cicp(9)).as_deref(), Some("RGB profile"));
+        assert_eq!(
+            description(&rgb_for_gray(&gray).unwrap()).as_deref(),
+            Some("RGB profile")
+        );
+    }
 
     /// A v2 RGB profile carrying identifying text in desc/cprt/dmnd/dmdd/a private tag,
     /// plus a populated header — the leak fixture (review F6).

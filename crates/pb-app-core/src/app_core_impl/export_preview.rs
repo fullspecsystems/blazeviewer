@@ -664,7 +664,7 @@ mod tests {
         let file = core.export.preview.export.as_ref().unwrap();
         assert_eq!(&file.bytes[..2], &[0xFF, 0xD8], "now a JPEG");
         let jpeg85 = file.bytes.len();
-        core.export_set_jpeg_quality(30);
+        core.export_set_quality(30);
         tick_until(
             &mut core,
             |c| matches!(c.export_preview_status(), PreviewStatus::Ready { bytes } if bytes as usize != jpeg85),
@@ -724,7 +724,7 @@ mod tests {
         let (mut core, _log, lib) = preview_core("commit");
         let out = sandbox("commit-out");
         core.export_set_format(FormatChoice::Jpeg);
-        core.export_set_jpeg_quality(60);
+        core.export_set_quality(60);
         tick_until(&mut core, ready);
         let previewed = core.export.preview.export.as_ref().unwrap().bytes.clone();
         core.dispatch_action(Action::Export); // in the mode: export
@@ -745,6 +745,57 @@ mod tests {
         tick_until(&mut core, |c| !c.export.busy());
         let written = std::fs::read(out.join("out.jpg")).unwrap();
         assert_eq!(written, *previewed, "the preview's bytes are the file's");
+        let _ = std::fs::remove_dir_all(&lib);
+        let _ = std::fs::remove_dir_all(&out);
+    }
+
+    /// Rung 4, end to end, for every format this build writes: the preview settles with the
+    /// file's exact size, Export… writes those bytes under the format's extension, and the
+    /// viewer reads the file back at the right size. Lossless ones skip the read-back.
+    #[test]
+    fn every_offered_format_previews_and_exports() {
+        let (mut core, log, lib) = preview_core("formats");
+        let out = sandbox("formats-out");
+        for format in FormatChoice::offered() {
+            core.export_set_format(format);
+            tick_until(&mut core, ready);
+            assert_eq!(
+                shown(&log),
+                Some((AUX_EXPORT, 64, 48)),
+                "{format:?} on screen"
+            );
+            let previewed = core.export.preview.export.as_ref().unwrap().bytes.clone();
+            core.dispatch_action(Action::Export);
+            tick_until(&mut core, |c| {
+                c.effects
+                    .iter()
+                    .any(|e| matches!(e, contract::CoreEffect::ShowSavePanel { .. }))
+            });
+            let (id, ext) = core
+                .effects
+                .iter()
+                .find_map(|e| match e {
+                    contract::CoreEffect::ShowSavePanel {
+                        request_id,
+                        extension,
+                        ..
+                    } => Some((*request_id, *extension)),
+                    _ => None,
+                })
+                .unwrap();
+            core.effects.clear();
+            assert_eq!(ext, format.extension());
+            core.save_panel_resolved(id, Some(out.join("photo")));
+            tick_until(&mut core, |c| !c.export.busy());
+            let path = out.join(format!("photo.{ext}"));
+            let written = std::fs::read(&path).unwrap_or_else(|e| panic!("{format:?}: {e}"));
+            assert_eq!(written, *previewed, "{format:?}: the preview's bytes");
+            let back =
+                pb_decode::decode_named_bytes(&format!("photo.{ext}"), &written, None, false)
+                    .unwrap_or_else(|e| panic!("{format:?} reads back: {e}"));
+            assert_eq!((back.width, back.height), (64, 48), "{format:?}");
+            std::fs::remove_file(&path).unwrap();
+        }
         let _ = std::fs::remove_dir_all(&lib);
         let _ = std::fs::remove_dir_all(&out);
     }
@@ -794,13 +845,13 @@ mod tests {
         tick_until(&mut core, ready);
         let q85 = core.export.preview.export.as_ref().unwrap().key.clone();
         let t = Instant::now();
-        core.export_set_jpeg_quality(80);
+        core.export_set_quality(80);
         core.now = t;
         core.tick();
         core.now = t + PREVIEW_DEBOUNCE * 2;
         core.tick(); // settled: the 80 request goes out
         assert!(core.export.preview.in_flight.is_some());
-        core.export_set_jpeg_quality(85);
+        core.export_set_quality(85);
         core.now = t + PREVIEW_DEBOUNCE * 3;
         core.tick();
         core.now = t + PREVIEW_DEBOUNCE * 5;

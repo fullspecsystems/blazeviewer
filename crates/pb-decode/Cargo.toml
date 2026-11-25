@@ -21,7 +21,7 @@ fast_image_resize = "5"
 # `jpeg` here is for ENCODING only (`encode_jpeg_rgba8`, the AI-describe image prep, task
 # #44) — decoding still routes through zune-jpeg via the ImageDecoder seam.
 image = { version = "0.25.10", default-features = false, features = ["png", "gif", "bmp", "ico", "tiff", "webp", "tga", "qoi", "pnm", "hdr", "exr", "ff", "dds", "jpeg"] }
-jxl-oxide = "0.12.6"
+jxl-oxide = { version = "0.12.6", features = ["moxcms"] }
 # ICC color management: parse the source profile to a 3x3 (source primaries ->
 # sRGB) + transfer curve, applied in-shader by pb-render. Pure Rust; already in
 # the tree transitively via `image`. Only the parse/matrix/TRC API is used here.
@@ -107,8 +107,10 @@ fuzz-internals = []
 cc = "1"
 
 [dev-dependencies]
-# Test fixtures: encode JPEGs / PNGs to decode back (the encoders live in pb-encode now).
-pb-encode = { path = "../pb-encode", features = ["png", "jpeg"] }
+# Test fixtures: encode JPEGs / PNGs to decode back (the encoders live in pb-encode now), and
+# read Blaze's own AVIF / HEIC exports back the way the viewer does (pure Rust / the OS — no
+# native build, unlike WebP and JPEG XL).
+pb-encode = { path = "../pb-encode", features = ["png", "jpeg", "avif", "heic"] }
 png = "0.18"
 # 3MF fixtures (a 3MF is a ZIP). Same major version as pb-mesh / pb-source.
 zip = { version = "2", default-features = false, features = ["deflate"] }

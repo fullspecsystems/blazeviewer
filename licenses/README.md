@@ -10,8 +10,10 @@ binary, in words that leave no room:
 - **LGPL-3.0 §4(b)** (libheif, libde265): *"Accompany the Combined Work with a copy of the GNU
   GPL and this License."* — both documents, which is why those two files are large: upstream's
   `COPYING` concatenates the LGPL-3.0 **and** the GPL-3.0 it builds on.
-- **BSD-2-Clause** (dav1d): binary redistribution must reproduce the copyright notice and
-  disclaimer.
+- **BSD-2-Clause / BSD-3-Clause / MIT** (dav1d; export's encoders — libwebp, libjxl and its
+  Highway / Brotli / skcms, rav1e, ravif, avif-serialize): binary redistribution must reproduce
+  the copyright notice and disclaimer. libwebp, libjxl and rav1e also carry patent grants
+  (their `PATENTS` files), shipped beside them.
 
 `THIRD-PARTY-NOTICES.md` at the repo root is the human-readable summary (what is used, how it
 is linked, and why that linkage complies). It points here; this is the legal text.
@@ -22,12 +24,22 @@ is linked, and why that linkage complies). It points here; this is the legal tex
 | `libde265-COPYING.txt` | libde265 1.1.1 | LGPL-3.0-or-later (+ GPL-3.0, + MIT for samples) |
 | `ffmpeg-COPYING.LGPLv2.1.txt` | FFmpeg 8.1.3 (Windows + macOS) | LGPL-2.1-or-later |
 | `dav1d-COPYING.txt` | dav1d 1.5.3 | BSD-2-Clause |
+| `libwebp-COPYING.txt`, `libwebp-PATENTS.txt` | libwebp 1.6.0 (WebP export) | BSD-3-Clause + Google's patent grant |
+| `libjxl-LICENSE.txt`, `libjxl-PATENTS.txt` | libjxl 0.12.0 (JPEG XL export) | BSD-3-Clause + Google's patent grant |
+| `highway-LICENSE-BSD3.txt` | Highway (libjxl's SIMD) | BSD-3-Clause (dual Apache-2.0; BSD chosen) |
+| `brotli-LICENSE.txt` | Brotli (libjxl's compression) | MIT |
+| `skcms-LICENSE.txt` | skcms (libjxl's colour management) | BSD-3-Clause |
+| `rav1e-LICENSE.txt`, `rav1e-PATENTS.txt` | rav1e 0.8.1 (AVIF export's AV1 encoder) | BSD-2-Clause + AOM Patent License 1.0 |
+| `ravif-LICENSE.txt` | ravif 0.13.0 (AVIF export) | BSD-3-Clause |
+| `avif-serialize-LICENSE.txt` | avif-serialize 0.8.9 (AVIF container) | BSD-3-Clause |
 
 ## Provenance
 
 Copied verbatim from the pinned upstream sources — the same trees the shipped binaries are
-built from (the vcpkg commit recorded in `scripts/setup-libheif.ps1 -VcpkgRef`, and the pinned
-FFmpeg tarball in `scripts/build-ffmpeg-macos.sh`). Not fetched from the web, not retyped. The
+built from (the vcpkg commit recorded in `scripts/setup-libheif.ps1 -VcpkgRef`, the pinned
+FFmpeg tarball in `scripts/build-ffmpeg-macos.sh`, and for export's encoders the sources
+vendored in the crates `Cargo.lock` pins: `libwebp-sys` 0.14.4, `jxl-sys` 0.1.12+libjxl-0.12.0,
+`rav1e`, `ravif`, `avif-serialize`). Not fetched from the web, not retyped. The
 FFmpeg text was re-checked against 8.1.3's `COPYING.LGPLv2.1` when Windows moved to that pin
 (task #141): identical apart from line endings.
 

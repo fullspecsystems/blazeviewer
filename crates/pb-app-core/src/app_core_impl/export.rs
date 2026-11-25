@@ -511,7 +511,7 @@ mod tests {
 
         core.dispatch_action(Action::ExportMode);
         core.export_set_format(FormatChoice::Jpeg);
-        core.export_set_jpeg_quality(80);
+        core.export_set_quality(80);
         core.export_set_size(SizeChoice::LongEdge(2048));
         core.dispatch_action(Action::Export); // in the mode: export
         core.export_set_format(FormatChoice::Png); // too late for that request

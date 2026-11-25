@@ -134,7 +134,9 @@ fn main() {
             line.push_str(&format!(" notes {:?}", img.notes));
         }
         if let Some(jsrc) = jpeg_src {
-            let enc = ExportFormat::Jpeg { quality: 85 }.encoder();
+            let enc = ExportFormat::Jpeg { quality: 85 }
+                .encoder()
+                .expect("JPEG is always built");
             let spec = PrepareSpec {
                 caps: enc.caps(),
                 resize: Some(Resize::LongEdge(2048)),

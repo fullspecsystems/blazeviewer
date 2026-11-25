@@ -8,9 +8,25 @@ description = "Blaze Viewer's export pipeline: export pixel/colour types, prepar
 # Codec backends sit behind features so a crate that needs only the types (pb-decode, which
 # returns `ExportSource`) never pulls an encoder in — export-plan.md § 3.1 / review F4.
 [features]
-default = ["png", "jpeg"]
+default = ["png", "jpeg", "tiff", "avif", "heic"]
 png = ["dep:png"]
 jpeg = ["dep:image"]
+# Rung 4 (export-plan.md): pure-Rust codecs are on by default; the C/C++ ones sit behind
+# features the shell build scripts turn on (they can't be cross-compiled from a Mac for the
+# Windows check, the same posture as pb-decode's libheif / dav1d).
+tiff = ["dep:tiff"]
+# AVIF through ravif (BSD-3) over rav1e (BSD-2): pure Rust, slow without its assembly.
+avif = ["dep:ravif", "dep:rgb"]
+# rav1e's hand-written assembly: NEON via cc on Apple Silicon, nasm on x86-64.
+avif-asm = ["avif", "ravif/asm"]
+# HEIC through macOS Image I/O (no crate; inert elsewhere — no free HEVC encoder).
+heic = []
+# WebP through libwebp (BSD-3, vendored and built with cc by libwebp-sys, MIT).
+webp = ["dep:libwebp-sys"]
+# JPEG XL through libjxl 0.12 (BSD-3; brotli MIT, highway Apache-2.0/BSD-3, skcms BSD-3),
+# vendored and built with cmake by jxl-sys (MIT OR Apache-2.0). Never jpegxl-rs / jpegxl-sys:
+# they are GPL.
+jxl = ["dep:jxl-sys"]
 
 [dependencies]
 moxcms = "0.8"
@@ -21,6 +37,17 @@ fast_image_resize = "5"
 bytemuck = "1"
 png = { version = "0.18", optional = true }
 image = { version = "0.25.10", default-features = false, features = ["jpeg"], optional = true }
+# The version `image` already links for decoding; LZW for writing.
+tiff = { version = "0.11.3", default-features = false, features = ["lzw"], optional = true }
+ravif = { version = "0.13", default-features = false, features = ["threading"], optional = true }
+# Borrow the prepared bytes as ravif's pixel type, no copy (`as_rgb` / `as_rgba`).
+rgb = { version = "0.8.52", default-features = false, features = ["bytemuck"], optional = true }
+libwebp-sys = { version = "0.14.4", optional = true }
+jxl-sys = { version = "0.1.12", optional = true }
 
 [dev-dependencies]
 proptest = "1"
+# Read exports back in tests the way the viewer does (TIFF and WebP decode through `image`).
+image = { version = "0.25.10", default-features = false, features = ["jpeg", "tiff", "webp"] }
+# Build an AVIF that carries an nclx box, to test the profile edit against it.
+avif-serialize = "0.8.6"

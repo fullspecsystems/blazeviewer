@@ -199,12 +199,17 @@ impl AppCore {
         self.export_edited(s);
     }
 
-    pub fn export_set_jpeg_quality(&mut self, quality: u8) {
+    /// The quality slider: the current format's quality (each lossy format keeps its own).
+    pub fn export_set_quality(&mut self, quality: u8) {
         let mut s = self.export.draft;
-        s.jpeg_quality = quality.clamp(
-            crate::export_panel::JPEG_QUALITY_MIN,
-            crate::export_panel::JPEG_QUALITY_MAX,
-        );
+        s.set_quality(quality);
+        self.export_edited(s);
+    }
+
+    /// WebP's and JPEG XL's Lossless checkbox.
+    pub fn export_set_lossless(&mut self, on: bool) {
+        let mut s = self.export.draft;
+        s.set_lossless(on);
         self.export_edited(s);
     }
 
@@ -563,7 +568,8 @@ mod tests {
     fn prefs_save_when_the_mode_closes_not_on_every_edit() {
         let mut core = core_on(&["a.jpg"]);
         key(&mut core, "E");
-        core.export_set_jpeg_quality(60);
+        core.export_set_format(FormatChoice::Jpeg);
+        core.export_set_quality(60);
         core.tick_export_prefs();
         assert_ne!(core.settings.export.jpeg_quality, 60, "still in the mode");
         core.export_close();

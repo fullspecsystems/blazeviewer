@@ -1,17 +1,25 @@
 // Export mode's panel (task #89, rung 2; plan: .taskmaster/docs/export-plan.md) — the card
 // that takes the Inspector's top-trailing slot while you set up an export: format, quality
-// (or PNG compression), size and Strip metadata, then Export…. The core owns every value and
+// (Lossless for WebP and JPEG XL, compression for PNG), size and Strip metadata, then Export….
+// The core owns every value and
 // rule (presets that would upscale are disabled, what the notes say, whether this item can
 // export at all); this view draws the model and sends each edit straight back.
 //
 // Export mode is a mode, not a modal: the keyboard still drives the photo (Space, R, …), so
 // nothing here takes text input. `E` leaves, `⌘↩` / ⇧⌘E export, `[` / `]` step the quality,
 // `Y` flicks between the export and the original (rung 3's live preview; a hold peeks).
-// The controls are the stock AppKit-backed SwiftUI ones — segmented pickers, a slider, a
-// pop-up menu, a checkbox, a prominent button — so they behave and read as native controls,
+// The controls are the stock AppKit-backed SwiftUI ones — pop-up menus, a segmented picker, a
+// slider, checkboxes, a prominent button — so they behave and read as native controls,
 // VoiceOver included.
 
 import SwiftUI
+
+/// One entry in the Format pop-up.
+struct ExportFormatOption: Identifiable, Equatable {
+    let code: Int  // FormatChoice::code
+    let label: String
+    var id: Int { code }
+}
 
 /// One entry in the Size pop-up.
 struct ExportSizeOption: Identifiable, Equatable {
@@ -31,9 +39,18 @@ struct ExportPanelModel: Equatable {
     /// Why this item can't be exported, or "".
     var blocked = ""
     var canExport = false
-    /// 0 PNG, 1 JPEG.
+    /// The format's code: 0 PNG, 1 JPEG, 2 WebP, 3 AVIF, 4 JPEG XL, 5 HEIC, 6 TIFF.
     var format = 0
-    var jpegQuality = 85
+    /// The Format menu: what this build writes, in order.
+    var formats: [ExportFormatOption] = []
+    /// The format has a Quality slider (each lossy format keeps its own value).
+    var hasQuality = false
+    var quality = 85
+    /// The slider is live — not while Lossless is on.
+    var qualityEnabled = false
+    /// WebP and JPEG XL have a Lossless checkbox.
+    var hasLossless = false
+    var lossless = false
     /// 0 Faster, 1 Balanced, 2 Smallest.
     var pngCompression = 1
     var size: UInt32 = 0
@@ -125,32 +142,56 @@ struct ExportPanelView: View {
     private var controls: some View {
         VStack(alignment: .leading, spacing: 12) {
             row("Format") {
+                // A pop-up, grouped: the everyday two, the modern ones, then TIFF. The core
+                // lists only what this build writes (HEIC is Mac-only).
                 Picker("Format", selection: binding(\.format, model.exportSetFormat)) {
-                    Text("PNG").tag(0)
-                    Text("JPEG").tag(1)
+                    ForEach(Array(p.formats.enumerated()), id: \.element.id) { i, f in
+                        if i > 0
+                            && ExportPanelView.formatGroup(f.code)
+                                != ExportPanelView.formatGroup(p.formats[i - 1].code)
+                        {
+                            Divider()
+                        }
+                        Text(f.label).tag(f.code)
+                    }
                 }
-                .pickerStyle(.segmented)
+                .pickerStyle(.menu)
                 .labelsHidden()
+                .fixedSize()
             }
-            if p.format == 1 {
+            if p.hasLossless {
+                indented {
+                    Toggle(
+                        "Lossless",
+                        isOn: Binding(get: { p.lossless }, set: { model.exportSetLossless($0) })
+                    )
+                    .toggleStyle(.checkbox)
+                    .help("Keep every pixel exactly, in a bigger file")
+                }
+            }
+            if p.hasQuality {
                 row("Quality") {
                     HStack(spacing: 8) {
                         Slider(
                             value: Binding(
-                                get: { Double(p.jpegQuality) },
-                                set: { model.exportSetJpegQuality(Int($0.rounded())) }),
+                                get: { Double(p.quality) },
+                                set: { model.exportSetQuality(Int($0.rounded())) }),
                             in: 10...100, step: 5
                         ) {
                             Text("Quality")
                         }
                         .labelsHidden()
-                        .help("JPEG quality. [ and ] step it.")
-                        Text("\(p.jpegQuality)")
+                        .help("Higher keeps more detail in a bigger file. [ and ] step it.")
+                        Text("\(p.quality)")
                             .font(.callout.monospacedDigit())
                             .frame(width: 28, alignment: .trailing)
                     }
+                    // Lossless greys the slider out rather than removing it: the rows below
+                    // stay put, and the value is still there when Lossless goes off.
+                    .disabled(!p.qualityEnabled)
                 }
-            } else {
+            }
+            if p.format == 0 {
                 row("Compression") {
                     Picker(
                         "Compression", selection: binding(\.pngCompression, model.exportSetPngCompression)
@@ -249,6 +290,24 @@ struct ExportPanelView: View {
     }
 
     // MARK: - Helpers
+
+    /// The Format menu's groups, for its dividers: PNG and JPEG, the modern formats, TIFF.
+    static func formatGroup(_ code: Int) -> Int {
+        switch code {
+        case 0, 1: return 0
+        case 6: return 2
+        default: return 1
+        }
+    }
+
+    /// A control in the controls column with no label of its own (a checkbox carries one).
+    private func indented<Content: View>(@ViewBuilder _ content: () -> Content) -> some View {
+        HStack(spacing: 10) {
+            Color.clear.frame(width: labelWidth, height: 1)
+            content()
+            Spacer(minLength: 0)
+        }
+    }
 
     /// A labelled row: a fixed leading label column, the control beside it.
     private func row<Content: View>(_ label: String, @ViewBuilder _ content: () -> Content)

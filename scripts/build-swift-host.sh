@@ -76,7 +76,13 @@ echo "==> cargo build -p pb-mac-ffi ($PROFILE, aarch64-apple-darwin)"
 # link (a staticlib carries no link flags; passed at `swift build` time — NOT in
 # Package.swift — so no SwiftPM manifest-cache staleness when toggling). No arrays: bash
 # 3.2 under `set -u` (see the CI note above); Homebrew paths have no spaces.
-FEATURE_ARGS=""
+# Export's codecs (task #89 rung 4) are always in: WebP + JPEG XL (`export-codecs`, C/C++ — libjxl
+# builds with cmake) and rav1e's NEON assembly for AVIF (`avif-asm`, built with cc).
+if ! command -v cmake >/dev/null 2>&1; then
+	echo "Export's JPEG XL encoder (libjxl) builds with cmake: brew install cmake" >&2
+	exit 2
+fi
+FEATURE_ARGS="--features export-codecs,avif-asm"
 FF_LINK_ARGS=""
 FF_SOURCE="Homebrew, dev-only build"
 if [[ "$BUNDLE_FFMPEG" == "1" ]]; then
@@ -118,7 +124,7 @@ if [[ "$FFVIDEO" == "1" ]]; then
 		echo "==> ffvideo (default) skipped: Homebrew FFmpeg not found — building WITHOUT video." >&2
 		echo "    (brew install ffmpeg to enable it, or pass --no-ffvideo to silence this.)" >&2
 	else
-		FEATURE_ARGS="--features ffvideo"
+		FEATURE_ARGS="--features export-codecs,avif-asm,ffvideo"
 		FF_LINK_ARGS="-Xlinker -L$FF_LIBDIR -Xlinker -lavcodec -Xlinker -lavformat -Xlinker -lavutil -Xlinker -lswscale -Xlinker -lswresample"
 		echo "==> ffvideo: linking FFmpeg from $FF_LIBDIR ($FF_SOURCE)"
 	fi

@@ -4,7 +4,7 @@
 //! - [`JpegEncoder`] — the export format (rung 2): an `ExportImage` prepared with
 //!   [`JpegEncoder::CAPS`] (8-bit, no alpha), its colour profile embedded.
 //!
-//! Rung 4 may swap mozjpeg in behind the same `Encoder` seam.
+//! mozjpeg could replace it behind the same `Encoder` seam (export-plan.md rung 4).
 
 use crate::encoder::{Caps, Encoder};
 use crate::types::{Channels, ExportImage, OutputColor, Samples};
@@ -21,6 +21,7 @@ impl JpegEncoder {
     pub const CAPS: Caps = Caps {
         alpha: false,
         sixteen_bit: false,
+        gray: true,
     };
 }
 
@@ -30,6 +31,9 @@ impl Encoder for JpegEncoder {
     }
     fn extension(&self) -> &'static str {
         "jpg"
+    }
+    fn lossless(&self) -> bool {
+        false
     }
     fn encode(&self, img: &ExportImage) -> Result<Vec<u8>, EncodeError> {
         encode_jpeg(img, self.quality)

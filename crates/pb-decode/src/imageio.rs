@@ -867,6 +867,52 @@ mod export_tests {
     use super::*;
     use pb_encode::{AlphaMode, Channels, ColorDesc, Samples};
 
+    /// Blaze's own AVIF and HEIC exports read back with their colour: a Display P3 red stays
+    /// P3 red in the P3 buffer this decoder fills, where an sRGB red lands at about
+    /// (234, 51, 35). AVIF's profile is added by editing ravif's container (`pb_encode::avif`),
+    /// so this is the check that Image I/O honours the edit. Alpha survives too.
+    #[test]
+    fn blazes_avif_and_heic_exports_keep_their_profile_and_alpha() {
+        let p3 = pb_encode::icc::display_p3_profile();
+        let red = |color, alpha: u8| pb_encode::ExportImage {
+            width: 64,
+            height: 64,
+            channels: Channels::Rgba,
+            samples: Samples::U8([255, 0, 0, alpha].repeat(64 * 64)),
+            color,
+            notes: Vec::new(),
+        };
+        type Encode = fn(&pb_encode::ExportImage) -> Vec<u8>;
+        let encoders: [(&str, Encode); 2] = [
+            ("avif", |i| pb_encode::avif::encode_avif(i, 90).unwrap()),
+            ("heic", |i| pb_encode::heic::encode_heic(i, 90).unwrap()),
+        ];
+        for (name, encode) in encoders {
+            let centre = |bytes: &[u8]| {
+                let d = crate::decode_bytes(bytes, None, false).unwrap();
+                let i = ((32 * d.width + 32) * 4) as usize;
+                [
+                    d.pixels[i],
+                    d.pixels[i + 1],
+                    d.pixels[i + 2],
+                    d.pixels[i + 3],
+                ]
+            };
+            let tagged = centre(&encode(&red(pb_encode::OutputColor::Icc(p3.clone()), 255)));
+            assert!(
+                tagged[0] > 245 && tagged[1] < 12 && tagged[2] < 12,
+                "{name} P3: {tagged:?}"
+            );
+            let plain = centre(&encode(&red(pb_encode::OutputColor::Srgb, 255)));
+            assert!(plain[1] > 35 && plain[2] > 20, "{name} sRGB: {plain:?}");
+            let see_through = centre(&encode(&red(pb_encode::OutputColor::Srgb, 64)));
+            assert!(
+                see_through[3].abs_diff(64) <= 4,
+                "{name} alpha: {see_through:?}"
+            );
+        }
+    }
+
     /// Encode a test image to HEIC (or any `sips` format) with the OS's own encoder — the
     /// fixture is produced independently of the code under test.
     fn sips_convert(png: &[u8], format: &str) -> Option<Vec<u8>> {

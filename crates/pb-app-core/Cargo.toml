@@ -80,8 +80,19 @@ livephoto = ["pb-decode/livephoto"]
 # sources cannot see subtitle tracks at all. Implied by `ffvideo`.
 ffprobe = ["pb-decode/ffprobe"]
 ffvideo = ["pb-decode/ffvideo", "ffprobe"]
+# Export's C/C++ codecs (task #89 rung 4): WebP (libwebp, built with cc) and JPEG XL (libjxl,
+# built with cmake). Off by default so a plain build — and the Mac → Windows cross-check — needs
+# no native toolchain; the shells' build scripts turn them on. PNG, JPEG, TIFF, AVIF and (on the
+# Mac) HEIC need nothing extra.
+export-codecs = ["pb-encode/webp", "pb-encode/jxl"]
+# rav1e's hand-written assembly for AVIF: NEON via cc on Apple Silicon, nasm on x86-64. Several
+# times faster; the build scripts turn it on where the assembler is there.
+avif-asm = ["pb-encode/avif-asm"]
 
 [dev-dependencies]
+# Score exports against their source in `examples/codec_bench.rs` (rung 4's default qualities;
+# never shipped). BSD-2-Clause.
+ssimulacra2 = "0.5"
 # Dump subtitle-preview frames to look at (the `dump_preview` diagnostic; never shipped).
 # Same version pb-decode already links, so the lockfile is unchanged.
 png = "0.17"
@@ -169,3 +180,8 @@ objc2-core-foundation = { version = "0.3", default-features = false, features = 
     "CFBase",
     "CFData",
 ] }
+
+# Rung 4's codec measurements: needs the C codecs (WebP / JPEG XL) built in.
+[[example]]
+name = "codec_bench"
+required-features = ["export-codecs"]

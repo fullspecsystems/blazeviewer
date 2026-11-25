@@ -26,7 +26,7 @@ use pb_decode::{DecodedImage, PixelFormat};
 use pb_encode::{Caps, ExportNote, ExportSource, PrepareSpec, Samples};
 use pb_source::ItemSource;
 
-use crate::export_panel::{ExportSettings, FormatChoice};
+use crate::export_panel::ExportSettings;
 use crate::frame_capture::{FrameKey, FrameSource};
 use crate::pb_key::PbKey;
 
@@ -546,7 +546,10 @@ fn export_side(
     t: &mut PreviewTimings,
 ) -> Result<PreviewExport, Stop> {
     let settings = req.key.settings;
-    let encoder = settings.export_format().encoder();
+    let encoder = settings
+        .export_format()
+        .encoder()
+        .map_err(|e| Stop::Failed(e.to_string()))?;
     let label = settings.format.label();
     let (bytes, notes, dims, prepared) = match cache.file(&req.key) {
         Some(f) => (Arc::clone(&f.bytes), f.notes.clone(), f.dims, None),
@@ -590,12 +593,16 @@ fn export_side(
         return Err(Stop::Stale);
     }
 
-    // What the file shows. PNG is lossless, so its prepared pixels are exactly what the file
-    // decodes to (and skip a decode); anything lossy is read back from the bytes.
+    // What the file shows. A lossless file (PNG, TIFF, lossless WebP / JPEG XL) decodes to
+    // exactly its prepared pixels, so show those and skip a decode; anything lossy is read
+    // back from the bytes.
     let s = Instant::now();
-    let shown = match (settings.format, prepared) {
-        (FormatChoice::Png, Some(img)) => pb_decode::export::display_from_export_image(&img),
-        _ => {
+    let shown = match prepared.filter(|_| encoder.lossless()) {
+        Some(img) => pb_decode::export::display_from_export_image(&img),
+        #[cfg(feature = "export-codecs")]
+        None if settings.format == crate::export_panel::FormatChoice::Jxl => read_back_jxl(&bytes)
+            .map_err(|e| Stop::Failed(format!("couldn't read the {label} back ({e})")))?,
+        None => {
             let d = pb_decode::decode_bytes(&bytes, None, false)
                 .map_err(|e| Stop::Failed(format!("couldn't read the {label} back ({e})")))?;
             if d.format != PixelFormat::Rgba8 || !d.is_well_formed() {
@@ -639,6 +646,28 @@ fn decode_source(req: &PreviewRequest) -> Result<ExportSource, String> {
             })
         }
     }
+}
+
+/// A lossy JPEG XL read back with libjxl, not the viewer's jxl-oxide: jxl-oxide (jxl-color
+/// 0.11) squeezes colours outside sRGB into it on the way to a wide-gamut space, so a Display P3
+/// photo's JPEG XL would preview duller than the file really is — and than Preview, Safari or
+/// any libjxl-based viewer shows it. libjxl is linked whenever JPEG XL export is.
+#[cfg(feature = "export-codecs")]
+fn read_back_jxl(bytes: &[u8]) -> Result<DecodedImage, pb_encode::EncodeError> {
+    let (width, height, rgba, icc) = pb_encode::jxl::decode_rgba8(bytes)?;
+    let img = pb_encode::ExportImage {
+        width,
+        height,
+        channels: pb_encode::Channels::Rgba,
+        samples: pb_encode::Samples::U8(rgba),
+        color: if icc.is_empty() {
+            pb_encode::OutputColor::Srgb
+        } else {
+            pb_encode::OutputColor::Icc(icc)
+        },
+        notes: Vec::new(),
+    };
+    Ok(pb_decode::export::display_from_export_image(&img))
 }
 
 /// Undo `rotation_cw` clockwise quarter turns, so the image is in the source's orientation.
@@ -693,6 +722,80 @@ pub fn size_label(bytes: u64) -> String {
 
 #[cfg(test)]
 mod tests {
+
+    /// A Display P3 photo's lossy JPEG XL previews as the file really is: its pure red stays
+    /// P3 red. (Read back through jxl-oxide, the viewer's decoder, it came out a duller,
+    /// sRGB-limited red — see `read_back_jxl`.)
+    #[cfg(feature = "export-codecs")]
+    #[test]
+    fn a_p3_photos_jpeg_xl_previews_in_full_gamut() {
+        use crate::export_panel::{ExportSettings, FormatChoice};
+        use crate::frame_capture::FrameKey;
+        let dir = std::env::temp_dir().join(format!("pb-jxl-p3-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("red.png");
+        let red = pb_encode::ExportImage {
+            width: 32,
+            height: 32,
+            channels: pb_encode::Channels::Rgb,
+            samples: pb_encode::Samples::U8([255, 0, 0].repeat(32 * 32)),
+            color: pb_encode::OutputColor::Icc(pb_encode::icc::display_p3_profile()),
+            notes: Vec::new(),
+        };
+        std::fs::write(
+            &path,
+            pb_encode::encode_png(&red, pb_encode::PngEffort::Fast).unwrap(),
+        )
+        .unwrap();
+        let source: Arc<dyn pb_source::ItemSource> =
+            Arc::new(pb_source::FsSource::new(vec![path.clone()]));
+        let settings = ExportSettings {
+            format: FormatChoice::Jxl,
+            ..ExportSettings::default()
+        };
+        let worker = PreviewWorker::new();
+        worker.submit(PreviewRequest {
+            gen: 1,
+            key: PreviewKey {
+                source: SourceKey {
+                    path: Some(path),
+                    container: None,
+                    name: "red.png".into(),
+                    frame: FrameKey::Still,
+                    content_gen: 0,
+                },
+                rotation_cw: 0,
+                settings,
+            },
+            source,
+            item: 0,
+            frame: None,
+            need_original: false,
+            display_turns: 0,
+            queued_at: Instant::now(),
+        });
+        let deadline = Instant::now() + Duration::from_secs(20);
+        let result = loop {
+            if let Some(r) = worker.drain().expect("worker alive").pop() {
+                break r;
+            }
+            assert!(Instant::now() < deadline, "no preview");
+            std::thread::sleep(Duration::from_millis(2));
+        };
+        let shown = result.export.expect("a preview").image;
+        let i = ((16 * shown.width + 16) * 4) as usize;
+        let px = &shown.pixels[i..i + 3];
+        assert!(
+            px[0] > 245 && px[1] < 12 && px[2] < 12,
+            "P3 red, not squeezed: {px:?}"
+        );
+        assert!(
+            shown.color.enabled && shown.color.matrix[0][0] > 1.15,
+            "described as P3: {:?}",
+            shown.color
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
     use super::*;
 
     fn t0() -> Instant {

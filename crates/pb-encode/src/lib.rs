@@ -6,29 +6,50 @@
 //! - [`prepare`] — source → encoder-ready [`ExportImage`]: un-premultiply, HDR → SDR P3,
 //!   colour resolution (incl. the ICC sanitizer), rotation, cleared transparency.
 //! - [`icc`] — the profile sanitizer behind *Strip metadata* and the profiles we synthesize.
-//! - [`encoder`] — the `Encoder` seam + [`Caps`] (rung 2); [`ExportFormat`] picks a codec.
-//! - Encoders behind features: [`png`] (rung 0c) and [`jpeg`] (rung 2; Describe's helper moved
-//!   from `pb-decode`).
+//! - [`encoder`] — the `Encoder` seam + [`Caps`] (rung 2); [`ExportFormat`] picks a codec and
+//!   [`Codec::available`] says which this build carries.
+//! - Encoders behind features: `png` (rung 0c), `jpeg` (rung 2; Describe's helper moved from
+//!   `pb-decode`), and rung 4's `tiff`, `avif` (pure Rust, on by default), `webp` and `jxl`
+//!   (C/C++ libraries, turned on by the shells' build scripts), and `heic` (macOS Image I/O).
 //! - [`resize`] — linear-light Lanczos downscaling for `prepare` (rung 2).
 //!
-//! Everything is pure — no I/O, no threads, no platform code — so it is unit-tested here and
-//! the export worker in `pb-app-core` stays a thin orchestration layer.
+//! Everything is pure — no I/O, no threads of its own, no platform code — except the HEIC
+//! encoder, which hands the pixels to macOS Image I/O. So it is unit-tested here and the export
+//! worker in `pb-app-core` stays a thin orchestration layer.
 
+#[cfg(feature = "avif")]
+pub mod avif;
 pub mod encoder;
+#[cfg(all(feature = "heic", target_os = "macos"))]
+pub mod heic;
 pub mod icc;
 #[cfg(feature = "jpeg")]
 pub mod jpeg;
+#[cfg(feature = "jxl")]
+pub mod jxl;
 #[cfg(feature = "png")]
 pub mod png;
 pub mod prepare;
+#[cfg(any(
+    feature = "tiff",
+    feature = "avif",
+    feature = "webp",
+    feature = "jxl",
+    all(feature = "heic", target_os = "macos")
+))]
+mod px;
 pub mod resize;
+#[cfg(feature = "tiff")]
+pub mod tiff;
 pub mod types;
+#[cfg(feature = "webp")]
+pub mod webp;
 
-pub use encoder::{Caps, Encoder, ExportFormat};
+pub use encoder::{Caps, Codec, Encoder, ExportFormat, PngEffort};
 #[cfg(feature = "jpeg")]
 pub use jpeg::{encode_jpeg, encode_jpeg_rgba8, JpegEncoder};
 #[cfg(feature = "png")]
-pub use png::{encode_png, PngEffort, PngEncoder};
+pub use png::{encode_png, PngEncoder};
 pub use prepare::{prepare, PrepareError, PrepareSpec};
 pub use resize::Resize;
 pub use types::{
@@ -45,6 +66,8 @@ pub enum EncodeError {
     Codec(String),
     /// The codec panicked (caught by [`catch_panics`]).
     Panicked(String),
+    /// This build doesn't carry the codec (a setting saved by a build that did).
+    Unavailable(&'static str),
 }
 
 impl EncodeError {
@@ -60,6 +83,7 @@ impl std::fmt::Display for EncodeError {
             EncodeError::Malformed => write!(f, "image buffer doesn't match its size"),
             EncodeError::Codec(why) => write!(f, "{why}"),
             EncodeError::Panicked(why) => write!(f, "encoder crashed: {why}"),
+            EncodeError::Unavailable(codec) => write!(f, "this version can't write {codec}"),
         }
     }
 }

@@ -35,6 +35,12 @@ livephoto = ["pb-app-core/livephoto", "pb-decode/livephoto", "dep:libc"]
 # demuxers-only vcpkg build (scripts/setup-libheif.ps1).
 ffprobe = ["pb-app-core/ffprobe", "pb-decode/ffprobe"]
 ffvideo = ["pb-app-core/ffvideo", "pb-decode/ffvideo", "ffprobe", "dep:libc"]
+# Export's C/C++ codecs (task #89 rung 4): WebP (libwebp, cc) and JPEG XL (libjxl, cmake). In
+# the Windows ship set (build-windows.ps1); off by default so the Mac → Windows cross-check and a
+# bare build need no native toolchain. PNG, JPEG, TIFF and AVIF need nothing extra.
+export-codecs = ["pb-app-core/export-codecs"]
+# rav1e's assembly for AVIF (nasm on x86-64, cc on ARM64): several times faster encodes.
+avif-asm = ["pb-app-core/avif-asm"]
 
 [dependencies]
 # Platform-neutral orchestration model (actions, key model, keymap) — shared with

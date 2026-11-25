@@ -140,5 +140,6 @@ fn settings(format: FormatChoice, q: u8, size: SizeChoice) -> ExportSettings {
         png: PngCompression::Balanced,
         size,
         strip_metadata: true,
+        ..ExportSettings::default()
     }
 }

@@ -1794,13 +1794,55 @@ impl AppCoreHandle {
         self.export_snapshot.as_ref().is_some_and(|p| p.can_export)
     }
 
-    /// 0 PNG, 1 JPEG.
+    /// The format's wire code (`FormatChoice::code`): 0 PNG, 1 JPEG, 2 WebP, 3 AVIF,
+    /// 4 JPEG XL, 5 HEIC, 6 TIFF.
     fn export_format(&self) -> u8 {
         self.export_settings().format.code()
     }
 
-    fn export_jpeg_quality(&self) -> u8 {
-        self.export_settings().jpeg_quality
+    /// The Format menu: the formats this build writes, in order.
+    fn export_format_count(&self) -> usize {
+        self.export_snapshot.as_ref().map_or(0, |p| p.formats.len())
+    }
+
+    fn export_format_code_at(&self, index: usize) -> u8 {
+        self.export_snapshot
+            .as_ref()
+            .and_then(|p| p.formats.get(index))
+            .map_or(0, |f| f.code())
+    }
+
+    fn export_format_label_at(&self, index: usize) -> String {
+        self.export_snapshot
+            .as_ref()
+            .and_then(|p| p.formats.get(index))
+            .map(|f| f.label().to_string())
+            .unwrap_or_default()
+    }
+
+    /// Whether the format has a Quality slider (the lossy-capable ones).
+    fn export_has_quality(&self) -> bool {
+        self.export_settings().stored_quality().is_some()
+    }
+
+    /// The current format's quality (each lossy format keeps its own), shown even while
+    /// Lossless is on.
+    fn export_quality(&self) -> u8 {
+        self.export_settings().stored_quality().unwrap_or(0)
+    }
+
+    /// Whether the slider is live: not while Lossless is on.
+    fn export_quality_enabled(&self) -> bool {
+        self.export_settings().quality().is_some()
+    }
+
+    /// Whether the format has a Lossless checkbox (WebP, JPEG XL).
+    fn export_has_lossless(&self) -> bool {
+        self.export_settings().lossless().is_some()
+    }
+
+    fn export_lossless(&self) -> bool {
+        self.export_settings().lossless().unwrap_or(false)
     }
 
     /// 0 Faster, 1 Balanced, 2 Smallest.
@@ -1854,9 +1896,14 @@ impl AppCoreHandle {
         }
     }
 
-    fn export_set_jpeg_quality(&mut self, quality: u8) {
+    fn export_set_quality(&mut self, quality: u8) {
         self.core.now = Instant::now();
-        self.core.export_set_jpeg_quality(quality);
+        self.core.export_set_quality(quality);
+    }
+
+    fn export_set_lossless(&mut self, on: bool) {
+        self.core.now = Instant::now();
+        self.core.export_set_lossless(on);
     }
 
     fn export_set_png_compression(&mut self, code: u8) {
@@ -1888,7 +1935,9 @@ impl AppCoreHandle {
 
     /// A preview is being made (the panel shows a spinner).
     fn export_preview_busy(&self) -> bool {
-        self.export_snapshot.as_ref().is_some_and(|p| p.preview.busy())
+        self.export_snapshot
+            .as_ref()
+            .is_some_and(|p| p.preview.busy())
     }
 
     /// Whether the Export / Original control applies.
@@ -5248,7 +5297,14 @@ mod ffi {
         fn export_blocked(&self) -> String;
         fn export_can_export(&self) -> bool;
         fn export_format(&self) -> u8;
-        fn export_jpeg_quality(&self) -> u8;
+        fn export_format_count(&self) -> usize;
+        fn export_format_code_at(&self, index: usize) -> u8;
+        fn export_format_label_at(&self, index: usize) -> String;
+        fn export_has_quality(&self) -> bool;
+        fn export_quality(&self) -> u8;
+        fn export_quality_enabled(&self) -> bool;
+        fn export_has_lossless(&self) -> bool;
+        fn export_lossless(&self) -> bool;
         fn export_png_compression(&self) -> u8;
         fn export_size(&self) -> u32;
         fn export_size_count(&self) -> usize;
@@ -5259,7 +5315,8 @@ mod ffi {
         fn export_note_count(&self) -> usize;
         fn export_note_at(&self, index: usize) -> String;
         fn export_set_format(&mut self, code: u8);
-        fn export_set_jpeg_quality(&mut self, quality: u8);
+        fn export_set_quality(&mut self, quality: u8);
+        fn export_set_lossless(&mut self, on: bool);
         fn export_set_png_compression(&mut self, code: u8);
         fn export_set_size(&mut self, code: u32);
         fn export_set_strip_metadata(&mut self, strip: bool);

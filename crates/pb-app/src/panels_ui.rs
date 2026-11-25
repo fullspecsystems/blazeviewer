@@ -154,7 +154,10 @@ pub enum PanelAction {
     /// Export mode's panel (task #89, rung 2): a control changed — applied through the
     /// core's `export_set_*` setters (the core re-signals `PanelsChanged`).
     ExportFormat(FormatChoice),
-    ExportJpegQuality(u8),
+    /// The current format's quality.
+    ExportQuality(u8),
+    /// WebP's / JPEG XL's Lossless switch.
+    ExportLossless(bool),
     ExportPngCompression(PngCompression),
     ExportSize(SizeChoice),
     /// The Size menu's **Custom…** — the core opens the Custom Size dialog.
@@ -2643,7 +2646,8 @@ const EXPORT_WIDTH: f32 = 320.0;
 /// Its label column (SwiftUI `labelWidth`).
 const EXPORT_LABEL_W: f32 = 96.0;
 
-/// Export mode's panel: format, quality (or PNG compression), size and Strip metadata, then
+/// Export mode's panel: format, quality (Lossless for WebP / JPEG XL, compression for PNG),
+/// size and Strip metadata, then
 /// **Export…** — the egui skin of `ExportPanelView.swift`, drawn from the same core model.
 /// pb-ui controls throughout (themed combos, the stepped slider, the toggle switch, the
 /// primary button); every edit becomes a [`PanelAction`] the shell applies to the core.
@@ -2726,7 +2730,17 @@ fn export_body(ui: &mut egui::Ui, p: &Palette, ex: &ExportPanel, actions: &mut V
                 .width(120.0)
                 .show_ui(ui, |ui| {
                     pb_ui::apply_to_ui(ui, p.dark);
-                    for c in FormatChoice::ALL {
+                    // What this build writes, grouped as on the Mac: the everyday two, the
+                    // modern ones, then TIFF.
+                    let group = |c: FormatChoice| match c {
+                        FormatChoice::Png | FormatChoice::Jpeg => 0,
+                        FormatChoice::Tiff => 2,
+                        _ => 1,
+                    };
+                    for (i, &c) in ex.formats.iter().enumerate() {
+                        if i > 0 && group(c) != group(ex.formats[i - 1]) {
+                            ui.separator();
+                        }
                         ui.selectable_value(&mut f, c, c.label());
                     }
                 });
@@ -2734,24 +2748,42 @@ fn export_body(ui: &mut egui::Ui, p: &Palette, ex: &ExportPanel, actions: &mut V
                 actions.push(PanelAction::ExportFormat(f));
             }
         });
-        match s.format {
-            FormatChoice::Jpeg => export_row(ui, p, "Quality", |ui| {
-                let mut q = s.jpeg_quality;
-                pb_ui::slider_stepped(
-                    ui,
-                    &mut q,
-                    pb_app_core::export_panel::JPEG_QUALITY_MIN
-                        ..=pb_app_core::export_panel::JPEG_QUALITY_MAX,
-                    pb_app_core::export_panel::JPEG_QUALITY_STEP as f64,
-                    0,
-                    "",
-                )
-                .on_hover_text("JPEG quality. [ and ] step it.");
-                if q != s.jpeg_quality {
-                    actions.push(PanelAction::ExportJpegQuality(q));
+        if let Some(lossless) = s.lossless() {
+            ui.horizontal(|ui| {
+                ui.add_space(EXPORT_LABEL_W + ui.spacing().item_spacing.x);
+                let mut on = lossless;
+                let r = pb_ui::toggle(ui, p, &mut on)
+                    .on_hover_text("Keep every pixel exactly, in a bigger file");
+                ui.label(RichText::new("Lossless").color(p.text));
+                if r.changed() {
+                    actions.push(PanelAction::ExportLossless(on));
                 }
-            }),
-            FormatChoice::Png => export_row(ui, p, "Compression", |ui| {
+            });
+        }
+        if let Some(stored) = s.stored_quality() {
+            // Lossless greys the slider out rather than removing it: the rows below stay put,
+            // and the value is still there when Lossless goes off.
+            export_row(ui, p, "Quality", |ui| {
+                ui.add_enabled_ui(s.quality().is_some(), |ui| {
+                    let mut q = stored;
+                    pb_ui::slider_stepped(
+                        ui,
+                        &mut q,
+                        pb_app_core::export_panel::QUALITY_MIN
+                            ..=pb_app_core::export_panel::QUALITY_MAX,
+                        pb_app_core::export_panel::QUALITY_STEP as f64,
+                        0,
+                        "",
+                    )
+                    .on_hover_text("Higher keeps more detail in a bigger file. [ and ] step it.");
+                    if q != stored {
+                        actions.push(PanelAction::ExportQuality(q));
+                    }
+                });
+            });
+        }
+        if s.format == FormatChoice::Png {
+            export_row(ui, p, "Compression", |ui| {
                 let mut c = s.png;
                 egui::ComboBox::from_id_salt("export_png")
                     .selected_text(c.label())
@@ -2769,7 +2801,7 @@ fn export_body(ui: &mut egui::Ui, p: &Palette, ex: &ExportPanel, actions: &mut V
                 if c != s.png {
                     actions.push(PanelAction::ExportPngCompression(c));
                 }
-            }),
+            });
         }
         export_row(ui, p, "Size", |ui| {
             ui.vertical(|ui| {

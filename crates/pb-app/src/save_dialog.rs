@@ -13,10 +13,15 @@
 
 use std::path::{Path, PathBuf};
 
-/// The dialog's filter name and title for a format's extension (`"png"` / `"jpg"`).
+/// The dialog's filter name and title for a format's extension (`FormatChoice::extension`).
 fn kind_of(extension: &str) -> (&'static str, &'static str) {
     match extension {
         "jpg" => ("JPEG image", "Export as JPEG"),
+        "webp" => ("WebP image", "Export as WebP"),
+        "avif" => ("AVIF image", "Export as AVIF"),
+        "jxl" => ("JPEG XL image", "Export as JPEG XL"),
+        "heic" => ("HEIC image", "Export as HEIC"),
+        "tif" => ("TIFF image", "Export as TIFF"),
         _ => ("PNG image", "Export as PNG"),
     }
 }

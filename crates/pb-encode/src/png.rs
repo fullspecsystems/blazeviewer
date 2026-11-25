@@ -7,19 +7,10 @@
 
 use std::borrow::Cow;
 
+pub use crate::encoder::PngEffort;
 use crate::encoder::{Caps, Encoder};
 use crate::types::{Channels, ExportImage, OutputColor, Samples};
 use crate::EncodeError;
-
-/// Compression effort. The default is chosen from corpus measurements (rung 1); `High` is
-/// the `png` crate's strongest level, still far from `oxipng`'s minutes-long presets.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum PngEffort {
-    Fast,
-    #[default]
-    Balanced,
-    High,
-}
 
 /// The PNG export format: everything `prepare` produces (alpha, 16-bit, gray).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -33,6 +24,9 @@ impl Encoder for PngEncoder {
     }
     fn extension(&self) -> &'static str {
         "png"
+    }
+    fn lossless(&self) -> bool {
+        true
     }
     fn encode(&self, img: &ExportImage) -> Result<Vec<u8>, EncodeError> {
         encode_png(img, self.effort)

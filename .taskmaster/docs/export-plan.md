@@ -917,6 +917,100 @@ around until measured (F23).
 - Each runs inside the worker-owned rayon pool with a thread cap; per-codec options, `Caps`,
   colour/EXIF embedding, cancellation; defaults tuned with `ssimulacra2`.
 
+**Session 8 (2026-11-24, Mac) — WebP, AVIF, JPEG XL, HEIC and TIFF built.** Owner ask: "work
+through a batch of them". mozjpeg and oxipng are not in this batch.
+
+- **pb-encode.** `ExportFormat` names every format whatever the build carries; `Codec::available`
+  says what was compiled in, and `encoder()` refuses the rest with `EncodeError::Unavailable`, so
+  pb-app-core and the shells need no `cfg`. `Encoder::lossless()` lets the preview show prepared
+  pixels instead of reading a lossless file back. `Caps` gained `gray`: WebP, AVIF and HEIC have
+  no gray layout, so `prepare` widens gray to RGB and turns a gray profile into an RGB one with the
+  same curve (`icc::rgb_for_gray`; neutral pixels render identically).
+  - **TIFF** (`tiff` 0.11, already linked by `image`): 8/16-bit, gray/RGB, alpha as an unassociated
+    ExtraSamples tag (written directly: the crate's `extra_samples` counts a fifth sample), ICC as
+    an `UNDEFINED` tag, LZW + horizontal predictor. Extension `.tif`.
+  - **WebP** (`libwebp-sys` 0.14.4 → vendored libwebp 1.6.0, built with cc, pre-generated bindings,
+    NEON on Apple Silicon): lossy (method 4, sharp YUV, alpha quality 100) or lossless (`exact` on,
+    so it decodes to exactly the prepared pixels). ICC via libwebp's own mux (`ICCP`, `VP8X`).
+    16383 px limit: the panel says so and disables Export… (`FormatChoice::max_edge`).
+  - **AVIF** (`ravif` 0.13 / rav1e 0.8.1, pure Rust; `avif-asm` adds rav1e's assembly — NEON via cc
+    here, nasm on x86-64). 10-bit 4:4:4 full range. **ravif can't embed an ICC** (avif-serialize
+    writes only nclx, and omits `colr` entirely for its defaults), so `avif::add_icc` edits the
+    finished file as libavif writes one: a `colr prof` property inserted before any nclx (in `ipco`
+    *and* in the primary item's `ipma` order — the first draft got the association order wrong;
+    a test pins it), the nclx's primaries/transfer set to 2 (unspecified), `iloc` re-pointed. Tested
+    structurally and end to end: Image I/O reads a P3 export as P3 red (pb-decode
+    `blazes_avif_and_heic_exports_keep_their_profile_and_alpha`). Speed 6, half the cores.
+  - **JPEG XL** (`jxl-sys` 0.1.12 → vendored libjxl 0.12.0, cmake + bindgen; never `jpegxl-rs` /
+    `jpegxl-sys`, GPL): lossy (libjxl's quality → distance; quality 100 clamps to its smallest lossy
+    distance, 0.01 — libjxl refuses 0 there) or lossless; 8/16-bit, gray, alpha; effort 7, half the
+    cores. `jxl::decode_rgba8` (libjxl, into the file's own space) for the preview — below.
+  - **HEIC** (macOS only, Image I/O through a hand-rolled FFI like `pb-decode/imageio.rs`): 8-bit +
+    alpha, profile via the `CGImage`'s colour space. Image I/O quantizes quality to a few steps
+    (65 = 70, 80 = 85 give identical files).
+- **pb-decode.** A `colr` ICC now outranks an nclx in the same file (libavif's reading; the old
+  first-box-wins scan read our AVIFs — and libavif's — as "unspecified").
+- **pb-app-core.** `FormatChoice` grew WebP / AVIF / JXL / HEIC / TIFF; `FormatChoice::offered()`
+  is what the panel lists. Per-format quality (`webp_quality`, … — the scales differ) and
+  `webp_lossless` / `jxl_lossless`, all persisted; a saved format this build lacks starts as PNG.
+  `[`/`]` step the current format's quality (nothing while lossless or for TIFF). The preview's
+  lossless shortcut is `encoder.lossless()`. Features `export-codecs` (WebP + JPEG XL) and
+  `avif-asm`, forwarded by pb-mac-ffi and pb-app.
+- **Shells.** Format is a pop-up (grouped: PNG, JPEG · WebP, AVIF, JPEG XL, HEIC · TIFF); a Lossless
+  checkbox (Mac) / switch (egui) under it for WebP and JPEG XL; Lossless **greys Quality out rather
+  than removing it** (no layout shift — the owner's ask from the File size spinner); the save panel
+  / dialog names and filters each format. `build-swift-host.sh` always builds the codecs (hard-fails
+  without cmake); `build-windows.ps1` adds them (CMake needed; `-NoCodecs` to skip; `avif-asm` when
+  nasm is on PATH, x64 only).
+- **Colour bugs found by measuring** (each pinned by a test):
+  - **moxcms 0.8.1 writes its Bradford cone matrix as `chad`** in every RGB profile it constructs
+    (fixed upstream in 0.9). Most engines ignore `chad` for matrix/TRC profiles, which hid it;
+    jxl-oxide recovers primaries through it and read our P3 red at xy (0.573, 0.422). `icc::fix_chad`
+    corrects every profile we build. Profiles copied from files keep their own (correct) `chad`.
+  - **`profile_for_cicp` labelled every profile "sRGB IEC61966-2.1"** (moxcms starts from sRGB's):
+    a P3 or BT.2020 export showed as sRGB in Get Info. Now "Display P3" when it is, else "RGB
+    profile".
+  - **`display_p3_profile()`** (HDR tone-map output) came from moxcms's `new_display_p3`, whose
+    slightly-off D50 white and curve skcms can't name. Now built from the P3 code points — skcms
+    names it P3 / D65 / sRGB, like Apple's.
+  - **Viewing lossy wide-gamut JPEG XL** is wrong in Blaze (task #156): jxl-oxide gamut-maps through
+    sRGB on the way to P3 (P3 red → (216, 55, 55)). Export mode's preview reads lossy JPEG XL back
+    with **libjxl** instead (`export_preview::read_back_jxl`, which asks for the file's own space —
+    libjxl would otherwise return clipped linear sRGB), so the preview is the file. The viewer
+    itself is an owner call (#156).
+- **Default qualities** (`examples/codec_bench.rs`, the 23 distinct images in the corpus at 2048 px,
+  8-bit, Strip on; read back as the preview reads them; SSIMULACRA2 in linear sRGB): each format's
+  grid setting whose **median** score is closest to JPEG 85's (83.6 at 1.41 bits/px):
+
+  | Format | Default | Median | p10 | bits/px | vs JPEG 85 |
+  |---|---|---|---|---|---|
+  | JPEG | 85 | 83.6 | 80.9 | 1.414 | — |
+  | WebP | 90 | 82.5 | 73.3 | 1.185 | −16 % |
+  | AVIF | 85 | 80.6 | 79.1 | 0.759 | −46 % |
+  | JPEG XL | 85 | 82.5 | 75.6 | 0.886 | −37 % |
+  | HEIC | 90 | 84.1 | 65.6 | 1.832 | **+30 %** |
+
+  WebP's and HEIC's tails (p10) stay low at every quality: both are 4:2:0, which smears saturated
+  edges (the RGB-CMY chart, a logo). Image I/O's HEIC is larger than JPEG at equal quality.
+- **Encode times at full size** (what the preview waits for; `codec_bench --timing`, the same 23
+  images, M5 Ultra, release, the codecs at half the cores):
+
+  | Encode | p50 | p95 | max (36 MP NEF) | |
+  |---|---|---|---|---|
+  | JPEG 85 | 8 ms | 131 ms | 174 ms | |
+  | HEIC 90 | 25 ms | 72 ms | 122 ms | Apple's hardware encoder |
+  | JPEG XL 85 (effort 7) | 36 ms | 513 ms | 866 ms | effort 5: −45 %; kept 7 |
+  | JPEG XL lossless | 72 ms | 749 ms | 984 ms | |
+  | WebP 90 | 57 ms | 1.0 s | 1.1 s | |
+  | AVIF 85 (speed 6) | 101 ms | 1.4 s | 2.0 s | speed 7/8 only ~25 % faster; kept 6 |
+  | TIFF | 34 ms | 529 ms | 773 ms | |
+  | WebP lossless | — | — | 7.1 s (effort 50) | 9.6 s at libwebp's default 75 |
+
+  **WebP lossless effort is 50**, not cwebp's 75: on the two big images it makes the same file
+  (7.46 vs 7.47 and 1.84 vs 1.84 bits/px) in two-thirds of the time; 25 is faster but 9 % bigger.
+  It is still the slow one — JPEG XL lossless is 4–7× faster and 8–12 % smaller on those two. AVIF, the one we
+  feared, lands in two seconds on 36 MP with rav1e's NEON assembly.
+
 ## Rung 5 — HDR export
 
 - **Prerequisites:** #146 (luminance + HLG audit — macOS half done 2026-11-14); `cICP` PNG
@@ -1090,6 +1184,18 @@ confirmed directly). **All accepted.**
 
 ## Handoff
 
+**Status (2026-11-24, session 8):** **rung 4's first batch is built** — WebP, AVIF, JPEG XL, HEIC
+(Mac) and TIFF; see Rung 4's session-8 note, which also records four colour bugs measuring found
+(moxcms's `chad`, "sRGB" descriptions on P3 profiles, an unnameable P3 profile, and jxl-oxide's
+gamut squeeze — the last now task #156). Verified on the Mac: pb-encode 61 tests with every codec
+(+ 53 with the defaults), pb-decode incl. Image I/O reading our AVIF / HEIC exports back as P3 with
+alpha, pb-app-core incl. every offered format previewing and exporting end to end and a P3 photo's
+JPEG XL previewing in full gamut; clippy `-D warnings` on pb-encode / pb-decode / pb-app-core /
+pb-mac-ffi with every codec; the Swift host builds with them; `codec_bench` on the corpus (the
+defaults). **Not verified:** the Mac GUI (manual test § 14); **all of Windows and Linux** — the
+Windows clippy cross-check passes *without* the C codecs (it can't build them), nothing run: W20.
+`build-windows.ps1`'s edits weren't even parsed (no PowerShell here).
+
 **Status (2026-11-24, session 7):** **rung 2's Custom… size and rung 3's live preview are built**
 — see both rungs' session-7 notes. Verified on the Mac: pb-app-core tests all pass (incl. 13 new
 preview tests that run the real worker on real JPEGs — three of them regressions for an
@@ -1190,6 +1296,19 @@ test script: `.taskmaster/docs/export-rung1-manual-test.md`. Rung 0a (#81) not s
 
 **Cross-platform debt**
 
+- **Windows (session 8, rung 4):** `build-windows.ps1` now builds `export-codecs` (libwebp via cc;
+  libjxl via **CMake + bindgen**, so the Developer shell is entered for it too) and `avif-asm` when
+  nasm is on PATH (x64). **Unbuilt and unparsed** — run it; if `jxl-sys` or `libwebp-sys` fails,
+  `-NoCodecs` is the lever, and report the error here. Then W20 (the egui Format combo, the Lossless
+  switch, Quality greying, the dialog filters). **`release-windows.ps1` was deliberately left
+  alone** (still `libheif,dav1d,ffprobe`): add `export-codecs` (and `avif-asm` on x64 with nasm)
+  there once the dev script has built them on that box, or a Windows release ships without WebP /
+  JPEG XL (the panel just doesn't list them — graceful, but the CHANGELOG says otherwise).
+  `avif-asm` on Windows ARM64 is untried (rav1e's aarch64 assembly under MSVC).
+- **Linux (session 8):** the AppImage build (`release-linux.sh`) has no `export-codecs` — it needs
+  cmake in `appimage.Dockerfile` and a container run to prove it. Until then Linux exports PNG,
+  JPEG, TIFF and AVIF (pure-Rust rav1e, no assembly); the CHANGELOG says WebP / JPEG XL aren't in
+  the Linux build yet.
 - **Windows (session 7, rungs 2–3):** the Custom Size dialog window, the panel's File size /
   Preview rows, and the renderer's aux preview textures on **DX12** (mipped RGBA8, covering the
   ring / held / single-image paths) are compile-checked only. Manual test W19 — watch for shimmer
@@ -1215,4 +1334,5 @@ test script: `.taskmaster/docs/export-rung1-manual-test.md`. Rung 0a (#81) not s
 
 **Claimed**
 
-- None. (#81 was claimed and built by the Mac in session 3; its Windows half is the debt below.)
+- None. (#81 was claimed and built by the Mac in session 3; its Windows half is the debt below.
+  Rung 4's first batch was built by the Mac in session 8; mozjpeg and oxipng are unclaimed.)

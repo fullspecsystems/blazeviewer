@@ -126,13 +126,31 @@ pub fn prepare(src: ExportSource, spec: &PrepareSpec) -> Result<ExportImage, Pre
         }
     }
 
-    let output = resolve_color(
+    let mut output = resolve_color(
         &color,
         spec.strip_metadata,
         &mut channels,
         &mut samples,
         &mut notes,
     )?;
+
+    // A format without a gray layout (WebP, AVIF, HEIC): widen to RGB, and carry a gray
+    // profile over as an RGB one with the same curve (`icc::rgb_for_gray`).
+    if !spec.caps.gray && channels.is_gray() {
+        expand_gray(&mut channels, &mut samples);
+        if let OutputColor::Icc(p) = &output {
+            if icc::data_color_space(p) == Some(icc::IccSpace::Gray) {
+                output = match icc::rgb_for_gray(p) {
+                    Some(rgb) if icc::is_srgb(&rgb) => OutputColor::Srgb,
+                    Some(rgb) => OutputColor::Icc(rgb),
+                    None => {
+                        notes.push(ExportNote::ProfileReplacedWithSrgb);
+                        OutputColor::Srgb
+                    }
+                };
+            }
+        }
+    }
 
     // Resize: the target is "as displayed", so a quarter-turned image swaps the box.
     let turns = spec.rotation_cw % 4;
@@ -551,6 +569,7 @@ mod tests {
         caps: Caps {
             alpha: false,
             sixteen_bit: false,
+            gray: true,
         },
         ..STRIP
     };
@@ -842,6 +861,63 @@ mod tests {
         let out = prepare(s, &STRIP).unwrap();
         assert_eq!(out.channels, Channels::Rgba);
         assert_eq!(out.samples, Samples::U8(vec![50, 50, 50, 255]));
+    }
+
+    /// A codec without a gray layout (WebP, AVIF, HEIC) gets RGB, and a gray profile becomes
+    /// an RGB one with the same curve — so the neutral pixels render exactly as before.
+    #[test]
+    fn a_codec_without_gray_gets_rgb_and_an_equivalent_rgb_profile() {
+        let no_gray = PrepareSpec {
+            caps: Caps::EIGHT_BIT_ALPHA,
+            ..PrepareSpec::full(0, false)
+        };
+        let gray22 = moxcms::ColorProfile::new_gray_with_gamma(2.2)
+            .encode()
+            .unwrap();
+        let mut s = src(
+            2,
+            1,
+            Channels::GrayAlpha,
+            Samples::U8(vec![40, 255, 220, 9]),
+        );
+        s.color = ColorDesc::Icc(Arc::from(gray22.clone()));
+        let out = prepare(s, &no_gray).unwrap();
+        assert_eq!(out.channels, Channels::Rgba);
+        assert_eq!(
+            out.samples,
+            Samples::U8(vec![40, 40, 40, 255, 220, 220, 220, 9])
+        );
+        let OutputColor::Icc(rgb) = &out.color else {
+            panic!("an RGB profile, not sRGB: the curve is gamma 2.2");
+        };
+        assert_eq!(icc::data_color_space(rgb), Some(icc::IccSpace::Rgb));
+        // Same lightness for every gray: the profile's neutral axis is the gray profile's.
+        let gray = moxcms::ColorProfile::new_from_slice(&gray22).unwrap();
+        let rgb = moxcms::ColorProfile::new_from_slice(rgb).unwrap();
+        let srgb = moxcms::ColorProfile::new_srgb();
+        let opts = moxcms::TransformOptions::default();
+        let from_gray = gray
+            .create_transform_8bit(moxcms::Layout::Gray, &srgb, moxcms::Layout::Rgb, opts)
+            .unwrap();
+        let from_rgb = rgb
+            .create_transform_8bit(moxcms::Layout::Rgb, &srgb, moxcms::Layout::Rgb, opts)
+            .unwrap();
+        for v in [0u8, 40, 128, 220, 255] {
+            let (mut a, mut b) = ([0u8; 3], [0u8; 3]);
+            from_gray.transform(&[v], &mut a).unwrap();
+            from_rgb.transform(&[v, v, v], &mut b).unwrap();
+            for (x, y) in a.iter().zip(&b) {
+                assert!(x.abs_diff(*y) <= 1, "{v}: {a:?} vs {b:?}");
+            }
+        }
+        // Untagged gray just widens.
+        let s = src(1, 1, Channels::Gray, Samples::U8(vec![77]));
+        let out = prepare(s, &no_gray).unwrap();
+        assert_eq!(
+            (out.channels, out.color),
+            (Channels::Rgb, OutputColor::Srgb)
+        );
+        assert_eq!(out.samples, Samples::U8(vec![77, 77, 77]));
     }
 
     #[test]

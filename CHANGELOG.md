@@ -28,19 +28,22 @@ with any pre-release suffix carried only by the tag.
   turned use the view on screen: the window's shape and full size, your angle and zoom,
   on a transparent background in a PNG.
 - **Export.** Press `E` (or File ▸ Export…, ⇧⌘E on a Mac, or right-click the
-  photo) for Export mode: a panel in the Inspector's place where you pick PNG or
-  JPEG, the JPEG quality (`[` and `]` step it) or PNG compression, and a size:
-  full resolution, a long edge from 800 to 3840 pixels, or Custom… for any long
-  edge, width, height or percentage. Exports are never larger than the photo.
-  While the panel is open the photo on screen **is the export**: what the JPEG or
-  PNG will actually look like, at its real quality and size, with the exact file
-  size in the panel. Press `Y` to switch to the original and back, or hold `Y` to
+  photo) for Export mode: a panel in the Inspector's place where you pick a
+  format (PNG, JPEG, WebP, AVIF, JPEG XL or TIFF, and HEIC on a Mac), its quality
+  (`[` and `]` step it; each format remembers its own, and WebP and JPEG XL can be
+  lossless) or PNG compression, and a size: full resolution, a long edge from 800
+  to 3840 pixels, or Custom… for any long edge, width, height or percentage.
+  Exports are never larger than the photo. While the panel is open the photo on
+  screen **is the export**: what the file will actually look like, at its real
+  quality and size, with the exact file size in the panel, so you can compare
+  formats before you save. Press `Y` to switch to the original and back, or hold `Y` to
   peek at it. Keep browsing with the panel open and your settings stay put; press
   Export… (⌘↩ on a Mac, Ctrl+Enter elsewhere) to save the photo on screen, with
   any rotation applied, and `E` again to leave. Your format, quality and size are
   remembered for next time. Colors are kept exactly: wide-gamut photos stay
-  Display P3, Adobe RGB and so on, and 16-bit PNGs stay 16-bit; resizing is done
-  in linear light, and transparency in a JPEG becomes white. HDR photos are saved
+  Display P3, Adobe RGB and so on (in every format), and 16-bit images stay 16-bit
+  in PNG, TIFF and JPEG XL; resizing is done in linear light, and transparency in a
+  JPEG becomes white. The Linux build doesn't write WebP or JPEG XL yet. HDR photos are saved
   as SDR for now, and the confirmation says so. Exports carry no metadata — no
   camera details and no location — and never appear in your system's recent
   files. The save dialog

@@ -168,16 +168,25 @@ pub(crate) fn colr_transfer(bytes: &[u8]) -> Option<u8> {
 /// gated to its real consumers (plus `test`, so the parser tests run everywhere).
 #[cfg(any(windows, heic_libheif, test))]
 pub(crate) fn color_from_colr_box(bytes: &[u8]) -> Option<ColorTransform> {
-    let mut i = 4usize; // a valid box has its 4-byte size *before* the type
-    while i + 8 <= bytes.len() {
-        if &bytes[i..i + 4] == b"colr" {
-            if let Some(t) = parse_colr_at(bytes, i) {
+    // A profile outranks code points (HEIF allows one `colr` of each kind; with both, the
+    // profile is the colour and the nclx only adds the YUV matrix — libavif's reading).
+    let mut nclx = None;
+    for i in colr_positions(bytes) {
+        let icc = matches!(&bytes[i + 4..i + 8], b"prof" | b"rICC");
+        if let Some(t) = parse_colr_at(bytes, i) {
+            if icc {
                 return Some(t);
             }
+            nclx.get_or_insert(t);
         }
-        i += 1;
     }
-    None
+    nclx
+}
+
+/// Where each `colr` type field sits (the box's 4-byte size precedes it).
+#[cfg(any(windows, heic_libheif, test))]
+fn colr_positions(bytes: &[u8]) -> impl Iterator<Item = usize> + '_ {
+    (4..bytes.len().saturating_sub(7)).filter(|&i| &bytes[i..i + 4] == b"colr")
 }
 
 /// The container's real colour description for **export** (rung 0b): the `colr` box's ICC
@@ -185,16 +194,18 @@ pub(crate) fn color_from_colr_box(bytes: &[u8]) -> Option<ColorTransform> {
 /// [`color_from_colr_box`] returns. `None` when there is no usable `colr` box.
 #[cfg(any(windows, heic_libheif, test))]
 pub(crate) fn colr_desc(bytes: &[u8]) -> Option<pb_encode::ColorDesc> {
-    let mut i = 4usize;
-    while i + 8 <= bytes.len() {
-        if &bytes[i..i + 4] == b"colr" {
-            if let Some(d) = colr_desc_at(bytes, i) {
-                return Some(d);
+    // As `color_from_colr_box`: a profile outranks code points.
+    let mut nclx = None;
+    for i in colr_positions(bytes) {
+        match colr_desc_at(bytes, i) {
+            Some(d @ pb_encode::ColorDesc::Icc(_)) => return Some(d),
+            Some(d) => {
+                nclx.get_or_insert(d);
             }
+            None => {}
         }
-        i += 1;
     }
-    None
+    nclx
 }
 
 #[cfg(any(windows, heic_libheif, test))]
@@ -422,6 +433,30 @@ mod tests {
         bogus[0..4].copy_from_slice(&9999u32.to_be_bytes()); // lies about its size
         let buf = colr_box(b"prof", &bogus);
         assert!(color_from_colr_box(&buf).is_none());
+    }
+
+    /// A file with both (libavif writes both when given a profile; so does Blaze's AVIF
+    /// export): the profile describes the colour, the nclx only the YUV matrix — whichever
+    /// comes first.
+    #[test]
+    fn a_profile_outranks_an_nclx_in_the_same_file() {
+        let icc = moxcms::ColorProfile::new_display_p3().encode().unwrap();
+        for nclx_first in [true, false] {
+            let nclx = colr_box(b"nclx", &[0, 2, 0, 2, 0, 6, 0x80]);
+            let prof = colr_box(b"prof", &icc);
+            let file = if nclx_first {
+                [nclx, prof].concat()
+            } else {
+                [prof, nclx].concat()
+            };
+            assert_eq!(
+                colr_desc(&file),
+                Some(pb_encode::ColorDesc::Icc(std::sync::Arc::from(icc.clone()))),
+                "nclx first: {nclx_first}"
+            );
+            let t = color_from_colr_box(&file).expect("the P3 profile");
+            assert!(t.matrix[1][0] < 0.0, "P3, not unspecified: {:?}", t.matrix);
+        }
     }
 
     #[test]

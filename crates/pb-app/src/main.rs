@@ -2117,7 +2117,8 @@ impl App {
             A::CloseInspector => self.core.panels.inspector = None,
             // Export mode's panel (task #89): each control → the core's setter.
             A::ExportFormat(f) => self.core.export_set_format(f),
-            A::ExportJpegQuality(q) => self.core.export_set_jpeg_quality(q),
+            A::ExportQuality(q) => self.core.export_set_quality(q),
+            A::ExportLossless(on) => self.core.export_set_lossless(on),
             A::ExportPngCompression(c) => self.core.export_set_png_compression(c),
             A::ExportSize(s) => self.core.export_set_size(s),
             A::ExportCustomSize => self.core.export_custom_size(),

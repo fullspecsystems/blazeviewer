@@ -26,6 +26,10 @@ package = ["dep:swift-bridge-build"]
 # behind AVPlayer) can be built into the Swift host. Off by default; the macOS
 # integration phase wires it.
 ffvideo = ["pb-app-core/ffvideo"]
+# Export's C/C++ codecs (WebP, JPEG XL) and rav1e's assembly for AVIF (NEON via cc here) —
+# build-swift-host.sh turns both on; a bare build still exports PNG, JPEG, TIFF, AVIF, HEIC.
+export-codecs = ["pb-app-core/export-codecs"]
+avif-asm = ["pb-app-core/avif-asm"]
 
 [dependencies]
 pb-app-core = { workspace = true }

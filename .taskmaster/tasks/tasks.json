@@ -960,8 +960,8 @@
           {
             "id": 8,
             "title": "Rung 4 — codec breadth",
-            "description": "mozjpeg, webp/libwebp-sys, libavif (+aom/rav1e) or ravif, oxipng, ssimulacra2; Image I/O HEIC on macOS. JPEG XL (owner wants it): a thin safe wrapper in pb-encode over jxl-sys (MIT OR Apache-2.0, libjxl 0.12) — NOT jpegxl-rs/jpegxl-sys (GPL-3.0-or-later); zune-jpegxl (pure Rust, lossless-only) as an optional no-C++ lossless path. Audit each codec's whole chain + native linkage before it lands (libjxl: highway, brotli, skcms/lcms2); THIRD-PARTY-NOTICES.",
-            "status": "pending"
+            "description": "mozjpeg, webp/libwebp-sys, libavif (+aom/rav1e) or ravif, oxipng, ssimulacra2; Image I/O HEIC on macOS. JPEG XL (owner wants it): a thin safe wrapper in pb-encode over jxl-sys (MIT OR Apache-2.0, libjxl 0.12) — NOT jpegxl-rs/jpegxl-sys (GPL-3.0-or-later); zune-jpegxl (pure Rust, lossless-only) as an optional no-C++ lossless path. Audit each codec's whole chain + native linkage before it lands (libjxl: highway, brotli, skcms/lcms2); THIRD-PARTY-NOTICES. — Session 8 (2026-11-24, Mac): built WebP (libwebp-sys, lossy + lossless), AVIF (ravif/rav1e, pure Rust; ICC via an ISOBMFF colr edit), JPEG XL (jxl-sys, lossy + lossless, 8/16-bit), HEIC (macOS Image I/O) and TIFF (tiff crate, LZW); the Format pop-up, per-format quality, Lossless; pb-decode prefers a colr ICC over nclx; codec_bench example (SSIMULACRA2) for the defaults. Licence chains audited, THIRD-PARTY-NOTICES + licenses/. Still open: mozjpeg, oxipng (and what that means for PNG's Compression), Linux WebP/JPEG XL (AppImage cmake), the Windows release script, Windows run (W20). See export-plan.md rung 4 + Handoff.",
+            "status": "in-progress"
           },
           {
             "id": 9,
@@ -2561,6 +2561,15 @@
         "description": "Found during the #151 library research, verified on rustsec.org 2026-11-23. (1) zip 2.4.2 with aes-crypto (pb-source, pb-app-core): WinZip-AES entries are accepted without their HMAC check when the data ends early or is empty (CVSS 6.5); this is reachable on the view path, since encrypted ZIPs open as archive doors. Fixed in zip >= 9.0, a major-version jump, so expect API churn in pb-source. (2) quick-xml < 0.41: a quadratic duplicate-attribute check and unbounded namespace allocation (both DoS, CVSS 7.5). In the lock at 0.37.5 via little_exif, which only the explicit Save Rotation command uses, and at 0.30 (zbus_xml) and 0.39 (wayland-scanner), which are build-time, trusted input. Low exposure today, but the #151 3MF parser must start on >= 0.41. ALSO (2026-11-23): zip 2.x rejects ZIPs whose ZIP64 extra field carries a stale local-header offset beside a valid 32-bit one (Bambu Studio writes 3MFs this way; other tools may write ZIPs this way), reporting a misleading 'Could not find EOCD'. pb-mesh already moved to zip 9.8 for this; pb-source's archive doors still have the bug until this bump.",
         "details": "Check whether velopack's zip 0.6.6 enables AES (probably not; then it is unaffected). Bump little_exif if a release pulls quick-xml >= 0.41, otherwise note the residual. Add a local cargo-audit (or cargo-deny advisories) step to the release checklist: run locally, never as a paid CI job.",
         "testStrategy": "The existing archive suites (ZIP incl. AES password entries) stay green after the zip bump; cargo audit reports no advisories for zip or quick-xml on the shipped dependency graph.",
+        "status": "pending",
+        "priority": "medium",
+        "dependencies": [],
+        "subtasks": []
+      },
+      {
+        "id": 156,
+        "title": "Viewing lossy wide-gamut JPEG XL: jxl-oxide squeezes Display P3 colour into sRGB",
+        "description": "Found 2026-11-24 while tuning export's JPEG XL (task #89 rung 4). jxl-oxide 0.12 / jxl-color 0.11 gamut-maps (perceptual intent) or clips the intermediate linear sRGB BEFORE converting to a wider target (convert.rs: GamutMap/Clip when primaries differ), so a lossy (XYB) JPEG XL of a Display P3 photo displays duller in Blaze than in Preview, Safari or any libjxl-based viewer: P3 red (255,0,0) renders as about (216,55,55). Affects every lossy wide-gamut JPEG XL, not just Blaze's exports (cjxl encodes P3 photos as XYB too); lossless and sRGB ones are fine. Export mode's preview already avoids it (reads lossy JPEG XL back with libjxl, `export_preview::read_back_jxl`). Options for the viewer: (a) decode JPEG XL with libjxl when built with `export-codecs` (it's linked anyway; measure decode speed vs jxl-oxide on the corpus first — it's a hot path), (b) request jxl-oxide's XYB output in linear sRGB as floats and convert to the scRGB fp16 path ourselves, (c) report upstream and wait. Owner call.",
         "status": "pending",
         "priority": "medium",
         "dependencies": [],

@@ -934,6 +934,14 @@ final class CoreModel {
         for i in 0..<Int(core.export_note_count()) {
             notes.append(core.export_note_at(UInt(i)).toString())
         }
+        var formats: [ExportFormatOption] = []
+        for i in 0..<Int(core.export_format_count()) {
+            let idx = UInt(i)
+            formats.append(
+                ExportFormatOption(
+                    code: Int(core.export_format_code_at(idx)),
+                    label: core.export_format_label_at(idx).toString()))
+        }
         exportPanel = ExportPanelModel(
             name: core.export_source_name().toString(),
             frame: core.export_source_frame().toString(),
@@ -942,7 +950,12 @@ final class CoreModel {
             blocked: core.export_blocked().toString(),
             canExport: core.export_can_export(),
             format: Int(core.export_format()),
-            jpegQuality: Int(core.export_jpeg_quality()),
+            formats: formats,
+            hasQuality: core.export_has_quality(),
+            quality: Int(core.export_quality()),
+            qualityEnabled: core.export_quality_enabled(),
+            hasLossless: core.export_has_lossless(),
+            lossless: core.export_lossless(),
             pngCompression: Int(core.export_png_compression()),
             size: core.export_size(),
             sizes: sizes,
@@ -956,7 +969,8 @@ final class CoreModel {
 
     // Export panel edits: each goes to the core, which re-signals `PanelsChanged`.
     func exportSetFormat(_ code: Int) { core.export_set_format(UInt8(code)); kick() }
-    func exportSetJpegQuality(_ q: Int) { core.export_set_jpeg_quality(UInt8(q)); kick() }
+    func exportSetQuality(_ q: Int) { core.export_set_quality(UInt8(q)); kick() }
+    func exportSetLossless(_ on: Bool) { core.export_set_lossless(on); kick() }
     func exportSetPngCompression(_ code: Int) {
         core.export_set_png_compression(UInt8(code)); kick()
     }
@@ -2922,8 +2936,10 @@ final class CoreModel {
             return
         }
         let panel = NSSavePanel()
-        let type: UTType = fileExtension == "jpg" ? .jpeg : .png
-        panel.title = type == .jpeg ? "Export as JPEG" : "Export as PNG"
+        // The format's own type (public.jpeg-xl, public.avif, …), so the panel enforces its
+        // extension; an extension the system somehow doesn't know still gets a dynamic type.
+        let type = UTType(filenameExtension: fileExtension) ?? .png
+        panel.title = "Export as \(Self.exportFormatName(fileExtension))"
         panel.prompt = "Export"
         panel.nameFieldStringValue = suggestedName
         panel.directoryURL = URL(fileURLWithPath: startDir, isDirectory: true)
@@ -2946,6 +2962,18 @@ final class CoreModel {
             panel.beginSheetModal(for: window, completionHandler: finish)
         } else {
             panel.begin(completionHandler: finish)
+        }
+    }
+
+    /// The format's name for the save panel's title, from the extension the core asks for
+    /// (`FormatChoice::extension` → `FormatChoice::label`).
+    static func exportFormatName(_ ext: String) -> String {
+        switch ext {
+        case "jpg": return "JPEG"
+        case "webp": return "WebP"
+        case "jxl": return "JPEG XL"
+        case "tif": return "TIFF"
+        default: return ext.uppercased()  // PNG, AVIF, HEIC
         }
     }
 

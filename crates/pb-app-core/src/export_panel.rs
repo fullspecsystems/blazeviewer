@@ -18,25 +18,62 @@ use serde::{Deserialize, Deserializer, Serialize};
 use crate::action::Action;
 use crate::contract::KeyResolution;
 
-/// The output formats the panel offers.
+/// The output formats. The panel offers the ones this build can write ([`offered`]).
+///
+/// [`offered`]: FormatChoice::offered
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum FormatChoice {
     #[default]
     Png,
     Jpeg,
+    Webp,
+    Avif,
+    Jxl,
+    Heic,
+    Tiff,
 }
 
 impl FormatChoice {
-    /// Every format, in the order the panel lists them.
-    pub const ALL: [FormatChoice; 2] = [FormatChoice::Png, FormatChoice::Jpeg];
+    /// Every format, in the order the panel lists them: the everyday two, the modern ones,
+    /// then TIFF for print and editing.
+    pub const ALL: [FormatChoice; 7] = [
+        FormatChoice::Png,
+        FormatChoice::Jpeg,
+        FormatChoice::Webp,
+        FormatChoice::Avif,
+        FormatChoice::Jxl,
+        FormatChoice::Heic,
+        FormatChoice::Tiff,
+    ];
+
+    /// The formats this build can write, in panel order.
+    pub fn offered() -> impl Iterator<Item = FormatChoice> {
+        FormatChoice::ALL.into_iter().filter(|f| f.available())
+    }
+
+    pub fn codec(self) -> pb_encode::Codec {
+        use pb_encode::Codec;
+        match self {
+            FormatChoice::Png => Codec::Png,
+            FormatChoice::Jpeg => Codec::Jpeg,
+            FormatChoice::Webp => Codec::Webp,
+            FormatChoice::Avif => Codec::Avif,
+            FormatChoice::Jxl => Codec::JpegXl,
+            FormatChoice::Heic => Codec::Heic,
+            FormatChoice::Tiff => Codec::Tiff,
+        }
+    }
+
+    /// Whether this build can write it (HEIC is Mac-only; WebP and JPEG XL need the shells'
+    /// codec feature).
+    pub fn available(self) -> bool {
+        self.codec().available()
+    }
 
     /// The name the panel shows.
     pub fn label(self) -> &'static str {
-        match self {
-            FormatChoice::Png => "PNG",
-            FormatChoice::Jpeg => "JPEG",
-        }
+        self.codec().name()
     }
 
     /// The file extension, without the dot.
@@ -44,22 +81,42 @@ impl FormatChoice {
         match self {
             FormatChoice::Png => "png",
             FormatChoice::Jpeg => "jpg",
+            FormatChoice::Webp => "webp",
+            FormatChoice::Avif => "avif",
+            FormatChoice::Jxl => "jxl",
+            FormatChoice::Heic => "heic",
+            FormatChoice::Tiff => "tif",
         }
     }
 
-    /// Stable wire value for the shells (FFI / egui): 0 PNG, 1 JPEG.
+    /// Stable wire value for the shells (FFI / egui): 0 PNG, 1 JPEG, 2 WebP, 3 AVIF,
+    /// 4 JPEG XL, 5 HEIC, 6 TIFF.
     pub fn code(self) -> u8 {
         match self {
             FormatChoice::Png => 0,
             FormatChoice::Jpeg => 1,
+            FormatChoice::Webp => 2,
+            FormatChoice::Avif => 3,
+            FormatChoice::Jxl => 4,
+            FormatChoice::Heic => 5,
+            FormatChoice::Tiff => 6,
         }
     }
 
     /// The inverse of [`code`](Self::code); unknown values are `None`.
     pub fn from_code(code: u8) -> Option<FormatChoice> {
-        match code {
-            0 => Some(FormatChoice::Png),
-            1 => Some(FormatChoice::Jpeg),
+        FormatChoice::ALL.into_iter().find(|f| f.code() == code)
+    }
+
+    /// Whether it has a lossless switch (WebP, JPEG XL).
+    pub fn has_lossless(self) -> bool {
+        matches!(self, FormatChoice::Webp | FormatChoice::Jxl)
+    }
+
+    /// Its largest edge, when it is smaller than anything the Size menu can ask for.
+    pub fn max_edge(self) -> Option<u32> {
+        match self {
+            FormatChoice::Webp => Some(16_383),
             _ => None,
         }
     }
@@ -372,19 +429,36 @@ impl SizeDialog {
     }
 }
 
-/// JPEG quality bounds and step (`[` / `]` and the slider's tick).
-pub const JPEG_QUALITY_MIN: u8 = 10;
-pub const JPEG_QUALITY_MAX: u8 = 100;
-pub const JPEG_QUALITY_STEP: u8 = 5;
+/// Quality bounds and step for every lossy format (`[` / `]` and the slider's tick).
+pub const QUALITY_MIN: u8 = 10;
+pub const QUALITY_MAX: u8 = 100;
+pub const QUALITY_STEP: u8 = 5;
 /// The default JPEG quality: rung 2's corpus run used 85 (visually clean on every file at a
-/// sensible size). Tuned with `ssimulacra2` in rung 4.
+/// sensible size).
 pub const JPEG_QUALITY_DEFAULT: u8 = 85;
+/// The other lossy formats' defaults, each codec on its own scale: the grid setting whose
+/// median SSIMULACRA2 over the corpus is closest to JPEG 85's (83.6), so switching formats
+/// keeps a typical photo looking the same (`examples/codec_bench.rs`, rung 4, 2048 px):
+/// WebP 90 scores 82.5 at −16 % of JPEG 85's size, AVIF 85 80.6 at −46 %, JPEG XL 85 82.5 at
+/// −37 %, and HEIC 90 84.1 at **+30 %** — Image I/O's HEIC is no smaller than JPEG.
+pub const WEBP_QUALITY_DEFAULT: u8 = 90;
+pub const AVIF_QUALITY_DEFAULT: u8 = 85;
+pub const JXL_QUALITY_DEFAULT: u8 = 85;
+pub const HEIC_QUALITY_DEFAULT: u8 = 90;
 
-/// What the panel edits and an export request freezes.
+/// What the panel edits and an export request freezes. Each lossy format keeps its own
+/// quality (the scales differ: JPEG 85 is not AVIF 85), and WebP and JPEG XL their lossless
+/// switch, so switching formats back and forth never loses a setting.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ExportSettings {
     pub format: FormatChoice,
     pub jpeg_quality: u8,
+    pub webp_quality: u8,
+    pub avif_quality: u8,
+    pub jxl_quality: u8,
+    pub heic_quality: u8,
+    pub webp_lossless: bool,
+    pub jxl_lossless: bool,
     pub png: PngCompression,
     pub size: SizeChoice,
     /// *Strip metadata* — on at every entry to the mode, never persisted (plan Q7).
@@ -397,13 +471,28 @@ impl Default for ExportSettings {
     }
 }
 
+fn clamp_quality(q: u8) -> u8 {
+    q.clamp(QUALITY_MIN, QUALITY_MAX)
+}
+
 impl ExportSettings {
     /// The settings a fresh entry to Export mode starts from: the saved preferences, with
-    /// Strip metadata back on.
+    /// Strip metadata back on. A format this build can't write (saved by one that could)
+    /// starts as PNG.
     pub fn from_prefs(p: &ExportPrefs) -> ExportSettings {
         ExportSettings {
-            format: p.format,
-            jpeg_quality: p.jpeg_quality.clamp(JPEG_QUALITY_MIN, JPEG_QUALITY_MAX),
+            format: if p.format.available() {
+                p.format
+            } else {
+                FormatChoice::Png
+            },
+            jpeg_quality: clamp_quality(p.jpeg_quality),
+            webp_quality: clamp_quality(p.webp_quality),
+            avif_quality: clamp_quality(p.avif_quality),
+            jxl_quality: clamp_quality(p.jxl_quality),
+            heic_quality: clamp_quality(p.heic_quality),
+            webp_lossless: p.webp_lossless,
+            jxl_lossless: p.jxl_lossless,
             png: p.png_compression,
             size: p.size,
             strip_metadata: true,
@@ -415,6 +504,12 @@ impl ExportSettings {
         ExportPrefs {
             format: self.format,
             jpeg_quality: self.jpeg_quality,
+            webp_quality: self.webp_quality,
+            avif_quality: self.avif_quality,
+            jxl_quality: self.jxl_quality,
+            heic_quality: self.heic_quality,
+            webp_lossless: self.webp_lossless,
+            jxl_lossless: self.jxl_lossless,
             png_compression: self.png,
             size: self.size,
         }
@@ -427,6 +522,21 @@ impl ExportSettings {
             FormatChoice::Jpeg => ExportFormat::Jpeg {
                 quality: self.jpeg_quality,
             },
+            FormatChoice::Webp => ExportFormat::Webp {
+                quality: self.webp_quality,
+                lossless: self.webp_lossless,
+            },
+            FormatChoice::Avif => ExportFormat::Avif {
+                quality: self.avif_quality,
+            },
+            FormatChoice::Jxl => ExportFormat::JpegXl {
+                quality: self.jxl_quality,
+                lossless: self.jxl_lossless,
+            },
+            FormatChoice::Heic => ExportFormat::Heic {
+                quality: self.heic_quality,
+            },
+            FormatChoice::Tiff => ExportFormat::Tiff,
         }
     }
 
@@ -434,24 +544,73 @@ impl ExportSettings {
         self.format.extension()
     }
 
-    /// `[` / `]` in the mode: JPEG quality by [`JPEG_QUALITY_STEP`], or PNG compression one
-    /// level. Returns whether anything changed.
+    /// The current format's lossless switch: `None` for a format without one.
+    pub fn lossless(&self) -> Option<bool> {
+        match self.format {
+            FormatChoice::Webp => Some(self.webp_lossless),
+            FormatChoice::Jxl => Some(self.jxl_lossless),
+            _ => None,
+        }
+    }
+
+    /// Set the current format's lossless switch (a format without one ignores it).
+    pub fn set_lossless(&mut self, on: bool) {
+        match self.format {
+            FormatChoice::Webp => self.webp_lossless = on,
+            FormatChoice::Jxl => self.jxl_lossless = on,
+            _ => {}
+        }
+    }
+
+    fn quality_slot(&mut self) -> Option<&mut u8> {
+        match self.format {
+            FormatChoice::Jpeg => Some(&mut self.jpeg_quality),
+            FormatChoice::Webp => Some(&mut self.webp_quality),
+            FormatChoice::Avif => Some(&mut self.avif_quality),
+            FormatChoice::Jxl => Some(&mut self.jxl_quality),
+            FormatChoice::Heic => Some(&mut self.heic_quality),
+            FormatChoice::Png | FormatChoice::Tiff => None,
+        }
+    }
+
+    /// The current format's quality, when it's in play: a lossy format not set to lossless.
+    pub fn quality(&self) -> Option<u8> {
+        if self.lossless() == Some(true) {
+            return None;
+        }
+        self.stored_quality()
+    }
+
+    /// The current format's remembered quality, lossless or not — what the panel's slider
+    /// shows (greyed out while Lossless is on). `None` for PNG and TIFF.
+    pub fn stored_quality(&self) -> Option<u8> {
+        let mut copy = *self;
+        copy.quality_slot().copied()
+    }
+
+    /// Set the current format's quality (clamped). Kept even while lossless is on, for when
+    /// it's turned off; PNG and TIFF ignore it.
+    pub fn set_quality(&mut self, q: u8) {
+        if let Some(slot) = self.quality_slot() {
+            *slot = clamp_quality(q);
+        }
+    }
+
+    /// `[` / `]` in the mode: the quality by [`QUALITY_STEP`], or PNG compression one level.
+    /// Lossless and TIFF have nothing to step. Returns whether anything changed.
     pub fn step_quality(&mut self, dir: i32) -> bool {
         let before = *self;
-        match self.format {
-            FormatChoice::Jpeg => {
-                // Snap to the step grid first, so 87 → 85 / 90 rather than 82 / 92.
-                let q = self.jpeg_quality as i32;
-                let step = JPEG_QUALITY_STEP as i32;
-                let next = if dir > 0 {
-                    (q / step + 1) * step
-                } else {
-                    ((q + step - 1) / step - 1) * step
-                };
-                self.jpeg_quality =
-                    next.clamp(JPEG_QUALITY_MIN as i32, JPEG_QUALITY_MAX as i32) as u8;
-            }
-            FormatChoice::Png => self.png = self.png.step(dir),
+        if self.format == FormatChoice::Png {
+            self.png = self.png.step(dir);
+        } else if let Some(q) = self.quality() {
+            // Snap to the step grid first, so 87 → 85 / 90 rather than 82 / 92.
+            let (q, step) = (q as i32, QUALITY_STEP as i32);
+            let next = if dir > 0 {
+                (q / step + 1) * step
+            } else {
+                ((q + step - 1) / step - 1) * step
+            };
+            self.set_quality(next.clamp(QUALITY_MIN as i32, QUALITY_MAX as i32) as u8);
         }
         *self != before
     }
@@ -464,6 +623,12 @@ impl ExportSettings {
 pub struct ExportPrefs {
     pub format: FormatChoice,
     pub jpeg_quality: u8,
+    pub webp_quality: u8,
+    pub avif_quality: u8,
+    pub jxl_quality: u8,
+    pub heic_quality: u8,
+    pub webp_lossless: bool,
+    pub jxl_lossless: bool,
     pub png_compression: PngCompression,
     /// Written as `size = "long 2048"` / `"width 1500"` / `"height 800"` / `"50%"` /
     /// `"full"`. Rung 2's first build wrote `long_edge = 2048` (0 = full); that is still read.
@@ -475,6 +640,12 @@ impl Default for ExportPrefs {
         ExportPrefs {
             format: FormatChoice::Png,
             jpeg_quality: JPEG_QUALITY_DEFAULT,
+            webp_quality: WEBP_QUALITY_DEFAULT,
+            avif_quality: AVIF_QUALITY_DEFAULT,
+            jxl_quality: JXL_QUALITY_DEFAULT,
+            heic_quality: HEIC_QUALITY_DEFAULT,
+            webp_lossless: false,
+            jxl_lossless: false,
             png_compression: PngCompression::Balanced,
             size: SizeChoice::Full,
         }
@@ -496,8 +667,21 @@ impl ExportPrefs {
         if let Some(f) = field(t, "format") {
             p.format = f;
         }
-        if let Some(q) = field::<i64>(t, "jpeg_quality") {
-            p.jpeg_quality = q.clamp(JPEG_QUALITY_MIN as i64, JPEG_QUALITY_MAX as i64) as u8;
+        let quality = |key: &str, slot: &mut u8| {
+            if let Some(q) = field::<i64>(t, key) {
+                *slot = q.clamp(QUALITY_MIN as i64, QUALITY_MAX as i64) as u8;
+            }
+        };
+        quality("jpeg_quality", &mut p.jpeg_quality);
+        quality("webp_quality", &mut p.webp_quality);
+        quality("avif_quality", &mut p.avif_quality);
+        quality("jxl_quality", &mut p.jxl_quality);
+        quality("heic_quality", &mut p.heic_quality);
+        if let Some(b) = field(t, "webp_lossless") {
+            p.webp_lossless = b;
+        }
+        if let Some(b) = field(t, "jxl_lossless") {
+            p.jxl_lossless = b;
         }
         if let Some(c) = field(t, "png_compression") {
             p.png_compression = c;
@@ -649,6 +833,8 @@ pub struct ExportPanel {
     pub can_export: bool,
     /// The live preview's state and side (rung 3).
     pub preview: PreviewReadout,
+    /// The Format menu: what this build can write, in order.
+    pub formats: Vec<FormatChoice>,
 }
 
 impl ExportPanel {
@@ -693,6 +879,21 @@ impl ExportPanel {
         if settings.format == FormatChoice::Jpeg {
             notes.push("JPEG has no transparency: transparent areas become white.".into());
         }
+        // A format with a smaller limit than the image: say so, and don't offer to export.
+        let too_big = match (settings.format.max_edge(), output_dims) {
+            (Some(max), Some((w, h))) => w.max(h) > max,
+            _ => false,
+        };
+        if too_big {
+            notes.insert(
+                0,
+                format!(
+                    "{} images can be at most {} pixels on a side. Choose a smaller size.",
+                    settings.format.label(),
+                    settings.format.max_edge().unwrap_or_default()
+                ),
+            );
+        }
         if settings.strip_metadata {
             notes.push(
                 "Camera details, dates and location are left out; the color profile is kept."
@@ -707,7 +908,7 @@ impl ExportPanel {
             );
         }
 
-        let can_export = source.as_ref().is_some_and(|s| s.blocked.is_none());
+        let can_export = source.as_ref().is_some_and(|s| s.blocked.is_none()) && !too_big;
         ExportPanel {
             source,
             settings,
@@ -716,6 +917,7 @@ impl ExportPanel {
             notes,
             can_export,
             preview: PreviewReadout::default(),
+            formats: FormatChoice::offered().collect(),
         }
     }
 
@@ -775,8 +977,11 @@ mod tests {
         let p = ExportPrefs {
             format: FormatChoice::Jpeg,
             jpeg_quality: 70,
+            avif_quality: 55,
+            jxl_lossless: true,
             png_compression: PngCompression::Smallest,
             size: SizeChoice::LongEdge(2048),
+            ..ExportPrefs::default()
         };
         let s = ExportSettings::from_prefs(&p);
         assert_eq!(s.format, FormatChoice::Jpeg);
@@ -803,10 +1008,16 @@ mod tests {
     fn prefs_load_leniently_field_by_field() {
         let parse = |s: &str| ExportPrefs::from_value(&s.parse::<toml::Table>().unwrap().into());
         // A format a later build added, a quality typed as text: each falls back alone.
-        let p = parse("format = \"webp\"\njpeg_quality = \"high\"\nsize = \"width 1500\"");
+        let p = parse("format = \"bmp\"\njpeg_quality = \"high\"\nsize = \"width 1500\"");
         assert_eq!(p.format, FormatChoice::Png);
         assert_eq!(p.jpeg_quality, JPEG_QUALITY_DEFAULT);
         assert_eq!(p.size, SizeChoice::Width(1500), "the good field survives");
+        // Rung 4's fields read alone too.
+        let p = parse("format = \"jxl\"\navif_quality = 5\nwebp_lossless = true\njxl_lossless = 1");
+        assert_eq!(p.format, FormatChoice::Jxl);
+        assert_eq!(p.avif_quality, QUALITY_MIN, "clamped");
+        assert!(p.webp_lossless);
+        assert!(!p.jxl_lossless, "not a bool: the default");
         // Out-of-range numbers clamp; an unreadable size falls back to full.
         let p = parse("jpeg_quality = 400\nsize = \"huge\"");
         assert_eq!((p.jpeg_quality, p.size), (100, SizeChoice::Full));
@@ -846,9 +1057,9 @@ mod tests {
         s.jpeg_quality = 87;
         s.step_quality(1);
         assert_eq!(s.jpeg_quality, 90, "snaps up to the grid");
-        s.jpeg_quality = JPEG_QUALITY_MAX;
+        s.jpeg_quality = QUALITY_MAX;
         assert!(!s.step_quality(1), "already at the top");
-        s.jpeg_quality = JPEG_QUALITY_MIN;
+        s.jpeg_quality = QUALITY_MIN;
         assert!(!s.step_quality(-1), "already at the bottom");
 
         // PNG: one compression level per press.
@@ -860,6 +1071,107 @@ mod tests {
         s.step_quality(-1);
         s.step_quality(-1);
         assert_eq!(s.png, PngCompression::Faster);
+    }
+
+    /// Each lossy format keeps its own quality; lossless hides it (and `[` / `]` have nothing
+    /// to step), but it's still there when lossless goes off. PNG and TIFF have none.
+    #[test]
+    fn each_format_keeps_its_own_quality_and_lossless_hides_it() {
+        let mut s = ExportSettings::default();
+        for (f, default) in [
+            (FormatChoice::Jpeg, JPEG_QUALITY_DEFAULT),
+            (FormatChoice::Webp, WEBP_QUALITY_DEFAULT),
+            (FormatChoice::Avif, AVIF_QUALITY_DEFAULT),
+            (FormatChoice::Jxl, JXL_QUALITY_DEFAULT),
+            (FormatChoice::Heic, HEIC_QUALITY_DEFAULT),
+        ] {
+            s.format = f;
+            assert_eq!(s.quality(), Some(default), "{f:?}");
+        }
+        s.format = FormatChoice::Avif;
+        s.set_quality(40);
+        s.format = FormatChoice::Jpeg;
+        assert_eq!(
+            s.quality(),
+            Some(JPEG_QUALITY_DEFAULT),
+            "AVIF's change stays AVIF's"
+        );
+        s.format = FormatChoice::Avif;
+        assert_eq!(s.export_format(), ExportFormat::Avif { quality: 40 });
+        assert_eq!(s.lossless(), None, "AVIF has no lossless switch here");
+
+        s.format = FormatChoice::Webp;
+        s.set_lossless(true);
+        assert_eq!((s.lossless(), s.quality()), (Some(true), None));
+        assert_eq!(
+            s.stored_quality(),
+            Some(WEBP_QUALITY_DEFAULT),
+            "still shown, greyed"
+        );
+        assert!(!s.step_quality(1), "nothing to step while lossless");
+        s.set_quality(55); // kept for later
+        s.set_lossless(false);
+        assert_eq!(s.quality(), Some(55));
+        assert_eq!(
+            s.export_format(),
+            ExportFormat::Webp {
+                quality: 55,
+                lossless: false
+            }
+        );
+        s.format = FormatChoice::Jxl;
+        assert_eq!(s.lossless(), Some(false), "WebP's switch isn't JPEG XL's");
+
+        for f in [FormatChoice::Png, FormatChoice::Tiff] {
+            s.format = f;
+            s.set_quality(12);
+            assert_eq!((s.quality(), s.lossless()), (None, None), "{f:?}");
+        }
+        s.format = FormatChoice::Tiff;
+        assert!(!s.step_quality(1));
+        assert_eq!(s.export_format(), ExportFormat::Tiff);
+        assert_eq!(s.extension(), "tif");
+    }
+
+    /// The menu lists what this build writes; a saved format it can't write starts as PNG.
+    #[test]
+    fn the_menu_offers_what_this_build_writes() {
+        let offered: Vec<_> = FormatChoice::offered().collect();
+        assert_eq!(&offered[..2], &[FormatChoice::Png, FormatChoice::Jpeg]);
+        assert!(offered.iter().all(|f| f.available()));
+        assert_eq!(
+            ExportPanel::build(ExportSettings::default(), src(10, 10)).formats,
+            offered
+        );
+        for f in FormatChoice::ALL {
+            let p = ExportPrefs {
+                format: f,
+                ..ExportPrefs::default()
+            };
+            let want = if f.available() { f } else { FormatChoice::Png };
+            assert_eq!(ExportSettings::from_prefs(&p).format, want, "{f:?}");
+            // Every name serializes and reads back (the prefs' `format = "jxl"`).
+            let text = toml::to_string(&p).unwrap();
+            let back = ExportPrefs::from_value(&text.parse::<toml::Table>().unwrap().into());
+            assert_eq!(back.format, f, "{text}");
+        }
+    }
+
+    /// WebP stops at 16383 px: the panel says so and won't export, before anything fails.
+    #[test]
+    fn webps_size_limit_is_explained_up_front() {
+        let mut s = ExportSettings {
+            format: FormatChoice::Webp,
+            ..ExportSettings::default()
+        };
+        let p = ExportPanel::build(s, src(20_000, 10_000));
+        assert!(!p.can_export);
+        assert!(p.notes[0].contains("16383 pixels"), "{:?}", p.notes);
+        s.size = SizeChoice::LongEdge(3840);
+        let p = ExportPanel::build(s, src(20_000, 10_000));
+        assert!(p.can_export, "a smaller size fits");
+        s.format = FormatChoice::Png;
+        assert!(ExportPanel::build(s, src(20_000, 10_000)).can_export);
     }
 
     #[test]

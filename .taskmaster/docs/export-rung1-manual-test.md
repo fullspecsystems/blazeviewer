@@ -271,6 +271,25 @@ Run `/mac-arsed-mac-app`-style checks here: native look and feel, light **and** 
 | 13.23 | Leave, quit, relaunch, `E` | The custom size is remembered |
 | 13.24 | VoiceOver over the panel and the sheet | File size and Preview are read; the sheet's controls are named |
 
+## 14. More formats (session 8: rung 4)
+
+Use a big, detailed photo (a 20 MP JPEG or NEF) and a PNG with transparency.
+
+| # | Do | Expect |
+|---|---|---|
+| 14.1 | `E`, open the **Format** pop-up | A menu, not buttons: PNG, JPEG · WebP, AVIF, JPEG XL, HEIC · TIFF (dividers between the groups) |
+| 14.2 | Pick each format in turn and wait | Each becomes the export on screen with its own File size. AVIF takes the longest (several seconds on 20 MP — the spinner shows it); the others a second or two at most |
+| 14.3 | **WebP**: the **Lossless** checkbox | Checked: Quality greys out (it doesn't disappear — nothing below moves) and the file grows; `[` / `]` do nothing. Unchecked: Quality is back at the value it had |
+| 14.4 | Set JPEG to 60, switch to AVIF, then back to JPEG | AVIF shows its own quality (85 by default); JPEG is still 60 |
+| 14.5 | **TIFF** | No Quality, no Compression: TIFF is lossless. Export, open the `.tif` in Preview: identical to the original |
+| 14.6 | Export one file per format (⌘↩ each time) | The save sheet says "Export as WebP" (AVIF, JPEG XL, HEIC, TIFF), offers that extension only; each file opens in Preview and Finder shows its size = the panel's File size |
+| 14.7 | A **Display P3** photo (an iPhone HEIC or `WideGamut-*-DisplayP3.jpg`) to WebP, AVIF, JPEG XL and HEIC; open each in Preview, ⌘I | The colours match the original (saturated reds stay red, not dull); Preview's info shows the Display P3 profile |
+| 14.8 | The transparent PNG to WebP, AVIF, HEIC, TIFF and JPEG XL | Transparency kept in all five (JPEG is the only one that turns it white) |
+| 14.9 | A huge photo (over 16383 px wide, or a panorama), **WebP** at Full size | A note: "WebP images can be at most 16383 pixels on a side. Choose a smaller size." Export… is disabled until you pick a smaller size |
+| 14.10 | Leave the mode on JPEG XL Lossless, quit, relaunch, `E` | JPEG XL, Lossless still checked |
+| 14.11 | Browse while an AVIF of a big photo is being made | Browsing stays smooth (the encoder uses half the cores, at low priority) |
+| 14.12 | VoiceOver over Format, Lossless, Quality | Each is named; a greyed Quality reads as dimmed |
+
 ---
 
 ## Windows (the other machine)
@@ -299,3 +318,4 @@ only compile-checked from the Mac.
 | W17 | Export twice from the same folder, elsewhere the first time; then from another folder | Same folder → where the last export went; another folder → beside its photo |
 | W18 | **Export mode** (`E`): run 12.1–12.16 | The egui panel top-right: combos for Format / Compression / Size (presets bigger than the photo greyed), a Quality slider for JPEG, a **Strip metadata** switch, an **Export…** button. A JPEG export's dialog shows a "JPEG image" filter and `.jpg` |
 | W19 | **Live preview and Custom size**: run 13.1–13.24 | The egui panel adds **File size** (with a spinner while calculating) and a **Preview** combo (Export / Original). Size ▸ **Custom…** opens a "Custom Size" dialog window: a Resize by combo, a number field, the result line, OK / Cancel; Enter is OK, Esc cancels. Check the preview on **DX12**: no shimmer at fit on a big photo, the export appears over the photo and `Y` flicks instantly |
+| W20 | **More formats**: `pwsh scripts/build-windows.ps1 -Release -Run` (it now builds WebP + JPEG XL: needs CMake; with nasm on PATH AVIF uses its assembly), then run 14.1–14.12 | The egui Format combo lists PNG, JPEG, WebP, AVIF, JPEG XL, TIFF (no HEIC on Windows) with separators; Lossless is a switch; Quality greys out under it. Each format's dialog filter ("WebP image", …) and extension; the files open in Photos (WebP, JPEG XL with its extension, AVIF with the AV1 extension). If the build fails in `jxl-sys` or `libwebp-sys`, `-NoCodecs` builds without them — report the error in the plan's Handoff |
