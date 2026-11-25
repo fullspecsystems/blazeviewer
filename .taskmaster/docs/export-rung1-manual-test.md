@@ -278,7 +278,7 @@ Use a big, detailed photo (a 20 MP JPEG or NEF) and a PNG with transparency.
 | # | Do | Expect |
 |---|---|---|
 | 14.1 | `E`, open the **Format** pop-up | A menu, not buttons: PNG, JPEG · WebP, AVIF, JPEG XL, HEIC · TIFF (dividers between the groups) |
-| 14.2 | Pick each format in turn and wait | Each becomes the export on screen with its own File size. AVIF takes the longest (several seconds on 20 MP — the spinner shows it); the others a second or two at most |
+| 14.2 | Pick each format in turn and wait | The pop-up shows the format's name every time (WebP and TIFF, the first of their groups, once showed blank). Each becomes the export on screen with its own File size. AVIF takes the longest (several seconds on 20 MP — the spinner shows it); the others a second or two at most |
 | 14.3 | **WebP**: the **Lossless** checkbox | Checked: Quality greys out (it doesn't disappear — nothing below moves) and the file grows; `[` / `]` do nothing. Unchecked: Quality is back at the value it had |
 | 14.4 | Set JPEG to 60, switch to AVIF, then back to JPEG | AVIF shows its own quality (85 by default); JPEG is still 60 |
 | 14.5 | **TIFF** | No Quality, no Compression: TIFF is lossless. Export, open the `.tif` in Preview: identical to the original |
@@ -290,6 +290,7 @@ Use a big, detailed photo (a 20 MP JPEG or NEF) and a PNG with transparency.
 | 14.11 | Browse while an AVIF of a big photo is being made | Browsing stays smooth (the encoder uses half the cores, at low priority) |
 | 14.12 | VoiceOver over Format, Lossless, Quality | Each is named; a greyed Quality reads as dimmed |
 | 14.13 | **TIFF**, ⌘↩, type the name `scan.tiff` | Saved as `scan.tiff` (not `scan.tiff.tif`); the same for JPEG named `x.jpeg` |
+| 14.14 | A **3D model**: `E`, then `P` to spin it, `P` again to stop | The panel keeps saying "The view on screen"; nothing below it moves |
 
 ---
 

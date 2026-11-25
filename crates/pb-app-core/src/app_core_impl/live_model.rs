@@ -704,6 +704,15 @@ mod tests {
         let source = panel.source.as_ref().expect("a source");
         assert_eq!(source.dims, Some((800, 600)));
         assert_eq!(source.frame.as_deref(), Some("The view on screen"));
+        // The same words while it moves (a drag, or the turntable on P): a longer line there
+        // made the panel jump each time the model started or stopped turning.
+        core.toggle_play_pause();
+        assert!(core.frame_is_moving(0), "the turntable is turning it");
+        let panel = core.export_panel();
+        assert_eq!(
+            panel.source.as_ref().and_then(|s| s.frame.as_deref()),
+            Some("The view on screen")
+        );
     }
 
     /// A drag changes the view every frame; the automatic text scan and describe wait until

@@ -121,9 +121,8 @@ impl AppCore {
         let kind = crate::video::item_kind(self.source.as_ref(), item);
         let moving = self.frame_is_moving(item);
         let frame = match (kind, self.frame_key(item)) {
-            (_, FrameKey::View { .. }) if moving => {
-                Some("The view on screen when you export".to_string())
-            }
+            // Turning a model doesn't change the wording: "The view on screen" already means
+            // the view when you export, and a longer line while it moves made the panel jump.
             (_, FrameKey::View { .. }) => Some("The view on screen".to_string()),
             (_, _) if moving => Some("The frame on screen when you export".to_string()),
             (crate::video::LibraryItemKind::Video(_), FrameKey::Still) => {

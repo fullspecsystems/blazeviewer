@@ -21,6 +21,14 @@ struct ExportFormatOption: Identifiable, Equatable {
     var id: Int { code }
 }
 
+/// A run of the Format pop-up's entries, drawn as one menu section. Its id is a String so the
+/// Picker can never take it for a format code (the selection's type is Int).
+struct ExportFormatGroup: Identifiable {
+    let group: Int
+    var formats: [ExportFormatOption]
+    var id: String { "group-\(group)" }
+}
+
 /// One entry in the Size pop-up.
 struct ExportSizeOption: Identifiable, Equatable {
     let code: UInt32  // 0 = full size, else the long edge
@@ -143,16 +151,17 @@ struct ExportPanelView: View {
         VStack(alignment: .leading, spacing: 12) {
             row("Format") {
                 // A pop-up, grouped: the everyday two, the modern ones, then TIFF. The core
-                // lists only what this build writes (HEIC is Mac-only).
+                // lists only what this build writes (HEIC is Mac-only). Each group is a Section,
+                // which the menu separates with a line. Not a Divider inside the ForEach: a
+                // ForEach tags every view in an element with its id, so that divider carried
+                // WebP's code, the pop-up matched it before WebP, and showed a blank title.
                 Picker("Format", selection: binding(\.format, model.exportSetFormat)) {
-                    ForEach(Array(p.formats.enumerated()), id: \.element.id) { i, f in
-                        if i > 0
-                            && ExportPanelView.formatGroup(f.code)
-                                != ExportPanelView.formatGroup(p.formats[i - 1].code)
-                        {
-                            Divider()
+                    ForEach(ExportPanelView.formatGroups(p.formats)) { group in
+                        Section {
+                            ForEach(group.formats) { f in
+                                Text(f.label).tag(f.code)
+                            }
                         }
-                        Text(f.label).tag(f.code)
                     }
                 }
                 .pickerStyle(.menu)
@@ -291,13 +300,27 @@ struct ExportPanelView: View {
 
     // MARK: - Helpers
 
-    /// The Format menu's groups, for its dividers: PNG and JPEG, the modern formats, TIFF.
+    /// The Format menu's groups: PNG and JPEG, the modern formats, TIFF.
     static func formatGroup(_ code: Int) -> Int {
         switch code {
         case 0, 1: return 0
         case 6: return 2
         default: return 1
         }
+    }
+
+    /// `formats`, in order, split into runs of the same `formatGroup`.
+    static func formatGroups(_ formats: [ExportFormatOption]) -> [ExportFormatGroup] {
+        var groups: [ExportFormatGroup] = []
+        for f in formats {
+            let g = formatGroup(f.code)
+            if let last = groups.last, last.group == g {
+                groups[groups.count - 1].formats.append(f)
+            } else {
+                groups.append(ExportFormatGroup(group: g, formats: [f]))
+            }
+        }
+        return groups
     }
 
     /// A control in the controls column with no label of its own (a checkbox carries one).
