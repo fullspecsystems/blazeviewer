@@ -153,8 +153,9 @@ mis-colored; multipage TIFF shows page 1 only; single-file HEIC image sequences 
 AV1-only). *Not* limits: animated GIF / APNG / WebP / AVIF and
 Live Photo motion all **play** on `P` (`animation.rs`) — browsing
 decodes only frame 1, by design.
-LUT/CLUT & gray/CMYK ICC profiles → sRGB passthrough (the `lcms2`-behind-a-flag
-escalation). SDR-white level is a 200-nit default (real value via DisplayConfig =
+LUT/CLUT & CMYK ICC profiles → sRGB passthrough (the `lcms2`-behind-a-flag
+escalation). Gray ICC profiles are honoured since 2026-11-24 (their own curve, identity
+matrix; a near-sRGB curve stays a passthrough). SDR-white level is a 200-nit default (real value via DisplayConfig =
 TODO). ⚠ On an **HDR desktop**, GDI screen capture of the flip swapchain returns
 all-white — a Windows limit, not a render bug (use the `offscreen_png` example to
 verify rendering).

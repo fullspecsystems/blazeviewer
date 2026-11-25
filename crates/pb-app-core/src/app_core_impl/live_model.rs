@@ -1012,11 +1012,10 @@ mod tests {
             [200, 40, 40],
             "the GPU draws the new colour"
         );
-        assert_eq!(
-            pb_decode::model_color(),
-            [200, 40, 40],
-            "new stills will too"
-        );
+        // That new stills use it too isn't asserted here: the colour pb-decode bakes with is
+        // process-wide, and every parallel test that runs `refresh_theme` resets it to the
+        // default, so reading it back raced (it failed under full-suite load, 2026-11-25).
+        // pb-decode's `the_model_colour_setting_reaches_the_still` covers that half.
         core.tick_live_model(false);
         assert!(
             core.live_model_ready(),
