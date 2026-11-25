@@ -246,6 +246,22 @@ mod tests {
         assert!(img.width.max(img.height) >= super::NOMINAL_EDGE - 1);
     }
 
+    /// Export decodes through its own entry point, not `decode_named_bytes`, so a model needs
+    /// routing there too. A model the user hasn't turned exports the still that Copy takes
+    /// and the panel sizes: the nominal render, transparent around the model.
+    #[test]
+    fn an_unturned_model_exports_its_nominal_still() {
+        let shown = decode_named_bytes("parts/cube.stl", &cube_stl(), None, false).unwrap();
+        let s = crate::decode_named_bytes_for_export("parts/cube.stl", &cube_stl()).unwrap();
+        assert_eq!((s.width, s.height), (shown.width, shown.height));
+        assert_eq!(s.channels, pb_encode::Channels::Rgba);
+        let pb_encode::Samples::U8(px) = &s.samples else {
+            panic!("a model renders 8-bit");
+        };
+        assert_eq!(px[3], 0, "the corner is transparent");
+        assert!(crate::decode_named_bytes_for_export("x.stl", b"nope").is_err());
+    }
+
     #[test]
     fn garbage_model_is_a_decode_error_not_a_panic() {
         assert!(decode_named_bytes("x.stl", b"nope", None, false).is_err());

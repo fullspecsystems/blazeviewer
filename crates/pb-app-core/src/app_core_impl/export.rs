@@ -547,6 +547,40 @@ mod tests {
         let _ = std::fs::remove_dir_all(&out);
     }
 
+    /// A 3D model nobody has turned exports its still (the turned view is a frame capture;
+    /// see `frame_capture`). It used to fail with "couldn't decode the image (unsupported
+    /// format)": export decodes through its own entry point, which had no route for models.
+    #[test]
+    fn an_unturned_model_exports_its_still() {
+        const TRIANGLE: &[u8] = b"solid t\nfacet normal 0 0 1\nouter loop\nvertex 0 0 0\nvertex 1 0 0\nvertex 0 1 1\nendloop\nendfacet\nendsolid t\n";
+        let lib = sandbox("model-lib");
+        let out = sandbox("model-out");
+        std::fs::write(lib.join("part.stl"), TRIANGLE).unwrap();
+        let mut core = test_core();
+        core.persist_prefs = false;
+        core.source = Arc::new(pb_source::FsSource::new(vec![lib.join("part.stl")]));
+        core.displayed_item = Some(0);
+        assert!(core.live_view_capture(0).is_none(), "not turned: the still");
+
+        core.export_cmd(png());
+        pump_until(&mut core, |c| {
+            c.effects
+                .iter()
+                .any(|e| matches!(e, contract::CoreEffect::ShowSavePanel { .. }))
+        });
+        let (id, _, name) = take_save_panel(&mut core).unwrap();
+        assert_eq!(name, "part.png");
+        core.save_panel_resolved(id, Some(out.join("part.png")));
+        pump_until(&mut core, |c| !c.export.busy());
+
+        let bytes = std::fs::read(out.join("part.png")).expect("the export was written");
+        let png = pb_decode::decode_named_bytes("part.png", &bytes, None, false).unwrap();
+        let still = pb_decode::decode_named_bytes("part.stl", TRIANGLE, None, false).unwrap();
+        assert_eq!((png.width, png.height), (still.width, still.height));
+        let _ = std::fs::remove_dir_all(&lib);
+        let _ = std::fs::remove_dir_all(&out);
+    }
+
     /// The dialog starts beside the photo; a second export from the **same** folder goes
     /// back where the first went; another folder starts beside its own photo (or the pin).
     #[test]

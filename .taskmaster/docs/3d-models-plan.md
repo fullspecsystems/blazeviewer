@@ -331,6 +331,18 @@ port it.
 
 ## Handoff
 
+### 2026-11-24 — Correction: an unturned model couldn't be exported (Mac session, #89)
+
+Phase 1's "Export works unchanged" was wrong. Export (and Export mode's preview) decode through
+`pb_decode::decode_named_bytes_for_export`, not `decode_named_bytes`, and that entry point had no
+route for models, so Export on a model nobody had turned failed with "couldn't decode the image
+(unsupported format)". A turned one worked because its view is a frame capture. The owner hit it
+on switching to a new model in Export mode. Fixed: `export_named_inner` routes models to
+`model::decode_model` at the nominal size, the still Copy takes and the panel sizes. Tests: the
+pb-decode `an_unturned_model_exports_its_nominal_still` and the pb-app-core
+`an_unturned_model_exports_its_still` (an STL exported to a file, which fails without the
+route).
+
 ### 2026-11-25 — Export / Copy / Describe capture the turned view (#153.6, Mac session)
 
 Owner decisions (asked 2026-11-24): a capture of a turned model is **exactly the window**

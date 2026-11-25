@@ -151,6 +151,13 @@ fn export_named_inner(name: &str, bytes: &[u8]) -> Result<ExportSource, ExportDe
         let img = crate::SvgDecoder.decode(&full_res(bytes))?;
         return Ok(from_decoded(img, "resvg"));
     }
+    // A 3D model the user hasn't turned: the still at its nominal size, as Copy takes it and
+    // the panel sizes it, routed by name like the display decode. (A turned one never comes
+    // here: its view is captured as a frame.)
+    if let Some(format) = pb_mesh::ModelFormat::from_extension(&ext) {
+        let img = crate::model::decode_model(format, &full_res(bytes))?;
+        return Ok(from_decoded(img, "pb-mesh"));
+    }
     if ext == "tga" {
         return crate::image_backend::export_format(bytes, image::ImageFormat::Tga);
     }
@@ -257,8 +264,8 @@ fn with_colr(mut s: ExportSource, bytes: &[u8]) -> ExportSource {
 }
 
 /// Adapt a full-size display decode into an export source. Used only for backends whose
-/// display decode is already full precision for their sources (RAW previews, SVG, PSD, the
-/// Windows OS codec) — the colour is mapped from the display transform, so only sRGB and
+/// display decode is already full precision for their sources (RAW previews, SVG, PSD, 3D
+/// model stills, the Windows OS codec) — the colour is mapped from the display transform, so only sRGB and
 /// the known Display-P3 case are exact; anything else is tagged sRGB with a log line (no
 /// such backend exists today — see the module docs).
 pub(crate) fn from_decoded(img: DecodedImage, path: &'static str) -> ExportSource {
