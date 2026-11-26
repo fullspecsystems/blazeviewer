@@ -248,6 +248,106 @@ fn trc_is_srgb_like(trc: &[f32; 7]) -> bool {
     is_srgb_trc(trc) || plain_gamma_2_2
 }
 
+/// True when the transform's matrix is the identity: its primaries and white point are
+/// sRGB's, so it can't hold a colour sRGB can't.
+pub(crate) fn has_srgb_gamut(ct: &ColorTransform) -> bool {
+    is_identity(&ct.matrix)
+}
+
+/// Linear sRGB → the code values a [`ColorTransform`] displays as that colour: the
+/// transform run backwards (task #156).
+///
+/// For a decoder that can hand out linear sRGB in **extended range** (negative or above 1
+/// where a colour lies outside sRGB) but not the image's own wide space: jxl-oxide gamut-maps
+/// lossy JPEG XL whenever its target primaries aren't sRGB's, so it is asked for linear sRGB
+/// and the conversion to Display P3 or Adobe RGB happens here. Because this inverts the
+/// very matrix and curve the shader applies, encoding then displaying gives the colour back
+/// by construction, up to quantization and a per-channel clip to the target's own gamut.
+pub(crate) struct SrgbLinearEncoder {
+    /// sRGB linear → target linear (the transform's matrix, inverted).
+    from_srgb: [[f32; 3]; 3],
+    /// The target's OETF (the transform's EOTF, inverted): linear → encoded.
+    oetf: ParametricCurve,
+    /// The OETF quantized to 8 bits on a square-root grid: entry `i` is the code for linear
+    /// `(i / OETF_STEPS)²`. The square root spaces the entries like the codes of a gamma
+    /// curve, so even the top of a linear curve gets 16 entries per code, and one table
+    /// lookup replaces a `powf` per sample.
+    lut8: Box<[u8; OETF_STEPS + 1]>,
+}
+
+const OETF_STEPS: usize = 16384;
+
+impl SrgbLinearEncoder {
+    /// `None` when the transform can't be inverted: a singular matrix, or a curve whose two
+    /// pieces don't meet (moxcms refuses to invert those).
+    pub(crate) fn new(ct: &ColorTransform) -> Option<Self> {
+        let from_srgb = invert3(&ct.matrix)?;
+        let [g, a, b, c, d, e, f] = ct.trc;
+        let oetf = ParametricCurve {
+            g,
+            a,
+            b,
+            c,
+            d,
+            e,
+            f,
+        }
+        .invert()?;
+        let lut8: Box<[u8]> = (0..=OETF_STEPS)
+            .map(|i| {
+                let s = i as f32 / OETF_STEPS as f32;
+                (oetf.eval(s * s).clamp(0.0, 1.0) * 255.0).round() as u8
+            })
+            .collect();
+        Some(Self {
+            from_srgb,
+            oetf,
+            lut8: lut8.try_into().ok()?,
+        })
+    }
+
+    /// Linear sRGB (extended) → the target's linear RGB, still unclipped.
+    #[inline]
+    pub(crate) fn to_target_linear(&self, rgb: [f32; 3]) -> [f32; 3] {
+        let m = &self.from_srgb;
+        [0, 1, 2].map(|i| m[i][0] * rgb[0] + m[i][1] * rgb[1] + m[i][2] * rgb[2])
+    }
+
+    /// One target-linear channel → its 8-bit code, clipped to [0, 1] first.
+    #[inline]
+    pub(crate) fn encode8(&self, v: f32) -> u8 {
+        let s = v.clamp(0.0, 1.0).sqrt();
+        // NaN clamps to NaN and casts to 0: black, never a panic.
+        self.lut8[((s * OETF_STEPS as f32 + 0.5) as usize).min(OETF_STEPS)]
+    }
+
+    /// One target-linear channel → its 16-bit code, clipped to [0, 1] first. Evaluates the
+    /// curve exactly: 16 bits would need a table too big to be worth it, and this serves
+    /// only the export decode.
+    #[inline]
+    pub(crate) fn encode16(&self, v: f32) -> u16 {
+        (self.oetf.eval(v.clamp(0.0, 1.0)).clamp(0.0, 1.0) * 65535.0).round() as u16
+    }
+}
+
+/// Invert a 3×3 (row-major), in f64; `None` when it is singular.
+fn invert3(m: &[[f32; 3]; 3]) -> Option<[[f32; 3]; 3]> {
+    let a = m.map(|r| r.map(f64::from));
+    let cof =
+        |r0: usize, r1: usize, c0: usize, c1: usize| a[r0][c0] * a[r1][c1] - a[r0][c1] * a[r1][c0];
+    let det = a[0][0] * cof(1, 2, 1, 2) - a[0][1] * cof(1, 2, 0, 2) + a[0][2] * cof(1, 2, 0, 1);
+    if !det.is_finite() || det.abs() < 1e-9 {
+        return None;
+    }
+    // The adjugate (the transposed cofactor matrix), over the determinant.
+    let adj = [
+        [cof(1, 2, 1, 2), -cof(0, 2, 1, 2), cof(0, 1, 1, 2)],
+        [-cof(1, 2, 0, 2), cof(0, 2, 0, 2), -cof(0, 1, 0, 2)],
+        [cof(1, 2, 0, 1), -cof(0, 2, 0, 1), cof(0, 1, 0, 1)],
+    ];
+    Some(adj.map(|r| r.map(|v| (v / det) as f32)))
+}
+
 // ── HDR transfer decode (shared) ─────────────────────────────────────────────────────
 //
 // Moved here from `ffmpeg::color` (task #144) so every HDR producer decodes PQ/HLG with
@@ -307,6 +407,102 @@ pub fn hlg_to_scrgb(e: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Curves the encoder must invert: sRGB, gamma 2.2 (Adobe RGB), gamma 1.8 (ProPhoto),
+    /// BT.709's, and linear.
+    const CURVES: [[f32; 7]; 5] = [
+        SRGB_TRC,
+        [2.2, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        [1.8, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        [
+            1.0 / 0.45,
+            1.0 / 1.099,
+            0.099 / 1.099,
+            1.0 / 4.5,
+            0.081,
+            0.0,
+            0.0,
+        ],
+        LINEAR_TRC,
+    ];
+
+    fn eotf(trc: &[f32; 7]) -> ParametricCurve {
+        let [g, a, b, c, d, e, f] = *trc;
+        ParametricCurve {
+            g,
+            a,
+            b,
+            c,
+            d,
+            e,
+            f,
+        }
+    }
+
+    /// Task #156: every 8-bit code of every curve survives decode-then-encode exactly, and
+    /// 16-bit codes within one step.
+    #[test]
+    fn srgb_linear_encoder_inverts_each_curve() {
+        let p3 = ColorTransform::from_cicp(12, 13, 0, true);
+        for trc in CURVES {
+            let ct = ColorTransform { trc, ..p3 };
+            let enc = SrgbLinearEncoder::new(&ct).expect("invertible");
+            let curve = eotf(&trc);
+            for k in 0..=255u8 {
+                let v = curve.eval(k as f32 / 255.0);
+                assert_eq!(enc.encode8(v), k, "{trc:?}: 8-bit code {k}");
+            }
+            for k in (0..=65535u32).step_by(97).chain([65535]) {
+                let v = curve.eval(k as f32 / 65535.0);
+                let got = enc.encode16(v) as i64;
+                assert!((got - k as i64).abs() <= 1, "{trc:?}: 16-bit {k} -> {got}");
+            }
+            // Out of range clips, and NaN is black rather than a panic.
+            assert_eq!(enc.encode8(-0.5), 0);
+            assert_eq!(enc.encode8(7.0), 255);
+            assert_eq!(enc.encode8(f32::NAN), 0);
+            assert_eq!(enc.encode16(-0.5), 0);
+            assert_eq!(enc.encode16(7.0), 65535);
+        }
+    }
+
+    /// Encoding linear sRGB and displaying it through the same transform is the identity:
+    /// P3 red, which sRGB can't hold, comes back as P3 red.
+    #[test]
+    fn srgb_linear_encoder_round_trips_through_the_transform() {
+        let p3 = ColorTransform::from_cicp(12, 13, 0, true);
+        assert!(!has_srgb_gamut(&p3) && has_srgb_gamut(&ColorTransform::srgb()));
+        let enc = SrgbLinearEncoder::new(&p3).unwrap();
+        let m = p3.matrix;
+        // P3 red as linear sRGB, out of range: what the decoder hands the encoder.
+        let red = [m[0][0], m[1][0], m[2][0]];
+        assert!(red[0] > 1.2 && red[1] < -0.03, "{red:?}");
+        let lin = enc.to_target_linear(red);
+        assert_eq!(lin.map(|v| enc.encode8(v)), [255, 0, 0], "{lin:?}");
+        // Every grey stays neutral.
+        for k in [0.0, 0.18, 0.5, 1.0] {
+            let g = enc.to_target_linear([k, k, k]);
+            let code = enc.encode8(g[0]);
+            assert_eq!(g.map(|v| enc.encode8(v)), [code; 3], "grey {k}: {g:?}");
+        }
+    }
+
+    #[test]
+    fn srgb_linear_encoder_refuses_what_it_cannot_invert() {
+        let p3 = ColorTransform::from_cicp(12, 13, 0, true);
+        let singular = ColorTransform {
+            matrix: [[1.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]],
+            ..p3
+        };
+        assert!(SrgbLinearEncoder::new(&singular).is_none());
+        // A curve whose toe and power pieces don't meet at `d`.
+        let broken = ColorTransform {
+            trc: [2.4, 1.0, 0.0, 1.0, 0.5, 0.0, 0.9],
+            ..p3
+        };
+        assert!(SrgbLinearEncoder::new(&broken).is_none());
+    }
+
     /// PQ anchor points from BT.2408/ST 2084: SDR reference white (203 nits)
     /// encodes at ≈0.5807 and must decode to scRGB 1.0; the curve's endpoints
     /// hold; 0.508 is ≈100 nits.

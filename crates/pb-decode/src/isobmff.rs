@@ -248,9 +248,7 @@ fn child_boxes(b: &[u8], start: usize, end: usize) -> Option<Vec<BoxSpan>> {
 /// `pitm` / `iprp` → `ipco` / `ipma` chain can't be walked.
 #[cfg(any(windows, heic_libheif, test))]
 fn primary_colr_positions(b: &[u8]) -> Option<Vec<usize>> {
-    let find = |boxes: &[BoxSpan], t: &[u8; 4]| {
-        boxes.iter().copied().find(|bx| &bx.2 == t)
-    };
+    let find = |boxes: &[BoxSpan], t: &[u8; 4]| boxes.iter().copied().find(|bx| &bx.2 == t);
     let be = |at: usize, n: usize| -> Option<u32> {
         Some(
             b.get(at..at + n)?
