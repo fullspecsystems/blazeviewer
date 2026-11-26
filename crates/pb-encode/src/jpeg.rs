@@ -1,10 +1,12 @@
-//! Baseline JPEG over the `image` crate (4:2:2 chroma). Two callers:
+//! Baseline JPEG over the `image` crate (4:4:4: it never subsamples chroma). Two callers:
 //! - [`encode_jpeg_rgba8`] — AI Describe's downscaled, already-sRGB upload (moved here from
 //!   `pb-decode` in rung 0c);
 //! - [`JpegEncoder`] — the export format (rung 2): an `ExportImage` prepared with
 //!   [`JpegEncoder::CAPS`] (8-bit, no alpha), its colour profile embedded.
 //!
-//! mozjpeg could replace it behind the same `Encoder` seam (export-plan.md rung 4).
+//! jpegli could replace it behind the same `Encoder` seam: 8-10 % smaller at equal quality and
+//! faster, but its only packaging clashes with jxl-sys over Highway (task #157). mozjpeg was
+//! measured too and isn't worth it at the default quality (export-plan.md rung 4).
 
 use crate::encoder::{Caps, Encoder};
 use crate::types::{Channels, ExportImage, OutputColor, Samples};

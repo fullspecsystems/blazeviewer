@@ -2574,6 +2574,17 @@
         "priority": "medium",
         "dependencies": [],
         "subtasks": []
+      },
+      {
+        "id": 157,
+        "title": "JPEG export through jpegli, with one shared Highway",
+        "description": "Measured 2026-11-25 (export-plan.md rung 4, 'JPEG encoder trial'): at equal SSIMULACRA2, jpegli writes 8-10 % smaller files than our current encoder (the image crate's baseline, 4:4:4) across q70-q90 and 22 % smaller at q95, and encodes faster (5 ms vs 8 ms at 2048 px). mozjpeg (C or the pure-Rust mozjpeg-rs port) gains only ~1 % at the default q85 and is not worth adding. Blocker: the only packaging, jpegli 0.1.0 + jpegli-sys 0.1.0+0.10.2, builds a second libjxl (0.10.2, CMake) with Highway 1.1.0, and its link-search path comes before jxl-sys's, so -lhwy resolves to 1.1.0 for everything. libjxl 0.12 (built against Highway 1.2.0) then runs on 1.1's runtime, and the ARM SVE/NEON_BF16 target bits differ between the two (wrong-target dispatch on SVE hardware; harmless on Apple Silicon and x86, where the bits match). jpegli itself only imports hwy::AllocateAlignedBytes/FreeAlignedBytes, which are identical. Plan: build jpegli ourselves against the same Highway 1.2.0 as jxl-sys (an in-tree -sys crate over google/jpegli, or a [patch] of jpegli-sys), then swap JpegEncoder behind the Encoder seam, re-tune JPEG_QUALITY_DEFAULT with codec_bench, and keep the ICC chunks numbered from 1 (the mozjpeg crate's write_icc_profile numbers from 0, which decoders reject).",
+        "status": "pending",
+        "priority": "medium",
+        "dependencies": [
+          89
+        ],
+        "subtasks": []
       }
     ],
     "metadata": {

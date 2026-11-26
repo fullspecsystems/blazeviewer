@@ -995,6 +995,34 @@ through a batch of them". mozjpeg and oxipng are not in this batch.
   RGB-CMY chart, a logo), and Image I/O's HEIC is larger than JPEG at equal quality. WebP had the
   same tail (73.3) until the review found sharp YUV wasn't actually on (lossy input was imported as
   YUV); with it, 80.5 — at −10 % rather than −16 %, and ~45 % slower to encode.
+- **JPEG encoder trial (2026-11-25, owner: "research and compare POC implementations").** Three
+  permissive candidates (jpegli-rs and zenjpeg are AGPL; out). Each ran in its own example binary
+  against the current encoder (`image` crate, baseline **4:4:4**, not 4:2:2 as its doc said) on
+  the 23-image corpus at 2048 px; file size at the same median SSIMULACRA2 as the current
+  encoder's q70 … q95:
+
+  | Encoder | q70 | q75 | q80 | q85 | q90 | q95 | ms @ 2048 px |
+  |---|---|---|---|---|---|---|---|
+  | **jpegli** 0.1.0 (C++, libjxl 0.10.2's; defaults: 4:4:4, adaptive quant, progressive) | −11.7 % | −8.6 % | −9.0 % | **−8.3 %** | −9.6 % | −22.1 % | **5** (current 8) |
+  | mozjpeg 0.10.13 (C), 4:2:0 | −11.3 % | −7.9 % | −2.7 % | −1.1 % | −1.3 % | — | 40–80 |
+  | mozjpeg (C), 4:4:4 | −9.4 % | −1.0 % | +0.9 % | +1.0 % | +0.6 % | — | 50–110 |
+  | mozjpeg-rs 0.9.2 (pure Rust), 4:2:0 | −10.9 % | −7.5 % | −2.7 % | −0.8 % | −0.5 % | — | 30–60 |
+  | mozjpeg-rs, 4:4:4 | −6.3 % | +2.3 % | +2.8 % | +2.7 % | +2.2 % | — | 40–80 |
+
+  - **mozjpeg isn't worth adding:** about nothing at the default q85, and its 4:2:0 default drops
+    the weakest images (p10 73 vs 81 at q85: saturated edges). The pure-Rust port matches the C
+    library, so it would be the one if ever.
+  - **The `mozjpeg` crate's `write_icc_profile` numbers ICC chunks from 0** (ICC.1 starts at 1), so
+    decoders drop the profile: every wide-gamut photo scored 55–80 until the trial wrote its own
+    APP2 markers. Whoever wires a libjpeg-API encoder: number from 1.
+  - **jpegli wins but isn't shippable as packaged (task #157).** jpegli-sys builds its own libjxl
+    0.10.2 + **Highway 1.1.0**; its `-L` comes before jxl-sys's, so `-lhwy` resolves to 1.1.0 for
+    libjxl 0.12 too (built against 1.2.0). It links and runs (a JPEG XL round trip beside jpegli
+    passed), but the ARM SVE / NEON_BF16 target bits moved between 1.1 and 1.2, so libjxl could
+    dispatch to the wrong target on SVE hardware (Apple Silicon and x86 are unaffected: bits
+    equal). jpegli itself only imports `hwy::AllocateAlignedBytes` / `FreeAlignedBytes`
+    (identical). The fix is a jpegli built against the same Highway 1.2.0 as jxl-sys. **This
+    release keeps the current encoder.**
 - **Independent review** (Codex, gpt-6.2-astra at xhigh, read-only, of b0e0c01d): no
   use-after-free, leak, ABI or buffer-size problem in the WebP / libjxl / CoreFoundation FFI, and
   `add_icc` verified against avif-serialize's opaque and alpha layouts. Twelve findings, all fixed
