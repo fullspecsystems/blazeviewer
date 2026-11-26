@@ -62,6 +62,7 @@ pub mod ids {
     pub const SHOW_ARCHIVES: &str = "show_archives";
     pub const SLIDESHOW: &str = "slideshow";
     pub const SLIDESHOW_FASTER: &str = "slideshow_faster";
+    pub const EXPORT_MODE: &str = "export_mode";
     pub const SLIDESHOW_SLOWER: &str = "slideshow_slower";
     /// Matches `Action::ToggleToolbar.id()` (task #61).
     pub const TOOLBAR: &str = "toggle_toolbar";
@@ -277,6 +278,7 @@ pub enum MenuAction {
     Slideshow,
     SlideshowFaster,
     SlideshowSlower,
+    ExportMode,
     ToggleToolbar,
     Info,
     FullExif,
@@ -343,6 +345,7 @@ impl MenuAction {
             MenuAction::Slideshow => Action::SlideshowToggle,
             MenuAction::SlideshowFaster => Action::SlideshowFaster,
             MenuAction::SlideshowSlower => Action::SlideshowSlower,
+            MenuAction::ExportMode => Action::ExportMode,
             MenuAction::ToggleToolbar => Action::ToggleToolbar,
             MenuAction::Info => Action::Info,
             MenuAction::FullExif => Action::FullExif,
@@ -409,6 +412,7 @@ pub fn action_for(id: &str) -> Option<MenuAction> {
         SLIDESHOW => MenuAction::Slideshow,
         SLIDESHOW_FASTER => MenuAction::SlideshowFaster,
         SLIDESHOW_SLOWER => MenuAction::SlideshowSlower,
+        EXPORT_MODE => MenuAction::ExportMode,
         TOOLBAR => MenuAction::ToggleToolbar,
         INFO => MenuAction::Info,
         FULL_EXIF => MenuAction::FullExif,
@@ -564,6 +568,12 @@ pub struct ViewChecks {
     /// `settings.subtitles`. Always *enabled*, like Mute Live Photo Audio — a preference
     /// you set whenever you like, not a property of what's on screen.
     pub subtitles: CheckMenuItem,
+    /// View ▸ Export Mode (task #89): checked while the mode is on.
+    pub export_mode: CheckMenuItem,
+    /// View ▸ Slideshow Faster / Slower: plain items, retitled in Export mode, where `[` /
+    /// `]` step the quality (`MenuState::step_keys`).
+    pub step_down: MenuItem,
+    pub step_up: MenuItem,
 }
 
 /// Everything [`build_menu`] hands back: the menu itself plus the item handles whose
@@ -784,6 +794,12 @@ pub fn build_menu(keymap: &Keymap) -> BuiltMenu {
     let toggle_panels = check_item(ids::TOGGLE_PANELS, "Hide Panels\tTab");
     let mute_live_audio = check_item(ids::MUTE_LIVE_AUDIO, "Mute Live Photo Audio\tM");
     let subtitles = check_item(ids::TOGGLE_SUBTITLES, "Subtitles\tC");
+    let export_mode = check_item(
+        ids::EXPORT_MODE,
+        &labeled(keymap, "Export Mode", Action::ExportMode),
+    );
+    let step_down = item(ids::SLIDESHOW_FASTER, "Slideshow Faster\t[");
+    let step_up = item(ids::SLIDESHOW_SLOWER, "Slideshow Slower\t]");
 
     let view = Submenu::new("&View", true);
     let _ = view.append_items(&[
@@ -798,8 +814,8 @@ pub fn build_menu(keymap: &Keymap) -> BuiltMenu {
         &recursive,
         &show_archives,
         &slideshow,
-        &item(ids::SLIDESHOW_FASTER, "Slideshow Faster\t["),
-        &item(ids::SLIDESHOW_SLOWER, "Slideshow Slower\t]"),
+        &step_down,
+        &step_up,
         &sep(),
         &toolbar,
         &info,
@@ -808,6 +824,7 @@ pub fn build_menu(keymap: &Keymap) -> BuiltMenu {
             ids::FOLDER_TREE,
             &labeled(keymap, "Show Folder Tree", Action::FolderTree),
         ),
+        &export_mode,
         &toggle_panels,
     ]);
 
@@ -952,6 +969,9 @@ pub fn build_menu(keymap: &Keymap) -> BuiltMenu {
             toggle_panels,
             mute_live_audio,
             subtitles,
+            export_mode,
+            step_down,
+            step_up,
         },
     }
 }
@@ -1151,8 +1171,17 @@ pub fn menu_bar_spec(keymap: &Keymap, s: &crate::contract::MenuState) -> Vec<Men
                     s.show_archives,
                 ),
                 check(MenuAction::Slideshow, "Slideshow\tS", true, s.slideshow),
-                item(MenuAction::SlideshowFaster, "Slideshow Faster\t[", true),
-                item(MenuAction::SlideshowSlower, "Slideshow Slower\t]", true),
+                // Retitled in Export mode, where `[` / `]` step the quality (task #89).
+                item(
+                    MenuAction::SlideshowFaster,
+                    &format!("{}\t[", s.step_keys.labels().0),
+                    s.step_keys.enabled(),
+                ),
+                item(
+                    MenuAction::SlideshowSlower,
+                    &format!("{}\t]", s.step_keys.labels().1),
+                    s.step_keys.enabled(),
+                ),
                 sep(),
                 check(
                     MenuAction::ToggleToolbar,
@@ -1171,6 +1200,12 @@ pub fn menu_bar_spec(keymap: &Keymap, s: &crate::contract::MenuState) -> Vec<Men
                     MenuAction::FolderTree,
                     &l("Show Folder Tree", Action::FolderTree),
                     true,
+                ),
+                check(
+                    MenuAction::ExportMode,
+                    &l("Export Mode", Action::ExportMode),
+                    true,
+                    s.export_mode,
                 ),
                 check(
                     MenuAction::TogglePanels,
@@ -1840,6 +1875,7 @@ mod tests {
             action_for(ids::SLIDESHOW_SLOWER),
             Some(MenuAction::SlideshowSlower)
         );
+        assert_eq!(action_for(ids::EXPORT_MODE), Some(MenuAction::ExportMode));
         assert_eq!(action_for(ids::TOOLBAR), Some(MenuAction::ToggleToolbar));
         assert_eq!(action_for(ids::INFO), Some(MenuAction::Info));
         assert_eq!(action_for(ids::FULL_EXIF), Some(MenuAction::FullExif));

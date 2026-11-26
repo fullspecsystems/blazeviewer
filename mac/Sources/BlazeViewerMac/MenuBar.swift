@@ -58,6 +58,8 @@ final class MenuBar: NSObject {
     /// Cached because the badges are also refreshed outside `sync` (install, a Settings
     /// save), and they must agree with the state the menu last applied.
     private var spaceTogglesVideo = false
+    /// The last `MenuStateFfi.step_keys` applied (0 = the slideshow's `[` / `]`).
+    private var stepKeys: UInt8 = 0
 
     init(model: CoreModel) {
         self.model = model
@@ -144,6 +146,21 @@ final class MenuBar: NSObject {
         check("recursive", s.recursive)
         check("fullscreen", s.fullscreen)
         check("slideshow", s.slideshow)
+        check("export_mode", s.export_mode)
+        // `[` / `]` step the quality in Export mode (task #89): the two items say so.
+        if s.step_keys != stepKeys {
+            stepKeys = s.step_keys
+            let titles: (String, String)
+            switch s.step_keys {
+            case 1, 3: titles = ("Lower Quality", "Higher Quality")
+            case 2: titles = ("Compress Faster", "Compress Smaller")
+            default: titles = ("Slideshow Faster", "Slideshow Slower")
+            }
+            items["slideshow_faster"]?.title = titles.0
+            items["slideshow_slower"]?.title = titles.1
+            items["slideshow_faster"]?.isEnabled = s.step_keys != 3
+            items["slideshow_slower"]?.isEnabled = s.step_keys != 3
+        }
         check("mute_live_audio", s.mute_live_audio)
         // The on/off half only. WHICH track is the flyout's business, and it is pulled at
         // open rather than pushed through this fixed struct.
@@ -435,6 +452,8 @@ final class MenuBar: NSObject {
             item("full_exif", "Show Detailed Info", key: "i"),
             item("folder_tree", "Show Folder Tree"),
             item("thumbnails", "Show Thumbnails"),
+            // Export mode takes the Inspector's place (task #89); E toggles it.
+            item("export_mode", "Export Mode"),
             item("toggle_panels", "Hide Panels"),
             sep(),
             // The toolbar (task #55): the standard Mac affordances — AppKit toggles the

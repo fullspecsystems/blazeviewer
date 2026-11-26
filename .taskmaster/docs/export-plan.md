@@ -707,8 +707,17 @@ read rung 2's first `long_edge`. **Custom…** goes through the dialog seam the 
 Esc = Cancel) from a "Custom…" entry at the foot of the Size pop-up; winit: a "Custom Size" dialog
 window (`dialog::export_size_dialog`). **The pre-export HDR note** now comes from the live preview
 (rung 3): once a preview is made, the panel says "This HDR image is exported as SDR (Display P3)."
-**Still open in rung 2:** the metadata allowlist + categories; the `[`/`]` menu-hint context; a
-View-menu Export Mode item; macOS Tab focus (Q9).
+**Still open in rung 2:** the metadata allowlist + categories. **Done 2026-11-25 (Mac session):**
+- **The `[`/`]` menu context:** in the mode, View ▸ Slideshow Faster / Slower read Lower /
+  Higher Quality (Compress Faster / Smaller for PNG; greyed for lossless and TIFF). They step it
+  from the menu too: `MenuState::step_keys` and `AppCore::export_menu`; the action arms are
+  re-meant in the mode.
+- **View ▸ Export Mode:** a check item on both shells.
+- **macOS Tab focus (Q9):** with Full Keyboard Access on, Tab moves focus into the panel
+  (`ExportFocus` / `@FocusState`, mirrored to `CoreModel.exportPanelFocused`). While a control
+  has it, the key monitor hands keys to the control, still forwards key-ups (the release net),
+  and Esc returns focus to the photo instead of quitting. Without FKA, Tab hides panels as
+  before. winit: pointer-only as documented.
 
 **Progress (session 6, 2026-11-14) — Export mode is in, end to end, on both shells:**
 - **Core** — `export_panel.rs` (pure: `ExportSettings` = format / JPEG quality / PNG compression
@@ -855,7 +864,9 @@ settles; `Y` flicks to the original; the panel shows the exact **File size**.
   starts from it. (9) A dead worker left "Calculating…" forever — `drain` reports it and the core
   starts over. Regression tests for 1–3.
 - **Not done:** `PB_PERF` episodes `ExportPreview` / `ExportFlick` (only per-stage timings print);
-  the export-at-its-own-1:1 toggle (F20); speculative ±5 encodes; viewport-first encoding; a
+  ~~the export-at-its-own-1:1 toggle (F20)~~ (done 2026-11-25: "Show at export size" lays
+  both flick sides out at the export's own size; `PreviewState::own_size`, the draw re-presents
+  on a new layout); speculative ±5 encodes; viewport-first encoding; a
   dedicated chip; compare-pin *suspension* (it's refused in the mode instead).
 
 **3.0 Prerequisites.**
@@ -1363,6 +1374,10 @@ test script: `.taskmaster/docs/export-rung1-manual-test.md`. Rung 0a (#81) not s
 
 **Cross-platform debt**
 
+- **Windows (2026-11-25, menus + F20):** View ▸ Export Mode (a check item), the retitled
+  `[`/`]` items (`StepKeys` via `set_text`), the egui popup's same items, and the egui panel's
+  "Show at export size" switch are compile-checked only (Windows clippy cross-check clean).
+  Check that the muda titles update when entering and leaving the mode.
 - **Windows (2026-11-25, Mac panel layout):** on the Mac, **Lossless now sits beside the Format
   pop-up** (no row comes or goes between formats), the label column is 78 pt ("Compression" is
   74), and **Compression is a pop-up** (the segmented control overflowed its column and shifted

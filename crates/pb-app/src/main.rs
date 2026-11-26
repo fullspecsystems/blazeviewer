@@ -2123,6 +2123,7 @@ impl App {
             A::ExportSize(s) => self.core.export_set_size(s),
             A::ExportCustomSize => self.core.export_custom_size(),
             A::ExportPreviewSide(side) => self.core.export_set_preview_side(side),
+            A::ExportPreviewOwnSize(on) => self.core.export_set_preview_own_size(on),
             A::ExportStripMetadata(on) => self.core.export_set_strip_metadata(on),
             A::ExportClose => self.core.export_close(),
             A::ExportCommit => self.core.export_commit(),
@@ -2746,6 +2747,8 @@ impl App {
         // A live video owns Space (task #94), so the menu's Next / Play/Pause hints swap
         // (task #142). Riding `MenuState` puts the flip through the same per-tick diff.
         state.space_toggles_video = self.core.space_toggles_video();
+        // View ▸ Export Mode, and what `[` / `]` mean in it (task #89).
+        (state.export_mode, state.step_keys) = self.core.export_menu();
         state
     }
 
@@ -2774,6 +2777,13 @@ impl App {
             c.full_exif.set_checked(state.info_full);
             c.toggle_panels.set_checked(state.panels_hidden);
             c.toggle_panels.set_enabled(state.hide_panels_enabled);
+            c.export_mode.set_checked(state.export_mode);
+            // `[` / `]` step the quality in Export mode (task #89): the items say so.
+            let (down, up) = state.step_keys.labels();
+            c.step_down.set_text(format!("{down}\t["));
+            c.step_up.set_text(format!("{up}\t]"));
+            c.step_down.set_enabled(state.step_keys.enabled());
+            c.step_up.set_enabled(state.step_keys.enabled());
         }
         // File ▸ Save Rotation enabled state.
         if let Some(it) = self.save_rotation_item.as_ref() {

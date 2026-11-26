@@ -73,7 +73,27 @@ impl AppCore {
             undo,
             native_fullscreen_engaged,
             space_toggles_video: false, // the shells override (see the field's doc)
+            export_mode: false,         // the shells set it, with `step_keys` (`export_menu`)
+            step_keys: contract::StepKeys::Slideshow,
         }
+    }
+
+    /// View ▸ Export Mode's check and what `[` / `]` mean (task #89), for the shells to put on
+    /// their `MenuState` (like `export_enabled`).
+    pub fn export_menu(&self) -> (bool, contract::StepKeys) {
+        use crate::export_panel::FormatChoice;
+        if !self.panels.export {
+            return (false, contract::StepKeys::Slideshow);
+        }
+        let s = self.export.draft;
+        let keys = if s.format == FormatChoice::Png {
+            contract::StepKeys::Compression
+        } else if s.quality().is_some() {
+            contract::StepKeys::Quality
+        } else {
+            contract::StepKeys::Inert
+        };
+        (true, keys)
     }
 
     /// Right-click over the photo (task #41): ask the shell to pop up the **photo context

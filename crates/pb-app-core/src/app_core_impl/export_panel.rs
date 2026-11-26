@@ -112,6 +112,8 @@ impl AppCore {
         let preview = crate::export_panel::PreviewReadout {
             status: self.export_preview_status(),
             side: self.export_preview_side(),
+            resized: self.export_preview_resized(),
+            own_size: self.export.preview.own_size,
         };
         ExportPanel::build(self.export.draft, source)
             .with_preview(preview, self.export_preview_notes())
@@ -361,6 +363,33 @@ mod tests {
                 recovered: None,
             },
         );
+    }
+
+    /// View ▸ Export Mode is checked in the mode, and the `[` / `]` menu items (Slideshow
+    /// Faster / Slower) say and do what the keys do there: the quality, PNG's compression, or
+    /// nothing. Outside the mode they're the slideshow's again.
+    #[test]
+    fn the_step_menu_items_follow_export_mode() {
+        use crate::contract::StepKeys;
+        let mut core = core_on(&["a.jpg"]);
+        assert_eq!(core.export_menu(), (false, StepKeys::Slideshow));
+        key(&mut core, "E");
+        core.export_set_format(FormatChoice::Jpeg);
+        assert_eq!(core.export_menu(), (true, StepKeys::Quality));
+        let q = core.export.draft.quality().unwrap();
+        core.handle(CoreEvent::MenuAction(Action::SlideshowFaster));
+        assert!(
+            core.export.draft.quality().unwrap() < q,
+            "the [ item lowers the quality"
+        );
+        core.handle(CoreEvent::MenuAction(Action::SlideshowSlower));
+        assert_eq!(core.export.draft.quality(), Some(q));
+        core.export_set_format(FormatChoice::Png);
+        assert_eq!(core.export_menu(), (true, StepKeys::Compression));
+        core.export_set_format(FormatChoice::Tiff);
+        assert_eq!(core.export_menu(), (true, StepKeys::Inert));
+        key(&mut core, "E");
+        assert_eq!(core.export_menu(), (false, StepKeys::Slideshow));
     }
 
     /// Review finding: ⌘↩ / Ctrl+Enter mustn't get past the limit the panel disables Export…

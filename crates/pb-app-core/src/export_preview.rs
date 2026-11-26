@@ -304,6 +304,9 @@ pub struct PreviewState {
     pub failed: Option<(TickKey, String)>,
     /// The aux slot the last draw presented — a change seen by the tick means a draw.
     pub last_target: Option<(usize, u32, u32)>,
+    /// Lay a resized export out at its own size instead of the original's (review F20), so
+    /// the viewer's 1:1 shows its real pixels. Both flick sides follow it. Until the mode closes.
+    pub own_size: bool,
 }
 
 impl PreviewState {

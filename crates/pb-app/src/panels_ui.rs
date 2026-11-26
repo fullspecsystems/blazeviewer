@@ -164,6 +164,8 @@ pub enum PanelAction {
     ExportCustomSize,
     /// The preview's Export / Original control (rung 3).
     ExportPreviewSide(Side),
+    /// "Show at export size" (review F20).
+    ExportPreviewOwnSize(bool),
     ExportStripMetadata(bool),
     /// The panel's ✕ — leave Export mode.
     ExportClose,
@@ -2891,6 +2893,21 @@ fn export_body(ui: &mut egui::Ui, p: &Palette, ex: &ExportPanel, actions: &mut V
                     );
                 if side != ex.preview.side {
                     actions.push(PanelAction::ExportPreviewSide(side));
+                }
+            });
+        });
+        // F20: lay a resized export out at its own size. Always present (greyed at full size)
+        // so choosing a size never moves the rows, as on the Mac.
+        ui.add_enabled_ui(ex.preview.resized, |ui| {
+            ui.horizontal(|ui| {
+                ui.add_space(EXPORT_LABEL_W + ui.spacing().item_spacing.x);
+                let mut on = ex.preview.own_size;
+                let r = pb_ui::toggle(ui, p, &mut on).on_hover_text(
+                    "Lay the preview out at the export's own size; View > Original 1:1 then shows its pixels",
+                );
+                ui.label(RichText::new("Show at export size").color(p.text));
+                if r.changed() {
+                    actions.push(PanelAction::ExportPreviewOwnSize(on));
                 }
             });
         });

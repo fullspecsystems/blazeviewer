@@ -608,6 +608,10 @@ impl AppCore {
             Action::SlideshowToggle => self.toggle_slideshow(),
             // Menu clicks jump between round values; the keys never get here (they
             // resolve to `RepeatStart` for fine taps + hold-to-accelerate).
+            // In Export mode the pair steps the quality instead (task #89), as the keys do
+            // there, and the menu titles say so (`export_menu`).
+            Action::SlideshowFaster if self.panels.export => self.export_step_quality(-1),
+            Action::SlideshowSlower if self.panels.export => self.export_step_quality(1),
             Action::SlideshowFaster => self.slideshow_menu_step(-1),
             Action::SlideshowSlower => self.slideshow_menu_step(1),
             Action::PlayPause => self.toggle_play_pause(),
@@ -4930,11 +4934,14 @@ impl AppCore {
         // (a sharpen, a resize, a rebind) carry on, and this covers them again before the
         // frame is drawn. `None` uncovers the photo.
         let preview = self.export_preview_target();
+        // A new layout for the slot on screen ("Show at export size", F20) re-presents it too;
+        // the renderer keeps what it first covered.
+        let relaid = self.export.preview.last_target != preview;
         self.export.preview.last_target = preview;
         let drew = if let Some(a) = self.renderer.as_mut() {
             match preview {
                 Some((slot, w, h)) => {
-                    if a.aux_presented() != Some(slot) {
+                    if relaid || a.aux_presented() != Some(slot) {
                         a.present_aux(slot, w, h);
                     }
                 }

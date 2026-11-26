@@ -27,8 +27,8 @@ with any pre-release suffix carried only by the tag.
   colors still win) and the spin speed. Export, Copy and Describe of a model you've
   turned use the view on screen: the window's shape and full size, your angle and zoom,
   on a transparent background in a PNG.
-- **Export.** Press `E` (or File ▸ Export…, ⇧⌘E on a Mac, or right-click the
-  photo) for Export mode: a panel in the Inspector's place where you pick a
+- **Export.** Press `E` (or View ▸ Export Mode, File ▸ Export…, ⇧⌘E on a Mac, or
+  right-click the photo) for Export mode: a panel in the Inspector's place where you pick a
   format (PNG, JPEG, WebP, AVIF, JPEG XL or TIFF, and HEIC on a Mac), its quality
   (`[` and `]` step it; each format remembers its own, and WebP and JPEG XL can be
   lossless) or PNG compression, and a size: full resolution, a long edge from 800
@@ -37,7 +37,10 @@ with any pre-release suffix carried only by the tag.
   screen **is the export**: what the file will actually look like, at its real
   quality and size, with the exact file size in the panel, so you can compare
   formats before you save. Press `Y` to switch to the original and back, or hold `Y` to
-  peek at it. Keep browsing with the panel open and your settings stay put; press
+  peek at it. A smaller export is shown enlarged to the original's size; turn on
+  "Show at export size" to see it at its own size, pixel for pixel at Original 1:1.
+  On a Mac with keyboard navigation turned on, Tab moves into the panel's controls
+  and Esc moves back to the photo. Keep browsing with the panel open and your settings stay put; press
   Export… (⌘↩ on a Mac, Ctrl+Enter elsewhere) to save the photo on screen, with
   any rotation applied, and `E` again to leave. Your format, quality and size are
   remembered for next time. Colors are kept exactly: wide-gamut photos stay

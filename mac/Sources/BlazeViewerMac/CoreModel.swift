@@ -181,6 +181,11 @@ final class CoreModel {
     /// the model, refreshed on `PanelsChanged` (`refreshExportPanel`).
     private(set) var exportVisible = false
     private(set) var exportPanel = ExportPanelModel()
+    /// A control in the Export panel has keyboard focus (Full Keyboard Access, task #89 Q9):
+    /// the key monitor hands keys to it rather than the viewer. Mirrored from the view.
+    @ObservationIgnored var exportPanelFocused = false
+    /// Bumped to move keyboard focus into the Export panel (Tab, with Full Keyboard Access).
+    private(set) var exportFocusRequest = 0
     /// The native folder tree (⇧F) — visibility and the current photo's folder hierarchy
     /// as a flat, depth-indented row list, refreshed on `PanelsChanged` (`refreshTree`).
     /// A native list scrolls, so every derived row shows (no HUD paging).
@@ -379,6 +384,35 @@ final class CoreModel {
                 return event
             }
             let f = event.modifierFlags
+            // Full Keyboard Access in Export mode (task #89 Q9). With it on, Tab moves focus
+            // into the panel (it hides panels otherwise). While a panel control has focus,
+            // keys are the control's: Space toggles, arrows step, Tab moves on, Esc hands
+            // focus back to the photo instead of quitting. Key-ups still reach the core, so a
+            // key held when focus moved can't stick; ⌘ chords take the usual path below.
+            if self.exportVisible && !f.contains(.command) {
+                let focused = self.exportPanelFocused && host.firstResponder !== self.canvasView
+                if focused {
+                    if event.type == .keyUp {
+                        self.core.key_up(name)
+                        self.kick()
+                        self.drainEffects()
+                        return event
+                    }
+                    if name == "Escape" {
+                        self.exportPanelFocused = false
+                        host.makeFirstResponder(self.canvasView)
+                        return nil
+                    }
+                    return event
+                }
+                if name == "Tab", event.type == .keyDown, !event.isARepeat,
+                    f.intersection([.control, .option, .shift]).isEmpty,
+                    NSApp.isFullKeyboardAccessEnabled
+                {
+                    self.exportFocusRequest += 1
+                    return nil
+                }
+            }
             if event.type == .keyDown {
                 self.core.key_down(
                     name,
@@ -963,7 +997,9 @@ final class CoreModel {
             notes: notes,
             fileSize: core.export_file_size().toString(),
             canFlick: core.export_preview_can_flick(),
-            previewSide: Int(core.export_preview_side()))
+            previewSide: Int(core.export_preview_side()),
+            previewResized: core.export_preview_resized(),
+            previewOwnSize: core.export_preview_own_size())
     }
 
     // Export panel edits: each goes to the core, which re-signals `PanelsChanged`.
@@ -981,6 +1017,12 @@ final class CoreModel {
     }
     func exportSetStripMetadata(_ on: Bool) { core.export_set_strip_metadata(on); kick() }
     /// The preview's Export / Original control (0 / 1) — a rebind, both sides are resident.
+    func exportSetPreviewOwnSize(_ on: Bool) {
+        core.export_set_preview_own_size(on)
+        drainEffects()
+        kick()
+    }
+
     func exportSetPreviewSide(_ side: Int) {
         core.export_set_preview_side(UInt8(side))
         drainEffects()

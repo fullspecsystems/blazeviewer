@@ -1426,6 +1426,8 @@ impl AppCoreHandle {
             undo_enabled: s.undo.is_some(),
             undo_label: s.undo.as_deref().unwrap_or("Undo").to_string(),
             space_toggles_video: s.space_toggles_video,
+            export_mode: s.export_mode,
+            step_keys: s.step_keys.code(),
         }
     }
 
@@ -1946,6 +1948,26 @@ impl AppCoreHandle {
             Some(pb_app_core::export_preview::Side::Original) => 1,
             _ => 0,
         }
+    }
+
+    /// The export is smaller than the original: "Show at export size" applies (F20).
+    fn export_preview_resized(&self) -> bool {
+        self.export_snapshot
+            .as_ref()
+            .is_some_and(|p| p.preview.resized)
+    }
+
+    /// "Show at export size" is on.
+    fn export_preview_own_size(&self) -> bool {
+        self.export_snapshot
+            .as_ref()
+            .is_some_and(|p| p.preview.own_size)
+    }
+
+    /// The panel's "Show at export size" checkbox (F20).
+    fn export_set_preview_own_size(&mut self, on: bool) {
+        self.core.now = Instant::now();
+        self.core.export_set_preview_own_size(on);
     }
 
     /// The panel's Export / Original control (`Y` flicks; a hold peeks).
@@ -2899,6 +2921,9 @@ impl AppCoreHandle {
             // Live video owns the Next keys (task #94): shows Playback ▸ Skip to Next Item
             // and swaps the Next / Play/Pause shortcut badges (task #142).
             space_toggles_video: self.core.space_toggles_video(),
+            // View ▸ Export Mode and what `[` / `]` mean in it (task #89).
+            export_mode: self.core.export_menu().0,
+            step_keys: self.core.export_menu().1,
             ..next
         };
         if self.last_menu_state == next {
@@ -4999,6 +5024,10 @@ mod ffi {
         undo_enabled: bool,
         undo_label: String,
         space_toggles_video: bool,
+        /// View ▸ Export Mode (task #89).
+        export_mode: bool,
+        /// What `[` / `]` do: 0 slideshow, 1 quality, 2 PNG compression, 3 nothing.
+        step_keys: u8,
     }
 
     extern "Rust" {
@@ -5319,6 +5348,9 @@ mod ffi {
         fn export_preview_can_flick(&self) -> bool;
         fn export_preview_side(&self) -> u8;
         fn export_set_preview_side(&mut self, side: u8);
+        fn export_preview_resized(&self) -> bool;
+        fn export_preview_own_size(&self) -> bool;
+        fn export_set_preview_own_size(&mut self, on: bool);
         fn export_size_dialog_by(&self) -> u8;
         fn export_size_dialog_value(&self) -> u32;
         fn export_size_dialog_readout(&self, by: u8, value: u32) -> String;

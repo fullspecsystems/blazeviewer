@@ -290,6 +290,10 @@ Use a big, detailed photo (a 20 MP JPEG or NEF) and a PNG with transparency.
 | 14.11 | Browse while an AVIF of a big photo is being made | Browsing stays smooth (the encoder uses half the cores, at low priority) |
 | 14.12 | VoiceOver over Format, Lossless, Quality | Each is named; a greyed Quality reads as dimmed |
 | 14.13 | **TIFF**, ⌘↩, type the name `scan.tiff` | Saved as `scan.tiff` (not `scan.tiff.tif`); the same for JPEG named `x.jpeg` |
+| 14.15 | In the mode, open **View** | **Export Mode** is checked; the `[` / `]` items read **Lower Quality** / **Higher Quality** (PNG: Compress Faster / Smaller; TIFF: greyed) and step the panel's value when chosen. Leave the mode: they read Slideshow Faster / Slower again |
+| 14.16 | Size 1280, then tick **Show at export size**, then View ▸ Original 1:1 | The export shrinks to its own size; at 1:1 its pixels are screen pixels. `Y` flicks to the original at the same size. The checkbox is greyed at Full size |
+| 14.17 | System Settings ▸ Keyboard ▸ **Keyboard navigation** on; in the mode press **Tab** | Focus moves to the Format pop-up (focus ring). Tab walks the controls, Space toggles a checkbox, arrows move the slider; **Esc** puts focus back on the photo (no quit). Turn navigation off: Tab hides the panel as before |
+| 14.18 | PNG ↔ JPEG in the Format pop-up | Size and everything below stay at the same height (Compression's row matches Quality's) |
 | 14.14 | A **3D model**: `E`, then `P` to spin it, `P` again to stop | The panel keeps saying "The view on screen"; nothing below it moves |
 
 ---

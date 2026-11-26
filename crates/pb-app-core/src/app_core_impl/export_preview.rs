@@ -81,17 +81,60 @@ impl AppCore {
     pub(crate) fn export_preview_target(&self) -> Option<(usize, u32, u32)> {
         let cur = self.preview_tick_key()?;
         let st = &self.export.preview;
+        // With "Show at export size" (F20), both sides are laid out at the export's own size
+        // (its texture, in the source's orientation), so 1:1 shows the export's real pixels.
+        let own = st
+            .own_size
+            .then_some(st.export.as_ref())
+            .flatten()
+            .filter(|e| e.tick.same_source(&cur))
+            .map(|e| e.texture_dims);
         match st.spring.shown() {
             Side::Export => st
                 .export
                 .as_ref()
                 .filter(|e| e.tick.same_source(&cur))
-                .map(|e| (AUX_EXPORT, e.source_dims.0, e.source_dims.1)),
+                .map(|e| {
+                    let (w, h) = own.unwrap_or(e.source_dims);
+                    (AUX_EXPORT, w, h)
+                }),
             Side::Original => st
                 .original
                 .as_ref()
                 .filter(|o| o.tick.same_source(&cur))
-                .map(|o| (AUX_ORIGINAL, o.dims.0, o.dims.1)),
+                .map(|o| {
+                    let (w, h) = own.unwrap_or(o.dims);
+                    (AUX_ORIGINAL, w, h)
+                }),
+        }
+    }
+
+    /// Whether the preview on screen is a resized export (its size isn't the original's).
+    pub(crate) fn export_preview_resized(&self) -> bool {
+        let Some(cur) = self.preview_tick_key() else {
+            return false;
+        };
+        self.export
+            .preview
+            .export
+            .as_ref()
+            .filter(|e| e.tick.same_source(&cur))
+            .is_some_and(|e| {
+                let (sw, sh) = if e.key.rotation_cw % 2 == 1 {
+                    (e.source_dims.1, e.source_dims.0)
+                } else {
+                    e.source_dims
+                };
+                e.dims != (sw, sh)
+            })
+    }
+
+    /// The panel's "Show at export size" (F20): lay the preview out at the export's own size.
+    pub fn export_set_preview_own_size(&mut self, on: bool) {
+        if self.export.preview.own_size != on {
+            self.export.preview.own_size = on;
+            self.emit_panels_changed();
+            self.draw();
         }
     }
 
@@ -472,18 +515,15 @@ impl AppCore {
         if e.notes.contains(&pb_encode::ExportNote::HdrToneMapped) {
             notes.push("This HDR image is exported as SDR (Display P3).".into());
         }
-        let turned = e.key.rotation_cw % 2 == 1;
-        let (sw, sh) = if turned {
-            (e.source_dims.1, e.source_dims.0)
-        } else {
-            e.source_dims
-        };
-        if e.dims != (sw, sh) {
-            notes.push(
+        if self.export_preview_resized() {
+            notes.push(if self.export.preview.own_size {
+                "The preview shows the export at its own size. Original 1:1 shows its pixels."
+                    .into()
+            } else {
                 "The preview shows the export enlarged to the original's size, to compare \
                  them."
-                    .into(),
-            );
+                    .into()
+            });
         }
         notes
     }
@@ -609,6 +649,45 @@ mod tests {
         assert!(shown(&log).is_none());
         core.draw();
         assert_eq!(shown(&log), Some((AUX_EXPORT, 64, 48)), "the present gate");
+        let _ = std::fs::remove_dir_all(&lib);
+    }
+
+    /// Review F20: a resized export is laid out at the original's size until "Show at export
+    /// size" is on; then both flick sides are laid out at the export's own size, so the
+    /// viewer's 1:1 shows its real pixels. The note says which.
+    #[test]
+    fn a_resized_export_can_be_shown_at_its_own_size() {
+        let (mut core, log, lib) = preview_core("own-size");
+        core.export_set_size(crate::export_panel::SizeChoice::LongEdge(32));
+        tick_until(&mut core, |c| ready(c) && c.export_preview_resized());
+        assert_eq!(
+            shown(&log),
+            Some((AUX_EXPORT, 64, 48)),
+            "enlarged to the original's"
+        );
+        let enlarged = |c: &AppCore| {
+            c.export_panel()
+                .notes
+                .iter()
+                .any(|n| n.contains("enlarged"))
+        };
+        assert!(enlarged(&core));
+        assert!(core.export_panel().preview.resized);
+        core.export_set_preview_own_size(true);
+        assert_eq!(shown(&log), Some((AUX_EXPORT, 32, 24)), "its own size");
+        assert!(!enlarged(&core) && core.export_panel().preview.own_size);
+        core.export_set_preview_side(Side::Original);
+        assert_eq!(
+            shown(&log),
+            Some((AUX_ORIGINAL, 32, 24)),
+            "the original lines up"
+        );
+        core.export_set_preview_own_size(false);
+        assert_eq!(shown(&log), Some((AUX_ORIGINAL, 64, 48)));
+        // Full size: nothing to switch.
+        core.export_set_size(crate::export_panel::SizeChoice::Full);
+        tick_until(&mut core, |c| ready(c) && !c.export_preview_resized());
+        assert!(!core.export_panel().preview.resized);
         let _ = std::fs::remove_dir_all(&lib);
     }
 

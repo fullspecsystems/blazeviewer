@@ -209,6 +209,45 @@ pub struct MenuState {
     /// Defaulted off by the pure choke point; each shell overrides it from
     /// `space_toggles_video()`.
     pub space_toggles_video: bool,
+    /// View ▸ Export Mode — checked while Export mode is on (task #89).
+    pub export_mode: bool,
+    /// What `[` and `]` do right now, so View ▸ Slideshow Faster / Slower can say it: Export
+    /// mode re-means them as the quality step (task #89).
+    pub step_keys: StepKeys,
+}
+
+/// What the `[` / `]` pair does, for the two View-menu items that carry those keys. Outside
+/// Export mode they pace the slideshow; in it they step the format's quality, PNG's
+/// compression, or nothing (lossless, TIFF).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum StepKeys {
+    #[default]
+    Slideshow,
+    Quality,
+    Compression,
+    Inert,
+}
+
+impl StepKeys {
+    /// The two items' titles, `[` first.
+    pub fn labels(self) -> (&'static str, &'static str) {
+        match self {
+            StepKeys::Slideshow => ("Slideshow Faster", "Slideshow Slower"),
+            StepKeys::Quality | StepKeys::Inert => ("Lower Quality", "Higher Quality"),
+            StepKeys::Compression => ("Compress Faster", "Compress Smaller"),
+        }
+    }
+
+    /// Whether the two items do anything.
+    pub fn enabled(self) -> bool {
+        self != StepKeys::Inert
+    }
+
+    /// The FFI code (swift-bridge carries no enums): 0 slideshow, 1 quality, 2 compression,
+    /// 3 inert.
+    pub fn code(self) -> u8 {
+        self as u8
+    }
 }
 
 /// What the right-click **photo context menu** should offer for the current photo (task
@@ -857,6 +896,9 @@ mod tests {
             CoreEvent::MenuAction(a) => assert_eq!(a, Action::Next),
             _ => unreachable!(),
         }
+        assert_eq!(StepKeys::default(), StepKeys::Slideshow);
+        assert_eq!(StepKeys::Compression.code(), 2);
+        assert!(!StepKeys::Inert.enabled());
         let eff = CoreEffect::SetMenuState(MenuState {
             slideshow: true,
             ..MenuState::default()

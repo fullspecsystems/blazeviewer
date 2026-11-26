@@ -71,11 +71,22 @@ struct ExportPanelModel: Equatable {
     var canFlick = false
     /// 0 the export on screen, 1 the original.
     var previewSide = 0
+    /// The export is smaller than the original, so "Show at export size" applies (F20).
+    var previewResized = false
+    var previewOwnSize = false
+}
+
+/// The panel's keyboard-focusable controls (Full Keyboard Access, task #89 Q9).
+enum ExportFocus: Hashable {
+    case format, lossless, quality, compression, size, strip, preview, ownSize, export
 }
 
 struct ExportPanelView: View {
     let model: CoreModel
     let maxHeight: CGFloat
+    /// Which control has keyboard focus. Mirrored to `model.exportPanelFocused`, so the key
+    /// monitor hands keys to the control instead of the viewer while one does.
+    @FocusState private var focus: ExportFocus?
 
     private var p: ExportPanelModel { model.exportPanel }
     /// The Size pop-up's "Custom…" entry — never a real size code (the core's codes keep the
@@ -124,6 +135,11 @@ struct ExportPanelView: View {
         .frame(width: width)
         .panelBackground(opacity: model.panelOpacity)
         .arrowCursorOnHover()
+        // Full Keyboard Access (task #89 Q9): Tab moves focus here (the monitor bumps the
+        // request); the monitor needs to know while a control has it.
+        .onChange(of: model.exportFocusRequest) { _, _ in focus = .format }
+        .onChange(of: focus) { _, f in model.exportPanelFocused = f != nil }
+        .onDisappear { model.exportPanelFocused = false }
     }
 
     // MARK: - Sections
@@ -175,6 +191,7 @@ struct ExportPanelView: View {
                     .labelsHidden()
                     .fixedSize()
                     .accessibilityLabel("Format")
+                    .focused($focus, equals: .format)
                     if p.hasLossless {
                         Toggle(
                             "Lossless",
@@ -182,6 +199,7 @@ struct ExportPanelView: View {
                         )
                         .toggleStyle(.checkbox)
                         .fixedSize()
+                        .focused($focus, equals: .lossless)
                         .help("Keep every pixel exactly, in a bigger file")
                     }
                 }
@@ -198,6 +216,7 @@ struct ExportPanelView: View {
                             Text("Quality")
                         }
                         .labelsHidden()
+                        .focused($focus, equals: .quality)
                         .help("Higher keeps more detail in a bigger file. [ and ] step it.")
                         Text("\(p.quality)")
                             .font(.callout.monospacedDigit())
@@ -223,6 +242,10 @@ struct ExportPanelView: View {
                     .pickerStyle(.menu)
                     .labelsHidden()
                     .fixedSize()
+                    // The Quality row it replaces is 22 pt (the slider); a 20 pt pop-up row
+                    // moved every row below by 2 pt when switching to and from PNG.
+                    .frame(minHeight: 22)
+                    .focused($focus, equals: .compression)
                     .help("PNG is lossless at every level; this trades file size against time")
                 }
             }
@@ -251,6 +274,7 @@ struct ExportPanelView: View {
                     }
                     .pickerStyle(.menu)
                     .labelsHidden()
+                    .focused($focus, equals: .size)
                     .fixedSize()
                     if !p.outputDims.isEmpty {
                         Text(p.outputDims)
@@ -265,6 +289,7 @@ struct ExportPanelView: View {
                 isOn: Binding(get: { p.stripMetadata }, set: { model.exportSetStripMetadata($0) })
             )
             .toggleStyle(.checkbox)
+            .focused($focus, equals: .strip)
             .help("Leave out camera details, dates and location. The color profile is kept.")
             // Always present, blank while there's nothing to say (browsing, turning a model),
             // so the rows below never move. "Calculating…" says a preview is being made; no
@@ -281,7 +306,21 @@ struct ExportPanelView: View {
                 .pickerStyle(.segmented)
                 .labelsHidden()
                 .disabled(!p.canFlick)
+                .focused($focus, equals: .preview)
                 .help("Y switches between the export and the original; hold Y to peek")
+            }
+            // F20: a resized export is shown enlarged to the original's size unless this is on.
+            // Always present (greyed at full size), so choosing a size never moves the rows.
+            row("", labelsContent: false) {
+                Toggle(
+                    "Show at export size",
+                    isOn: Binding(
+                        get: { p.previewOwnSize }, set: { model.exportSetPreviewOwnSize($0) })
+                )
+                .toggleStyle(.checkbox)
+                .disabled(!p.previewResized)
+                .focused($focus, equals: .ownSize)
+                .help("Lay the preview out at the export's own size; View ▸ Original 1:1 then shows its pixels")
             }
         }
     }
@@ -297,6 +336,7 @@ struct ExportPanelView: View {
             }
             .buttonStyle(.borderedProminent)
             .disabled(!p.canExport)
+            .focused($focus, equals: .export)
             .help("Export with these settings (⌘↩)")
         }
     }

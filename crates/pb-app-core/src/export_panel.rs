@@ -817,6 +817,10 @@ pub struct PreviewReadout {
     pub status: crate::export_preview::PreviewStatus,
     /// The side of the flick on screen.
     pub side: crate::export_preview::Side,
+    /// The export is smaller than the original, so "Show at export size" applies (F20).
+    pub resized: bool,
+    /// "Show at export size" is on.
+    pub own_size: bool,
 }
 
 impl PreviewReadout {
