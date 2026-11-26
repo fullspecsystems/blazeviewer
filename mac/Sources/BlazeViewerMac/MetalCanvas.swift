@@ -149,12 +149,14 @@ final class MetalCanvasNSView: NSView {
 
     override func mouseDragged(with event: NSEvent) {
         let (x, y) = corePoint(for: event)
+        model?.modifiersChanged(event.modifierFlags) // Shift slides a 3D model
         model?.pointerMoved(x: x, y: y)
     }
 
     override func mouseDown(with event: NSEvent) {
         // Track the press position first so control hit-tests see the click point.
         let (x, y) = corePoint(for: event)
+        model?.modifiersChanged(event.modifierFlags)
         model?.pointerMoved(x: x, y: y)
         model?.mouseLeft(pressed: true)
     }
@@ -172,6 +174,7 @@ final class MetalCanvasNSView: NSView {
     }
 
     override func scrollWheel(with event: NSEvent) {
+        model?.modifiersChanged(event.modifierFlags)
         if event.hasPreciseScrollingDeltas {
             // Trackpad two-finger swipe: points → physical px (the winit PixelDelta unit).
             let scale = backingScale

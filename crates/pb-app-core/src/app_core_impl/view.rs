@@ -328,8 +328,14 @@ impl AppCore {
         if dx == 0.0 && dy == 0.0 {
             return;
         }
-        // A drag or two-finger swipe over a ready 3D model turns it (task #153, owner D1).
-        if self.live_model_orbit(dx, dy) {
+        // A drag or two-finger swipe over a ready 3D model turns it (task #153, owner D1); with
+        // Shift held it slides the model instead, as in most 3D apps.
+        let took = if self.mods.shift {
+            self.live_model_pan(dx, dy)
+        } else {
+            self.live_model_orbit(dx, dy)
+        };
+        if took {
             return;
         }
         self.view.pan[0] += dx;
@@ -552,9 +558,15 @@ impl AppCore {
             // A ready 3D model turns instead of panning (task #153), and `view.pan` never moves,
             // so the photo's edge test would kill the glide on its first tick. Turning has no
             // edge sideways; up and down it stops at the poles.
+            // Only a turn is ever thrown, so a model's glide turns it even if Shift goes down
+            // mid-coast.
             let elevation = self.live_model_elevation();
             let before = self.view.pan;
-            self.pan_by_pixels(glide.vx * dt, glide.vy * dt);
+            if elevation.is_some() {
+                self.live_model_orbit(glide.vx * dt, glide.vy * dt);
+            } else {
+                self.pan_by_pixels(glide.vx * dt, glide.vy * dt);
+            }
             if let Some(e0) = elevation {
                 if glide.vy != 0.0 && self.live_model_elevation() == Some(e0) {
                     glide.vy = 0.0;

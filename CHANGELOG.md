@@ -18,7 +18,8 @@ with any pre-release suffix carried only by the tag.
   these files but never takes them over from your slicer.
 - **Turn 3D models around.** Drag a model, or swipe with two fingers on a trackpad,
   to spin it, and zoom with `+` and `−`, Ctrl+scroll or a pinch. The arrow keys turn
-  it too. Press `8` (or `0`, or double-tap) to return to the original view. The model
+  it too. Hold Shift while you drag or swipe to move the model around the window
+  instead. Press `8` (or `0`, or double-tap) to return to the original view. The model
   is drawn live on your graphics card, with smooth (antialiased) edges, and is ready
   to turn the moment you stop on it. Press `P` (or click the *Spin* hint that appears)
   to set it turning on its own like a turntable, and `P` again to let it glide to a stop.

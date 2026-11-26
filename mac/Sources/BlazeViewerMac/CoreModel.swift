@@ -558,6 +558,14 @@ final class CoreModel {
         drainEffects()
     }
 
+    /// The modifier keys held with a pointer or scroll event. Key presses carry their own; a
+    /// drag or swipe needs the live state (Shift slides a 3D model instead of turning it).
+    func modifiersChanged(_ flags: NSEvent.ModifierFlags) {
+        core.modifiers_changed(
+            flags.contains(.control), flags.contains(.shift), flags.contains(.option),
+            flags.contains(.command))
+    }
+
     /// Left mouse press/release: on-image controls or drag-to-pan (the core decides).
     func mouseLeft(pressed: Bool) {
         core.mouse_left(pressed)

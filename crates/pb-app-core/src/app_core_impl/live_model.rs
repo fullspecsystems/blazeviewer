@@ -4,7 +4,8 @@
 //!
 //! The routing rule (owner decision D1): once the model on screen is ready, the input that would
 //! pan or zoom a photo turns or zooms the model instead. That covers drag, the two-finger swipe,
-//! pinch, the scroll-wheel zoom, the held `=`/`-` keys and the arrows. The first such input
+//! pinch, the scroll-wheel zoom, the held `=`/`-` keys and the arrows; with Shift held, a drag or
+//! swipe slides the model across the window instead of turning it. The first such input
 //! swaps the still for the live view. Fit (`8`), 100% (`0`) and the smart-magnify double-tap
 //! put the still back. Navigation leaves, always: presenting any photo stops the renderer
 //! drawing the mesh, and the next tick frees it.
@@ -307,6 +308,16 @@ impl AppCore {
         took
     }
 
+    /// Slide the model across the window by a Shift+drag or swipe of `(dx, dy)` pixels, and
+    /// draw. Like zoom, it leaves the turntable spinning.
+    pub fn live_model_pan(&mut self, dx: f32, dy: f32) -> bool {
+        let took = self.live_model_apply(|v, vp| v.pan_by(dx, dy, vp));
+        if took {
+            self.draw();
+        }
+        took
+    }
+
     /// Zoom the model by `factor`, about the centre, without drawing.
     pub fn live_model_zoom_quiet(&mut self, factor: f32) -> bool {
         self.live_model_apply(|v, _| v.zoom_by(factor))
@@ -409,9 +420,13 @@ impl AppCore {
         true
     }
 
-    /// A drag moved the model `(dx, dy)` px at `at`: remember it for the throw on release.
+    /// A drag moved the model `(dx, dy)` px at `at`: remember it for the throw on release. Only a
+    /// turn is thrown; a Shift+drag slides the model the way a drag slides a photo, and stops
+    /// dead like one.
     pub fn live_model_drag_moved(&mut self, at: Instant, dx: f32, dy: f32) {
-        if self.live_model.active && self.live_model_ready() {
+        if self.mods.shift {
+            self.live_model.drag.clear();
+        } else if self.live_model.active && self.live_model_ready() {
             self.live_model.drag.push(at, dx, dy);
         }
     }
@@ -648,6 +663,48 @@ mod tests {
         let ready = core.live_model.ready.as_ref().unwrap();
         assert!(!ready.view.is_home());
         assert_eq!(core.view.pan, [0.0, 0.0], "the photo view never panned");
+    }
+
+    /// Where the camera sits: it moves when the model turns, and not when the model slides.
+    fn eye(core: &AppCore) -> [f32; 3] {
+        let view = core.live_model.ready.as_ref().unwrap().view;
+        view.frame([800.0, 600.0]).eye
+    }
+
+    /// Shift+drag slides the model across the window instead of turning it (the Blender,
+    /// SketchUp and Cura convention). Without Shift a drag turns it again.
+    #[test]
+    fn a_shift_drag_moves_the_model_instead_of_turning_it() {
+        let (mut core, seen) = core_on(0);
+        settle(&mut core);
+        let home = core.live_model.ready.as_ref().unwrap().view;
+        let eye0 = eye(&core);
+        core.mods.shift = true;
+        core.pan_by_pixels(40.0, 10.0);
+        assert!(core.live_model.active);
+        assert!(seen.lock().unwrap().showing, "the draw pushed a frame");
+        assert_ne!(
+            core.live_model.ready.as_ref().unwrap().view,
+            home,
+            "it moved"
+        );
+        assert_eq!(eye(&core), eye0, "but didn't turn");
+        assert_eq!(core.view.pan, [0.0, 0.0], "the photo view never panned");
+
+        core.mods.shift = false;
+        core.pan_by_pixels(40.0, 10.0);
+        assert_ne!(eye(&core), eye0, "without Shift a drag turns it");
+    }
+
+    /// Moving a spinning model leaves it spinning, as zooming does: neither takes it in hand.
+    #[test]
+    fn moving_a_spinning_model_leaves_it_spinning() {
+        let (mut core, _) = core_on(0);
+        settle(&mut core);
+        core.toggle_play_pause();
+        core.mods.shift = true;
+        core.pan_by_pixels(30.0, 0.0);
+        assert!(core.live_model_spinning());
     }
 
     /// #153.6, owner decisions: Export / Copy / Describe of a turned model capture the window
@@ -958,6 +1015,29 @@ mod tests {
             core.pan_inertia.is_none(),
             "a mouse drag on a photo stops dead"
         );
+    }
+
+    /// A Shift+drag moves the model the way a drag moves a photo, so it stops dead too.
+    #[test]
+    fn a_moved_model_is_never_thrown() {
+        let (mut core, _) = core_on(0);
+        settle(&mut core);
+        core.mods.shift = true;
+        flick(&mut core, 16.0, 20, Duration::from_millis(4));
+        assert!(core.pan_inertia.is_none());
+    }
+
+    /// Shift pressed while a flicked model coasts doesn't turn the coast into a slide.
+    #[test]
+    fn shift_during_a_glide_keeps_it_turning() {
+        let (mut core, _) = core_on(0);
+        settle(&mut core);
+        let mut t = flick(&mut core, 16.0, 20, Duration::from_millis(4));
+        assert!(core.pan_inertia.is_some());
+        core.mods.shift = true;
+        let before = eye(&core);
+        glide_for(&mut core, &mut t, 0.1);
+        assert_ne!(eye(&core), before, "still turning");
     }
 
     #[test]

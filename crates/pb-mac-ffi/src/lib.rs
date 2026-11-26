@@ -1121,6 +1121,18 @@ impl AppCoreHandle {
         self.core.handle(CoreEvent::PointerMoved { x, y });
     }
 
+    /// The modifier keys held with a pointer or scroll event, the winit shell's
+    /// `ModifiersChanged` mirrored. A key press already carries its own, but a drag or swipe
+    /// needs the live state: Shift turns a drag over a 3D model into a slide.
+    fn modifiers_changed(&mut self, ctrl: bool, shift: bool, alt: bool, logo: bool) {
+        self.core.mods = Modifiers {
+            ctrl,
+            shift,
+            alt,
+            logo,
+        };
+    }
+
     /// Left mouse button pressed/released — the winit shell's `MouseInput(Left)` arm
     /// mirrored: a press on a folder-tree row fires that control (the open-panel / play-hint /
     /// scan-pill affordances are native SwiftUI views and handle their own clicks); anywhere
@@ -5105,6 +5117,7 @@ mod ffi {
         // Pointer + gestures (NS1 item 4) — same conventions as the winit shell:
         // physical px, top-left origin; pixel scrolls scaled by the backing factor.
         fn pointer_moved(&mut self, x: f32, y: f32);
+        fn modifiers_changed(&mut self, ctrl: bool, shift: bool, alt: bool, logo: bool);
         fn mouse_left(&mut self, pressed: bool);
         fn scroll_lines(&mut self, x: f32, y: f32);
         fn scroll_pixels(&mut self, x: f32, y: f32);

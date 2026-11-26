@@ -343,6 +343,32 @@ pb-decode `an_unturned_model_exports_its_nominal_still` and the pb-app-core
 `an_unturned_model_exports_its_still` (an STL exported to a file, which fails without the
 route).
 
+### 2026-11-26 — Shift+drag slides a model (Mac session)
+
+The owner asked for the usual 3D-app modifier for changing what a drag does. Shift is the
+common one-button convention for pan (Blender's Shift+middle-drag and Shift+two-finger swipe,
+SketchUp's Shift during Orbit, Cura's Shift+left-drag, three.js OrbitControls); slicers
+(Bambu, Prusa, Orca) put pan on the right or middle button, and our right button is the
+context menu. `LiveView::pan_by` existed but nothing called it.
+
+- `pan_by_pixels` (drag and two-finger swipe) routes to `live_model_pan` while `mods.shift`
+  is held, else to the orbit as before. Like zoom, a slide leaves the turntable spinning.
+- Only a turn is thrown: `live_model_drag_moved` drops the flick samples while Shift is held
+  (a mouse-drag slide stops dead, as a photo's pan does), and `apply_pan_inertia` turns a
+  model's glide explicitly, so Shift pressed mid-coast can't turn it into a slide.
+- The Mac core only learned modifiers from key presses, so Shift held alone never reached a
+  drag. New FFI `modifiers_changed`, called by the canvas on mouse-down, drag and scroll with
+  the event's own flags (the winit shell already tracks `ModifiersChanged`).
+- **Verified:** pb-app-core tests (a Shift drag moves the view without moving the eye; Shift
+  off turns again; spinning survives a slide; no throw; Shift mid-glide keeps turning — a
+  mutation of the glide fix fails it), clippy, Windows clippy cross-check. In a separate Mac
+  test instance (cmux-cua, a Shift drag held across the gesture) the model slid twice at the
+  same angle and size; a temporary trace showed Shift on every drag event. One earlier Shift
+  drag in a first test instance turned the model instead; it had three overlapping windows
+  and the drags there were unreliable (two never landed), so I couldn't tell what happened.
+- **Not verified:** Windows at runtime (core.mods comes from winit's `ModifiersChanged`, so it
+  should work unchanged), a physical trackpad's Shift+two-finger swipe.
+
 ### 2026-11-25 — Export / Copy / Describe capture the turned view (#153.6, Mac session)
 
 Owner decisions (asked 2026-11-24): a capture of a turned model is **exactly the window**
