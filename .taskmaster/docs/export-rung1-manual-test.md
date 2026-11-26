@@ -277,7 +277,7 @@ Use a big, detailed photo (a 20 MP JPEG or NEF) and a PNG with transparency.
 
 | # | Do | Expect |
 |---|---|---|
-| 14.1 | `E`, open the **Format** pop-up | A menu, not buttons: PNG, JPEG · WebP, AVIF, JPEG XL, HEIC · TIFF (dividers between the groups) |
+| 14.1 | `E`, open the **Format** pop-up | A menu, not buttons: PNG, JPEG · WebP, AVIF, JPEG XL, HEIC · TIFF (dividers between the groups). WebP and JPEG XL show **Lossless** beside the pop-up, on the same line; switching between formats never moves the panel's contents sideways (PNG's Compression is a pop-up too) |
 | 14.2 | Pick each format in turn and wait | The pop-up shows the format's name every time (WebP and TIFF, the first of their groups, once showed blank). Each becomes the export on screen with its own File size. AVIF takes the longest (several seconds on 20 MP — "Calculating…" shows it); the others a second or two at most |
 | 14.3 | **WebP**: the **Lossless** checkbox | Checked: Quality greys out (it doesn't disappear — nothing below moves) and the file grows; `[` / `]` do nothing. Unchecked: Quality is back at the value it had |
 | 14.4 | Set JPEG to 60, switch to AVIF, then back to JPEG | AVIF shows its own quality (85 by default); JPEG is still 60 |

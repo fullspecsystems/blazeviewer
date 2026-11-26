@@ -1335,6 +1335,14 @@ test script: `.taskmaster/docs/export-rung1-manual-test.md`. Rung 0a (#81) not s
 
 **Cross-platform debt**
 
+- **Windows (2026-11-25, Mac panel layout):** on the Mac, **Lossless now sits beside the Format
+  pop-up** (no row comes or goes between formats), the label column is 78 pt ("Compression" is
+  74), and **Compression is a pop-up** (the segmented control overflowed its column and shifted
+  the panel sideways on PNG). The egui panel already had Compression as a combo, but its Lossless
+  switch is still a row of its own: its 120 px Format combo + 40 px switch + label (~226 px) don't
+  fit the ~184 px controls column of the 320 px panel. Doing the same there means measuring on
+  Windows (a narrower combo, a smaller label column, or a wider panel). Owner's call whether
+  Windows needs it; nothing is broken there.
 - **Windows (session 8, rung 4):** `build-windows.ps1` now builds `export-codecs` (libwebp via cc;
   libjxl via **CMake + bindgen**, so the Developer shell is entered for it too — and now regardless
   of `-NoNative`) and `avif-asm` when NASM ≥ 2.15 is on PATH (x64). **Unbuilt and never run** —

@@ -82,7 +82,8 @@ struct ExportPanelView: View {
     /// kind in the top four bits, and kind 15 doesn't exist).
     static let customSizeTag = UInt32.max
     private let width: CGFloat = 300
-    private let labelWidth: CGFloat = 86
+    /// The label column: the longest label, "Compression", is 74 pt in the callout font.
+    private let labelWidth: CGFloat = 78
 
     var body: some View {
         VStack(spacing: 0) {
@@ -148,33 +149,41 @@ struct ExportPanelView: View {
 
     private var controls: some View {
         VStack(alignment: .leading, spacing: 12) {
-            row("Format") {
-                // A pop-up, grouped: the everyday two, the modern ones, then TIFF. The core
-                // lists only what this build writes (HEIC is Mac-only). Each group is a Section,
-                // which the menu separates with a line. Not a Divider inside the ForEach: a
-                // ForEach tags every view in an element with its id, so that divider carried
-                // WebP's code, the pop-up matched it before WebP, and showed a blank title.
-                Picker("Format", selection: binding(\.format, model.exportSetFormat)) {
-                    ForEach(ExportPanelView.formatGroups(p.formats)) { group in
-                        Section {
-                            ForEach(group.formats) { f in
-                                Text(f.label).tag(f.code)
+            // Lossless sits beside the pop-up, so a format that has it is laid out like one that
+            // doesn't: no row comes or goes when the format changes. The row labels only the
+            // pop-up "Format" (the checkbox keeps its own name for VoiceOver). It fits with
+            // ~14 pt to spare: the pop-up is 85 pt (sized to its widest entry, whatever is
+            // chosen), the checkbox 71.
+            row("Format", labelsContent: false) {
+                HStack(alignment: .firstTextBaseline, spacing: 10) {
+                    // A pop-up, grouped: the everyday two, the modern ones, then TIFF. The core
+                    // lists only what this build writes (HEIC is Mac-only). Each group is a
+                    // Section, which the menu separates with a line. Not a Divider inside the
+                    // ForEach: a ForEach tags every view in an element with its id, so that
+                    // divider carried WebP's code, the pop-up matched it before WebP, and showed
+                    // a blank title.
+                    Picker("Format", selection: binding(\.format, model.exportSetFormat)) {
+                        ForEach(ExportPanelView.formatGroups(p.formats)) { group in
+                            Section {
+                                ForEach(group.formats) { f in
+                                    Text(f.label).tag(f.code)
+                                }
                             }
                         }
                     }
-                }
-                .pickerStyle(.menu)
-                .labelsHidden()
-                .fixedSize()
-            }
-            if p.hasLossless {
-                indented {
-                    Toggle(
-                        "Lossless",
-                        isOn: Binding(get: { p.lossless }, set: { model.exportSetLossless($0) })
-                    )
-                    .toggleStyle(.checkbox)
-                    .help("Keep every pixel exactly, in a bigger file")
+                    .pickerStyle(.menu)
+                    .labelsHidden()
+                    .fixedSize()
+                    .accessibilityLabel("Format")
+                    if p.hasLossless {
+                        Toggle(
+                            "Lossless",
+                            isOn: Binding(get: { p.lossless }, set: { model.exportSetLossless($0) })
+                        )
+                        .toggleStyle(.checkbox)
+                        .fixedSize()
+                        .help("Keep every pixel exactly, in a bigger file")
+                    }
                 }
             }
             if p.hasQuality {
@@ -200,6 +209,9 @@ struct ExportPanelView: View {
                 }
             }
             if p.format == 0 {
+                // A pop-up like Format and Size (and the egui panel's combo). It was a segmented
+                // control, ~188 pt against the 180 pt column: picking PNG widened the panel's
+                // contents and shifted every row sideways.
                 row("Compression") {
                     Picker(
                         "Compression", selection: binding(\.pngCompression, model.exportSetPngCompression)
@@ -208,8 +220,9 @@ struct ExportPanelView: View {
                         Text("Balanced").tag(1)
                         Text("Smallest").tag(2)
                     }
-                    .pickerStyle(.segmented)
+                    .pickerStyle(.menu)
                     .labelsHidden()
+                    .fixedSize()
                     .help("PNG is lossless at every level; this trades file size against time")
                 }
             }
@@ -313,28 +326,26 @@ struct ExportPanelView: View {
         return groups
     }
 
-    /// A control in the controls column with no label of its own (a checkbox carries one).
-    private func indented<Content: View>(@ViewBuilder _ content: () -> Content) -> some View {
-        HStack(spacing: 10) {
-            Color.clear.frame(width: labelWidth, height: 1)
-            content()
-            Spacer(minLength: 0)
-        }
-    }
-
     /// A labelled row: a fixed leading label column, the control beside it.
-    private func row<Content: View>(_ label: String, @ViewBuilder _ content: () -> Content)
-        -> some View
-    {
+    /// A labelled row. The label names every control in `content` for VoiceOver, unless
+    /// `labelsContent` is false and the content names its own (a row holding two controls).
+    private func row<Content: View>(
+        _ label: String, labelsContent: Bool = true, @ViewBuilder _ content: () -> Content
+    ) -> some View {
         HStack(alignment: .firstTextBaseline, spacing: 10) {
             Text(label)
                 .font(.callout)
                 .foregroundStyle(Color.panelSecondary)
                 .frame(width: labelWidth, alignment: .leading)
                 .accessibilityHidden(true)
-            content()
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .accessibilityLabel(label)
+            if labelsContent {
+                content()
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .accessibilityLabel(label)
+            } else {
+                content()
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
         }
     }
 
