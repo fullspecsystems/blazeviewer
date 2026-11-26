@@ -82,7 +82,9 @@ pragmatic crate choices differ from the table above and are the current baseline
 1. **In-shader ICC CMS.** `pb_decode::color` parses the source profile (`moxcms`) to a
    3×3 (source primaries → BT.709) + a 7-param TRC, carried on `DecodedImage::color`.
    Read per backend: JPEG APP2 (zune `icc_profile`), PNG/TIFF/WebP (`image` `icc_profile`),
-   JXL `rendered_icc`, and — because the Windows HEIF decoder returns **no** WIC color
+   JXL `rendered_icc` (but lossy wide-gamut JXL is rendered as linear sRGB and re-encoded
+   to its own space by `jxl.rs` `WideGamut`, because jxl-oxide gamut-maps XYB to sRGB
+   first: task #156), and — because the Windows HEIF decoder returns **no** WIC color
    contexts — the ISOBMFF `colr` box parsed directly (`prof`/`rICC` ICC or `nclx` CICP) in
    `wic.rs`. sRGB / ~2.2-gamma-sRGB-primaries → passthrough. Fixes oversaturated P3 HEICs.
 2. **fp16 scRGB render path.** `pb-render` renders to an `Rgba16Float` scRGB-linear

@@ -88,6 +88,11 @@ with any pre-release suffix carried only by the tag.
 
 ### Fixed
 
+- **Wide-color JPEG XL photos show their full color.** A lossy JPEG XL in a wide color
+  space such as Display P3, the kind cjxl or Blaze Viewer's own export makes from an iPhone
+  or camera photo, looked duller than in Preview or Safari: its most saturated reds and
+  greens were toned down. They now look as vivid as they should, and exporting one to
+  another format keeps its color too.
 - **AI descriptions work with models that think first.** Models like Qwen 3.5 and 3.6
   could spend the whole response length thinking and fail with "Couldn't read the
   endpoint's reply". Blaze Viewer now gives a model that thinks room to finish thinking
