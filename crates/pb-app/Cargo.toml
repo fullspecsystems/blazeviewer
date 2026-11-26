@@ -202,7 +202,7 @@ windows = { version = "0.62", features = [
 # Test-only: build archive fixtures for the no-trace integration tests. Same crates
 # pb-source uses; their writers come with the base crates (pure Rust).
 [dev-dependencies]
-zip = { version = "2", default-features = false, features = ["deflate"] }
+zip = { version = "9.8", default-features = false, features = ["deflate-flate2"] }
 sevenz-rust2 = "0.21.3"
 # Build tiny tar / tar.gz fixtures for the no-trace tests (#102). Same versions
 # pb-source already links, so the lockfile is unchanged.

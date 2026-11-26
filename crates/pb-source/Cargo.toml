@@ -6,12 +6,18 @@ license.workspace = true
 description = "Photo source abstraction for Blaze Viewer: a uniform 'encoded bytes + identity for item i' over a filesystem listing, a ZIP archive, a 7-Zip archive, or a tar-family archive (tar / tar.gz / tar.bz2 / tar.zst / tar.xz). RAM-only, read-only on the view path (honors the no-trace privacy guarantee)."
 
 [dependencies]
-# ZIP archive reading. Lean, pure-Rust feature set: `deflate` (miniz_oxide — the
+# ZIP archive reading. Lean, pure-Rust feature set: `deflate-flate2` (inflate via
+# flate2, whose default miniz_oxide backend the `flate2` line below selects — the
 # only common photo-zip codec besides stored) + `aes-crypto` (pure-Rust AES for
 # WinZip-AES-encrypted archives). bzip2/zstd are intentionally omitted: they're
 # rare for already-compressed photos and would pull C build deps — exactly the
 # Windows build-risk the project avoids (see the libheif notes in CLAUDE.md).
-zip = { version = "2", default-features = false, features = ["deflate", "aes-crypto"] }
+# Not zip's `deflate` bundle: it adds the zopfli encoder and switches flate2 to
+# zlib-rs graph-wide (see pb-mesh). Must stay >= 9 (task #155): 2.x accepted
+# WinZip-AES entries without their HMAC check when the data ended early or was
+# empty (RUSTSEC-2026-0545), and refused ZIPs whose ZIP64 extra field carries a
+# stale local-header offset beside a valid 32-bit one (Bambu Studio writes them).
+zip = { version = "9.8", default-features = false, features = ["deflate-flate2", "aes-crypto"] }
 # 7-Zip reading (SevenZSource's eager decode-to-RAM). Pure Rust including its codecs
 # (LZMA/LZMA2 via lzma-rust2, bzip2 via libbz2-rs-sys, PPMd via ppmd-rust), so no C
 # build risk. Default features kept (compress + aes256 + bzip2 + ppmd + util) for
@@ -58,8 +64,9 @@ crc32fast = "1"
 # RAR5 encryption (task #103): password-protected entries decrypt with standard
 # primitives — PBKDF2-HMAC-SHA256 key derivation (2^N iterations) + AES-256-CBC
 # over the packed runs — unlike RAR4's bespoke KDF (out of scope). All pure Rust
-# and all already in-tree (aes/cbc via sevenz-rust2's AES256; hmac/sha2 via the
-# 7z + zip crypto), so no new build risk. See src/rar_crypt.rs.
+# (aes/cbc via sevenz-rust2's AES256), so no new build risk. See src/rar_crypt.rs.
+# Since zip 9 (#155) moved its AES to hmac 0.13 / digest 0.11, this crate is the only
+# user of hmac 0.12; moving it (with sha2 0.11) up would drop that duplicate.
 aes = "0.9"
 cbc = "0.2"
 hmac = "0.12"

@@ -6,12 +6,12 @@ license.workspace = true
 description = "Blaze Viewer's 3D models (task #151): STL / OBJ / 3MF parsed from bytes into one canonical mesh, auto-framed, and rendered to a still on the CPU. Pure: no I/O, no GPU."
 
 [dependencies]
-# 3MF is an OPC package (a ZIP). Deliberately the current major, not the 2.x pb-source still
-# uses: zip 2.x trusts a ZIP64 extra field's offsets even when the regular 32-bit header is
+# 3MF is an OPC package (a ZIP). Deliberately the current major (pb-source joined it in #155):
+# zip 2.x trusts a ZIP64 extra field's offsets even when the regular 32-bit header is
 # valid (the spec says the ZIP64 value applies only to fields set to 0xFFFFFFFF), and Bambu
 # Studio writes 3MFs whose ZIP64 extras carry a wrong local-header offset. 2.x then rejects the
 # whole package as "Could not find EOCD"; >= 4 reads it, as `unzip` does. Inflate only: no
-# encoders, and no AES (a 3MF never needs it). #155 moves pb-source to this major too.
+# encoders, and no AES here (a 3MF never needs it; pb-source's `aes-crypto` unifies in anyway).
 zip = { version = "9.8", default-features = false, features = ["deflate-flate2"] }
 # Backend selection only: zip 9 takes flate2 with default features off, so something must pick
 # an inflate backend. This picks flate2's default (miniz_oxide), already in the tree via

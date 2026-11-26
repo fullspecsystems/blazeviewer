@@ -121,8 +121,16 @@ with any pre-release suffix carried only by the tag.
 - **HDR PNGs show in HDR.** PNGs tagged as HDR (PQ or HLG — the 2025 PNG standard) used
   to look flat and gray; they now show with full HDR brightness, like HDR HEIC and AVIF
   photos. PNGs tagged with a wide-gamut color space this way get correct colors too.
+- **Some ZIPs that wouldn't open now do.** ZIPs saved by some tools, the way Bambu Studio
+  saves its files, were turned away as damaged with "Could not find EOCD". They now open
+  like any other ZIP.
 
 ### Security
+
+- **Files in password-protected ZIPs are verified.** A photo or video you open from an
+  encrypted ZIP is now checked against the archive's authentication code, so a damaged or
+  tampered file shows an error instead of opening as if it were genuine. Files in ordinary
+  ZIPs are checked against their checksum the same way.
 
 - **The built-in video library (FFmpeg) is updated to 8.1.3 on Mac and Windows**, picking up
   upstream fixes for crashes and memory-safety bugs that a damaged or deliberately malformed
