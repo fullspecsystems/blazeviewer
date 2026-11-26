@@ -8,8 +8,8 @@
 
 use super::*;
 use crate::export_panel::{
-    clock_label, export_key_override, ExportKey, ExportPanel, ExportSettings, FormatChoice,
-    PanelKey, PanelSource, PngCompression, SizeChoice, SizeDialog,
+    clock_label, export_key_override, CustomSize, ExportKey, ExportPanel, ExportSettings,
+    FormatChoice, PanelKey, PanelSource, PngCompression, SizeBy, SizeChoice, SizeDialog,
 };
 use crate::frame_capture::FrameKey;
 use crate::overlay::PanelContent;
@@ -228,10 +228,54 @@ impl AppCore {
         self.export_edited(s);
     }
 
+    /// A ready-made size from the Size menu (it leaves Custom).
     pub fn export_set_size(&mut self, size: SizeChoice) {
         let mut s = self.export.draft;
         s.size = size;
+        s.custom = None;
         self.export_edited(s);
+    }
+
+    /// The Size menu's **Custom** (macOS): show the Custom row, giving the current size the
+    /// way it's already given (a preset or the full size: by long edge). The export doesn't
+    /// change until a number is entered.
+    pub fn export_size_custom(&mut self) {
+        let mut s = self.export.draft;
+        if s.custom.is_none() {
+            s.custom = Some(s.size.by_value().map_or(SizeBy::LongEdge, |(by, _)| by));
+            self.export_edited(s);
+        }
+    }
+
+    /// The Custom row's "Resize by": give the size this way, keeping the export the size it
+    /// was ([`CustomSize::for_size`]). An export at full size stays at full size.
+    pub fn export_set_size_by(&mut self, by: SizeBy) {
+        let mut s = self.export.draft;
+        s.custom = Some(by);
+        let dims = self.displayed_item.and_then(|i| self.export_source_dims(i));
+        let resized = dims.is_some_and(|d| s.size.target(d).is_some());
+        if resized {
+            if let Some(size) = CustomSize::for_size(by, s.size, dims)
+                .value
+                .and_then(|v| SizeChoice::custom(by, v))
+            {
+                s.size = size;
+            }
+        }
+        self.export_edited(s);
+    }
+
+    /// The Custom row's number, entered. Returns `false` (nothing changes) when it's out of
+    /// range for `by`.
+    pub fn export_set_custom_size(&mut self, by: SizeBy, value: u32) -> bool {
+        let Some(size) = SizeChoice::custom(by, value) else {
+            return false;
+        };
+        let mut s = self.export.draft;
+        s.size = size;
+        s.custom = Some(by);
+        self.export_edited(s);
+        true
     }
 
     /// The Size menu's **Custom…**: ask for a size (a sheet on macOS, the dialog window on
@@ -494,6 +538,76 @@ mod tests {
             contract::DialogResult::Dismissed(Some(contract::DialogKind::ExportSize)),
         ));
         assert_eq!(core.export.draft.size, SizeChoice::Width(1200));
+    }
+
+    /// The macOS Custom row (owner, 2026-11-26): choosing Custom shows it without changing the
+    /// export, "Resize by" keeps the export's size, a number applies, and a preset leaves it.
+    #[test]
+    fn the_custom_row_shows_converts_and_applies() {
+        use crate::export_panel::{CustomSize, SizeBy};
+        let mut core = core_on(&["a.jpg"]);
+        with_dims(&mut core, 0, 3000, 2000);
+        key(&mut core, "E");
+        assert_eq!(core.export_panel().custom, None, "a preset: no Custom row");
+
+        // From full size: by long edge, the image's own, and still the full size.
+        core.export_size_custom();
+        let p = core.export_panel();
+        assert_eq!(
+            p.custom,
+            Some(CustomSize {
+                by: SizeBy::LongEdge,
+                value: Some(3000)
+            })
+        );
+        assert_eq!(core.export.draft.size, SizeChoice::Full);
+        assert_eq!(p.output_dims, Some((3000, 2000)));
+        // Changing "Resize by" at full size stays at full size: no "already … px" note.
+        core.export_set_size_by(SizeBy::Width);
+        assert_eq!(core.export.draft.size, SizeChoice::Full);
+        assert_eq!(
+            core.export_panel().custom.map(|c| c.value),
+            Some(Some(3000))
+        );
+        core.export_set_size_by(SizeBy::Percent);
+        assert_eq!(core.export_panel().custom.map(|c| c.value), Some(Some(100)));
+
+        // A number applies; out of range changes nothing.
+        assert!(!core.export_set_custom_size(SizeBy::Percent, 0));
+        assert!(!core.export_set_custom_size(SizeBy::Percent, 101));
+        assert!(core.export_set_custom_size(SizeBy::Percent, 50));
+        assert_eq!(core.export.draft.size, SizeChoice::Percent(50));
+        assert_eq!(core.export_panel().output_dims, Some((1500, 1000)));
+        // Resize by keeps the output: 50% of 3000 × 2000 is 1500 wide, 1000 high.
+        core.export_set_size_by(SizeBy::Width);
+        assert_eq!(core.export.draft.size, SizeChoice::Width(1500));
+        core.export_set_size_by(SizeBy::Height);
+        assert_eq!(core.export.draft.size, SizeChoice::Height(1000));
+        core.export_set_size_by(SizeBy::LongEdge);
+        assert_eq!(core.export.draft.size, SizeChoice::LongEdge(1500));
+        assert_eq!(core.export_panel().output_dims, Some((1500, 1000)));
+
+        // A custom number equal to a preset stays on Custom.
+        assert!(core.export_set_custom_size(SizeBy::LongEdge, 2048));
+        let p = core.export_panel();
+        assert_eq!(p.settings.size, SizeChoice::LongEdge(2048));
+        assert_eq!(p.custom.map(|c| c.by), Some(SizeBy::LongEdge));
+
+        // A preset from the menu leaves Custom, even the same size.
+        core.export_set_size(SizeChoice::LongEdge(2048));
+        assert_eq!(core.export_panel().custom, None);
+        // Custom from a preset starts from it.
+        core.export_size_custom();
+        assert_eq!(
+            core.export_panel().custom,
+            Some(CustomSize {
+                by: SizeBy::LongEdge,
+                value: Some(2048)
+            })
+        );
+        assert_eq!(core.export.draft.size, SizeChoice::LongEdge(2048));
+        // The row shapes the panel, never the preview's file.
+        assert_eq!(core.export.draft.normalized().custom, None);
     }
 
     // ---- The mode × action table (export-plan.md § 3.11) — one test per row --------------

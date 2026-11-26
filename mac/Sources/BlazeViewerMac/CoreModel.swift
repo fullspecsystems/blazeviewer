@@ -10,7 +10,7 @@ import UniformTypeIdentifiers
 /// NSAlert sheets (native buttons + Return/Esc for free); About is the standard NSApp
 /// panel; Settings is its own window — none of those ride through here.
 enum SheetKind: String, Identifiable {
-    case password, ask, loading, scanning, exportSize
+    case password, ask, loading, scanning
     var id: String { rawValue }
 }
 
@@ -38,10 +38,12 @@ final class CoreModel {
     var passwordEntry = ""
     /// The "Ask about image" question field's live contents (task #44; view-bound).
     var askEntry = ""
-    /// Export mode's Custom… size sheet (task #89): "Resize by" (0 long edge, 1 width,
-    /// 2 height, 3 percentage) and the number field's text (view-bound).
-    var exportSizeBy = 0
-    var exportSizeText = ""
+    /// The Export panel's Custom size field while a number is being typed (view-bound); nil
+    /// when it shows the core's. Entered on Return, Tab or a click away; Esc drops it.
+    var exportSizeEdit: String?
+    /// Esc dropped the Custom field's edit: ignore the text the field writes back as it gives
+    /// up focus, until it's focused again.
+    @ObservationIgnored var exportSizeEditCancelled = false
     /// The password sheet's "Checking…" state while a submitted entry is verified.
     private(set) var dialogChecking = false
     /// Loading sheet: decompressed fraction (0 until the archive header sets a total).
@@ -399,6 +401,9 @@ final class CoreModel {
                         return event
                     }
                     if name == "Escape" {
+                        // Esc drops a half-typed Custom size.
+                        self.exportSizeEdit = nil
+                        self.exportSizeEditCancelled = true
                         self.exportPanelFocused = false
                         host.makeFirstResponder(self.canvasView)
                         return nil
@@ -414,6 +419,8 @@ final class CoreModel {
                 }
             }
             if event.type == .keyDown {
+                // ⌘↩ exports and ⇧⌘E may: a size typed into the Custom field goes first.
+                if f.contains(.command), self.exportSizeEdit != nil { self.flushExportSizeEdit() }
                 self.core.key_down(
                     name,
                     f.contains(.control),
@@ -701,6 +708,7 @@ final class CoreModel {
     }
 
     func menuAction(_ id: String) {
+        flushExportSizeEdit()
         if id == "fullscreen" { fullscreenHintFromMouse = true }
         core.menu_action(id)
         kick()
@@ -994,6 +1002,11 @@ final class CoreModel {
             pngCompression: Int(core.export_png_compression()),
             size: core.export_size(),
             sizes: sizes,
+            customBy: {
+                let by = core.export_size_custom_by()
+                return by == UInt8.max ? -1 : Int(by)
+            }(),
+            customValue: core.export_size_custom_value(),
             stripMetadata: core.export_strip_metadata(),
             notes: notes,
             fileSize: core.export_file_size().toString(),
@@ -1012,11 +1025,61 @@ final class CoreModel {
     func exportSetPngCompression(_ code: Int) {
         core.export_set_png_compression(UInt8(code)); kick()
     }
-    func exportSetSize(_ code: UInt32) { core.export_set_size(code); kick() }
-    /// The Size menu's Custom…: the core answers with the sheet (`ShowDialog("export_size")`).
-    func exportCustomSize() {
-        core.export_custom_size()
-        drainEffects()
+    func exportSetSize(_ code: UInt32) {
+        exportSizeEdit = nil
+        core.export_set_size(code)
+        kick()
+    }
+    /// The Size menu's Custom: the row under it appears; the export is unchanged.
+    func exportChooseCustomSize() { core.export_choose_custom_size(); kick() }
+    /// The Custom row's "Resize by" (0 long edge, 1 width, 2 height, 3 percentage). The core
+    /// keeps the export its size, so the field shows the new number for it.
+    func exportSetSizeBy(_ by: Int) {
+        core.export_set_size_by(UInt8(by))
+        drainEffects() // refresh the panel first, so the field never shows the old number
+        exportSizeEdit = nil
+        kick()
+    }
+
+    /// The line under the Size menu while a number is typed — the size it gives this image,
+    /// or the range to enter — else nil (the panel shows the export's size).
+    var exportSizeEditReadout: String? {
+        guard let text = exportSizeEdit, exportPanel.customBy >= 0 else { return nil }
+        return core.export_custom_size_readout(UInt8(exportPanel.customBy), text).toString()
+    }
+
+    /// Enter the typed number. `false` when it's out of range: the field keeps it, to fix.
+    /// An unchanged number isn't re-entered.
+    @discardableResult
+    func exportApplySizeEdit() -> Bool {
+        guard let text = exportSizeEdit else { return true }
+        let by = exportPanel.customBy
+        guard by >= 0 else {
+            exportSizeEdit = nil
+            return true
+        }
+        guard let value = UInt32(text.trimmingCharacters(in: .whitespaces)) else { return false }
+        if value == exportPanel.customValue {
+            exportSizeEdit = nil
+            return true
+        }
+        guard core.export_set_custom_size(UInt8(by), value) else { return false }
+        drainEffects() // refresh the panel first, so the field never shows the old number
+        exportSizeEdit = nil
+        kick()
+        return true
+    }
+
+    /// Before anything else acts on the export (Export…, a menu command, ⌘↩): enter a typed
+    /// number, or drop it when it's out of range.
+    func flushExportSizeEdit() {
+        if !exportApplySizeEdit() { exportSizeEdit = nil }
+    }
+
+    /// Hand the keyboard back to the photo (Return in the Custom field).
+    func focusPhoto() {
+        exportPanelFocused = false
+        if let canvas = canvasView { hostWindow?.makeFirstResponder(canvas) }
     }
     func exportSetStripMetadata(_ on: Bool) { core.export_set_strip_metadata(on); kick() }
     /// The preview's Export / Original control (0 / 1) — a rebind, both sides are resident.
@@ -1037,9 +1100,17 @@ final class CoreModel {
         drainEffects()
         kick()
     }
-    func closeExport() { core.export_close(); kick() }
+    func closeExport() {
+        flushExportSizeEdit()
+        core.export_close()
+        kick()
+    }
     /// The panel's Export… button: the save sheet follows once the core suggests a name.
-    func commitExport() { core.export_commit(); kick() }
+    func commitExport() {
+        flushExportSizeEdit()
+        core.export_commit()
+        kick()
+    }
 
     /// Close the Inspector from its ✕ button.
     func closeInspector() {
@@ -1500,10 +1571,6 @@ final class CoreModel {
         case "ask_image":
             askEntry = "" // each Ask starts blank
             activeSheet = .ask
-        case "export_size":
-            exportSizeBy = Int(core.export_size_dialog_by())
-            exportSizeText = String(core.export_size_dialog_value())
-            activeSheet = .exportSize
         case "loading":
             dialogMessage = core.dialog_message().toString()
             progressFraction = 0
@@ -1675,41 +1742,6 @@ final class CoreModel {
         askEntry = ""
         guard !q.isEmpty else { return }
         core.ask_submitted(q)
-        drainEffects()
-    }
-
-    /// The Custom… size sheet's number, or nil when it isn't a whole number.
-    var exportSizeValue: UInt32? {
-        UInt32(exportSizeText.trimmingCharacters(in: .whitespaces))
-    }
-
-    /// The line under the Custom… field: what this size gives the image, or the range.
-    var exportSizeReadout: String {
-        guard let v = exportSizeValue else {
-            return exportSizeBy == 3
-                ? "Enter a percentage from 1 to 100." : "Enter a size in pixels."
-        }
-        return core.export_size_dialog_readout(UInt8(exportSizeBy), v).toString()
-    }
-
-    /// Whether the Custom… sheet's OK can run.
-    var exportSizeValid: Bool {
-        guard let v = exportSizeValue, v > 0 else { return false }
-        return v <= (exportSizeBy == 3 ? 100 : 65_535)
-    }
-
-    /// Custom… OK / Return: the core closes the sheet (CloseDialog) and uses the size.
-    func exportSizeSubmit() {
-        guard exportSizeValid, let v = exportSizeValue else { return }
-        if core.export_size_chosen(UInt8(exportSizeBy), v) {
-            kick()
-            drainEffects()
-        }
-    }
-
-    /// Custom… Cancel / Esc: keep the current size.
-    func exportSizeCancel() {
-        core.dialog_dismissed()
         drainEffects()
     }
 

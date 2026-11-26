@@ -522,7 +522,12 @@ the mean of those maxima; alpha ignored; non-finite → 0; units per format (PNG
 | `Tab` | Hide panels: Export mode **suspends** (contextual keys revert; preview hidden); `Tab` again resumes |
 
 - **No inline text fields** — ADR-023 and the held-key release net stay intact. Resize uses presets
-  + "Custom…" (a macOS sheet / the pb-ui dialog window).
+  + "Custom…" (a macOS sheet / the pb-ui dialog window). **Amended on the Mac (owner,
+  2026-11-26):** the sheet became an inline Custom row (a "Resize by" menu and a number field
+  under the Size menu). The Mac's key monitor already hands keys to a focused panel control and
+  still sends every key-up to the core, so the release net holds; Return enters the number and
+  gives the keys back to the photo, Esc drops it (not quit). winit keeps the dialog: its overlay
+  gets no keyboard at all (Handoff, Cross-platform debt).
 - **Checkboxes and menus on winit are pointer-operated** unless given contextual bindings — the
   keyboard-only acceptance in rung 2 says exactly which controls are keyboard-reachable (F23).
 - **macOS Tab focus** (Full Keyboard Access): while a panel control is first responder the key
@@ -1308,6 +1313,19 @@ confirmed directly). **All accepted.**
 
 ## Handoff
 
+**Status (2026-11-26, Custom row):** on the Mac, Size ▸ **Custom** no longer opens a sheet; it
+shows a row under the Size menu, `Long edge ▾ [2048] px`, giving the size by long edge, width,
+height or percentage (owner request: "layout shift is okay and much nicer than a modal"). The
+core keeps the menu's Custom state in `ExportSettings::custom` (a custom number can equal a
+preset, and Custom at full size changes nothing yet), `export_set_size_by` keeps the export's
+size when the unit changes (`CustomSize::for_size`), and `export_set_custom_size` enters a number.
+Verified on the Mac: 3 new core tests (1185 pass), clippy, the Windows clippy cross-check, and a
+test copy driven by hand: the row fits the column; typing goes to the field, not the viewer, and
+the line beneath reads what the number would give; Return applies it and Space then browses; Esc
+puts the old number back without quitting; clicking the photo applies it. **Not verified:**
+changing "Resize by" in the GUI (its menu can't be opened from the automation; core-tested
+only), ⌘↩ / Export… with a number still being typed, VoiceOver (manual test 13.19–13.24, 14.23).
+
 **Status (2026-11-26):** **JPEG export goes through jpegli** (task #157, `crates/pb-jpegli`;
 Rung 4's "JPEG encoder trial" has the build notes and measurements) and **zip 9 for archive doors**
 (task #155's zip half). Verified on the Mac: pb-jpegli's tests (progressive 4:4:4, ICC chunks from
@@ -1435,6 +1453,14 @@ test script: `.taskmaster/docs/export-rung1-manual-test.md`. Rung 0a (#81) not s
 - Quit waits up to 4 s for an in-flight export (`finish_exports_for_exit`), from both shells.
 
 **Cross-platform debt**
+
+- **Windows (2026-11-26, Custom row):** winit still asks for a custom size with the Custom…
+  dialog window; only the Mac has the inline row. Its core is shared (`ExportPanel::custom`,
+  `export_size_custom` / `export_set_size_by` / `export_set_custom_size`), but the egui overlay
+  gets no keyboard (ADR-023), so an inline field there means routing key presses to egui while a
+  `TextEdit` has focus (`ctx.wants_keyboard_input()`), with key-ups still reaching the core and
+  Esc leaving the field instead of quitting. Owner to decide whether Windows gets the row; it
+  needs testing on Windows either way. The dialog path is untouched and still works.
 
 - **Windows (2026-11-26, source size):** the egui panel's source line gains the original's size
   ("· 300 KB") and its File size row the share ("125 KB (42%)"); compile-checked only. The

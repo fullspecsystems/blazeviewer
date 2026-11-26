@@ -496,7 +496,6 @@ struct ContentView: View {
                 case .ask: AskSheetView(model: model)
                 case .loading: LoadingSheetView(model: model)
                 case .scanning: ScanningSheetView(model: model)
-                case .exportSize: ExportSizeSheetView(model: model)
                 }
             }
     }

@@ -181,10 +181,11 @@ impl PngCompression {
 /// edge is greyed out: exports are never upscaled (review F20).
 pub const SIZE_PRESETS: [u32; 8] = [3840, 2560, 2048, 1920, 1600, 1280, 1024, 800];
 
-/// The largest edge the Custom… dialog accepts (JPEG's own limit).
+/// The largest edge a custom size accepts (JPEG's own limit).
 pub const MAX_EDGE: u32 = 65_535;
 
-/// How a custom size is given — the Custom… dialog's "Resize by" menu.
+/// How a custom size is given — the "Resize by" menu of the Size menu's Custom row (macOS) or
+/// Custom… dialog (winit).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum SizeBy {
     #[default]
@@ -225,6 +226,14 @@ impl SizeBy {
         match self {
             SizeBy::Percent => 100,
             _ => MAX_EDGE,
+        }
+    }
+
+    /// What to enter, said when the field holds something out of range.
+    pub fn range_hint(self) -> String {
+        match self {
+            SizeBy::Percent => "Enter a percentage from 1 to 100.".into(),
+            _ => format!("Enter a size from 1 to {MAX_EDGE} px."),
         }
     }
 
@@ -411,10 +420,7 @@ impl SizeDialog {
     /// The line under the field: what `value` `by` gives this image.
     pub fn readout(by: SizeBy, value: u32, dims: Option<(u32, u32)>) -> String {
         let Some(choice) = SizeChoice::custom(by, value) else {
-            return match by {
-                SizeBy::Percent => "Enter a percentage from 1 to 100.".into(),
-                _ => format!("Enter a size from 1 to {MAX_EDGE} px."),
-            };
+            return by.range_hint();
         };
         let Some(d) = dims else {
             return String::new();
@@ -426,6 +432,53 @@ impl SizeDialog {
                 dims_label(d)
             ),
         }
+    }
+}
+
+/// The Size menu's **Custom** row (macOS): the size given by long edge, width, height or
+/// percentage, in a menu and a number field on one line under the Size menu. It replaced the
+/// Custom… sheet there (owner, 2026-11-26); winit still asks with the dialog.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CustomSize {
+    pub by: SizeBy,
+    /// The number in the field; `None` (a blank field) when the image's size isn't known yet
+    /// and the size isn't already given `by` this.
+    pub value: Option<u32>,
+}
+
+impl CustomSize {
+    /// The row for `size` given `by`: the size's own number when it's given that way,
+    /// otherwise the number `by` that gives the same output, so changing "Resize by" keeps the
+    /// export the size it was. The full size is 100%, or the image's own edge.
+    pub fn for_size(by: SizeBy, size: SizeChoice, dims: Option<(u32, u32)>) -> CustomSize {
+        let value = match size.by_value() {
+            Some((b, v)) if b == by => Some(v),
+            _ if by == SizeBy::Percent && size == SizeChoice::Full => Some(100),
+            _ => dims.map(|d| {
+                let (w, h) = size.target(d).unwrap_or(d);
+                match by {
+                    SizeBy::LongEdge => w.max(h),
+                    SizeBy::Width => w,
+                    SizeBy::Height => h,
+                    SizeBy::Percent => {
+                        let pct = f64::from(w.max(h)) * 100.0 / f64::from(d.0.max(d.1).max(1));
+                        (pct.round() as u32).clamp(1, 100)
+                    }
+                }
+            }),
+        };
+        CustomSize { by, value }
+    }
+
+    /// The line under the row while a number is being typed: the size `text` gives this
+    /// image ("1500 × 1000"), or what to enter. Blank when the image's size isn't known.
+    pub fn readout(by: SizeBy, text: &str, dims: Option<(u32, u32)>) -> String {
+        let value = text.trim().parse::<u32>().unwrap_or(0);
+        let Some(choice) = SizeChoice::custom(by, value) else {
+            return by.range_hint();
+        };
+        dims.map(|d| dims_label(choice.target(d).unwrap_or(d)))
+            .unwrap_or_default()
     }
 }
 
@@ -566,6 +619,11 @@ pub struct ExportSettings {
     pub jxl_lossless: bool,
     pub png: PngCompression,
     pub size: SizeChoice,
+    /// The Size menu is on **Custom**, giving the size by this ([`CustomSize`]). Kept apart
+    /// from `size` because a custom number can equal a preset (2048 px), and Custom chosen at
+    /// full size changes nothing until a number is entered. Not persisted: a fresh entry is on
+    /// Custom when the saved size isn't a preset. Shapes the panel, never the file.
+    pub custom: Option<SizeBy>,
     /// *Strip metadata* — on at every entry to the mode, never persisted (plan Q7).
     pub strip_metadata: bool,
     /// What unchecking it keeps. Location is never persisted.
@@ -602,6 +660,9 @@ impl ExportSettings {
             jxl_lossless: p.jxl_lossless,
             png: p.png_compression,
             size: p.size,
+            custom: (!p.size.is_preset())
+                .then(|| p.size.by_value().map(|(by, _)| by))
+                .flatten(),
             strip_metadata: true,
             keep: KeepMetadata {
                 camera: p.keep_camera,
@@ -729,6 +790,7 @@ impl ExportSettings {
             jxl_lossless: false,
             png: PngCompression::Balanced,
             size: self.size,
+            custom: None, // the panel's, not the file's
             strip_metadata: self.strip_metadata,
             // What's kept shapes the file only when not stripping, and generation data only
             // rides in PNG (the only format that writes it).
@@ -1095,6 +1157,9 @@ pub struct ExportPanel {
     pub source: Option<PanelSource>,
     pub settings: ExportSettings,
     pub sizes: Vec<SizeOption>,
+    /// The Size menu's Custom row, when the menu is on Custom (macOS draws it; winit lists the
+    /// custom size in `sizes` and edits it in the dialog).
+    pub custom: Option<CustomSize>,
     /// The output size as displayed, when the source size is known.
     pub output_dims: Option<(u32, u32)>,
     /// Plain-language notes on what the export will do ("Transparent areas become white").
@@ -1132,6 +1197,14 @@ impl ExportPanel {
         }
 
         let output_dims = dims.map(|d| settings.size.target(d).unwrap_or(d));
+        let custom = settings
+            .custom
+            .or_else(|| {
+                (!settings.size.is_preset())
+                    .then(|| settings.size.by_value().map(|(by, _)| by))
+                    .flatten()
+            })
+            .map(|by| CustomSize::for_size(by, settings.size, dims));
 
         let mut notes = Vec::new();
         if let Some((w, h)) = dims {
@@ -1168,6 +1241,7 @@ impl ExportPanel {
             source,
             settings,
             sizes,
+            custom,
             output_dims,
             notes,
             can_export,
@@ -1721,6 +1795,63 @@ mod tests {
         );
         assert_eq!(SizeChoice::parse_spec("width"), None);
         assert_eq!(SizeChoice::parse_spec("0%"), None);
+    }
+
+    #[test]
+    fn the_custom_row_gives_the_size_each_way_and_reads_out_what_is_typed() {
+        let d = Some((3000, 2000));
+        let v = |by, size| CustomSize::for_size(by, size, d).value;
+        // The size's own number when it's given that way.
+        assert_eq!(v(SizeBy::Width, SizeChoice::Width(1200)), Some(1200));
+        // Otherwise the number that gives the same output.
+        assert_eq!(v(SizeBy::LongEdge, SizeChoice::Width(1200)), Some(1200));
+        assert_eq!(v(SizeBy::Height, SizeChoice::Width(1200)), Some(800));
+        assert_eq!(v(SizeBy::Percent, SizeChoice::Width(1200)), Some(40));
+        assert_eq!(v(SizeBy::Width, SizeChoice::Percent(25)), Some(750));
+        // The full size: 100%, or the image's own edge; a size that wouldn't shrink is full.
+        assert_eq!(v(SizeBy::Percent, SizeChoice::Full), Some(100));
+        assert_eq!(v(SizeBy::Height, SizeChoice::Full), Some(2000));
+        assert_eq!(v(SizeBy::Percent, SizeChoice::Width(4000)), Some(100));
+        // A tiny export rounds up to 1%, never 0.
+        assert_eq!(v(SizeBy::Percent, SizeChoice::LongEdge(5)), Some(1));
+        // Unknown dims: only a number already given that way, or 100%.
+        let none = |by, size| CustomSize::for_size(by, size, None).value;
+        assert_eq!(none(SizeBy::Width, SizeChoice::Width(640)), Some(640));
+        assert_eq!(none(SizeBy::Percent, SizeChoice::Full), Some(100));
+        assert_eq!(none(SizeBy::LongEdge, SizeChoice::Full), None);
+
+        let r = |by, text: &str| CustomSize::readout(by, text, d);
+        assert_eq!(r(SizeBy::Width, "1500"), "1500 × 1000");
+        assert_eq!(r(SizeBy::Percent, " 10 "), "300 × 200");
+        assert_eq!(r(SizeBy::LongEdge, "5000"), "3000 × 2000", "never upscaled");
+        assert_eq!(r(SizeBy::Width, ""), "Enter a size from 1 to 65535 px.");
+        assert_eq!(r(SizeBy::Width, "12a"), "Enter a size from 1 to 65535 px.");
+        assert_eq!(
+            r(SizeBy::Percent, "150"),
+            "Enter a percentage from 1 to 100."
+        );
+        assert_eq!(CustomSize::readout(SizeBy::Width, "10", None), "");
+    }
+
+    #[test]
+    fn a_saved_custom_size_opens_on_the_custom_row() {
+        for (size, want) in [
+            (SizeChoice::Full, None),
+            (SizeChoice::LongEdge(2048), None),
+            (SizeChoice::LongEdge(1500), Some(SizeBy::LongEdge)),
+            (SizeChoice::Percent(50), Some(SizeBy::Percent)),
+        ] {
+            let p = ExportPrefs {
+                size,
+                ..ExportPrefs::default()
+            };
+            let s = ExportSettings::from_prefs(&p);
+            assert_eq!(s.custom, want, "{size:?}");
+            assert_eq!(
+                ExportPanel::build(s, src(3000, 2000)).custom.map(|c| c.by),
+                want
+            );
+        }
     }
 
     #[test]

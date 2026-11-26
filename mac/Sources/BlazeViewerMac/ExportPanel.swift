@@ -5,9 +5,11 @@
 // rule (presets that would upscale are disabled, what the notes say, whether this item can
 // export at all); this view draws the model and sends each edit straight back.
 //
-// Export mode is a mode, not a modal: the keyboard still drives the photo (Space, R, …), so
-// nothing here takes text input. `E` leaves, `⌘↩` / ⇧⌘E export, `[` / `]` step the quality,
-// `Y` flicks between the export and the original (rung 3's live preview; a hold peeks).
+// Export mode is a mode, not a modal: the keyboard still drives the photo (Space, R, …). The
+// one text input, the Custom size's number, takes the keys only while you type in it (Return
+// enters it and hands them back, Esc drops it). `E` leaves, `⌘↩` / ⇧⌘E export, `[` / `]`
+// step the quality, `Y` flicks between the export and the original (rung 3's live preview; a
+// hold peeks).
 // The controls are the stock AppKit-backed SwiftUI ones — pop-up menus, a segmented picker, a
 // slider, checkboxes, a prominent button — so they behave and read as native controls,
 // VoiceOver included.
@@ -64,7 +66,13 @@ struct ExportPanelModel: Equatable {
     /// 0 Faster, 1 Balanced, 2 Smallest.
     var pngCompression = 1
     var size: UInt32 = 0
+    /// The Size menu's ready-made sizes (a custom size isn't listed: it's the Custom row).
     var sizes: [ExportSizeOption] = []
+    /// The Custom row's "Resize by" (0 long edge, 1 width, 2 height, 3 percentage), or -1
+    /// when the Size menu isn't on Custom.
+    var customBy = -1
+    /// The Custom row's number; 0 for a blank field (the image's size isn't known yet).
+    var customValue: UInt32 = 0
     var stripMetadata = true
     var notes: [String] = []
     /// The live preview (rung 3): the exact file size, with its share of the original
@@ -85,7 +93,8 @@ struct ExportPanelModel: Equatable {
 
 /// The panel's keyboard-focusable controls (Full Keyboard Access, task #89 Q9).
 enum ExportFocus: Hashable {
-    case format, lossless, quality, compression, size, strip, preview, ownSize, export
+    case format, lossless, quality, compression, size, sizeBy, sizeValue, strip, preview,
+        ownSize, export
 }
 
 struct ExportPanelView: View {
@@ -96,9 +105,11 @@ struct ExportPanelView: View {
     @FocusState private var focus: ExportFocus?
 
     private var p: ExportPanelModel { model.exportPanel }
-    /// The Size pop-up's "Custom…" entry — never a real size code (the core's codes keep the
+    /// The Size pop-up's "Custom" entry — never a real size code (the core's codes keep the
     /// kind in the top four bits, and kind 15 doesn't exist).
     static let customSizeTag = UInt32.max
+    /// Choosing Custom puts the cursor in its number field once the row appears.
+    @State private var focusSizeField = false
     private let width: CGFloat = 300
     /// The label column: the longest label, "Compression", is 74 pt in the callout font.
     private let labelWidth: CGFloat = 78
@@ -145,8 +156,21 @@ struct ExportPanelView: View {
         // Full Keyboard Access (task #89 Q9): Tab moves focus here (the monitor bumps the
         // request); the monitor needs to know while a control has it.
         .onChange(of: model.exportFocusRequest) { _, _ in focus = .format }
-        .onChange(of: focus) { _, f in model.exportPanelFocused = f != nil }
-        .onDisappear { model.exportPanelFocused = false }
+        .onChange(of: focus) { old, f in
+            model.exportPanelFocused = f != nil
+            if f == .sizeValue { model.exportSizeEditCancelled = false }
+            // Leaving the Custom field (Tab, a click on the photo) enters what was typed;
+            // out of range, it goes back to the size in use. After Esc it's dropped.
+            if old == .sizeValue, f != .sizeValue,
+                model.exportSizeEditCancelled || !model.exportApplySizeEdit()
+            {
+                model.exportSizeEdit = nil
+            }
+        }
+        .onDisappear {
+            model.exportPanelFocused = false
+            model.exportSizeEdit = nil
+        }
     }
 
     // MARK: - Sections
@@ -258,17 +282,19 @@ struct ExportPanelView: View {
                     .help("PNG is lossless at every level; this trades file size against time")
                 }
             }
-            row("Size") {
-                VStack(alignment: .leading, spacing: 3) {
+            // The Size menu, and under it on Custom one line giving the size by long edge,
+            // width, height or percentage (it replaced the Custom… sheet; the rows below move
+            // down for it). Each control names itself for VoiceOver.
+            row("Size", labelsContent: false) {
+                VStack(alignment: .leading, spacing: 6) {
                     Picker(
                         "Size",
                         selection: Binding(
-                            get: { p.size },
+                            get: { p.customBy >= 0 ? ExportPanelView.customSizeTag : p.size },
                             set: { code in
-                                // Custom… opens the sheet; the selection stays on the current
-                                // size until the sheet answers.
                                 if code == ExportPanelView.customSizeTag {
-                                    model.exportCustomSize()
+                                    focusSizeField = true
+                                    model.exportChooseCustomSize()
                                 } else {
                                     model.exportSetSize(code)
                                 }
@@ -279,17 +305,26 @@ struct ExportPanelView: View {
                                 .disabled(!option.enabled)
                         }
                         Divider()
-                        Text("Custom…").tag(ExportPanelView.customSizeTag)
+                        Text("Custom").tag(ExportPanelView.customSizeTag)
                     }
                     .pickerStyle(.menu)
                     .labelsHidden()
+                    .accessibilityLabel("Size")
                     .focused($focus, equals: .size)
                     .fixedSize()
-                    if !p.outputDims.isEmpty {
-                        Text(p.outputDims)
+                    if p.customBy >= 0 {
+                        customSizeRow
+                    }
+                    // What the size gives: the export's dimensions, or while a number is typed,
+                    // what that number would give (or the range to enter).
+                    let line = model.exportSizeEditReadout ?? p.outputDims
+                    if !line.isEmpty {
+                        Text(line)
                             .font(.callout.monospacedDigit())
                             .foregroundStyle(Color.panelSecondary)
-                            .accessibilityLabel("Exported at \(p.outputDims)")
+                            .fixedSize(horizontal: false, vertical: true)
+                            .accessibilityLabel(
+                                model.exportSizeEdit == nil ? "Exported at \(line)" : line)
                     }
                 }
             }
@@ -350,6 +385,67 @@ struct ExportPanelView: View {
             }
         }
     }
+
+    /// The Custom row: "Resize by", then the number and its unit. The pop-up is as wide as
+    /// "Percentage" whatever is chosen, so the field never moves.
+    private var customSizeRow: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 6) {
+            Picker(
+                "Resize by", selection: Binding(get: { p.customBy }, set: { model.exportSetSizeBy($0) })
+            ) {
+                Text("Long edge").tag(0)
+                Text("Width").tag(1)
+                Text("Height").tag(2)
+                Text("Percentage").tag(3)
+            }
+            .pickerStyle(.menu)
+            .labelsHidden()
+            .accessibilityLabel("Resize by")
+            .focused($focus, equals: .sizeBy)
+            .fixedSize()
+            TextField(
+                "",
+                text: Binding(
+                    get: { model.exportSizeEdit ?? shownSize },
+                    set: { text in
+                        // The field writes its text back as it gives up focus; that repeat of
+                        // the number already shown isn't an edit, and after Esc nothing is.
+                        if model.exportSizeEditCancelled { return }
+                        if model.exportSizeEdit == nil, text == shownSize { return }
+                        model.exportSizeEdit = text
+                    })
+            )
+            .labelsHidden()
+            .multilineTextAlignment(.trailing)
+            .font(.body.monospacedDigit())
+            .frame(minWidth: 44, maxWidth: 60)
+            .focused($focus, equals: .sizeValue)
+            .accessibilityLabel(p.customBy == 3 ? "Percentage" : "Pixels")
+            .help("Return applies the size, Esc puts it back")
+            .onSubmit {
+                // Return enters the number and gives the keyboard back to the photo; out of
+                // range, it beeps and stays to be fixed.
+                if model.exportApplySizeEdit() {
+                    focus = nil
+                    model.focusPhoto()
+                } else {
+                    NSSound.beep()
+                }
+            }
+            .onAppear {
+                guard focusSizeField else { return }
+                focusSizeField = false
+                // Next turn: the field has to be in the window before it can take focus.
+                DispatchQueue.main.async { focus = .sizeValue }
+            }
+            Text(p.customBy == 3 ? "%" : "px")
+                .foregroundStyle(Color.panelSecondary)
+                .accessibilityHidden(true)
+        }
+    }
+
+    /// The Custom field's number as the core gives it ("" while the image's size is unknown).
+    private var shownSize: String { p.customValue > 0 ? String(p.customValue) : "" }
 
     private var exportButton: some View {
         HStack {
@@ -426,64 +522,5 @@ struct ExportPanelView: View {
         -> Binding<T>
     {
         Binding(get: { p[keyPath: key] }, set: { set($0) })
-    }
-}
-
-/// Export mode's **Custom…** size sheet (task #89): resize by long edge, width, height or
-/// percentage, with the result for this image read out as you type. Return is OK, Esc is
-/// Cancel — the sheet is a real modal, unlike the panel behind it.
-struct ExportSizeSheetView: View {
-    @Bindable var model: CoreModel
-    @FocusState private var focused: Bool
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            Text("Custom Size")
-                .font(.headline)
-            Grid(alignment: .leadingFirstTextBaseline, horizontalSpacing: 10, verticalSpacing: 10) {
-                GridRow {
-                    Text("Resize by")
-                        .gridColumnAlignment(.trailing)
-                    Picker("Resize by", selection: $model.exportSizeBy) {
-                        Text("Long edge").tag(0)
-                        Text("Width").tag(1)
-                        Text("Height").tag(2)
-                        Text("Percentage").tag(3)
-                    }
-                    .labelsHidden()
-                    .fixedSize()
-                }
-                GridRow {
-                    Text(model.exportSizeBy == 3 ? "Percentage" : "Pixels")
-                    HStack(spacing: 6) {
-                        TextField("", text: $model.exportSizeText)
-                            .labelsHidden()
-                            .multilineTextAlignment(.trailing)
-                            .frame(width: 90)
-                            .focused($focused)
-                            .onSubmit { model.exportSizeSubmit() }
-                            .accessibilityLabel(model.exportSizeBy == 3 ? "Percentage" : "Pixels")
-                        Text(model.exportSizeBy == 3 ? "%" : "px")
-                            .foregroundStyle(.secondary)
-                    }
-                }
-            }
-            Text(model.exportSizeReadout)
-                .font(.callout)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-                .frame(maxWidth: .infinity, alignment: .leading)
-            HStack(spacing: 8) {
-                Spacer()
-                Button("Cancel") { model.exportSizeCancel() }
-                    .keyboardShortcut(.cancelAction)
-                Button("OK") { model.exportSizeSubmit() }
-                    .keyboardShortcut(.defaultAction)
-                    .disabled(!model.exportSizeValid)
-            }
-        }
-        .padding(20)
-        .frame(width: 340)
-        .onAppear { focused = true }
     }
 }

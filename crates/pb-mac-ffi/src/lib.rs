@@ -1867,8 +1867,12 @@ impl AppCoreHandle {
         self.export_settings().size.code()
     }
 
+    /// The Size pop-up's ready-made sizes. A custom size isn't listed: the pop-up shows
+    /// Custom and the row under it gives the size (`export_size_custom_by`).
     fn export_size_count(&self) -> usize {
-        self.export_snapshot.as_ref().map_or(0, |p| p.sizes.len())
+        self.export_snapshot.as_ref().map_or(0, |p| {
+            p.sizes.iter().filter(|o| o.choice.is_preset()).count()
+        })
     }
 
     fn export_size_code_at(&self, index: usize) -> u32 {
@@ -2017,48 +2021,59 @@ impl AppCoreHandle {
         self.core.export.preview.last_target.is_some()
     }
 
-    /// The Size menu's **Custom…**: the core answers with `ShowDialog("export_size")`.
-    fn export_custom_size(&mut self) {
+    /// The Size menu's **Custom**: show the Custom row under it (the export doesn't change
+    /// until a number is entered).
+    fn export_choose_custom_size(&mut self) {
         self.core.now = Instant::now();
-        self.core.export_custom_size();
+        self.core.export_size_custom();
     }
 
-    /// The Custom… sheet's starting "Resize by" (0 long edge, 1 width, 2 height, 3 percentage).
-    fn export_size_dialog_by(&self) -> u8 {
-        self.core.export_size_dialog().by.code()
+    /// The Custom row's "Resize by" (0 long edge, 1 width, 2 height, 3 percentage), or 255
+    /// when the Size menu isn't on Custom.
+    fn export_size_custom_by(&self) -> u8 {
+        self.export_snapshot
+            .as_ref()
+            .and_then(|p| p.custom)
+            .map_or(u8::MAX, |c| c.by.code())
     }
 
-    /// The Custom… sheet's starting number.
-    fn export_size_dialog_value(&self) -> u32 {
-        self.core.export_size_dialog().value
+    /// The Custom row's number; 0 for a blank field (the image's size isn't known yet).
+    fn export_size_custom_value(&self) -> u32 {
+        self.export_snapshot
+            .as_ref()
+            .and_then(|p| p.custom)
+            .and_then(|c| c.value)
+            .unwrap_or(0)
     }
 
-    /// The line under the sheet's field for `value` by `by`: "This image exports at 1500 ×
-    /// 1000.", or what range to enter.
-    fn export_size_dialog_readout(&self, by: u8, value: u32) -> String {
+    /// The Custom row's "Resize by": the core keeps the export the size it was.
+    fn export_set_size_by(&mut self, by: u8) {
+        if let Some(by) = pb_app_core::export_panel::SizeBy::from_code(by) {
+            self.core.now = Instant::now();
+            self.core.export_set_size_by(by);
+        }
+    }
+
+    /// The Custom row's number, entered. `false` (nothing changes) when it's out of range.
+    fn export_set_custom_size(&mut self, by: u8, value: u32) -> bool {
         let Some(by) = pb_app_core::export_panel::SizeBy::from_code(by) else {
-            return String::new();
-        };
-        pb_app_core::export_panel::SizeDialog::readout(
-            by,
-            value,
-            self.core.export_size_dialog().dims,
-        )
-    }
-
-    /// The Custom… sheet's OK. `false` (nothing sent) when the value is out of range — the
-    /// sheet keeps OK disabled then, so this is a backstop.
-    fn export_size_chosen(&mut self, by: u8, value: u32) -> bool {
-        let Some(size) = pb_app_core::export_panel::SizeBy::from_code(by)
-            .and_then(|by| pb_app_core::export_panel::SizeChoice::custom(by, value))
-        else {
             return false;
         };
         self.core.now = Instant::now();
-        self.core.handle(CoreEvent::DialogResolved(
-            contract::DialogResult::ExportSizeChosen(size),
-        ));
-        true
+        self.core.export_set_custom_size(by, value)
+    }
+
+    /// The line under the Custom row while a number is typed: the size it gives this image
+    /// ("1500 × 1000"), or what range to enter.
+    fn export_custom_size_readout(&self, by: u8, text: String) -> String {
+        let Some(by) = pb_app_core::export_panel::SizeBy::from_code(by) else {
+            return String::new();
+        };
+        pb_app_core::export_panel::CustomSize::readout(
+            by,
+            &text,
+            self.export_src().and_then(|s| s.dims),
+        )
     }
 
     /// The panel's ✕.
@@ -2090,7 +2105,7 @@ impl AppCoreHandle {
     fn export_size_at(&self, index: usize) -> Option<&pb_app_core::export_panel::SizeOption> {
         self.export_snapshot
             .as_ref()
-            .and_then(|p| p.sizes.get(index))
+            .and_then(|p| p.sizes.iter().filter(|o| o.choice.is_preset()).nth(index))
     }
 
     // ── The native one-line info readout (`i`): the last HUD element to go native. The core
@@ -5373,7 +5388,12 @@ mod ffi {
         fn export_set_png_compression(&mut self, code: u8);
         fn export_set_size(&mut self, code: u32);
         fn export_set_strip_metadata(&mut self, strip: bool);
-        fn export_custom_size(&mut self);
+        fn export_choose_custom_size(&mut self);
+        fn export_size_custom_by(&self) -> u8;
+        fn export_size_custom_value(&self) -> u32;
+        fn export_set_size_by(&mut self, by: u8);
+        fn export_set_custom_size(&mut self, by: u8, value: u32) -> bool;
+        fn export_custom_size_readout(&self, by: u8, text: String) -> String;
         fn export_preview_covering(&self) -> bool;
         fn export_file_size(&self) -> String;
         fn export_preview_can_flick(&self) -> bool;
@@ -5385,10 +5405,6 @@ mod ffi {
         fn export_preview_resized(&self) -> bool;
         fn export_preview_own_size(&self) -> bool;
         fn export_set_preview_own_size(&mut self, on: bool);
-        fn export_size_dialog_by(&self) -> u8;
-        fn export_size_dialog_value(&self) -> u32;
-        fn export_size_dialog_readout(&self, by: u8, value: u32) -> String;
-        fn export_size_chosen(&mut self, by: u8, value: u32) -> bool;
         fn export_close(&mut self);
         fn export_commit(&mut self);
         fn info_line_visible(&self) -> bool;

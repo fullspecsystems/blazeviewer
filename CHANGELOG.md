@@ -32,7 +32,8 @@ with any pre-release suffix carried only by the tag.
   format (PNG, JPEG, WebP, AVIF, JPEG XL or TIFF, and HEIC on a Mac), its quality
   (`[` and `]` step it; each format remembers its own, and WebP and JPEG XL can be
   lossless) or PNG compression, and a size: full resolution, a long edge from 800
-  to 3840 pixels, or Custom… for any long edge, width, height or percentage.
+  to 3840 pixels, or Custom for any long edge, width, height or percentage (on a Mac
+  you type it right in the panel; on Windows and Linux in a small window).
   Exports are never larger than the photo. While the panel is open the photo on
   screen **is the export**: what the file will actually look like, at its real
   quality and size, with the exact file size in the panel and how much of the
