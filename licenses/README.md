@@ -11,7 +11,8 @@ binary, in words that leave no room:
   GPL and this License."* — both documents, which is why those two files are large: upstream's
   `COPYING` concatenates the LGPL-3.0 **and** the GPL-3.0 it builds on.
 - **BSD-2-Clause / BSD-3-Clause / MIT** (dav1d; export's encoders — libwebp, libjxl and its
-  Highway / Brotli / skcms, rav1e, ravif, avif-serialize): binary redistribution must reproduce
+  Highway / Brotli / skcms, rav1e, ravif, avif-serialize, and kamadak-exif with mutate_once,
+  which write export's EXIF): binary redistribution must reproduce
   the copyright notice and disclaimer. libwebp, libjxl and rav1e also carry patent grants
   (their `PATENTS` files), shipped beside them.
 
@@ -33,6 +34,8 @@ is linked, and why that linkage complies). It points here; this is the legal tex
 | `rav1e-asm-NOTICES.txt` | rav1e's assembly (much of it from dav1d: VideoLAN, Two Orioles, Martin Storsjo, …) | BSD-2-Clause; the notices generated from the files' own headers |
 | `ravif-LICENSE.txt` | ravif 0.13.0 (AVIF export) | BSD-3-Clause |
 | `avif-serialize-LICENSE.txt` | avif-serialize 0.8.9 (AVIF container) | BSD-3-Clause |
+| `kamadak-exif-LICENSE.txt` | kamadak-exif 0.6.1 (EXIF reading; export's EXIF writer) | BSD-2-Clause |
+| `mutate_once-LICENSE.txt` | mutate_once 0.1.2 (kamadak-exif's dependency) | BSD-2-Clause |
 
 ## Provenance
 
@@ -40,7 +43,8 @@ Copied verbatim from the pinned upstream sources — the same trees the shipped 
 built from (the vcpkg commit recorded in `scripts/setup-libheif.ps1 -VcpkgRef`, the pinned
 FFmpeg tarball in `scripts/build-ffmpeg-macos.sh`, and for export's encoders the sources
 vendored in the crates `Cargo.lock` pins: `libwebp-sys` 0.14.4, `jxl-sys` 0.1.12+libjxl-0.12.0,
-`rav1e`, `ravif`, `avif-serialize`). Not fetched from the web, not retyped. The
+`rav1e`, `ravif`, `avif-serialize`, `kamadak-exif` 0.6.1, `mutate_once` 0.1.2). Not fetched
+from the web, not retyped. The
 FFmpeg text was re-checked against 8.1.3's `COPYING.LGPLv2.1` when Windows moved to that pin
 (task #141): identical apart from line endings.
 

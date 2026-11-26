@@ -6,12 +6,14 @@
 //! under *Strip metadata*, synthesize one for CICP, fall back to sRGB when a profile can't
 //! describe these pixels), resize (rung 2, linear light), reduce to the target's [`Caps`]
 //! (flatten alpha, narrow to 8-bit — rung 2), bake the RAM rotation, then clear the hidden
-//! colour under fully transparent pixels when stripping.
+//! colour under fully transparent pixels when stripping. Last, the metadata to embed (§ 3.7):
+//! nothing under *Strip metadata*, else the chosen categories' fresh allowlisted block.
 
 use std::sync::Arc;
 
 use crate::encoder::Caps;
 use crate::icc;
+use crate::metadata::{MetadataChoice, OutputMetadata, SourceMetadata};
 use crate::resize::Resize;
 use crate::types::{
     AlphaMode, Channels, ColorDesc, ExportImage, ExportNote, ExportSource, OutputColor,
@@ -23,8 +25,12 @@ use crate::types::{
 pub struct PrepareSpec {
     /// Clockwise quarter turns to bake in (the RAM rotation): 0..=3.
     pub rotation_cw: u8,
-    /// *Strip metadata*: sanitize the profile and clear colour under transparency.
+    /// *Strip metadata*: embed no metadata at all, sanitize the profile, and clear colour under
+    /// transparency.
     pub strip_metadata: bool,
+    /// What to copy when not stripping. The colour profile is kept verbatim only with
+    /// `original_profile`; otherwise it is sanitized exactly as under *Strip metadata*.
+    pub metadata: MetadataChoice,
     /// What the output format can carry — from its `Encoder::caps`.
     pub caps: Caps,
     /// Downscale to this size (as displayed, after rotation); `None` keeps full resolution.
@@ -36,11 +42,13 @@ pub struct PrepareSpec {
 }
 
 impl PrepareSpec {
-    /// Full resolution, every capability, white background — rung 1's PNG export.
+    /// Full resolution, every capability, white background, no metadata categories — rung 1's
+    /// PNG export.
     pub const fn full(rotation_cw: u8, strip_metadata: bool) -> PrepareSpec {
         PrepareSpec {
             rotation_cw,
             strip_metadata,
+            metadata: MetadataChoice::NONE,
             caps: Caps::ALL,
             resize: None,
             flatten_onto: [255, 255, 255],
@@ -89,8 +97,20 @@ fn q16(v: f32) -> u16 {
     (v.clamp(0.0, 1.0) * 65535.0 + 0.5) as u16
 }
 
-/// Run the full preparation. Consumes the source so peak memory isn't 2× (review F27).
+/// Run the full preparation for a source with no metadata of its own (a captured frame, or a
+/// caller that copies none). See [`prepare_with_metadata`].
 pub fn prepare(src: ExportSource, spec: &PrepareSpec) -> Result<ExportImage, PrepareError> {
+    prepare_with_metadata(src, &SourceMetadata::default(), spec)
+}
+
+/// Run the full preparation. Consumes the source so peak memory isn't 2× (review F27).
+/// `metadata` is what the source file carries (`pb_decode::read_export_metadata`); the
+/// spec's [`MetadataChoice`] picks what of it the image embeds, unless *Strip metadata* is on.
+pub fn prepare_with_metadata(
+    src: ExportSource,
+    metadata: &SourceMetadata,
+    spec: &PrepareSpec,
+) -> Result<ExportImage, PrepareError> {
     if !src.is_well_formed() {
         return Err(PrepareError::Malformed);
     }
@@ -126,13 +146,9 @@ pub fn prepare(src: ExportSource, spec: &PrepareSpec) -> Result<ExportImage, Pre
         }
     }
 
-    let mut output = resolve_color(
-        &color,
-        spec.strip_metadata,
-        &mut channels,
-        &mut samples,
-        &mut notes,
-    )?;
+    // The original profile survives only when the user kept metadata *and* chose it.
+    let sanitize = spec.strip_metadata || !spec.metadata.original_profile;
+    let mut output = resolve_color(&color, sanitize, &mut channels, &mut samples, &mut notes)?;
 
     // A format without a gray layout (WebP, AVIF, HEIC): widen to RGB, and carry a gray
     // profile over as an RGB one with the same curve (`icc::rgb_for_gray`).
@@ -194,6 +210,14 @@ pub fn prepare(src: ExportSource, spec: &PrepareSpec) -> Result<ExportImage, Pre
         notes.push(ExportNote::TransparentColorCleared);
     }
 
+    // Strip means nothing at all; otherwise a fresh block (Orientation 1: the rotation is
+    // already in the pixels) of only the chosen, allowlisted categories.
+    let metadata = if spec.strip_metadata {
+        OutputMetadata::default()
+    } else {
+        metadata.output(spec.metadata)
+    };
+
     Ok(ExportImage {
         width: w as u32,
         height: h as u32,
@@ -201,6 +225,7 @@ pub fn prepare(src: ExportSource, spec: &PrepareSpec) -> Result<ExportImage, Pre
         samples,
         color: output,
         notes,
+        metadata,
     })
 }
 
@@ -341,10 +366,11 @@ fn tone_map_to_p3(f: &[f32], channels: Channels) -> (Samples, Channels, bool) {
     (Samples::U16(out), out_ch, peak > 1.0 + 1e-4)
 }
 
-/// Decide the output colour tag, reconciling the profile with the channel layout.
+/// Decide the output colour tag, reconciling the profile with the channel layout. `sanitize`
+/// rebuilds an embedded profile without its identifying tags; otherwise it is kept verbatim.
 fn resolve_color(
     color: &ColorDesc,
-    strip: bool,
+    sanitize: bool,
     channels: &mut Channels,
     samples: &mut Samples,
     notes: &mut Vec<ExportNote>,
@@ -379,7 +405,7 @@ fn resolve_color(
             return Ok(OutputColor::Srgb);
         }
     }
-    if !strip {
+    if !sanitize {
         return Ok(OutputColor::Icc(icc_bytes));
     }
     match icc::sanitize(&icc_bytes) {
@@ -936,6 +962,80 @@ mod tests {
         s.color = ColorDesc::Icc(Arc::from(srgb));
         let out = prepare(s, &STRIP).unwrap();
         assert_eq!(out.color, OutputColor::Srgb);
+    }
+
+    /// Required test 1 (export-plan.md § 3.7), through `prepare`: a turned photo whose EXIF
+    /// carries GPS, a MakerNote, serial numbers, a UserComment and Orientation 6. Camera +
+    /// copyright keeps make, model, date and artist with Orientation 1 and nothing private;
+    /// location adds GPS; *Strip metadata* embeds nothing at all, whatever was chosen.
+    #[test]
+    fn metadata_follows_strip_and_the_chosen_categories() {
+        use crate::metadata::tests::{assert_clean, dirty_source};
+        let meta = dirty_source();
+        let s = src(2, 1, Channels::Rgb, Samples::U8(vec![1, 2, 3, 4, 5, 6]));
+        let keep = PrepareSpec {
+            metadata: MetadataChoice::REVEALED,
+            ..PrepareSpec::full(1, false)
+        };
+        let out = prepare_with_metadata(s.clone(), &meta, &keep).unwrap();
+        assert_eq!((out.width, out.height), (1, 2), "the turn is in the pixels");
+        assert_clean(out.metadata.exif.as_deref().expect("EXIF kept"), false);
+        assert!(out.metadata.text.is_empty());
+
+        let everything = PrepareSpec {
+            metadata: MetadataChoice::ALL,
+            ..keep
+        };
+        let out = prepare_with_metadata(s.clone(), &meta, &everything).unwrap();
+        assert_clean(out.metadata.exif.as_deref().unwrap(), true);
+        assert_eq!(out.metadata.text, meta.generation);
+
+        let strip = PrepareSpec {
+            strip_metadata: true,
+            ..everything
+        };
+        let out = prepare_with_metadata(s.clone(), &meta, &strip).unwrap();
+        assert_eq!(
+            out.metadata,
+            OutputMetadata::default(),
+            "Strip: nothing at all"
+        );
+
+        // Plain `prepare` has no source metadata to copy.
+        assert!(prepare(s, &everything).unwrap().metadata.is_empty());
+    }
+
+    /// Strip off keeps the profile verbatim only with "Original colour profile"; without it
+    /// (and always under Strip) the profile is sanitized.
+    #[test]
+    fn the_original_profile_is_kept_only_when_chosen() {
+        let original = moxcms::ColorProfile::new_adobe_rgb().encode().unwrap();
+        let s = || {
+            let mut s = src(1, 1, Channels::Rgb, Samples::U8(vec![9, 8, 7]));
+            s.color = ColorDesc::Icc(Arc::from(original.clone()));
+            s
+        };
+        let color = |strip: bool, original_profile: bool| {
+            let spec = PrepareSpec {
+                metadata: MetadataChoice {
+                    original_profile,
+                    ..MetadataChoice::NONE
+                },
+                ..PrepareSpec::full(0, strip)
+            };
+            prepare(s(), &spec).unwrap().color
+        };
+        assert_eq!(color(false, true), OutputColor::Icc(original.clone()));
+        for (strip, keep) in [(false, false), (true, true), (true, false)] {
+            let OutputColor::Icc(p) = color(strip, keep) else {
+                panic!("Adobe RGB stays a profile");
+            };
+            assert_ne!(p, original, "strip {strip}, original {keep}: sanitized");
+            assert_eq!(
+                icc::description(&p),
+                icc::description(&icc::sanitize(&original).unwrap())
+            );
+        }
     }
 
     #[test]

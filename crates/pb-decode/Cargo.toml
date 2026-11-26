@@ -110,7 +110,7 @@ cc = "1"
 # Test fixtures: encode JPEGs / PNGs to decode back (the encoders live in pb-encode now), and
 # read Blaze's own AVIF / HEIC exports back the way the viewer does (pure Rust / the OS — no
 # native build, unlike WebP and JPEG XL).
-pb-encode = { path = "../pb-encode", features = ["png", "jpeg", "avif", "heic"] }
+pb-encode = { path = "../pb-encode", features = ["png", "jpeg", "avif", "heic", "tiff"] }
 png = "0.18"
 # 3MF fixtures (a 3MF is a ZIP). Same major version as pb-mesh / pb-source.
 zip = { version = "2", default-features = false, features = ["deflate"] }

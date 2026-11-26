@@ -37,14 +37,18 @@ impl Encoder for JpegEncoder {
     fn lossless(&self) -> bool {
         false
     }
+    fn writes_metadata(&self) -> bool {
+        true
+    }
     fn encode(&self, img: &ExportImage) -> Result<Vec<u8>, EncodeError> {
         encode_jpeg(img, self.quality)
     }
 }
 
 /// Encode a prepared 8-bit gray or RGB image as JPEG, embedding its profile (an `sRGB` tag
-/// embeds nothing — untagged JPEG is read as sRGB). Alpha or 16-bit samples are refused:
-/// `prepare` with [`JpegEncoder::CAPS`] never produces them.
+/// embeds nothing — untagged JPEG is read as sRGB) and its EXIF block as an `APP1` `Exif`
+/// segment. Alpha or 16-bit samples are refused: `prepare` with [`JpegEncoder::CAPS`] never
+/// produces them.
 pub fn encode_jpeg(img: &ExportImage, quality: u8) -> Result<Vec<u8>, EncodeError> {
     use image::ImageEncoder as _;
     let color_type = match img.channels {
@@ -68,6 +72,10 @@ pub fn encode_jpeg(img: &ExportImage, quality: u8) -> Result<Vec<u8>, EncodeErro
     if let OutputColor::Icc(p) = &img.color {
         enc.set_icc_profile(p.clone())
             .map_err(|e| EncodeError::Codec(format!("jpeg profile: {e}")))?;
+    }
+    if let Some(exif) = &img.metadata.exif {
+        enc.set_exif_metadata(exif.clone())
+            .map_err(|e| EncodeError::Codec(format!("jpeg metadata: {e}")))?;
     }
     enc.write_image(px, img.width, img.height, color_type)
         .map_err(|e| EncodeError::Codec(format!("jpeg encode failed: {e}")))?;
@@ -118,7 +126,35 @@ mod tests {
             samples,
             color,
             notes: Vec::new(),
+            metadata: Default::default(),
         }
+    }
+
+    /// Required test 2 for JPEG: the EXIF goes in `APP1` beside the profile and reads back
+    /// clean; without metadata there is no `APP1` at all.
+    #[test]
+    fn metadata_round_trips() {
+        use crate::metadata::tests::{assert_clean, dirty_source};
+        use crate::metadata::MetadataChoice;
+        use image::ImageDecoder as _;
+        let p3 = crate::icc::display_p3_profile();
+        let mut img = image(
+            Channels::Rgb,
+            Samples::U8([200, 30, 40].repeat(4)),
+            OutputColor::Icc(p3.clone()),
+        );
+        img.metadata = dirty_source().output(MetadataChoice::REVEALED);
+        let jpeg = encode_jpeg(&img, 90).unwrap();
+        let exif = exif::Reader::new()
+            .read_from_container(&mut std::io::Cursor::new(&jpeg))
+            .expect("an APP1 Exif segment");
+        assert_clean(exif.buf(), false);
+        let mut dec = image::codecs::jpeg::JpegDecoder::new(std::io::Cursor::new(&jpeg)).unwrap();
+        assert_eq!(dec.icc_profile().unwrap().as_deref(), Some(p3.as_slice()));
+
+        img.metadata = Default::default();
+        let plain = encode_jpeg(&img, 90).unwrap();
+        assert!(!plain.windows(6).any(|w| w == b"Exif\0\0"));
     }
 
     /// The export encoder embeds the profile byte-for-byte and the file decodes back.

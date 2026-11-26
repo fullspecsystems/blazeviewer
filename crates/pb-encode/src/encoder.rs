@@ -47,6 +47,14 @@ pub trait Encoder: Send + Sync {
     /// Whether the file decodes to exactly the pixels it was given, so a preview can show
     /// the prepared image instead of reading the file back.
     fn lossless(&self) -> bool;
+    /// Whether this format embeds the image's EXIF block (`ExportImage::metadata.exif`). The
+    /// export panel says which formats can't carry metadata. Every codec answers explicitly,
+    /// so a new one can't silently drop what the user chose to keep.
+    fn writes_metadata(&self) -> bool;
+    /// Whether this format writes generation text (`ExportImage::metadata.text`). Only PNG.
+    fn writes_generation(&self) -> bool {
+        false
+    }
     /// Encode an image `prepare`d with [`caps`](Self::caps). Wrapped in
     /// [`catch_panics`](crate::catch_panics) by the caller.
     fn encode(&self, img: &ExportImage) -> Result<Vec<u8>, EncodeError>;
@@ -89,6 +97,25 @@ impl Codec {
             Codec::Heic => cfg!(all(feature = "heic", target_os = "macos")),
             Codec::Tiff => cfg!(feature = "tiff"),
         }
+    }
+
+    /// Whether the format embeds EXIF: the same answer as its encoder's
+    /// [`Encoder::writes_metadata`], without building one (for the panel's notes).
+    pub const fn writes_metadata(self) -> bool {
+        match self {
+            Codec::Png
+            | Codec::Jpeg
+            | Codec::Webp
+            | Codec::Avif
+            | Codec::JpegXl
+            | Codec::Heic
+            | Codec::Tiff => true,
+        }
+    }
+
+    /// Whether the format writes generation text ([`Encoder::writes_generation`]): PNG only.
+    pub const fn writes_generation(self) -> bool {
+        matches!(self, Codec::Png)
     }
 
     /// The name for messages ("this build can't write WebP").
@@ -207,6 +234,12 @@ mod tests {
                 Ok(e) => {
                     assert!(f.codec().available(), "{f:?}");
                     assert!(!e.extension().is_empty() && !e.extension().starts_with('.'));
+                    assert_eq!(e.writes_metadata(), f.codec().writes_metadata(), "{f:?}");
+                    assert_eq!(
+                        e.writes_generation(),
+                        f.codec().writes_generation(),
+                        "{f:?}"
+                    );
                 }
                 Err(EncodeError::Unavailable(name)) => {
                     assert!(!f.codec().available(), "{f:?}");

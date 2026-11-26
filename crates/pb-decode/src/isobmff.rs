@@ -248,9 +248,7 @@ fn child_boxes(b: &[u8], start: usize, end: usize) -> Option<Vec<BoxSpan>> {
 /// `pitm` / `iprp` → `ipco` / `ipma` chain can't be walked.
 #[cfg(any(windows, heic_libheif, test))]
 fn primary_colr_positions(b: &[u8]) -> Option<Vec<usize>> {
-    let find = |boxes: &[BoxSpan], t: &[u8; 4]| {
-        boxes.iter().copied().find(|bx| &bx.2 == t)
-    };
+    let find = |boxes: &[BoxSpan], t: &[u8; 4]| boxes.iter().copied().find(|bx| &bx.2 == t);
     let be = |at: usize, n: usize| -> Option<u32> {
         Some(
             b.get(at..at + n)?
@@ -637,6 +635,7 @@ mod tests {
             samples: pb_encode::Samples::U8([200, 30, 40, 128].repeat(256)),
             color: pb_encode::OutputColor::Icc(p3.clone()),
             notes: Vec::new(),
+            metadata: Default::default(),
         };
         let avif = pb_encode::avif::encode_avif(&img, 80).unwrap();
         assert!(primary_colr_positions(&avif).is_some_and(|p| p.len() == 1));

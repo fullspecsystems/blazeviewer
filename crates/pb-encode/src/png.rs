@@ -2,8 +2,9 @@
 //!
 //! Writes 8- or 16-bit, gray or RGB, with alpha only when some pixel actually uses it
 //! (colour-type reduction, review F25). Colour is tagged with an `sRGB` chunk or an `iCCP`
-//! profile — never both (the PNG spec forbids it). No metadata chunks: rung 1 exports are
-//! Strip-only.
+//! profile — never both (the PNG spec forbids it). Metadata, when the image carries any
+//! (export-plan.md § 3.7): the EXIF block in an `eXIf` chunk, and generation text as `tEXt`
+//! (ASCII) or `iTXt` (anything else, UTF-8), uncompressed, as the generators write it.
 
 use std::borrow::Cow;
 
@@ -26,6 +27,12 @@ impl Encoder for PngEncoder {
         "png"
     }
     fn lossless(&self) -> bool {
+        true
+    }
+    fn writes_metadata(&self) -> bool {
+        true
+    }
+    fn writes_generation(&self) -> bool {
         true
     }
     fn encode(&self, img: &ExportImage) -> Result<Vec<u8>, EncodeError> {
@@ -85,6 +92,23 @@ pub fn encode_png(img: &ExportImage, effort: PngEffort) -> Result<Vec<u8>, Encod
         OutputColor::Srgb => info.srgb = Some(png::SrgbRenderingIntent::Perceptual),
         OutputColor::Icc(p) => info.icc_profile = Some(Cow::Borrowed(p.as_slice())),
     }
+    if let Some(exif) = &img.metadata.exif {
+        info.exif_metadata = Some(Cow::Borrowed(exif.as_slice()));
+    }
+    for (keyword, text) in &img.metadata.text {
+        if text.is_ascii() {
+            info.uncompressed_latin1_text
+                .push(png::text_metadata::TEXtChunk::new(
+                    keyword.clone(),
+                    text.clone(),
+                ));
+        } else {
+            info.utf8_text.push(png::text_metadata::ITXtChunk::new(
+                keyword.clone(),
+                text.clone(),
+            ));
+        }
+    }
 
     let mut out = Vec::new();
     {
@@ -138,7 +162,84 @@ mod tests {
             samples,
             color,
             notes: Vec::new(),
+            metadata: Default::default(),
         }
+    }
+
+    /// Required test 2 for PNG: the EXIF goes in `eXIf` and reads back clean; and required
+    /// test 3: generation text round-trips, ASCII as `tEXt`, the rest as UTF-8 `iTXt`, both
+    /// found again by the viewer's reader.
+    #[test]
+    fn metadata_round_trips() {
+        use crate::metadata::tests::{assert_clean, dirty_source};
+        use crate::metadata::{MetadataChoice, SourceMetadata};
+        let mut src = dirty_source();
+        src.generation = vec![
+            (
+                "parameters".into(),
+                "a cat, Steps: 20, Sampler: Euler".into(),
+            ),
+            ("prompt".into(), "{\"3\": {\"text\": \"café ☕\"}}".into()),
+        ];
+        let mut img = image(
+            Channels::Rgb,
+            Samples::U8(vec![10; 2 * 2 * 3]),
+            2,
+            2,
+            OutputColor::Srgb,
+        );
+        img.metadata = src.output(MetadataChoice::ALL);
+        let png = encode_png(&img, PngEffort::Fast).unwrap();
+
+        let exif = exif::Reader::new()
+            .read_from_container(&mut std::io::Cursor::new(&png))
+            .expect("an eXIf chunk");
+        assert_clean(exif.buf(), true);
+
+        let mut reader = png::Decoder::new(std::io::Cursor::new(&png))
+            .read_info()
+            .unwrap();
+        let mut buf = vec![0; reader.output_buffer_size().unwrap()];
+        reader.next_frame(&mut buf).unwrap();
+        let info = reader.info();
+        let latin1: Vec<_> = info
+            .uncompressed_latin1_text
+            .iter()
+            .map(|c| (c.keyword.as_str(), c.text.as_str()))
+            .collect();
+        assert_eq!(latin1, [("parameters", "a cat, Steps: 20, Sampler: Euler")]);
+        let utf8: Vec<_> = info
+            .utf8_text
+            .iter()
+            .map(|c| (c.keyword.clone(), c.get_text().unwrap()))
+            .collect();
+        assert_eq!(
+            utf8,
+            [(src.generation[1].0.clone(), src.generation[1].1.clone())]
+        );
+
+        // PNG → PNG: what the export wrote is generation data a re-export picks up again.
+        let reread = SourceMetadata {
+            exif: None,
+            generation: src.generation.clone(),
+        };
+        assert_eq!(reread.output(MetadataChoice::ALL).text, img.metadata.text);
+
+        // No metadata: neither chunk.
+        let plain = encode_png(
+            &image(
+                Channels::Gray,
+                Samples::U8(vec![1]),
+                1,
+                1,
+                OutputColor::Srgb,
+            ),
+            PngEffort::Fast,
+        )
+        .unwrap();
+        assert!(!plain
+            .windows(4)
+            .any(|w| w == b"eXIf" || w == b"tEXt" || w == b"iTXt"));
     }
 
     /// Decode with the `png` crate itself: (info, raw image bytes).

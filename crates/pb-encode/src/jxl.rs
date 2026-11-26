@@ -4,7 +4,9 @@
 //!
 //! Lossy (libjxl's quality → Butteraugli distance mapping, XYB inside) or lossless (exact);
 //! 8- or 16-bit, gray or RGB, with alpha. The colour goes in as libjxl's sRGB encoding or the
-//! ICC profile itself, so a lossy file decodes back to the original space.
+//! ICC profile itself, so a lossy file decodes back to the original space. An EXIF block goes
+//! in an `Exif` box (which needs the container format; a file without metadata stays a bare
+//! codestream), uncompressed, behind the 4-byte TIFF-header offset that box requires.
 //!
 //! The encoder and its thread pool live only inside one call, freed by [`Session`]'s `Drop`
 //! whatever path leaves.
@@ -38,6 +40,9 @@ impl Encoder for JxlEncoder {
     }
     fn lossless(&self) -> bool {
         self.lossless
+    }
+    fn writes_metadata(&self) -> bool {
+        true
     }
     fn encode(&self, img: &ExportImage) -> Result<Vec<u8>, EncodeError> {
         encode_jxl(img, self.quality, self.lossless)
@@ -113,6 +118,10 @@ pub fn encode_jxl_at(
             j::JxlEncoderSetParallelRunner(s.enc, Some(j::JxlThreadParallelRunner), s.runner),
             "couldn't start its threads",
         )?;
+        // Boxes must be declared before encoding starts.
+        if img.metadata.exif.is_some() {
+            ok(j::JxlEncoderUseBoxes(s.enc), "couldn't add the metadata")?;
+        }
 
         let mut info = std::mem::MaybeUninit::<j::JxlBasicInfo>::zeroed();
         j::JxlEncoderInitBasicInfo(info.as_mut_ptr());
@@ -175,6 +184,24 @@ pub fn encode_jxl_at(
             ok(
                 j::JxlEncoderSetFrameDistance(fs, distance.max(0.05)),
                 "bad quality",
+            )?;
+        }
+
+        // The Exif box ahead of the codestream, where a reader scanning boxes meets it first.
+        // libjxl copies the contents, so the buffer only has to live through the call.
+        if let Some(exif) = &img.metadata.exif {
+            let mut payload = Vec::with_capacity(4 + exif.len());
+            payload.extend_from_slice(&0u32.to_be_bytes()); // the TIFF header starts right after
+            payload.extend_from_slice(exif);
+            ok(
+                j::JxlEncoderAddBox(
+                    s.enc,
+                    c"Exif".as_ptr(),
+                    payload.as_ptr(),
+                    payload.len(),
+                    0, // uncompressed: a `brob` box needs Brotli in every reader
+                ),
+                "couldn't add the metadata",
             )?;
         }
 
@@ -397,7 +424,62 @@ mod tests {
             samples,
             color,
             notes: Vec::new(),
+            metadata: Default::default(),
         }
+    }
+
+    /// The payload of the container's `Exif` box, after its 4-byte TIFF-header offset.
+    fn exif_box(file: &[u8]) -> Option<&[u8]> {
+        let mut at = 0usize;
+        while at + 8 <= file.len() {
+            let size = u32::from_be_bytes(file[at..at + 4].try_into().unwrap()) as usize;
+            let typ = &file[at + 4..at + 8];
+            let (hdr, size) = match size {
+                1 => (
+                    16,
+                    u64::from_be_bytes(file[at + 8..at + 16].try_into().unwrap()) as usize,
+                ),
+                0 => (8, file.len() - at),
+                n => (8, n),
+            };
+            if typ == b"Exif" {
+                let body = &file[at + hdr..at + size];
+                let offset = u32::from_be_bytes(body[..4].try_into().unwrap()) as usize;
+                return body.get(4 + offset..);
+            }
+            at += size.max(8);
+        }
+        None
+    }
+
+    /// Required test 2 for JPEG XL: the `Exif` box reads back clean, lossy and lossless, and
+    /// the file still decodes exactly; without metadata it stays a bare codestream.
+    #[test]
+    fn metadata_round_trips_in_an_exif_box() {
+        use crate::metadata::tests::{assert_clean, dirty_source};
+        use crate::metadata::MetadataChoice;
+        let px: Vec<u8> = (0..8 * 4 * 3).map(|i| (i * 5) as u8).collect();
+        let mut img = image(
+            8,
+            4,
+            Channels::Rgb,
+            Samples::U8(px.clone()),
+            OutputColor::Icc(crate::icc::display_p3_profile()),
+        );
+        img.metadata = dirty_source().output(MetadataChoice::REVEALED);
+        for lossless in [true, false] {
+            let jxl = encode_jxl(&img, 90, lossless).unwrap();
+            assert!(jxl.starts_with(b"\0\0\0\x0CJXL "), "the container");
+            assert_clean(exif_box(&jxl).expect("an Exif box"), false);
+            let (back, _) = decode(&jxl, 3, false);
+            assert_eq!(back.len(), px.len());
+            if lossless {
+                assert_eq!(back, px);
+            }
+        }
+        img.metadata = Default::default();
+        let bare = encode_jxl(&img, 90, true).unwrap();
+        assert!(exif_box(&bare).is_none());
     }
 
     /// Decode with libjxl itself to the given pixel format: (pixels, ICC profile).

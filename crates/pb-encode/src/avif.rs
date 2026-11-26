@@ -9,6 +9,10 @@
 //! with the primary item, and the `nclx` primaries and transfer set to *unspecified* (2) so the
 //! profile governs while its matrix still describes the YUV. Only the `meta` box changes; the
 //! AV1 payload is moved, never touched, and `iloc` is re-pointed at it.
+//!
+//! **Metadata.** The EXIF block goes in as an `Exif` item describing the primary image
+//! (`cdsc`), which avif-serialize writes for us through ravif's `with_exif` (with the 4-byte
+//! TIFF-header offset HEIF requires). `add_icc` re-points its extents like the payload's.
 
 use crate::encoder::{Caps, Encoder};
 use crate::types::{ExportImage, OutputColor};
@@ -34,6 +38,9 @@ impl Encoder for AvifEncoder {
     }
     fn lossless(&self) -> bool {
         false
+    }
+    fn writes_metadata(&self) -> bool {
+        true
     }
     fn encode(&self, img: &ExportImage) -> Result<Vec<u8>, EncodeError> {
         encode_avif(img, self.quality)
@@ -66,11 +73,14 @@ pub fn encode_avif_at(img: &ExportImage, quality: u8, speed: u8) -> Result<Vec<u
     } else {
         threads()
     };
-    let enc = ravif::Encoder::new()
+    let mut enc = ravif::Encoder::new()
         .with_quality(q)
         .with_alpha_quality(q.max(90.0))
         .with_speed(speed.clamp(1, 10))
         .with_num_threads(Some(threads));
+    if let Some(exif) = &img.metadata.exif {
+        enc = enc.with_exif(exif.as_slice());
+    }
     let (w, h) = (img.width as usize, img.height as usize);
     let encoded = if alpha {
         let px: &[ravif::RGBA8] =
@@ -408,6 +418,34 @@ mod tests {
             samples: Samples::U8(px),
             color,
             notes: Vec::new(),
+            metadata: Default::default(),
+        }
+    }
+
+    /// Required test 2 for AVIF: the `Exif` item reads back clean through a HEIF reader, and
+    /// adding a profile afterwards (which moves everything after `meta`) re-points it too.
+    #[test]
+    fn metadata_round_trips_with_and_without_a_profile() {
+        use crate::metadata::tests::{assert_clean, dirty_source};
+        use crate::metadata::MetadataChoice;
+        let p3 = crate::icc::display_p3_profile();
+        for color in [OutputColor::Srgb, OutputColor::Icc(p3.clone())] {
+            let mut img = image(16, 8, Channels::Rgba, gradient(16, 8, 4), color.clone());
+            img.metadata = dirty_source().output(MetadataChoice::ALL);
+            let avif = encode_avif(&img, 60).unwrap();
+            let exif = exif::Reader::new()
+                .read_from_container(&mut std::io::Cursor::new(&avif))
+                .unwrap_or_else(|e| panic!("{color:?}: an Exif item ({e})"));
+            assert_clean(exif.buf(), true);
+            let (props, extents) = walk(&avif);
+            assert_eq!(
+                extents.len(),
+                4,
+                "colour, alpha, and the Exif item's two extents"
+            );
+            if let OutputColor::Icc(p) = color {
+                assert_eq!(&colr(&props, b"prof").unwrap()[12..], p.as_slice());
+            }
         }
     }
 

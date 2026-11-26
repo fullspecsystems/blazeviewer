@@ -881,6 +881,7 @@ mod export_tests {
             samples: Samples::U8([255, 0, 0, alpha].repeat(64 * 64)),
             color,
             notes: Vec::new(),
+            metadata: Default::default(),
         };
         type Encode = fn(&pb_encode::ExportImage) -> Vec<u8>;
         let encoders: [(&str, Encode); 2] = [
