@@ -1005,19 +1005,39 @@ pub struct PreviewReadout {
     pub own_size: bool,
     /// Which metadata categories the source carries, once known (the panel greys the rest).
     pub available: Option<KeepMetadata>,
+    /// The original file's size, once the preview has read it, when the export is the file's
+    /// own image (not a frame or a 3D model's view).
+    pub source_bytes: Option<u64>,
 }
 
 impl PreviewReadout {
-    /// The File size row: the exact size once the preview is made, else what's happening.
+    /// The File size row: the exact size once the preview is made, with its share of the
+    /// original file when that's known ("125 KB (42%)"), else what's happening.
     pub fn size_text(&self) -> String {
         use crate::export_preview::PreviewStatus as S;
         match &self.status {
-            S::Ready { bytes } => crate::export_preview::size_label(*bytes),
+            S::Ready { bytes } => {
+                let size = crate::export_preview::size_label(*bytes);
+                match self
+                    .source_bytes
+                    .and_then(|whole| share_label(*bytes, whole))
+                {
+                    Some(share) => format!("{size} ({share})"),
+                    None => size,
+                }
+            }
             S::Working => "Calculating\u{2026}".into(),
             S::Failed(_) => "Unknown".into(),
             S::TooLarge => "Shown after export".into(),
             S::Off => String::new(),
         }
+    }
+
+    /// The original file's size for the panel's source line ("300 KB"), "" until known.
+    pub fn source_size_text(&self) -> String {
+        self.source_bytes
+            .map(crate::export_preview::size_label)
+            .unwrap_or_default()
     }
 
     /// Whether the flick control applies (there's something to flick between).
@@ -1028,6 +1048,20 @@ impl PreviewReadout {
                 | crate::export_preview::PreviewStatus::Working
         )
     }
+}
+
+/// `part` as a share of `whole`, to the whole percent: "42%", "<1%" for a sliver, `None`
+/// when there's no whole to compare with.
+fn share_label(part: u64, whole: u64) -> Option<String> {
+    if whole == 0 {
+        return None;
+    }
+    let pct = part as f64 * 100.0 / whole as f64;
+    Some(if part > 0 && pct < 0.5 {
+        "<1%".to_string()
+    } else {
+        format!("{pct:.0}%")
+    })
 }
 
 /// One size choice in the panel's menu.
@@ -1458,6 +1492,41 @@ mod tests {
             "{:?}",
             p.notes
         );
+    }
+
+    /// The File size row gives the export as a share of the original when it's known, and
+    /// the source line the original's size.
+    #[test]
+    fn the_file_size_row_reads_as_a_share_of_the_original() {
+        use crate::export_preview::{size_label, PreviewStatus};
+        let readout = |bytes: u64, source: Option<u64>| PreviewReadout {
+            status: PreviewStatus::Ready { bytes },
+            source_bytes: source,
+            ..Default::default()
+        };
+        let r = readout(125_000, Some(300_000));
+        assert_eq!(r.size_text(), format!("{} (42%)", size_label(125_000)));
+        assert_eq!(r.source_size_text(), size_label(300_000));
+        // Larger than the original (a PNG of a JPEG) reads the same way.
+        assert_eq!(
+            readout(1_200_000, Some(300_000)).size_text(),
+            format!("{} (400%)", size_label(1_200_000))
+        );
+        // A sliver rounds to "<1%", not "0%".
+        assert!(readout(1_000, Some(10_000_000))
+            .size_text()
+            .ends_with("(<1%)"));
+        // Unknown original: the size alone, and nothing on the source line.
+        let unknown = readout(125_000, None);
+        assert_eq!(unknown.size_text(), size_label(125_000));
+        assert_eq!(unknown.source_size_text(), "");
+        // Still working: no share yet.
+        let working = PreviewReadout {
+            status: PreviewStatus::Working,
+            source_bytes: Some(300_000),
+            ..Default::default()
+        };
+        assert_eq!(working.size_text(), "Calculating\u{2026}");
     }
 
     #[test]

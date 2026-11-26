@@ -146,7 +146,7 @@ impl AppCore {
     }
 
     /// Whether `item` is a 3D model: an image item with a model extension.
-    fn item_is_model(&self, item: usize) -> bool {
+    pub(super) fn item_is_model(&self, item: usize) -> bool {
         is_model_item(self.source.as_ref(), item)
     }
 

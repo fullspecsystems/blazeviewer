@@ -980,6 +980,7 @@ final class CoreModel {
             name: core.export_source_name().toString(),
             frame: core.export_source_frame().toString(),
             sourceDims: core.export_source_dims().toString(),
+            sourceSize: core.export_source_size().toString(),
             outputDims: core.export_output_dims().toString(),
             blocked: core.export_blocked().toString(),
             canExport: core.export_can_export(),

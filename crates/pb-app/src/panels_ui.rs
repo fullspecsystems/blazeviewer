@@ -2700,7 +2700,8 @@ fn export_panel(
 
 fn export_body(ui: &mut egui::Ui, p: &Palette, ex: &ExportPanel, actions: &mut Vec<PanelAction>) {
     let s = ex.settings;
-    // What's being exported: the name, then the frame (a video / animation) and its size.
+    // What's being exported: the name, then the frame (a video / animation), its size, and
+    // the original file's size once the preview has read it ("2880 × 2600 · 300 KB").
     match &ex.source {
         Some(src) => {
             ui.label(
@@ -2713,6 +2714,7 @@ fn export_body(ui: &mut egui::Ui, p: &Palette, ex: &ExportPanel, actions: &mut V
                 .iter()
                 .cloned()
                 .chain(src.dims.map(dims_label))
+                .chain(Some(ex.preview.source_size_text()).filter(|t| !t.is_empty()))
                 .collect();
             if !detail.is_empty() {
                 ui.label(RichText::new(detail.join(" · ")).color(panel_secondary(p)));
@@ -2879,8 +2881,9 @@ fn export_body(ui: &mut egui::Ui, p: &Palette, ex: &ExportPanel, actions: &mut V
                 });
             }
         }
-        // The live preview (rung 3): the exact file size once it's made, and which side of
-        // the flick is on screen (`Y` flicks; a hold peeks).
+        // The live preview (rung 3): the exact file size once it's made, as a share of the
+        // original's when that's known ("125 KB (42%)"), and which side of the flick is on
+        // screen (`Y` flicks; a hold peeks).
         let size = ex.preview.size_text();
         // One fixed CONTROL_H line, centred on the row's label like the controls above it.
         // Always present, blank while there's nothing to say (browsing, turning a model), so the

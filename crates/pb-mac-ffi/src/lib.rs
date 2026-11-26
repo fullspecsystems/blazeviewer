@@ -1776,6 +1776,15 @@ impl AppCoreHandle {
             .unwrap_or_default()
     }
 
+    /// The original file's size ("300 KB") for the source line, "" until the preview has
+    /// read it, and always for a frame or a 3D model's view.
+    fn export_source_size(&self) -> String {
+        self.export_snapshot
+            .as_ref()
+            .map(|p| p.preview.source_size_text())
+            .unwrap_or_default()
+    }
+
     /// The output size ("2048 × 1536"), or "" when unknown.
     fn export_output_dims(&self) -> String {
         self.export_snapshot
@@ -1926,8 +1935,9 @@ impl AppCoreHandle {
         self.core.export_set_strip_metadata(strip);
     }
 
-    /// The live preview's File size row (rung 3): "412 KB" once made, "Calculating…" while
-    /// it's being made, "" with nothing to preview.
+    /// The live preview's File size row (rung 3): "412 KB (42%)" once made (the share of the
+    /// original file when that's known), "Calculating…" while it's being made, "" with
+    /// nothing to preview.
     fn export_file_size(&self) -> String {
         self.export_snapshot
             .as_ref()
@@ -5335,6 +5345,7 @@ mod ffi {
         fn export_source_name(&self) -> String;
         fn export_source_frame(&self) -> String;
         fn export_source_dims(&self) -> String;
+        fn export_source_size(&self) -> String;
         fn export_output_dims(&self) -> String;
         fn export_blocked(&self) -> String;
         fn export_can_export(&self) -> bool;

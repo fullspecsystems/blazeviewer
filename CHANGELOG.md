@@ -35,8 +35,9 @@ with any pre-release suffix carried only by the tag.
   to 3840 pixels, or Custom… for any long edge, width, height or percentage.
   Exports are never larger than the photo. While the panel is open the photo on
   screen **is the export**: what the file will actually look like, at its real
-  quality and size, with the exact file size in the panel, so you can compare
-  formats before you save. Press `Y` to switch to the original and back, or hold `Y` to
+  quality and size, with the exact file size in the panel and how much of the
+  original's size that is ("125 KB (42%)"; the original's own size shows beside its
+  dimensions), so you can compare formats before you save. Press `Y` to switch to the original and back, or hold `Y` to
   peek at it. A smaller export is shown enlarged to the original's size; turn on
   "Show at export size" to see it at its own size, pixel for pixel at Original 1:1.
   On a Mac with keyboard navigation turned on, Tab moves into the panel's controls
@@ -91,6 +92,9 @@ with any pre-release suffix carried only by the tag.
   a generic error.
 
 ### Fixed
+
+- **Mac: Esc closes the Settings window**, as it does on Windows. It only worked while
+  you were typing in one of its text fields.
 
 - **Wide-color JPEG XL photos show their full color.** A lossy JPEG XL in a wide color
   space such as Display P3, the kind cjxl or Blaze Viewer's own export makes from an iPhone

@@ -43,6 +43,8 @@ struct ExportPanelModel: Equatable {
     /// "Frame at 1:23", "Poster frame", … — "" for a photo exported as itself.
     var frame = ""
     var sourceDims = ""
+    /// The original file's size ("300 KB"), once the preview has read it; "" for a frame.
+    var sourceSize = ""
     var outputDims = ""
     /// Why this item can't be exported, or "".
     var blocked = ""
@@ -65,7 +67,8 @@ struct ExportPanelModel: Equatable {
     var sizes: [ExportSizeOption] = []
     var stripMetadata = true
     var notes: [String] = []
-    /// The live preview (rung 3): the exact file size, or "Calculating…".
+    /// The live preview (rung 3): the exact file size, with its share of the original
+    /// ("125 KB (42%)") when known, or "Calculating…".
     var fileSize = ""
     /// Whether the Export / Original control applies.
     var canFlick = false
@@ -156,7 +159,9 @@ struct ExportPanelView: View {
                 .lineLimit(1)
                 .truncationMode(.middle)
                 .help(p.name)
-            let detail = [p.frame, p.sourceDims].filter { !$0.isEmpty }.joined(separator: " · ")
+            // "2880 × 2600 · 300 KB": the original's size joins once the preview has read it.
+            let detail = [p.frame, p.sourceDims, p.sourceSize].filter { !$0.isEmpty }
+                .joined(separator: " · ")
             if !detail.isEmpty {
                 Text(detail)
                     .font(.callout)

@@ -1436,6 +1436,12 @@ test script: `.taskmaster/docs/export-rung1-manual-test.md`. Rung 0a (#81) not s
 
 **Cross-platform debt**
 
+- **Windows (2026-11-26, source size):** the egui panel's source line gains the original's size
+  ("· 300 KB") and its File size row the share ("125 KB (42%)"); compile-checked only. The
+  strings come from the core (`PreviewReadout::size_text` / `source_size_text`), so they match
+  the Mac's; check it fits the ~184 px controls column (manual test 14.21, Windows side). On
+  Windows `size_label` counts in 1024s like Explorer, so both numbers agree with Explorer.
+
 - **Windows (2026-11-26, jpegli, task #157):** `crates/pb-jpegli` has only been compiled with
   Apple clang. With MSVC it adds `/EHsc` (the shim's error path throws through jpegli; `cc`
   doesn't add it), `/bigobj`, `/std:c++17`, `HWY_STATIC_DEFINE` and `_CRT_SECURE_NO_WARNINGS`;

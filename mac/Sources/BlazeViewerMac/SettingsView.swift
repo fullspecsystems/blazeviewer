@@ -101,10 +101,19 @@ struct SettingsView: View {
         .onChange(of: draft) {
             scheduleApply()
         }
-        // Esc closes the window (parity with the old Cancel shortcut); edits are
-        // already applied, so it's just a close.
-        .onExitCommand {
-            closeWindow()
+        // Esc closes the window, like every other dialog here (DialogViews' Cancel
+        // buttons) and Esc on Windows; edits are already applied, so it's just a close.
+        // A cancel-action button rather than `.onExitCommand`: that one only fires while
+        // a control inside has keyboard focus, which with keyboard navigation off is
+        // only a text field, so Esc did nothing on most of the window. Invisible, because
+        // an auto-saving Settings window has no Cancel to show. The Shortcuts tab's key
+        // capture sees Esc first (its event monitor) and cancels the capture instead.
+        .background {
+            Button("Close Settings", action: closeWindow)
+                .keyboardShortcut(.cancelAction)
+                .frame(width: 0, height: 0)
+                .opacity(0)
+                .accessibilityHidden(true)
         }
         .onDisappear {
             // ⌘W / traffic light / Esc: flush any edit still sitting in the debounce

@@ -119,6 +119,27 @@ impl AppCore {
             .map(|(_, a)| a)
     }
 
+    /// The original file's size, once the preview has read it — only when the export is
+    /// the file's own image: not a video or animation frame, and not a 3D model, whose
+    /// export is a view of the model rather than a version of the file.
+    pub(crate) fn export_source_bytes(&self) -> Option<u64> {
+        let cur = self.preview_tick_key()?;
+        let still_image = matches!(cur.frame, crate::frame_capture::FrameKey::Still)
+            && matches!(
+                crate::video::item_kind(self.source.as_ref(), cur.item),
+                crate::video::LibraryItemKind::Image
+            );
+        if !still_image || self.item_is_model(cur.item) {
+            return None;
+        }
+        self.export
+            .preview
+            .source_bytes
+            .as_ref()
+            .filter(|(tk, _)| tk.same_source(&cur))
+            .map(|(_, b)| *b)
+    }
+
     /// Whether the preview on screen is a resized export (its size isn't the original's).
     pub(crate) fn export_preview_resized(&self) -> bool {
         let Some(cur) = self.preview_tick_key() else {
@@ -310,6 +331,9 @@ impl AppCore {
         if let Some(a) = r.available {
             self.export.preview.available =
                 Some((tk, crate::export_panel::KeepMetadata::from_choice(a)));
+        }
+        if let Some(b) = r.source_bytes {
+            self.export.preview.source_bytes = Some((tk, b));
         }
         if let Some(img) = r.original {
             let ok = self.renderer.as_mut().is_some_and(|rd| {
@@ -900,6 +924,40 @@ mod tests {
     /// Plan § 3.7, end to end: the panel greys what a photo lacks, Strip metadata copies
     /// nothing, and unchecking it copies the chosen categories (allowlisted, Orientation 1)
     /// into the previewed and exported file. Location stays out until asked for.
+    /// The panel learns the original file's size from the preview's own read of it (no stat
+    /// on the event loop), shows it on the source line, and gives the export's size as a
+    /// share of it; moving to another photo shows that photo's size, never the last one's.
+    #[test]
+    fn the_panel_compares_the_export_with_the_original_file() {
+        let (mut core, _log, lib) = preview_core("source_bytes");
+        let len = |name: &str| std::fs::metadata(lib.join(name)).unwrap().len();
+        core.export_set_format(FormatChoice::Png);
+        tick_until(&mut core, |c| ready(c) && c.export_source_bytes().is_some());
+        assert_eq!(core.export_source_bytes(), Some(len("a.jpg")));
+        let panel = core.export_panel();
+        assert_eq!(
+            panel.preview.source_size_text(),
+            crate::export_preview::size_label(len("a.jpg"))
+        );
+        let PreviewStatus::Ready { bytes } = core.export_preview_status() else {
+            unreachable!()
+        };
+        let pct = (bytes as f64 * 100.0 / len("a.jpg") as f64).round();
+        assert_eq!(
+            panel.preview.size_text(),
+            format!("{} ({pct:.0}%)", crate::export_preview::size_label(bytes))
+        );
+
+        core.displayed_item = Some(1);
+        assert_eq!(
+            core.export_source_bytes(),
+            None,
+            "b.jpg's size isn't known until its preview reads it"
+        );
+        tick_until(&mut core, |c| ready(c) && c.export_source_bytes().is_some());
+        assert_eq!(core.export_source_bytes(), Some(len("b.jpg")));
+    }
+
     #[test]
     fn unchecking_strip_copies_the_chosen_metadata() {
         use crate::export_panel::MetadataKind;

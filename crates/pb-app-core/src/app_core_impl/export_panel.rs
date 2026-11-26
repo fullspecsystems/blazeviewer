@@ -115,6 +115,7 @@ impl AppCore {
             resized: self.export_preview_resized(),
             own_size: self.export.preview.own_size,
             available: self.export_source_metadata(),
+            source_bytes: self.export_source_bytes(),
         };
         ExportPanel::build(self.export.draft, source)
             .with_preview(preview, self.export_preview_notes())

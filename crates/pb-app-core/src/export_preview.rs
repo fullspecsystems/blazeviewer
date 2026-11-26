@@ -213,6 +213,9 @@ pub struct PreviewResult {
     pub timings: PreviewTimings,
     /// The metadata categories the source carries (for the panel's greying).
     pub available: Option<pb_encode::MetadataChoice>,
+    /// The original file's size in bytes, when the source is the file itself (not a captured
+    /// frame): the panel shows it and the export's size as a share of it.
+    pub source_bytes: Option<u64>,
 }
 
 /// The export side of a preview.
@@ -312,6 +315,9 @@ pub struct PreviewState {
     /// Which metadata categories the source carries (from the preview's decode), for the
     /// panel's greying.
     pub available: Option<(TickKey, crate::export_panel::KeepMetadata)>,
+    /// The original file's size, read by the preview's decode (it has the bytes in hand, so
+    /// the panel never stats the file on the event loop). Not for a captured frame.
+    pub source_bytes: Option<(TickKey, u64)>,
 }
 
 impl PreviewState {
@@ -413,8 +419,13 @@ impl Default for PreviewWorker {
 #[derive(Default)]
 struct WorkerCache {
     /// The decoded source of the item being previewed — a setting change never re-decodes
-    /// (vital for RAW and captured frames).
-    source: Option<(SourceKey, ExportSource, pb_encode::SourceMetadata)>,
+    /// (vital for RAW and captured frames) — with its metadata and file size.
+    source: Option<(
+        SourceKey,
+        ExportSource,
+        pb_encode::SourceMetadata,
+        Option<u64>,
+    )>,
     /// Encoded files, newest last, within [`FILES_BUDGET`].
     files: VecDeque<CachedFile>,
     files_bytes: usize,
@@ -479,7 +490,7 @@ fn run_preview(
         queue: req.queued_at.elapsed(),
         ..PreviewTimings::default()
     };
-    let finish = |original, export, mut t: PreviewTimings, available| {
+    let finish = |original, export, mut t: PreviewTimings, available, source_bytes| {
         t.total = start.elapsed();
         Some(PreviewResult {
             gen: req.gen,
@@ -488,24 +499,26 @@ fn run_preview(
             export,
             timings: t,
             available,
+            source_bytes,
         })
     };
 
     // 1. The source, decoded once per item and frame, with the metadata it carries.
-    if cache.source.as_ref().map(|(k, _, _)| k) != Some(&req.key.source) {
+    if cache.source.as_ref().map(|(k, ..)| k) != Some(&req.key.source) {
         cache.source = None; // free the last one before decoding the next
         let s = Instant::now();
         match decode_source(req) {
-            Ok((src, meta)) => cache.source = Some((req.key.source.clone(), src, meta)),
-            Err(why) => return finish(None, Err(why), t, None),
+            Ok((src, meta, len)) => cache.source = Some((req.key.source.clone(), src, meta, len)),
+            Err(why) => return finish(None, Err(why), t, None, None),
         }
         t.decode = s.elapsed();
     }
     if stale() {
         return None;
     }
-    let (_, src, meta) = cache.source.as_ref()?;
+    let (_, src, meta, source_bytes) = cache.source.as_ref()?;
     let available = Some(meta.available(&src.color));
+    let source_bytes = *source_bytes;
     let source_dims = if req.display_turns % 2 == 1 {
         (src.height, src.width)
     } else {
@@ -542,9 +555,9 @@ fn run_preview(
 
     // 3. The export side.
     match export_side(req, cache, source_dims, stale, &mut t) {
-        Ok(e) => finish(original, Ok(e), t, available),
+        Ok(e) => finish(original, Ok(e), t, available, source_bytes),
         Err(Stop::Stale) => None,
-        Err(Stop::Failed(why)) => finish(original, Err(why), t, available),
+        Err(Stop::Failed(why)) => finish(original, Err(why), t, available, source_bytes),
     }
 }
 
@@ -564,7 +577,7 @@ fn export_side(
     let (bytes, notes, dims, prepared) = match cache.file(&req.key) {
         Some(f) => (Arc::clone(&f.bytes), f.notes.clone(), f.dims, None),
         None => {
-            let (_, src, meta) = cache
+            let (_, src, meta, _) = cache
                 .source
                 .as_ref()
                 .ok_or_else(|| Stop::Failed("the image went away".into()))?;
@@ -635,9 +648,11 @@ fn export_side(
 
 /// Decode the request's source at full resolution — the same paths an export takes — with
 /// the metadata the file carries (none for a captured frame).
+/// The source to export, the metadata it carries, and — when it's the file itself, not a
+/// captured frame — the file's size in bytes.
 fn decode_source(
     req: &PreviewRequest,
-) -> Result<(ExportSource, pb_encode::SourceMetadata), String> {
+) -> Result<(ExportSource, pb_encode::SourceMetadata, Option<u64>), String> {
     match &req.frame {
         Some(frame) => {
             let cancel = AtomicBool::new(false);
@@ -646,6 +661,7 @@ fn decode_source(
             Ok((
                 pb_decode::export_source_from_decoded(img),
                 pb_encode::SourceMetadata::default(),
+                None,
             ))
         }
         None => {
@@ -660,7 +676,11 @@ fn decode_source(
                         format!("couldn't decode the image ({e})")
                     }
                 })?;
-            Ok((src, pb_decode::read_export_metadata(&bytes)))
+            Ok((
+                src,
+                pb_decode::read_export_metadata(&bytes),
+                Some(bytes.len() as u64),
+            ))
         }
     }
 }
