@@ -1314,6 +1314,14 @@ Rung 4's "JPEG encoder trial" has the build notes and measurements) and **zip 9 
 1 across three markers, EXIF in APP1, a jpegli error returns `Err` instead of exiting, eight
 encodes in parallel), pb-encode's JPEG tests against both encoders, `codec_bench` on the corpus.
 **Not verified:** jpegli on Windows at all (see Cross-platform debt).
+**Trial Mac release build** (`release-macos.sh --release` from `dbbb3e8a`, build id clean; not
+notarized, not uploaded, the shipped 0.4.0 DMG in `dist/` left as it was): signed with the
+Developer ID under the hardened runtime, `codesign --verify --deep --strict` passes; no Homebrew
+paths, FFmpeg only via `@rpath` from `Contents/Frameworks` and every dylib says "LGPL version 2.1
+or later"; jpegli, libwebp and libjxl linked, with one `hwy::GetChosenTarget`; `minos 14.0`;
+`licenses/` includes the IJG README and THIRD-PARTY-NOTICES the IJG line. DMG 28.1 MB (0.4.0:
+22.4 MB, before any export codecs). Notarization wasn't exercised; nothing new needs it (jpegli
+is static), but the real release is its first run with these codecs.
 
 **Status (2026-11-24, session 8):** **rung 4's first batch is built** — WebP, AVIF, JPEG XL, HEIC
 (Mac) and TIFF; see Rung 4's session-8 note, which also records four colour bugs measuring found
