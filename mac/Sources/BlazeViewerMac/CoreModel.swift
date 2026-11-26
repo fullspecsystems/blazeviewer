@@ -962,7 +962,6 @@ final class CoreModel {
             stripMetadata: core.export_strip_metadata(),
             notes: notes,
             fileSize: core.export_file_size().toString(),
-            previewBusy: core.export_preview_busy(),
             canFlick: core.export_preview_can_flick(),
             previewSide: Int(core.export_preview_side()))
     }

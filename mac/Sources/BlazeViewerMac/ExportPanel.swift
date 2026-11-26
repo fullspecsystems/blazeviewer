@@ -67,7 +67,6 @@ struct ExportPanelModel: Equatable {
     var notes: [String] = []
     /// The live preview (rung 3): the exact file size, or "Calculating…".
     var fileSize = ""
-    var previewBusy = false
     /// Whether the Export / Original control applies.
     var canFlick = false
     /// 0 the export on screen, 1 the original.
@@ -255,20 +254,11 @@ struct ExportPanelView: View {
             .toggleStyle(.checkbox)
             .help("Leave out camera details, dates and location. The color profile is kept.")
             // Always present, blank while there's nothing to say (browsing, turning a model),
-            // so the rows below never move. The spinner is an overlay hung off the text's
-            // trailing edge, so it never takes part in layout: it's taller than a callout line,
-            // and laid out in an HStack it grew the row each time a setting changed.
+            // so the rows below never move. "Calculating…" says a preview is being made; no
+            // spinner beside it (one sat off-centre and only repeated the word).
             row("File size") {
                 Text(p.fileSize.isEmpty ? " " : p.fileSize)
                     .font(.callout.monospacedDigit())
-                    .overlay(alignment: .trailing) {
-                        if p.previewBusy {
-                            ProgressView()
-                                .controlSize(.mini)
-                                .alignmentGuide(.trailing) { d in d[.leading] - 6 }
-                                .accessibilityHidden(true)
-                        }
-                    }
             }
             row("Preview") {
                 Picker("Preview", selection: binding(\.previewSide, model.exportSetPreviewSide)) {

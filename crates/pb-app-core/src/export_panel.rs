@@ -832,11 +832,6 @@ impl PreviewReadout {
         }
     }
 
-    /// Whether a preview is being made (the shells show a spinner).
-    pub fn busy(&self) -> bool {
-        self.status == crate::export_preview::PreviewStatus::Working
-    }
-
     /// Whether the flick control applies (there's something to flick between).
     pub fn can_flick(&self) -> bool {
         matches!(

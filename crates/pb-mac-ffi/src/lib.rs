@@ -1933,13 +1933,6 @@ impl AppCoreHandle {
             .unwrap_or_default()
     }
 
-    /// A preview is being made (the panel shows a spinner).
-    fn export_preview_busy(&self) -> bool {
-        self.export_snapshot
-            .as_ref()
-            .is_some_and(|p| p.preview.busy())
-    }
-
     /// Whether the Export / Original control applies.
     fn export_preview_can_flick(&self) -> bool {
         self.export_snapshot
@@ -5323,7 +5316,6 @@ mod ffi {
         fn export_custom_size(&mut self);
         fn export_preview_covering(&self) -> bool;
         fn export_file_size(&self) -> String;
-        fn export_preview_busy(&self) -> bool;
         fn export_preview_can_flick(&self) -> bool;
         fn export_preview_side(&self) -> u8;
         fn export_set_preview_side(&mut self, side: u8);

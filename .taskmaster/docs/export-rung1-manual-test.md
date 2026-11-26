@@ -246,7 +246,7 @@ Run `/mac-arsed-mac-app`-style checks here: native look and feel, light **and** 
 
 | # | Do | Expect |
 |---|---|---|
-| 13.1 | `E` on a big photo (20 MP or more) and wait a moment | The photo **becomes the export**: **File size** reads "Calculating…" with a small spinner, then the exact size (`11 MB`); **Preview** reads **Export**. Nothing below File size moves when the spinner comes and goes (change the quality a few times), or while you hold a key to browse |
+| 13.1 | `E` on a big photo (20 MP or more) and wait a moment | The photo **becomes the export**: **File size** reads "Calculating…" (no spinner beside it), then the exact size (`11 MB`); **Preview** reads **Export**. Nothing below File size moves while it calculates (change the quality a few times), or while you hold a key to browse |
 | 13.2 | Pick **JPEG**, drag the quality slider down to 10 and let go | After you let go, one update (not one per step): blocky JPEG artifacts appear **on the photo**, and the size drops. The old picture stays until the new one is ready |
 | 13.3 | Zoom to 1:1 (`1`) and pan | The artifacts are there at full size; zoom and pan work as usual |
 | 13.4 | Tap `Y` | A toast "Original"; the photo is the original. Tap `Y` again: "Export (… KB)", back to the export. The **Preview** control follows |
@@ -278,7 +278,7 @@ Use a big, detailed photo (a 20 MP JPEG or NEF) and a PNG with transparency.
 | # | Do | Expect |
 |---|---|---|
 | 14.1 | `E`, open the **Format** pop-up | A menu, not buttons: PNG, JPEG · WebP, AVIF, JPEG XL, HEIC · TIFF (dividers between the groups) |
-| 14.2 | Pick each format in turn and wait | The pop-up shows the format's name every time (WebP and TIFF, the first of their groups, once showed blank). Each becomes the export on screen with its own File size. AVIF takes the longest (several seconds on 20 MP — the spinner shows it); the others a second or two at most |
+| 14.2 | Pick each format in turn and wait | The pop-up shows the format's name every time (WebP and TIFF, the first of their groups, once showed blank). Each becomes the export on screen with its own File size. AVIF takes the longest (several seconds on 20 MP — "Calculating…" shows it); the others a second or two at most |
 | 14.3 | **WebP**: the **Lossless** checkbox | Checked: Quality greys out (it doesn't disappear — nothing below moves) and the file grows; `[` / `]` do nothing. Unchecked: Quality is back at the value it had |
 | 14.4 | Set JPEG to 60, switch to AVIF, then back to JPEG | AVIF shows its own quality (85 by default); JPEG is still 60 |
 | 14.5 | **TIFF** | No Quality, no Compression: TIFF is lossless. Export, open the `.tif` in Preview: identical to the original |
@@ -319,5 +319,5 @@ only compile-checked from the Mac.
 | W16 | Export, then File ▸ **Show Last Export in File Explorer** | Explorer opens with the PNG selected |
 | W17 | Export twice from the same folder, elsewhere the first time; then from another folder | Same folder → where the last export went; another folder → beside its photo |
 | W18 | **Export mode** (`E`): run 12.1–12.16 | The egui panel top-right: combos for Format / Compression / Size (presets bigger than the photo greyed), a Quality slider for JPEG, a **Strip metadata** switch, an **Export…** button. A JPEG export's dialog shows a "JPEG image" filter and `.jpg` |
-| W19 | **Live preview and Custom size**: run 13.1–13.24 | The egui panel adds **File size** (with a spinner while calculating) and a **Preview** combo (Export / Original). Size ▸ **Custom…** opens a "Custom Size" dialog window: a Resize by combo, a number field, the result line, OK / Cancel; Enter is OK, Esc cancels. Check the preview on **DX12**: no shimmer at fit on a big photo, the export appears over the photo and `Y` flicks instantly |
+| W19 | **Live preview and Custom size**: run 13.1–13.24 | The egui panel adds **File size** ("Calculating…" while it works, no spinner) and a **Preview** combo (Export / Original). Size ▸ **Custom…** opens a "Custom Size" dialog window: a Resize by combo, a number field, the result line, OK / Cancel; Enter is OK, Esc cancels. Check the preview on **DX12**: no shimmer at fit on a big photo, the export appears over the photo and `Y` flicks instantly |
 | W20 | **More formats**: `pwsh scripts/build-windows.ps1 -Release -Run` (it now builds WebP + JPEG XL: needs CMake; with nasm on PATH AVIF uses its assembly), then run 14.1–14.12 | The egui Format combo lists PNG, JPEG, WebP, AVIF, JPEG XL, TIFF (no HEIC on Windows) with separators; Lossless is a switch; Quality greys out under it. Each format's dialog filter ("WebP image", …) and extension; the files open in Photos (WebP, JPEG XL with its extension, AVIF with the AV1 extension). If the build fails in `jxl-sys` or `libwebp-sys`, `-NoCodecs` builds without them — report the error in the plan's Handoff |
