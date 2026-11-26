@@ -114,6 +114,12 @@ struct BlazeViewerMacApp: App {
         WindowGroup(appName) {
             ContentView(model: model)
         }
+        // One window (task #48). Left to itself, SwiftUI opens a window for each outside
+        // "open this" event, so a launch from Finder, the Dock or `open` with a file came up
+        // with two: the second took the renderer, and the real window sat dead behind a gray
+        // one. The app delegate already takes those files (`application(_:open:)`); no
+        // scene needs a window for them.
+        .handlesExternalEvents(matching: [])
         // ⌘, / App menu ▸ Settings… — reached via ShowDialog("settings") →
         // `openSettingsAction` (installed by ContentView; only a view can grab the
         // environment's openSettings action).

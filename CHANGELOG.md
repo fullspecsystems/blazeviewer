@@ -96,6 +96,10 @@ with any pre-release suffix carried only by the tag.
 
 ### Fixed
 
+- **Mac: opening a file or folder from Finder, the Dock or the command line opens one
+  window.** It could open a second, unresponsive gray window with the Open buttons in front
+  of the real one, which stayed hidden behind it until you quit and reopened the app.
+
 - **Mac: Esc closes the Settings window**, as it does on Windows. It only worked while
   you were typing in one of its text fields.
 

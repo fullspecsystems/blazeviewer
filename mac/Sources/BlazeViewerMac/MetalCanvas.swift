@@ -222,11 +222,32 @@ final class MetalCanvasNSView: NSView {
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
-        guard window != nil, !attached, let metalLayer = layer as? CAMetalLayer else { return }
+        guard let ownWindow = window, !attached, let metalLayer = layer as? CAMetalLayer
+        else { return }
+        // Blaze Viewer is one window (task #48). A second one used to come from SwiftUI opening
+        // a window for a launch's "open this file" event; `handlesExternalEvents(matching: [])`
+        // on the scene stops that. This is the fallback for any other way a second window
+        // appears: its canvas would take the renderer and the keyboard and leave a dead gray
+        // window in front of the real one, so instead it closes its own window and brings the
+        // real one forward. It never attaches, so its dismantle detaches nothing. Known cost
+        // (seen while this was the only fix): after such a close, SwiftUI sometimes stops
+        // updating the real window's title. A stale title beats a dead window.
+        if let host = model?.hostWindow, host !== ownWindow,
+            host.isVisible || host.isMiniaturized
+        {
+            pbTrace("extra window: closing it, keeping the viewer window")
+            DispatchQueue.main.async {
+                ownWindow.close()
+                if host.isMiniaturized { host.deminiaturize(nil) }
+                host.makeKeyAndOrderFront(nil)
+            }
+            return
+        }
         let scale = backingScale
         metalLayer.contentsScale = scale
         attached = true
         model?.hostWindow = window
+        model?.canvasView = self
         // Take the window's keyboard focus immediately so no toolbar control becomes the
         // initial first responder and paints a stuck focus ring (see `acceptsFirstResponder`).
         window?.initialFirstResponder = self
@@ -473,7 +494,11 @@ struct MetalCanvas: NSViewRepresentable {
         view.model = model
         // The model re-reports the canvas size through this view after a fullscreen→windowed
         // restore (see `setWindowMode`), where AppKit doesn't reliably re-fire `layout()`.
-        model.canvasView = view
+        // Only a canvas that attaches takes over (see `viewDidMoveToWindow`): an extra
+        // window's canvas must not, since its window closes at once.
+        if model.canvasView == nil {
+            model.canvasView = view
+        }
         view.onAttach = { layer, size, scale in
             model.attachCanvas(layer: layer, pixelSize: size, scale: scale)
         }
