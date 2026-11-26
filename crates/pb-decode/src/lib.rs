@@ -19,6 +19,9 @@ pub mod animation;
 mod color;
 mod common;
 pub mod export;
+// What an export may copy (export-plan.md § 3.7): the source's EXIF block and PNG generation
+// text, read beside the pixel decode.
+mod export_meta;
 #[cfg(test)]
 mod hdr_audit;
 mod image_backend;
@@ -198,7 +201,10 @@ pub use ffmpeg::video_producer::run_ff_video_producer;
 // The demux-only compressed packet source (video-overhaul Phase 3): feeds the
 // macOS AVSampleBufferDisplayLayer presenter compressed access units + the
 // hvcC/avcC/DoVi config a CMVideoFormatDescription needs.
-pub use export::{decode_named_bytes_for_export, export_source_from_decoded, ExportDecodeError};
+pub use export::{
+    decode_named_bytes_for_export, export_source_from_decoded, read_export_metadata,
+    ExportDecodeError,
+};
 #[cfg(feature = "ffvideo")]
 pub use ffmpeg::demux::{DemuxPacket, DemuxStreamInfo, DoviConfig, VideoCodec, VideoDemuxer};
 pub use image_backend::ImageCrateDecoder;

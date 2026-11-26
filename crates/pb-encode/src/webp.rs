@@ -1,7 +1,8 @@
 //! **WebP** over libwebp (export-plan.md rung 4): `libwebp-sys` builds the vendored library
 //! (BSD-3, with Google's VP8 patent grant) with `cc`, no system dependency. Lossy or lossless,
-//! 8-bit with alpha; the colour profile goes in an `ICCP` chunk through libwebp's own mux
-//! library (an sRGB image embeds none — untagged WebP is read as sRGB).
+//! 8-bit with alpha; the colour profile goes in an `ICCP` chunk and the EXIF block in an `EXIF`
+//! chunk, both through libwebp's own mux library (an sRGB image embeds no profile — untagged
+//! WebP is read as sRGB).
 //!
 //! Every libwebp object is created and freed inside one call: no handle outlives `encode`.
 
@@ -33,6 +34,9 @@ impl Encoder for WebpEncoder {
     }
     fn lossless(&self) -> bool {
         self.lossless
+    }
+    fn writes_metadata(&self) -> bool {
+        true
     }
     fn encode(&self, img: &ExportImage) -> Result<Vec<u8>, EncodeError> {
         encode_webp(img, self.quality, self.lossless)
@@ -67,10 +71,15 @@ pub fn encode_webp_at(
     }
     let bitstream =
         unsafe { encode_bitstream(&px, img.width, img.height, alpha, quality, lossless, effort) }?;
-    match &img.color {
-        OutputColor::Srgb => Ok(bitstream),
-        OutputColor::Icc(profile) => unsafe { with_icc(&bitstream, profile) },
+    let icc = match &img.color {
+        OutputColor::Srgb => None,
+        OutputColor::Icc(profile) => Some(profile.as_slice()),
+    };
+    let exif = img.metadata.exif.as_deref();
+    if icc.is_none() && exif.is_none() {
+        return Ok(bitstream);
     }
+    unsafe { with_chunks(&bitstream, icc, exif) }
 }
 
 /// libwebp's advanced API: one config, one picture, a memory writer.
@@ -155,21 +164,34 @@ unsafe fn encode_bitstream(
     out
 }
 
-/// Add an `ICCP` chunk (making the file the extended `VP8X` layout) with libwebp's mux.
-unsafe fn with_icc(bitstream: &[u8], profile: &[u8]) -> Result<Vec<u8>, EncodeError> {
+/// Add an `ICCP` and/or `EXIF` chunk (making the file the extended `VP8X` layout, which
+/// flags each) with libwebp's mux.
+unsafe fn with_chunks(
+    bitstream: &[u8],
+    profile: Option<&[u8]>,
+    exif: Option<&[u8]>,
+) -> Result<Vec<u8>, EncodeError> {
     let image = w::WebPData {
         bytes: bitstream.as_ptr(),
         size: bitstream.len(),
     };
     let mux = unsafe { w::WebPMuxCreateInternal(&image, 1, w::WEBP_MUX_ABI_VERSION as c_int) };
     if mux.is_null() {
-        return Err(codec("couldn't add the color profile"));
+        return Err(codec("couldn't add the color profile or metadata"));
     }
-    let icc = w::WebPData {
-        bytes: profile.as_ptr(),
-        size: profile.len(),
-    };
-    let set = unsafe { w::WebPMuxSetChunk(mux, c"ICCP".as_ptr(), &icc, 1) };
+    let mut set = w::WebPMuxError::WEBP_MUX_OK;
+    for (fourcc, payload) in [(c"ICCP", profile), (c"EXIF", exif)] {
+        let Some(payload) = payload else { continue };
+        if set != w::WebPMuxError::WEBP_MUX_OK {
+            break;
+        }
+        let data = w::WebPData {
+            bytes: payload.as_ptr(),
+            size: payload.len(),
+        };
+        // `copy_data` = 1: the mux owns a copy, so nothing borrowed outlives this call.
+        set = unsafe { w::WebPMuxSetChunk(mux, fourcc.as_ptr(), &data, 1) };
+    }
     let mut out = w::WebPData {
         bytes: std::ptr::null(),
         size: 0,
@@ -182,7 +204,7 @@ unsafe fn with_icc(bitstream: &[u8], profile: &[u8]) -> Result<Vec<u8>, EncodeEr
     unsafe { w::WebPMuxDelete(mux) };
     if assembled != w::WebPMuxError::WEBP_MUX_OK || out.bytes.is_null() {
         return Err(codec(format!(
-            "couldn't add the color profile ({assembled:?})"
+            "couldn't add the color profile or metadata ({assembled:?})"
         )));
     }
     let bytes = unsafe { std::slice::from_raw_parts(out.bytes, out.size) }.to_vec();
@@ -204,6 +226,36 @@ mod tests {
             samples: Samples::U8(px),
             color,
             notes: Vec::new(),
+            metadata: Default::default(),
+        }
+    }
+
+    /// Required test 2 for WebP: the `EXIF` chunk reads back clean, beside the profile or
+    /// alone (an sRGB image still needs the extended layout for it), and the image decodes.
+    #[test]
+    fn metadata_round_trips() {
+        use crate::metadata::tests::{assert_clean, dirty_source};
+        use crate::metadata::MetadataChoice;
+        let px = gradient(16, 8, 3);
+        let p3 = crate::icc::display_p3_profile();
+        for (color, lossless) in [
+            (OutputColor::Icc(p3.clone()), true),
+            (OutputColor::Srgb, false),
+        ] {
+            let mut img = image(16, 8, Channels::Rgb, px.clone(), color.clone());
+            img.metadata = dirty_source().output(MetadataChoice::ALL);
+            let webp = encode_webp(&img, 80, lossless).unwrap();
+            assert_eq!(&webp[8..16], b"WEBPVP8X");
+            let exif = exif::Reader::new()
+                .read_from_container(&mut std::io::Cursor::new(&webp))
+                .expect("an EXIF chunk");
+            assert_clean(exif.buf(), true);
+            let (back, icc) = decode(&webp);
+            assert_eq!((back.width(), back.height()), (16, 8));
+            match color {
+                OutputColor::Icc(p) => assert_eq!(icc.as_deref(), Some(p.as_slice())),
+                OutputColor::Srgb => assert_eq!(icc, None),
+            }
         }
     }
 
@@ -294,6 +346,7 @@ mod tests {
             samples: Samples::U8(vec![0; MAX_EDGE as usize + 1]),
             color: OutputColor::Srgb,
             notes: Vec::new(),
+            metadata: Default::default(),
         };
         assert!(matches!(
             encode_webp(&too_wide, 80, false),

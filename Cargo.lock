@@ -4532,6 +4532,7 @@ dependencies = [
  "fast_image_resize",
  "image 0.25.10",
  "jxl-sys",
+ "kamadak-exif",
  "libwebp-sys",
  "moxcms",
  "pb-color",

@@ -5,10 +5,16 @@
 //! display reduction. [`crate::prepare`] turns one into an [`ExportImage`] — rotated,
 //! colour-resolved and quantized for a target — which an encoder writes.
 //!
+//! The source's metadata (EXIF, generation text) travels beside the `ExportSource` as a
+//! [`SourceMetadata`](crate::SourceMetadata), read from the file's bytes rather than the decode,
+//! and [`crate::prepare_with_metadata`] turns it into the image's [`OutputMetadata`].
+//!
 //! Identifiers use the American spelling (`Color`) per the house rule for new identifiers;
 //! prose stays Canadian.
 
 use std::sync::Arc;
+
+use crate::metadata::OutputMetadata;
 
 /// Channel layout of a pixel buffer. Samples are interleaved in this order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -181,7 +187,8 @@ pub enum OutputColor {
 pub enum ExportNote {
     /// HDR content was tone-mapped to SDR (Display P3) for a format/rung without HDR.
     HdrToneMapped,
-    /// The source profile was rebuilt without its descriptive text (Strip metadata).
+    /// The source profile was rebuilt without its descriptive text (Strip metadata, or
+    /// "Original colour profile" not chosen).
     ProfileSanitized,
     /// The source profile couldn't be used (unreadable, or didn't match the pixels), so
     /// the export is tagged sRGB.
@@ -200,4 +207,6 @@ pub struct ExportImage {
     pub samples: Samples,
     pub color: OutputColor,
     pub notes: Vec<ExportNote>,
+    /// The EXIF block and PNG text to embed (empty under *Strip metadata*).
+    pub metadata: OutputMetadata,
 }

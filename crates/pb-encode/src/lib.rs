@@ -6,6 +6,9 @@
 //! - [`prepare`] — source → encoder-ready [`ExportImage`]: un-premultiply, HDR → SDR P3,
 //!   colour resolution (incl. the ICC sanitizer), rotation, cleared transparency.
 //! - [`icc`] — the profile sanitizer behind *Strip metadata* and the profiles we synthesize.
+//! - [`metadata`]: what a source carries ([`SourceMetadata`]), which categories to copy
+//!   ([`MetadataChoice`]), and the fresh allowlisted EXIF + PNG text an encoder embeds
+//!   ([`OutputMetadata`]).
 //! - [`encoder`] — the `Encoder` seam + [`Caps`] (rung 2); [`ExportFormat`] picks a codec and
 //!   [`Codec::available`] says which this build carries.
 //! - Encoders behind features: `png` (rung 0c), `jpeg` (rung 2; Describe's helper moved from
@@ -27,6 +30,7 @@ pub mod icc;
 pub mod jpeg;
 #[cfg(feature = "jxl")]
 pub mod jxl;
+pub mod metadata;
 #[cfg(feature = "png")]
 pub mod png;
 pub mod prepare;
@@ -48,9 +52,10 @@ pub mod webp;
 pub use encoder::{Caps, Codec, Encoder, ExportFormat, PngEffort};
 #[cfg(feature = "jpeg")]
 pub use jpeg::{encode_jpeg, encode_jpeg_rgba8, JpegEncoder};
+pub use metadata::{MetadataChoice, OutputMetadata, SourceMetadata};
 #[cfg(feature = "png")]
 pub use png::{encode_png, PngEncoder};
-pub use prepare::{prepare, PrepareError, PrepareSpec};
+pub use prepare::{prepare, prepare_with_metadata, PrepareError, PrepareSpec};
 pub use resize::Resize;
 pub use types::{
     AlphaMode, Channels, Cicp, ColorDesc, ExportImage, ExportNote, ExportSource, OutputColor,

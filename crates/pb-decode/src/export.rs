@@ -19,9 +19,15 @@
 //!   fallback).
 //!
 //! Every path is panic-safe, like the display decode.
+//!
+//! The source's metadata (EXIF, generation text) is read separately, from the same bytes, by
+//! [`read_export_metadata`]: the pixels and the metadata are different purposes, and a
+//! captured frame has pixels but no file metadata.
 
 use std::path::Path;
 use std::sync::Arc;
+
+pub use crate::export_meta::read_export_metadata;
 
 use pb_encode::{
     AlphaMode, Channels, ColorDesc, ExportSource, Provenance, SampleEncoding, Samples,

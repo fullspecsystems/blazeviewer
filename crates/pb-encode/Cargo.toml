@@ -35,6 +35,10 @@ pb-color = { path = "../pb-color" }
 # Export resize (rung 2): Lanczos3 on borrowed f32 buffers. Both already in the tree via pb-decode.
 fast_image_resize = "5"
 bytemuck = "1"
+# Export metadata (export-plan.md § 3.7): parse the source's EXIF into typed fields and write the
+# fresh allowlisted block. BSD-2-Clause (its one dependency, mutate_once, too); already in the
+# tree through pb-decode, which reads orientation with it.
+kamadak-exif = "0.6"
 png = { version = "0.18", optional = true }
 image = { version = "0.25.10", default-features = false, features = ["jpeg"], optional = true }
 # The version `image` already links for decoding; LZW for writing.

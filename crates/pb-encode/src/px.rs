@@ -55,6 +55,7 @@ mod tests {
             samples,
             color: OutputColor::Srgb,
             notes: Vec::new(),
+            metadata: Default::default(),
         }
     }
 

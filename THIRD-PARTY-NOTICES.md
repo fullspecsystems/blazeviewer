@@ -26,6 +26,7 @@ missing rather than shipping a binary without them:
 | libwebp (export) | 1.6.0 | vendored in the `libwebp-sys` 0.14.4 crate (`Cargo.lock`) |
 | libjxl (export) | 0.12.0 | vendored in the `jxl-sys` 0.1.12+libjxl-0.12.0 crate (`Cargo.lock`), with its Highway, Brotli and skcms |
 | rav1e / ravif / avif-serialize (export) | 0.8.1 / 0.13.0 / 0.8.9 | `Cargo.lock` |
+| kamadak-exif / mutate_once (EXIF read + export metadata) | 0.6.1 / 0.1.2 | `Cargo.lock` |
 
 Linux takes libheif/FFmpeg from the build distro and bundles the resulting shared objects, so
 its versions track that distro rather than the vcpkg pin.
@@ -116,10 +117,10 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ## Image export encoders (task #89 rung 4) — BSD-3-Clause, BSD-2-Clause, MIT
 
-Export writes WebP, AVIF and JPEG XL through these, all **statically linked** and all
-permissive — the house rule is that we encode only with permissive code (CLAUDE.md, *Licensing*),
-and every crate in each chain was checked before it landed (export-plan.md rung 4). Their license
-texts, verbatim, are in `licenses/`.
+Export writes WebP, AVIF and JPEG XL (and the EXIF it copies) through these, all **statically
+linked** and all permissive — the house rule is that we encode only with permissive code
+(CLAUDE.md, *Licensing*), and every crate in each chain was checked before it landed
+(export-plan.md rung 4). Their license texts, verbatim, are in `licenses/`.
 
 - **libwebp** 1.6.0 (WebP) — BSD-3-Clause, plus Google's additional patent grant for VP8
   (`libwebp-PATENTS.txt`). Built from the source the `libwebp-sys` crate (MIT) vendors.
@@ -136,6 +137,10 @@ texts, verbatim, are in `licenses/`.
   Janne Grunau and others — listed in `rav1e-asm-NOTICES.txt`.
   Homepage: https://github.com/xiph/rav1e
 - **ravif** 0.13.0 and **avif-serialize** 0.8.9 (the AVIF encoder and container) — BSD-3-Clause.
+- **kamadak-exif** 0.6.1 (reads EXIF for display orientation and the Details panel, and writes
+  the fresh, allowlisted EXIF block an export carries when *Strip metadata* is off) and its one
+  dependency **mutate_once** 0.1.2, both BSD-2-Clause, © KAMADA Ken'ichi.
+  Homepage: https://github.com/kamadak/exif-rs
 
 The macOS HEIC export uses the system's Image I/O encoder: an operating-system component (see
 below), not redistributed.
