@@ -93,6 +93,8 @@ avif-asm = ["pb-encode/avif-asm"]
 # Score exports against their source in `examples/codec_bench.rs` (rung 4's default qualities;
 # never shipped). BSD-2-Clause.
 ssimulacra2 = "0.5"
+# Builds EXIF for the metadata tests (already in the tree through pb-decode).
+kamadak-exif = "0.6"
 # Dump subtitle-preview frames to look at (the `dump_preview` diagnostic; never shipped).
 # Same version pb-decode already links, so the lockfile is unchanged.
 png = "0.17"

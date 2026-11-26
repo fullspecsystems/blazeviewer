@@ -109,6 +109,16 @@ impl AppCore {
         }
     }
 
+    /// Which metadata categories the source on screen carries, once the preview has read it.
+    pub(crate) fn export_source_metadata(&self) -> Option<crate::export_panel::KeepMetadata> {
+        let cur = self.preview_tick_key()?;
+        self.export
+            .preview
+            .available
+            .filter(|(tk, _)| tk.same_source(&cur))
+            .map(|(_, a)| a)
+    }
+
     /// Whether the preview on screen is a resized export (its size isn't the original's).
     pub(crate) fn export_preview_resized(&self) -> bool {
         let Some(cur) = self.preview_tick_key() else {
@@ -296,6 +306,10 @@ impl AppCore {
                 ms(t.read_back),
                 ms(t.total),
             );
+        }
+        if let Some(a) = r.available {
+            self.export.preview.available =
+                Some((tk, crate::export_panel::KeepMetadata::from_choice(a)));
         }
         if let Some(img) = r.original {
             let ok = self.renderer.as_mut().is_some_and(|rd| {
@@ -829,6 +843,115 @@ mod tests {
         let _ = std::fs::remove_dir_all(&out);
     }
 
+    /// A JPEG of `path`'s pixels carrying EXIF: Make, Artist, and a GPS latitude.
+    fn write_jpeg_with_exif(path: &Path) {
+        use exif::{Field, In, Rational, Tag, Value};
+        write_jpeg(path, 64, 48);
+        let fields = [
+            Field {
+                tag: Tag::Make,
+                ifd_num: In::PRIMARY,
+                value: Value::Ascii(vec![b"TestCam".to_vec()]),
+            },
+            Field {
+                tag: Tag::Artist,
+                ifd_num: In::PRIMARY,
+                value: Value::Ascii(vec![b"A. Person".to_vec()]),
+            },
+            Field {
+                tag: Tag::GPSLatitudeRef,
+                ifd_num: In::PRIMARY,
+                value: Value::Ascii(vec![b"N".to_vec()]),
+            },
+            Field {
+                tag: Tag::GPSLatitude,
+                ifd_num: In::PRIMARY,
+                value: Value::Rational(vec![
+                    Rational { num: 53, denom: 1 },
+                    Rational { num: 32, denom: 1 },
+                    Rational { num: 0, denom: 1 },
+                ]),
+            },
+        ];
+        let mut w = exif::experimental::Writer::new();
+        for f in &fields {
+            w.push_field(f);
+        }
+        let mut tiff = std::io::Cursor::new(Vec::new());
+        w.write(&mut tiff, false).unwrap();
+        let jpeg = std::fs::read(path).unwrap();
+        let mut app1 = b"Exif\0\0".to_vec();
+        app1.extend_from_slice(tiff.get_ref());
+        let mut out = jpeg[..2].to_vec(); // SOI
+        out.extend_from_slice(&[0xFF, 0xE1]);
+        out.extend_from_slice(&((app1.len() + 2) as u16).to_be_bytes());
+        out.extend_from_slice(&app1);
+        out.extend_from_slice(&jpeg[2..]);
+        std::fs::write(path, out).unwrap();
+    }
+
+    fn exif_tags(bytes: &[u8]) -> Vec<exif::Tag> {
+        exif::Reader::new()
+            .read_from_container(&mut std::io::Cursor::new(bytes))
+            .map(|e| e.fields().map(|f| f.tag).collect())
+            .unwrap_or_default()
+    }
+
+    /// Plan § 3.7, end to end: the panel greys what a photo lacks, Strip metadata copies
+    /// nothing, and unchecking it copies the chosen categories (allowlisted, Orientation 1)
+    /// into the previewed and exported file. Location stays out until asked for.
+    #[test]
+    fn unchecking_strip_copies_the_chosen_metadata() {
+        use crate::export_panel::MetadataKind;
+        let (mut core, _log, lib) = preview_core("metadata");
+        write_jpeg_with_exif(&lib.join("a.jpg"));
+        core.export_set_format(FormatChoice::Jpeg);
+        tick_until(&mut core, |c| {
+            ready(c) && c.export_source_metadata().is_some()
+        });
+        assert!(core.export_keep_available(MetadataKind::Camera));
+        assert!(
+            core.export_keep_available(MetadataKind::Location),
+            "it has GPS"
+        );
+        assert!(
+            !core.export_keep_available(MetadataKind::Generation),
+            "not a PNG"
+        );
+        let file = |c: &AppCore| c.export.preview.export.as_ref().unwrap().bytes.clone();
+        assert!(
+            exif_tags(&file(&core)).is_empty(),
+            "Strip on: nothing at all"
+        );
+
+        core.export_set_strip_metadata(false); // the defaults: camera + copyright
+        tick_until(&mut core, |c| {
+            ready(c) && !exif_tags(&c.export.preview.export.as_ref().unwrap().bytes).is_empty()
+        });
+        let tags = exif_tags(&file(&core));
+        assert!(tags.contains(&exif::Tag::Make) && tags.contains(&exif::Tag::Artist));
+        assert!(
+            tags.contains(&exif::Tag::Orientation),
+            "Orientation 1, written"
+        );
+        assert!(
+            !tags.contains(&exif::Tag::GPSLatitude),
+            "no location by default"
+        );
+
+        core.export_set_keep(MetadataKind::Location, true);
+        tick_until(&mut core, |c| {
+            ready(c)
+                && exif_tags(&c.export.preview.export.as_ref().unwrap().bytes)
+                    .contains(&exif::Tag::GPSLatitude)
+        });
+        // Location is never remembered: a fresh entry to the mode starts without it.
+        core.dispatch_action(Action::ExportMode);
+        core.dispatch_action(Action::ExportMode);
+        assert!(!core.export.draft.keep.location && core.export.draft.strip_metadata);
+        let _ = std::fs::remove_dir_all(&lib);
+    }
+
     /// Rung 4, end to end, for every format this build writes: the preview settles with the
     /// file's exact size, Export… writes those bytes under the format's extension, and the
     /// viewer reads the file back at the right size. Lossless ones skip the read-back.
@@ -854,6 +977,7 @@ mod tests {
                 samples: pb_encode::Samples::U8(vec![128; 16 * 16 * 3]),
                 color: pb_encode::OutputColor::Srgb,
                 notes: Vec::new(),
+                metadata: Default::default(),
             };
             enc.lossless()
                 || enc

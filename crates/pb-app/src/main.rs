@@ -2124,6 +2124,7 @@ impl App {
             A::ExportCustomSize => self.core.export_custom_size(),
             A::ExportPreviewSide(side) => self.core.export_set_preview_side(side),
             A::ExportPreviewOwnSize(on) => self.core.export_set_preview_own_size(on),
+            A::ExportKeep(kind, on) => self.core.export_set_keep(kind, on),
             A::ExportStripMetadata(on) => self.core.export_set_strip_metadata(on),
             A::ExportClose => self.core.export_close(),
             A::ExportCommit => self.core.export_commit(),

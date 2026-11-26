@@ -415,8 +415,9 @@ under transparent areas can't leak (F25).
 - Per-photo warnings; categories the photo lacks are greyed.
 - **Allowlist only:** typed tags parsed from the source bytes on the worker (not the Details cache's
   display strings), values bounded, written into a fresh block — JPEG APP1, PNG `eXIf`, WebP `EXIF`,
-  AVIF/HEIC Exif item, JXL `Exif` box. `little_exif` vs a minimal writer is decided in rung 2 by
-  testing.
+  AVIF/HEIC Exif item, JXL `Exif` box. **Decided 2026-11-25:** kamadak-exif's own writer
+  (`exif::experimental::Writer`, BSD-2, already shipped via pb-decode); no new crate. TIFF writes
+  native tags + real Exif/GPS sub-IFDs; HEIC goes through Image I/O's property dictionaries.
 - **The sanitized-profile builder and its leak fixture land in rung 0c**, because rung 1 already
   ships Strip-on exports (F6).
 
@@ -707,7 +708,15 @@ read rung 2's first `long_edge`. **Custom…** goes through the dialog seam the 
 Esc = Cancel) from a "Custom…" entry at the foot of the Size pop-up; winit: a "Custom Size" dialog
 window (`dialog::export_size_dialog`). **The pre-export HDR note** now comes from the live preview
 (rung 3): once a preview is made, the panel says "This HDR image is exported as SDR (Display P3)."
-**Still open in rung 2:** the metadata allowlist + categories. **Done 2026-11-25 (Mac session):**
+**Rung 2 is complete (2026-11-25).** **Metadata (§ 3.7):** the library half (an agent, merged
+94ca325c): `pb_decode::read_export_metadata` reads the source's EXIF / PNG generation text,
+`pb_encode::prepare_with_metadata` allowlists typed tags into a fresh block (Orientation = 1;
+never MakerNote, serials, UserComment, thumbnails), and every encoder embeds it (`writes_metadata`).
+The app half: `KeepMetadata` on `ExportSettings` (camera + copyright on, location off at every
+entry and never persisted, generation PNG-only, the original profile opt-in), both workers pass
+`keep.choice(strip)`, the preview reports what the source carries so the panel greys the rest,
+and the note says what's kept. End-to-end test: `unchecking_strip_copies_the_chosen_metadata`.
+**Also done 2026-11-25 (Mac session):**
 - **The `[`/`]` menu context:** in the mode, View ▸ Slideshow Faster / Slower read Lower /
   Higher Quality (Compress Faster / Smaller for PNG; greyed for lossless and TIFF). They step it
   from the menu too: `MenuState::step_keys` and `AppCore::export_menu`; the action arms are
@@ -1374,6 +1383,10 @@ test script: `.taskmaster/docs/export-rung1-manual-test.md`. Rung 0a (#81) not s
 
 **Cross-platform debt**
 
+- **Windows (2026-11-25, metadata):** the egui panel's five category switches (under Strip
+  metadata) are compile-checked only. The library half's WebP / AVIF / JPEG XL / TIFF embedding is
+  cross-platform but tested on the Mac only: export a GPS-tagged JPEG with Location on and check
+  the file with `exiftool` on Windows.
 - **Windows (2026-11-25, menus + F20):** View ▸ Export Mode (a check item), the retitled
   `[`/`]` items (`StepKeys` via `set_text`), the egui popup's same items, and the egui panel's
   "Show at export size" switch are compile-checked only (Windows clippy cross-check clean).

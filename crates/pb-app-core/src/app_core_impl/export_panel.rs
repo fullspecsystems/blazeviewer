@@ -114,6 +114,7 @@ impl AppCore {
             side: self.export_preview_side(),
             resized: self.export_preview_resized(),
             own_size: self.export.preview.own_size,
+            available: self.export_source_metadata(),
         };
         ExportPanel::build(self.export.draft, source)
             .with_preview(preview, self.export_preview_notes())
@@ -251,6 +252,19 @@ impl AppCore {
             self.export.draft.size,
             self.displayed_item.and_then(|i| self.export_source_dims(i)),
         )
+    }
+
+    /// Whether the photo on screen has anything for `kind`: the panel greys a category it
+    /// lacks. Known once the preview has read the source; until then all are offered.
+    pub fn export_keep_available(&self, kind: crate::export_panel::MetadataKind) -> bool {
+        self.export_source_metadata().is_none_or(|a| a.get(kind))
+    }
+
+    /// One of the categories unchecking Strip metadata reveals (plan § 3.7).
+    pub fn export_set_keep(&mut self, kind: crate::export_panel::MetadataKind, on: bool) {
+        let mut s = self.export.draft;
+        s.keep.set(kind, on);
+        self.export_edited(s);
     }
 
     pub fn export_set_strip_metadata(&mut self, strip: bool) {

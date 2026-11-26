@@ -4446,6 +4446,7 @@ version = "0.1.0"
 dependencies = [
  "base64",
  "half",
+ "kamadak-exif",
  "libc",
  "little_exif",
  "objc2 0.6.4",

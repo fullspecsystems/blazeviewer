@@ -74,6 +74,10 @@ struct ExportPanelModel: Equatable {
     /// The export is smaller than the original, so "Show at export size" applies (F20).
     var previewResized = false
     var previewOwnSize = false
+    /// What unchecking Strip metadata keeps, by category (camera, copyright, location,
+    /// generation, original profile), and whether this photo has anything in each.
+    var keep: [Bool] = [true, true, false, false, false]
+    var keepAvailable: [Bool] = [true, true, true, true, true]
 }
 
 /// The panel's keyboard-focusable controls (Full Keyboard Access, task #89 Q9).
@@ -291,6 +295,23 @@ struct ExportPanelView: View {
             .toggleStyle(.checkbox)
             .focused($focus, equals: .strip)
             .help("Leave out camera details, dates and location. The color profile is kept.")
+            // Unchecking reveals what to keep (plan § 3.7); a category the photo lacks is
+            // greyed. Location starts off every time.
+            if !p.stripMetadata {
+                VStack(alignment: .leading, spacing: 6) {
+                    ForEach(Array(Self.keepLabels.enumerated()), id: \.offset) { i, label in
+                        Toggle(
+                            label,
+                            isOn: Binding(
+                                get: { p.keep.indices.contains(i) && p.keep[i] },
+                                set: { model.exportSetKeep(i, $0) })
+                        )
+                        .toggleStyle(.checkbox)
+                        .disabled(!(p.keepAvailable.indices.contains(i) && p.keepAvailable[i]))
+                    }
+                }
+                .padding(.leading, 20)
+            }
             // Always present, blank while there's nothing to say (browsing, turning a model),
             // so the rows below never move. "Calculating…" says a preview is being made; no
             // spinner beside it (one sat off-centre and only repeated the word).
@@ -342,6 +363,12 @@ struct ExportPanelView: View {
     }
 
     // MARK: - Helpers
+
+    /// The metadata categories, in the core's order (`MetadataKind`).
+    static let keepLabels = [
+        "Camera & date", "Copyright & credit", "Location", "Generation data",
+        "Original color profile",
+    ]
 
     /// The Format menu's groups: PNG and JPEG, the modern formats, TIFF.
     static func formatGroup(_ code: Int) -> Int {

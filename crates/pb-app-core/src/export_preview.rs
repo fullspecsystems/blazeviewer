@@ -211,6 +211,8 @@ pub struct PreviewResult {
     pub original: Option<DecodedImage>,
     pub export: Result<PreviewExport, String>,
     pub timings: PreviewTimings,
+    /// The metadata categories the source carries (for the panel's greying).
+    pub available: Option<pb_encode::MetadataChoice>,
 }
 
 /// The export side of a preview.
@@ -307,6 +309,9 @@ pub struct PreviewState {
     /// Lay a resized export out at its own size instead of the original's (review F20), so
     /// the viewer's 1:1 shows its real pixels. Both flick sides follow it. Until the mode closes.
     pub own_size: bool,
+    /// Which metadata categories the source carries (from the preview's decode), for the
+    /// panel's greying.
+    pub available: Option<(TickKey, crate::export_panel::KeepMetadata)>,
 }
 
 impl PreviewState {
@@ -409,7 +414,7 @@ impl Default for PreviewWorker {
 struct WorkerCache {
     /// The decoded source of the item being previewed — a setting change never re-decodes
     /// (vital for RAW and captured frames).
-    source: Option<(SourceKey, ExportSource)>,
+    source: Option<(SourceKey, ExportSource, pb_encode::SourceMetadata)>,
     /// Encoded files, newest last, within [`FILES_BUDGET`].
     files: VecDeque<CachedFile>,
     files_bytes: usize,
@@ -474,7 +479,7 @@ fn run_preview(
         queue: req.queued_at.elapsed(),
         ..PreviewTimings::default()
     };
-    let finish = |original, export, mut t: PreviewTimings| {
+    let finish = |original, export, mut t: PreviewTimings, available| {
         t.total = start.elapsed();
         Some(PreviewResult {
             gen: req.gen,
@@ -482,23 +487,25 @@ fn run_preview(
             original,
             export,
             timings: t,
+            available,
         })
     };
 
-    // 1. The source, decoded once per item and frame.
-    if cache.source.as_ref().map(|(k, _)| k) != Some(&req.key.source) {
+    // 1. The source, decoded once per item and frame, with the metadata it carries.
+    if cache.source.as_ref().map(|(k, _, _)| k) != Some(&req.key.source) {
         cache.source = None; // free the last one before decoding the next
         let s = Instant::now();
         match decode_source(req) {
-            Ok(src) => cache.source = Some((req.key.source.clone(), src)),
-            Err(why) => return finish(None, Err(why), t),
+            Ok((src, meta)) => cache.source = Some((req.key.source.clone(), src, meta)),
+            Err(why) => return finish(None, Err(why), t, None),
         }
         t.decode = s.elapsed();
     }
     if stale() {
         return None;
     }
-    let (_, src) = cache.source.as_ref()?;
+    let (_, src, meta) = cache.source.as_ref()?;
+    let available = Some(meta.available(&src.color));
     let source_dims = if req.display_turns % 2 == 1 {
         (src.height, src.width)
     } else {
@@ -535,9 +542,9 @@ fn run_preview(
 
     // 3. The export side.
     match export_side(req, cache, source_dims, stale, &mut t) {
-        Ok(e) => finish(original, Ok(e), t),
+        Ok(e) => finish(original, Ok(e), t, available),
         Err(Stop::Stale) => None,
-        Err(Stop::Failed(why)) => finish(original, Err(why), t),
+        Err(Stop::Failed(why)) => finish(original, Err(why), t, available),
     }
 }
 
@@ -557,7 +564,7 @@ fn export_side(
     let (bytes, notes, dims, prepared) = match cache.file(&req.key) {
         Some(f) => (Arc::clone(&f.bytes), f.notes.clone(), f.dims, None),
         None => {
-            let (_, src) = cache
+            let (_, src, meta) = cache
                 .source
                 .as_ref()
                 .ok_or_else(|| Stop::Failed("the image went away".into()))?;
@@ -565,11 +572,12 @@ fn export_side(
             let spec = PrepareSpec {
                 caps: encoder.caps(),
                 resize: settings.size.resize(),
+                metadata: settings.keep.choice(settings.strip_metadata),
                 ..PrepareSpec::full(req.key.rotation_cw, settings.strip_metadata)
             };
             let s = Instant::now();
             let image = pb_encode::catch_panics(|| {
-                pb_encode::prepare(src.clone(), &spec)
+                pb_encode::prepare_with_metadata(src.clone(), meta, &spec)
                     .map_err(|e| pb_encode::EncodeError::Codec(e.to_string()))
             })
             .map_err(|e| Stop::Failed(e.to_string()))?;
@@ -625,28 +633,34 @@ fn export_side(
     })
 }
 
-/// Decode the request's source at full resolution — the same paths an export takes.
-fn decode_source(req: &PreviewRequest) -> Result<ExportSource, String> {
+/// Decode the request's source at full resolution — the same paths an export takes — with
+/// the metadata the file carries (none for a captured frame).
+fn decode_source(
+    req: &PreviewRequest,
+) -> Result<(ExportSource, pb_encode::SourceMetadata), String> {
     match &req.frame {
         Some(frame) => {
             let cancel = AtomicBool::new(false);
             let img = crate::frame_capture::capture(req.source.as_ref(), req.item, frame, &cancel)
                 .map_err(|e| format!("couldn't read that frame ({e})"))?;
-            Ok(pb_decode::export_source_from_decoded(img))
+            Ok((
+                pb_decode::export_source_from_decoded(img),
+                pb_encode::SourceMetadata::default(),
+            ))
         }
         None => {
             let bytes = req
                 .source
                 .bytes(req.item)
                 .map_err(|e| format!("couldn't read the image ({e})"))?;
-            pb_decode::decode_named_bytes_for_export(&req.key.source.name, &bytes).map_err(|e| {
-                match e {
+            let src = pb_decode::decode_named_bytes_for_export(&req.key.source.name, &bytes)
+                .map_err(|e| match e {
                     pb_decode::ExportDecodeError::Refused(why) => why.to_string(),
                     pb_decode::ExportDecodeError::Decode(e) => {
                         format!("couldn't decode the image ({e})")
                     }
-                }
-            })
+                })?;
+            Ok((src, pb_decode::read_export_metadata(&bytes)))
         }
     }
 }
@@ -669,6 +683,7 @@ fn read_back_jxl(bytes: &[u8]) -> Result<DecodedImage, pb_encode::EncodeError> {
             pb_encode::OutputColor::Icc(icc)
         },
         notes: Vec::new(),
+        metadata: Default::default(),
     };
     Ok(pb_decode::export::display_from_export_image(&img))
 }
@@ -744,6 +759,7 @@ mod tests {
             samples: pb_encode::Samples::U8([255, 0, 0].repeat(32 * 32)),
             color: pb_encode::OutputColor::Icc(pb_encode::icc::display_p3_profile()),
             notes: Vec::new(),
+            metadata: Default::default(),
         };
         std::fs::write(
             &path,

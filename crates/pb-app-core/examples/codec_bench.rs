@@ -138,6 +138,7 @@ fn score(reference: &[[f32; 3]], w: u32, h: u32, bytes: &[u8], codec: &str) -> O
                 OutputColor::Icc(icc)
             },
             notes: Vec::new(),
+            metadata: Default::default(),
         })
     } else {
         pb_decode::decode_bytes(bytes, None, false).ok()?

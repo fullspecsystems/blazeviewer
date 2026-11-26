@@ -197,7 +197,11 @@ fn run_stages(job: &ExportJob, t: &mut ExportTimings) -> Result<ExportOutcome, S
             let img = crate::frame_capture::capture(job.source.as_ref(), job.item, frame, &cancel)
                 .map_err(|e| format!("couldn't read that frame ({e})"))?;
             t.decode = s.elapsed();
-            pb_decode::export_source_from_decoded(img)
+            // A frame carries no file metadata of its own.
+            (
+                pb_decode::export_source_from_decoded(img),
+                pb_encode::SourceMetadata::default(),
+            )
         }
         None => {
             let s = Instant::now();
@@ -217,11 +221,14 @@ fn run_stages(job: &ExportJob, t: &mut ExportTimings) -> Result<ExportOutcome, S
                         }
                     },
                 )?;
+            // What the file carries that the export may copy (allowlisted in `prepare`).
+            let meta = pb_decode::read_export_metadata(&bytes);
             drop(bytes);
             t.decode = s.elapsed();
-            src
+            (src, meta)
         }
     };
+    let (src, meta) = src;
 
     let s = Instant::now();
     // The codec decides what `prepare` reduces to: JPEG flattens alpha onto white and
@@ -234,10 +241,12 @@ fn run_stages(job: &ExportJob, t: &mut ExportTimings) -> Result<ExportOutcome, S
     let spec = pb_encode::PrepareSpec {
         caps: encoder.caps(),
         resize: job.settings.size.resize(),
+        metadata: job.settings.keep.choice(job.settings.strip_metadata),
         ..pb_encode::PrepareSpec::full(job.rotation_cw, job.settings.strip_metadata)
     };
     let image = pb_encode::catch_panics(|| {
-        pb_encode::prepare(src, &spec).map_err(|e| pb_encode::EncodeError::Codec(e.to_string()))
+        pb_encode::prepare_with_metadata(src, &meta, &spec)
+            .map_err(|e| pb_encode::EncodeError::Codec(e.to_string()))
     })
     .map_err(|e| e.to_string())?;
     t.prepare = s.elapsed();

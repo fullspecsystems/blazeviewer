@@ -999,7 +999,9 @@ final class CoreModel {
             canFlick: core.export_preview_can_flick(),
             previewSide: Int(core.export_preview_side()),
             previewResized: core.export_preview_resized(),
-            previewOwnSize: core.export_preview_own_size())
+            previewOwnSize: core.export_preview_own_size(),
+            keep: (0..<5).map { core.export_keep(UInt8($0)) },
+            keepAvailable: (0..<5).map { core.export_keep_available(UInt8($0)) })
     }
 
     // Export panel edits: each goes to the core, which re-signals `PanelsChanged`.
@@ -1017,6 +1019,12 @@ final class CoreModel {
     }
     func exportSetStripMetadata(_ on: Bool) { core.export_set_strip_metadata(on); kick() }
     /// The preview's Export / Original control (0 / 1) — a rebind, both sides are resident.
+    func exportSetKeep(_ kind: Int, _ on: Bool) {
+        core.export_set_keep(UInt8(kind), on)
+        drainEffects()
+        kick()
+    }
+
     func exportSetPreviewOwnSize(_ on: Bool) {
         core.export_set_preview_own_size(on)
         drainEffects()

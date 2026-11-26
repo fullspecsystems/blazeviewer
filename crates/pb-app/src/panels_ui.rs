@@ -166,6 +166,8 @@ pub enum PanelAction {
     ExportPreviewSide(Side),
     /// "Show at export size" (review F20).
     ExportPreviewOwnSize(bool),
+    /// A Strip-metadata-off category (plan § 3.7).
+    ExportKeep(pb_app_core::export_panel::MetadataKind, bool),
     ExportStripMetadata(bool),
     /// The panel's ✕ — leave Export mode.
     ExportClose,
@@ -2859,6 +2861,24 @@ fn export_body(ui: &mut egui::Ui, p: &Palette, ex: &ExportPanel, actions: &mut V
                 actions.push(PanelAction::ExportStripMetadata(strip));
             }
         });
+        // Unchecking reveals what to keep (plan § 3.7); a category the photo lacks is greyed.
+        if !s.strip_metadata {
+            use pb_app_core::export_panel::MetadataKind;
+            for kind in MetadataKind::ALL {
+                let available = ex.preview.available.is_none_or(|a| a.get(kind));
+                ui.add_enabled_ui(available, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.add_space(24.0);
+                        let mut on = s.keep.get(kind);
+                        let r = pb_ui::toggle(ui, p, &mut on);
+                        ui.label(RichText::new(kind.label()).color(p.text));
+                        if r.changed() {
+                            actions.push(PanelAction::ExportKeep(kind, on));
+                        }
+                    });
+                });
+            }
+        }
         // The live preview (rung 3): the exact file size once it's made, and which side of
         // the flick is on screen (`Y` flicks; a hold peeks).
         let size = ex.preview.size_text();

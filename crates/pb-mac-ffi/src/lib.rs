@@ -1950,6 +1950,26 @@ impl AppCoreHandle {
         }
     }
 
+    /// Whether unchecking Strip metadata keeps category `kind` (0 camera, 1 copyright,
+    /// 2 location, 3 generation, 4 original profile).
+    fn export_keep(&self, kind: u8) -> bool {
+        pb_app_core::export_panel::MetadataKind::from_code(kind)
+            .is_some_and(|k| self.core.export.draft.keep.get(k))
+    }
+
+    fn export_set_keep(&mut self, kind: u8, on: bool) {
+        if let Some(k) = pb_app_core::export_panel::MetadataKind::from_code(kind) {
+            self.core.now = Instant::now();
+            self.core.export_set_keep(k, on);
+        }
+    }
+
+    /// Whether the photo on screen has anything in category `kind` (greyed otherwise).
+    fn export_keep_available(&self, kind: u8) -> bool {
+        pb_app_core::export_panel::MetadataKind::from_code(kind)
+            .is_some_and(|k| self.core.export_keep_available(k))
+    }
+
     /// The export is smaller than the original: "Show at export size" applies (F20).
     fn export_preview_resized(&self) -> bool {
         self.export_snapshot
@@ -5348,6 +5368,9 @@ mod ffi {
         fn export_preview_can_flick(&self) -> bool;
         fn export_preview_side(&self) -> u8;
         fn export_set_preview_side(&mut self, side: u8);
+        fn export_keep(&self, kind: u8) -> bool;
+        fn export_set_keep(&mut self, kind: u8, on: bool);
+        fn export_keep_available(&self, kind: u8) -> bool;
         fn export_preview_resized(&self) -> bool;
         fn export_preview_own_size(&self) -> bool;
         fn export_set_preview_own_size(&mut self, on: bool);

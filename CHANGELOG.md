@@ -48,9 +48,12 @@ with any pre-release suffix carried only by the tag.
   in PNG, TIFF and JPEG XL; resizing is done in linear light, and transparency in a
   JPEG becomes white. WebP and JPEG XL are Mac-only in this release; Windows and
   Linux get them next. HDR photos are saved
-  as SDR for now, and the confirmation says so. Exports carry no metadata — no
-  camera details and no location — and never appear in your system's recent
-  files. The save dialog
+  as SDR for now, and the confirmation says so. Exports carry no metadata (no
+  camera details, no location) unless you uncheck Strip metadata. Then you choose
+  what to keep: camera & date and copyright (on to start), location (off every
+  time), AI generation data (PNG to PNG), and the original color profile. Only
+  those details are copied, never maker notes, serial numbers or thumbnails.
+  Exports never appear in your system's recent files. The save dialog
   opens beside the photo (or in your pinned "Open files in" folder); export from
   the same folder again and it opens where you put the last one. Nothing about
   where you export is kept after you quit. On a Mac, click the "Exported …"

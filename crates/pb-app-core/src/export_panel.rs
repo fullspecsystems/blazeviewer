@@ -446,6 +446,108 @@ pub const AVIF_QUALITY_DEFAULT: u8 = 85;
 pub const JXL_QUALITY_DEFAULT: u8 = 85;
 pub const HEIC_QUALITY_DEFAULT: u8 = 90;
 
+/// What unchecking *Strip metadata* copies into the export (plan § 3.7). Camera & date and
+/// Copyright & credit start on; Location is off at every entry and never remembered;
+/// Generation data and the original colour profile are opt-in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct KeepMetadata {
+    pub camera: bool,
+    pub copyright: bool,
+    pub location: bool,
+    pub generation: bool,
+    pub profile: bool,
+}
+
+/// One of the [`KeepMetadata`] categories, in panel order (the FFI's 0…4).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MetadataKind {
+    Camera,
+    Copyright,
+    Location,
+    Generation,
+    Profile,
+}
+
+impl MetadataKind {
+    pub const ALL: [MetadataKind; 5] = [
+        MetadataKind::Camera,
+        MetadataKind::Copyright,
+        MetadataKind::Location,
+        MetadataKind::Generation,
+        MetadataKind::Profile,
+    ];
+
+    /// The checkbox's label (user-facing copy: US English).
+    pub fn label(self) -> &'static str {
+        match self {
+            MetadataKind::Camera => "Camera & date",
+            MetadataKind::Copyright => "Copyright & credit",
+            MetadataKind::Location => "Location",
+            MetadataKind::Generation => "Generation data",
+            MetadataKind::Profile => "Original color profile",
+        }
+    }
+
+    pub fn from_code(c: u8) -> Option<MetadataKind> {
+        MetadataKind::ALL.get(c as usize).copied()
+    }
+}
+
+impl KeepMetadata {
+    pub fn get(&self, k: MetadataKind) -> bool {
+        match k {
+            MetadataKind::Camera => self.camera,
+            MetadataKind::Copyright => self.copyright,
+            MetadataKind::Location => self.location,
+            MetadataKind::Generation => self.generation,
+            MetadataKind::Profile => self.profile,
+        }
+    }
+
+    pub fn set(&mut self, k: MetadataKind, on: bool) {
+        match k {
+            MetadataKind::Camera => self.camera = on,
+            MetadataKind::Copyright => self.copyright = on,
+            MetadataKind::Location => self.location = on,
+            MetadataKind::Generation => self.generation = on,
+            MetadataKind::Profile => self.profile = on,
+        }
+    }
+
+    /// What `prepare` copies for these settings: nothing while *Strip metadata* is on.
+    pub fn choice(self, strip: bool) -> pb_encode::MetadataChoice {
+        if strip {
+            return pb_encode::MetadataChoice::NONE;
+        }
+        pb_encode::MetadataChoice {
+            camera: self.camera,
+            copyright: self.copyright,
+            location: self.location,
+            generation: self.generation,
+            original_profile: self.profile,
+        }
+    }
+
+    /// The categories a source carries ([`pb_encode::SourceMetadata::available`]).
+    pub fn from_choice(c: pb_encode::MetadataChoice) -> KeepMetadata {
+        KeepMetadata {
+            camera: c.camera,
+            copyright: c.copyright,
+            location: c.location,
+            generation: c.generation,
+            profile: c.original_profile,
+        }
+    }
+
+    pub const NONE: KeepMetadata = KeepMetadata {
+        camera: false,
+        copyright: false,
+        location: false,
+        generation: false,
+        profile: false,
+    };
+}
+
 /// What the panel edits and an export request freezes. Each lossy format keeps its own
 /// quality (the scales differ: JPEG 85 is not AVIF 85), and WebP and JPEG XL their lossless
 /// switch, so switching formats back and forth never loses a setting.
@@ -463,6 +565,8 @@ pub struct ExportSettings {
     pub size: SizeChoice,
     /// *Strip metadata* — on at every entry to the mode, never persisted (plan Q7).
     pub strip_metadata: bool,
+    /// What unchecking it keeps. Location is never persisted.
+    pub keep: KeepMetadata,
 }
 
 impl Default for ExportSettings {
@@ -496,6 +600,13 @@ impl ExportSettings {
             png: p.png_compression,
             size: p.size,
             strip_metadata: true,
+            keep: KeepMetadata {
+                camera: p.keep_camera,
+                copyright: p.keep_copyright,
+                location: false, // never remembered (plan § 3.7)
+                generation: p.keep_generation,
+                profile: p.keep_profile,
+            },
         }
     }
 
@@ -512,6 +623,10 @@ impl ExportSettings {
             jxl_lossless: self.jxl_lossless,
             png_compression: self.png,
             size: self.size,
+            keep_camera: self.keep.camera,
+            keep_copyright: self.keep.copyright,
+            keep_generation: self.keep.generation,
+            keep_profile: self.keep.profile,
         }
     }
 
@@ -612,6 +727,16 @@ impl ExportSettings {
             png: PngCompression::Balanced,
             size: self.size,
             strip_metadata: self.strip_metadata,
+            // What's kept shapes the file only when not stripping, and generation data only
+            // rides in PNG (the only format that writes it).
+            keep: if self.strip_metadata {
+                KeepMetadata::NONE
+            } else {
+                KeepMetadata {
+                    generation: self.keep.generation && self.format == FormatChoice::Png,
+                    ..self.keep
+                }
+            },
         };
         match self.format {
             FormatChoice::Png => n.png = self.png,
@@ -686,6 +811,11 @@ pub struct ExportPrefs {
     /// Written as `size = "long 2048"` / `"width 1500"` / `"height 800"` / `"50%"` /
     /// `"full"`. Rung 2's first build wrote `long_edge = 2048` (0 = full); that is still read.
     pub size: SizeChoice,
+    /// What unchecking Strip metadata keeps — Location deliberately absent (never remembered).
+    pub keep_camera: bool,
+    pub keep_copyright: bool,
+    pub keep_generation: bool,
+    pub keep_profile: bool,
 }
 
 impl Default for ExportPrefs {
@@ -701,6 +831,10 @@ impl Default for ExportPrefs {
             jxl_lossless: false,
             png_compression: PngCompression::Balanced,
             size: SizeChoice::Full,
+            keep_camera: true,
+            keep_copyright: true,
+            keep_generation: false,
+            keep_profile: false,
         }
     }
 }
@@ -735,6 +869,16 @@ impl ExportPrefs {
         }
         if let Some(b) = field(t, "jxl_lossless") {
             p.jxl_lossless = b;
+        }
+        for (key, slot) in [
+            ("keep_camera", &mut p.keep_camera),
+            ("keep_copyright", &mut p.keep_copyright),
+            ("keep_generation", &mut p.keep_generation),
+            ("keep_profile", &mut p.keep_profile),
+        ] {
+            if let Some(b) = field(t, key) {
+                *slot = b;
+            }
         }
         if let Some(c) = field(t, "png_compression") {
             p.png_compression = c;
@@ -796,6 +940,41 @@ pub enum ExportKey {
     Leave,
 }
 
+/// The panel's note with Strip metadata off: what the export copies and what it leaves out.
+fn metadata_note(s: &ExportSettings) -> String {
+    let k = s.keep;
+    let mut kept: Vec<&str> = Vec::new();
+    if k.camera {
+        kept.push("camera & date");
+    }
+    if k.copyright {
+        kept.push("copyright & credit");
+    }
+    if k.location {
+        kept.push("location");
+    }
+    if k.generation && s.format == FormatChoice::Png {
+        kept.push("generation data");
+    }
+    let profile = if k.profile {
+        "the original color profile is kept as is"
+    } else {
+        "the color profile is kept"
+    };
+    let mut note = match kept.as_slice() {
+        [] => format!("No camera details, dates or location are copied; {profile}."),
+        [one] => format!("Keeps {one}; {profile}."),
+        [init @ .., last] => format!("Keeps {} and {last}; {profile}.", init.join(", ")),
+    };
+    if !k.location && (k.camera || k.copyright) {
+        note.push_str(" Location is left out.");
+    }
+    if k.generation && s.format != FormatChoice::Png {
+        note.push_str(" Generation data is kept only in PNG exports.");
+    }
+    note
+}
+
 /// What the panel model depends on — compared each tick so the native shells re-pull only
 /// when something they show changed (no per-tick model build or allocation).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -821,6 +1000,8 @@ pub struct PreviewReadout {
     pub resized: bool,
     /// "Show at export size" is on.
     pub own_size: bool,
+    /// Which metadata categories the source carries, once known (the panel greys the rest).
+    pub available: Option<KeepMetadata>,
 }
 
 impl PreviewReadout {
@@ -942,12 +1123,7 @@ impl ExportPanel {
                     .into(),
             );
         } else {
-            // Honest about rung 2's gap: the metadata categories aren't written yet.
-            notes.push(
-                "The original color profile is kept as is. Camera details, dates and location \
-                 aren't copied yet."
-                    .into(),
-            );
+            notes.push(metadata_note(&settings));
         }
 
         let can_export = source.as_ref().is_some_and(|s| s.blocked.is_none()) && too_big.is_none();
@@ -1291,10 +1467,82 @@ mod tests {
         s.strip_metadata = false;
         let p = ExportPanel::build(s, src(10, 10));
         assert!(p.notes.iter().any(|n| n.contains("transparency")));
-        assert!(
-            p.notes.iter().any(|n| n.contains("aren't copied yet")),
-            "unchecked: honest that nothing but the profile is kept (rung 2's gap)"
+        let note = |s: ExportSettings| {
+            ExportPanel::build(s, src(10, 10))
+                .notes
+                .into_iter()
+                .find(|n| n.contains("color profile"))
+                .unwrap()
+        };
+        // The defaults when Strip is unchecked: camera and copyright, not location.
+        assert_eq!(
+            note(s),
+            "Keeps camera & date and copyright & credit; the color profile is kept. Location \
+             is left out."
         );
+        s.keep.location = true;
+        s.keep.profile = true;
+        assert_eq!(
+            note(s),
+            "Keeps camera & date, copyright & credit and location; the original color profile \
+             is kept as is."
+        );
+        s.keep = KeepMetadata {
+            generation: true,
+            ..KeepMetadata::NONE
+        };
+        assert_eq!(
+            note(s),
+            "No camera details, dates or location are copied; the color profile is kept. \
+             Generation data is kept only in PNG exports."
+        );
+    }
+
+    /// Location is never remembered (plan § 3.7); the other categories are, and Strip itself
+    /// always starts checked (Q7). What's kept shapes the file only when not stripping.
+    #[test]
+    fn metadata_choices_persist_except_location() {
+        let mut s = ExportSettings::default();
+        assert_eq!(
+            s.keep,
+            KeepMetadata {
+                camera: true,
+                copyright: true,
+                ..KeepMetadata::NONE
+            },
+            "the defaults"
+        );
+        s.strip_metadata = false;
+        s.keep = KeepMetadata {
+            camera: false,
+            copyright: true,
+            location: true,
+            generation: true,
+            profile: true,
+        };
+        let back = ExportSettings::from_prefs(&s.to_prefs());
+        assert!(back.strip_metadata, "Strip starts checked again");
+        assert_eq!(
+            back.keep,
+            KeepMetadata {
+                location: false,
+                ..s.keep
+            }
+        );
+        let toml = toml::Value::try_from(s.to_prefs()).unwrap();
+        assert_eq!(ExportPrefs::from_value(&toml), s.to_prefs());
+        // Stripping: the choices don't shape the file (the preview cache can share it).
+        let mut a = s;
+        a.strip_metadata = true;
+        let mut b = a;
+        b.keep = KeepMetadata::NONE;
+        assert_eq!(a.normalized(), b.normalized());
+        // Generation data shapes only a PNG.
+        let mut c = s;
+        c.format = FormatChoice::Jpeg;
+        let mut d = c;
+        d.keep.generation = false;
+        assert_eq!(c.normalized(), d.normalized());
     }
 
     #[test]
