@@ -112,8 +112,8 @@ cc = "1"
 # native build, unlike WebP and JPEG XL).
 pb-encode = { path = "../pb-encode", features = ["png", "jpeg", "avif", "heic", "tiff"] }
 png = "0.18"
-# 3MF fixtures (a 3MF is a ZIP). Same major version as pb-mesh / pb-source.
-zip = { version = "2", default-features = false, features = ["deflate"] }
+# 3MF fixtures (a 3MF is a ZIP). Same version and features as pb-mesh / pb-source.
+zip = { version = "9.8", default-features = false, features = ["deflate-flate2"] }
 
 # Throwaway HEIC A/B tools. `heic_compare` calls the feature-gated LibHeifDecoder
 # directly, so it only builds with `--features libheif` (keeps `--all-targets`

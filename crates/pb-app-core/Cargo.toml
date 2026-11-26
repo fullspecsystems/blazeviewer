@@ -105,7 +105,7 @@ qrcode = { version = "0.14", default-features = false }
 # Build tiny ZIPs for the archive-open tests (video-only archives must open —
 # scan.rs; encrypted archives for the password-cache auto-try tests). `aes-crypto`
 # lets the tests WRITE AES-encrypted entries; pb-source already links it to read them.
-zip = { version = "2", default-features = false, features = ["deflate", "aes-crypto"] }
+zip = { version = "9.8", default-features = false, features = ["deflate-flate2", "aes-crypto"] }
 # Build tiny tars for the archive-open dispatch tests (#102). Same version as
 # pb-source, so the lockfile is unchanged.
 tar = { version = "0.4.46", default-features = false }

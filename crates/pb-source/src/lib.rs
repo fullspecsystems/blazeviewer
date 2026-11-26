@@ -536,7 +536,13 @@ impl ZipSource {
             if entry.is_dir() {
                 continue;
             }
-            let name = normalize_entry_name(entry.name());
+            // zip 9 decodes names on demand: UTF-8 when the bytes are valid UTF-8,
+            // otherwise CP437, which maps every byte — so this can't fail today. If it
+            // ever does, the entry is skipped like any other unindexable one.
+            let Ok(raw_name) = entry.name() else {
+                continue;
+            };
+            let name = normalize_entry_name(&raw_name);
             if !is_supported(&ext_of(&name)) {
                 continue;
             }
@@ -648,7 +654,8 @@ impl ItemSource for ZipSource {
                     "archive entry too large to allocate",
                 )
             })?;
-            file.take(size).read_to_end(&mut buf)?;
+            let verify = file.encrypted();
+            read_zip_entry(file, size, verify, &mut buf)?;
         }
         self.checkin(archive);
         Ok(buf)
@@ -671,9 +678,19 @@ impl ItemSource for ZipSource {
             };
             // Cap at the smaller of the request and the entry's real size; reserve
             // recoverably so a lying header can't OOM us.
-            let want = (max as u64).min(file.size()) as usize;
-            let _ = buf.try_reserve(want);
-            file.take(want as u64).read_to_end(&mut buf)?;
+            let size = file.size();
+            let want = (max as u64).min(size);
+            let _ = buf.try_reserve(want as usize);
+            if want == size {
+                // The "prefix" is the whole entry: read it the verified way, like `bytes`.
+                // A true prefix stops short of the end, so it can't be verified (the
+                // CRC and the AES HMAC cover the whole entry); the decoders that eat it
+                // treat it as hostile input like any other bytes.
+                let verify = file.encrypted();
+                read_zip_entry(file, size, verify, &mut buf)?;
+            } else {
+                file.take(want).read_to_end(&mut buf)?;
+            }
         }
         self.checkin(archive);
         Ok(buf)
@@ -695,10 +712,13 @@ impl ItemSource for ZipSource {
         let Ok(archive) = self.checkout() else {
             return Vec::new();
         };
+        // zip 9 decodes each name on demand (see `ZipSource::open`); one that can't be
+        // decoded can't be looked up by name either, so it is skipped.
         let names: Vec<String> = archive
             .file_names()
+            .filter_map(Result::ok)
             .filter(|n| !n.ends_with('/') && zip_dir_of(n) == dir)
-            .map(str::to_string)
+            .map(|n| n.into_owned())
             .collect();
         self.checkin(archive);
         names
@@ -737,7 +757,8 @@ impl ItemSource for ZipSource {
                     "archive entry too large to allocate",
                 )
             })?;
-            file.take(size).read_to_end(&mut buf)?;
+            let verify = file.encrypted();
+            read_zip_entry(file, size, verify, &mut buf)?;
         }
         self.checkin(archive);
         Ok(buf)
@@ -1321,6 +1342,36 @@ fn zip_to_io(e: zip::result::ZipError) -> io::Error {
     }
 }
 
+/// Read a whole ZIP entry into `buf`: at most its declared `size`, then, for an encrypted
+/// entry (`verify`), one probe read that must report end-of-entry.
+///
+/// The probe is load-bearing. zip runs its end-of-entry checks only when a read returns
+/// EOF: the CRC-32 and, for WinZip-AES, the HMAC, including over ciphertext that a
+/// deflate stream ended before reaching (task #155, RUSTSEC-2026-0545). `take(size)`
+/// alone never makes that read, so without the probe an empty or deflated AES entry
+/// would still be returned unauthenticated. An encrypted entry that yields bytes past its
+/// declared size is refused rather than truncated (zip 9 refuses it as well).
+///
+/// An unencrypted entry skips the probe, as before zip 9: its CRC authenticates nothing
+/// (anyone who can change the bytes can change the CRC), and a photo with a damaged byte
+/// still shows, glitch and all, where the check would turn it into an error (the lenient-
+/// decode direction, task #127).
+fn read_zip_entry(
+    mut file: impl Read,
+    size: u64,
+    verify: bool,
+    buf: &mut Vec<u8>,
+) -> io::Result<()> {
+    (&mut file).take(size).read_to_end(buf)?;
+    if verify && file.read(&mut [0u8; 1])? != 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "archive entry is larger than its declared size",
+        ));
+    }
+    Ok(())
+}
+
 /// Map a 7z error onto [`OpenError`], distinguishing the "needs a password" cases
 /// (an encrypted archive or encrypted header) from a genuinely unreadable one, so
 /// the app shows the right message.
@@ -1677,6 +1728,228 @@ mod tests {
         assert!(wrong.bytes(0).is_err(), "wrong password -> read fails");
 
         let _ = std::fs::remove_file(&zip);
+    }
+
+    /// One WinZip-AES entry, written in memory (no data descriptor: the cursor seeks).
+    fn aes_zip_bytes(name: &str, data: &[u8], method: CompressionMethod, pw: &str) -> Vec<u8> {
+        let mut zw = ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        let opts = SimpleFileOptions::default()
+            .compression_method(method)
+            .with_aes_encryption(AesMode::Aes256, pw);
+        zw.start_file(name, opts).unwrap();
+        zw.write_all(data).unwrap();
+        zw.finish().unwrap().into_inner()
+    }
+
+    /// Offsets of a single-entry ZIP's records: (central directory start, the local
+    /// header's extra field range, the central header's extra field range).
+    fn single_entry_layout(z: &[u8]) -> (usize, std::ops::Range<usize>, std::ops::Range<usize>) {
+        let u16_at = |p: usize| u16::from_le_bytes([z[p], z[p + 1]]) as usize;
+        let eocd = z.len() - 22; // no archive comment
+        assert_eq!(&z[eocd..eocd + 4], b"PK\x05\x06");
+        let cd = u32::from_le_bytes(z[eocd + 16..eocd + 20].try_into().unwrap()) as usize;
+        assert_eq!(&z[..4], b"PK\x03\x04");
+        assert_eq!(&z[cd..cd + 4], b"PK\x01\x02");
+        let local_extra = 30 + u16_at(26)..30 + u16_at(26) + u16_at(28);
+        let central_extra = cd + 46 + u16_at(cd + 28)..cd + 46 + u16_at(cd + 28) + u16_at(cd + 30);
+        (cd, local_extra, central_extra)
+    }
+
+    /// RUSTSEC-2026-0545, the empty case: zip 2.x returned a WinZip-AES entry with no
+    /// payload as a clean, empty read without ever checking its HMAC. An empty entry
+    /// still carries an authentication code, and a wrong one must be refused.
+    #[test]
+    fn zip_aes_empty_entry_with_a_bad_auth_code_is_refused() {
+        let good = aes_zip_bytes("a.jpg", b"", CompressionMethod::Stored, "pw");
+        let (cd, _, _) = single_entry_layout(&good);
+        let mut bad = good.clone();
+        bad[cd - 1] ^= 0x5A; // the last byte of the 10-byte auth code, just before the directory
+
+        let good_path = temp_path("aes_empty_good", "zip");
+        let bad_path = temp_path("aes_empty_bad", "zip");
+        std::fs::write(&good_path, &good).unwrap();
+        std::fs::write(&bad_path, &bad).unwrap();
+
+        let ok = ZipSource::open(&good_path, Some("pw".into()), is_img).unwrap();
+        assert_eq!(
+            ok.bytes(0).unwrap(),
+            b"",
+            "an authentic empty entry reads empty"
+        );
+        assert!(ok.password_ok());
+
+        let tampered = ZipSource::open(&bad_path, Some("pw".into()), is_img).unwrap();
+        assert!(
+            tampered.bytes(0).is_err(),
+            "an empty AES entry with a bad auth code must not read as clean"
+        );
+        assert!(!tampered.password_ok(), "nor validate a password");
+
+        let _ = std::fs::remove_file(&good_path);
+        let _ = std::fs::remove_file(&bad_path);
+    }
+
+    /// RUSTSEC-2026-0545, the early-end case: a deflate stream ends at its final block, so
+    /// the decompressor can stop before it has pulled the whole ciphertext through the AES
+    /// reader. zip 2.x then never checked the HMAC; zip 9 checks it at end-of-entry, but
+    /// only if the caller reads to EOF rather than stopping at the declared size.
+    ///
+    /// Built from a Stored AES entry whose plaintext is a deflate stream followed by
+    /// 256 KiB of trailing bytes the stream never reaches, re-labelled as Deflate (AE-2,
+    /// so no CRC hides the result: only the HMAC can catch the tamper).
+    /// An unencrypted entry whose bytes no longer match its CRC still reads (as it did
+    /// before zip 9): the decoder shows what it can. Only encrypted entries are verified.
+    #[test]
+    fn a_plain_entry_with_a_bad_checksum_still_reads() {
+        let mut zw = ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        let opts = SimpleFileOptions::default().compression_method(CompressionMethod::Stored);
+        zw.start_file("a.jpg", opts).unwrap();
+        zw.write_all(b"photo bytes").unwrap();
+        let mut z = zw.finish().unwrap().into_inner();
+        let at = z
+            .windows(11)
+            .position(|w| w == b"photo bytes")
+            .expect("stored data");
+        z[at] = b'P'; // the data changes; both headers keep the old CRC
+
+        let path = temp_path("plain_bad_crc", "zip");
+        std::fs::write(&path, &z).unwrap();
+        let src = ZipSource::open(&path, None, is_img).unwrap();
+        assert_eq!(src.bytes(0).unwrap(), b"Photo bytes");
+        assert_eq!(src.bytes_prefix(0, 1 << 20).unwrap(), b"Photo bytes");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn zip_aes_deflate_tail_is_authenticated() {
+        use flate2::{write::DeflateEncoder, Compression};
+        let original: Vec<u8> = (0..100u8).collect();
+        let mut enc = DeflateEncoder::new(Vec::new(), Compression::default());
+        enc.write_all(&original).unwrap();
+        let mut plain = enc.finish().unwrap();
+        plain.extend((0..256 * 1024u32).map(|i| (i % 253) as u8));
+
+        let mut good = aes_zip_bytes("a.jpg", &plain, CompressionMethod::Stored, "pw");
+        let (cd, local_extra, central_extra) = single_entry_layout(&good);
+        for extra in [local_extra, central_extra] {
+            // The 0x9901 AES extra field: id, size 7, vendor version, "AE", strength, method.
+            let p = extra.start
+                + good[extra.clone()]
+                    .windows(4)
+                    .position(|w| w == [0x01, 0x99, 0x07, 0x00])
+                    .expect("AES extra field");
+            assert_eq!(&good[p + 6..p + 8], b"AE");
+            good[p + 4..p + 6].copy_from_slice(&2u16.to_le_bytes()); // AE-2: no CRC
+            good[p + 9..p + 11].copy_from_slice(&8u16.to_le_bytes()); // Deflate
+        }
+        let len = (original.len() as u32).to_le_bytes();
+        good[14..18].fill(0); // local CRC (AE-2 stores 0)
+        good[22..26].copy_from_slice(&len); // local uncompressed size
+        good[cd + 16..cd + 20].fill(0); // central CRC
+        good[cd + 24..cd + 28].copy_from_slice(&len); // central uncompressed size
+
+        let mut bad = good.clone();
+        bad[cd - 10 - 1000] ^= 0x5A; // ciphertext in the tail the inflater never reads
+
+        let good_path = temp_path("aes_tail_good", "zip");
+        let bad_path = temp_path("aes_tail_bad", "zip");
+        std::fs::write(&good_path, &good).unwrap();
+        std::fs::write(&bad_path, &bad).unwrap();
+
+        let ok = ZipSource::open(&good_path, Some("pw".into()), is_img).unwrap();
+        assert_eq!(
+            ok.bytes(0).unwrap(),
+            original,
+            "the untampered entry inflates"
+        );
+        assert!(ok.password_ok());
+
+        let tampered = ZipSource::open(&bad_path, Some("pw".into()), is_img).unwrap();
+        assert!(
+            tampered.bytes(0).is_err(),
+            "tampered ciphertext past the deflate stream's end must fail the HMAC"
+        );
+        assert!(!tampered.password_ok());
+
+        let _ = std::fs::remove_file(&good_path);
+        let _ = std::fs::remove_file(&bad_path);
+    }
+
+    /// A STORED ZIP built by hand the way Bambu Studio writes its 3MFs (the generator is
+    /// pb-mesh's `stale_zip64_package`): every central-directory entry carries a ZIP64
+    /// extra field whose local-header offset is **wrong**, beside a right 32-bit one. The
+    /// spec applies the ZIP64 value only when the 32-bit field is `0xFFFFFFFF`.
+    fn stale_zip64_zip(files: &[(&str, &[u8])]) -> Vec<u8> {
+        let (mut out, mut central) = (Vec::new(), Vec::new());
+        for (name, data) in files {
+            let offset = out.len() as u32;
+            let (crc, len, name_len) =
+                (crc32fast::hash(data), data.len() as u32, name.len() as u16);
+            out.extend(0x0403_4b50u32.to_le_bytes());
+            for v in [45u16, 0, 0, 0, 0] {
+                out.extend(v.to_le_bytes()); // version, flags, STORED, time, date
+            }
+            for v in [crc, len, len] {
+                out.extend(v.to_le_bytes());
+            }
+            out.extend(name_len.to_le_bytes());
+            out.extend(0u16.to_le_bytes());
+            out.extend(name.as_bytes());
+            out.extend(*data);
+
+            central.extend(0x0201_4b50u32.to_le_bytes());
+            for v in [45u16, 45, 0, 0, 0, 0] {
+                central.extend(v.to_le_bytes());
+            }
+            for v in [crc, len, len] {
+                central.extend(v.to_le_bytes());
+            }
+            for v in [name_len, 28, 0, 0, 0] {
+                central.extend(v.to_le_bytes()); // name, extra, comment, disk, internal attrs
+            }
+            central.extend(0u32.to_le_bytes()); // external attrs
+            central.extend(offset.to_le_bytes()); // the RIGHT offset
+            central.extend(name.as_bytes());
+            central.extend(1u16.to_le_bytes()); // ZIP64 extended information
+            central.extend(24u16.to_le_bytes());
+            central.extend(u64::from(len).to_le_bytes());
+            central.extend(u64::from(len).to_le_bytes());
+            central.extend((u64::from(offset) + 41_013).to_le_bytes()); // the STALE offset
+        }
+        let cd_offset = out.len() as u32;
+        let cd_len = central.len() as u32;
+        out.extend(central);
+        out.extend(0x0605_4b50u32.to_le_bytes());
+        let n = files.len() as u16;
+        for v in [0u16, 0, n, n] {
+            out.extend(v.to_le_bytes());
+        }
+        out.extend(cd_len.to_le_bytes());
+        out.extend(cd_offset.to_le_bytes());
+        out.extend(0u16.to_le_bytes());
+        out
+    }
+
+    /// zip 2.x trusted the stale ZIP64 offset and refused the whole archive as "Could not
+    /// find EOCD", so a ZIP saved this way (Bambu Studio's 3MFs, and any other tool that
+    /// writes ZIP64 extras like it) would not open as an archive door.
+    #[test]
+    fn zip_with_stale_zip64_offsets_opens_and_reads() {
+        let path = temp_path("stale_zip64", "zip");
+        std::fs::write(
+            &path,
+            stale_zip64_zip(&[("b.png", b"second"), ("a.jpg", b"first")]),
+        )
+        .unwrap();
+        let src = match ZipSource::open(&path, None, is_img) {
+            Ok(src) => src,
+            Err(e) => panic!("a valid 32-bit offset wins over a stale ZIP64 one: {e:?}"),
+        };
+        assert_eq!(src.len(), 2);
+        assert_eq!(src.name(0), "a.jpg");
+        assert_eq!(src.bytes(0).unwrap(), b"first");
+        assert_eq!(src.bytes(1).unwrap(), b"second");
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
