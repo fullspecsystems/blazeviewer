@@ -343,6 +343,43 @@ pb-decode `an_unturned_model_exports_its_nominal_still` and the pb-app-core
 `an_unturned_model_exports_its_still` (an STL exported to a file, which fails without the
 route).
 
+### 2026-11-26 (later) — roll: trackpad twist, Option/Alt+drag (Mac session)
+
+Owner: "what I need is a roll, and two finger twist is perfect for this - so if I have an
+object that's upside down, I can rotate it right side up", with Option (Alt on Windows) for
+no trackpad. Asked against three alternatives (Option+drag trackball tumble, `R` lays it on its
+next side, free rotation always); roll was the pick.
+
+- `LiveView.roll` turns the camera's right/up about its line of sight (`LiveView::camera`).
+  The target stays on that line, so the model rolls about its own centre on screen, wherever it
+  was slid to. The eye doesn't move; the lights are camera-relative, so they stay put on screen.
+  `is_home` and `reset` cover it, and the frame carries it, so Export / Copy / Describe of a
+  rolled view capture it with no other change.
+- `roll_by(radians)` (counterclockwise positive, as `NSEvent.rotation`) for the twist;
+  `roll_by_drag(dx)` for Option+drag: right is clockwise, at the orbit's rate (half a turn
+  across the short side). The vertical part of an Option+drag is ignored.
+- A drag on a rolled model is un-rolled first (`unroll`), so it still turns the way the
+  pointer moves. The turntable axis (and `P`) is unchanged by a roll, as the owner was told.
+- The glide's pole test was "vy stops if elevation didn't change", which a roll breaks (screen
+  vertical can be a pure turn). Now `LiveView::stop_at_poles` takes out only the component that
+  pushes past the pole the camera rests on, in the rolled frame (`live_model_stop_at_poles`).
+- Input: new `CoreEvent::Twist { degrees }` (Mac `rotate(with:)` → FFI `twist`); a photo
+  ignores it. `pan_by_pixels` routes Alt → roll, then Shift → slide, else orbit. Like zoom and
+  the slide, a roll leaves the turntable spinning and is never thrown.
+- **Verified:** pb-mesh 53 (rolls about the model's centre, CCW positive, eye fixed; drag
+  rolls clockwise at the orbit rate; a rolled drag follows the pointer; pole stop in the
+  rolled frame), pb-app-core 1193 (twist rolls and keeps spinning; photos ignore it;
+  Option+drag rolls and is never thrown; a rolled model's vertical flick glides), clippy,
+  Windows clippy cross-check. Mac test instance (cmux-cua Option drag, traced): every event
+  arrived with alt; 844 px rolled the model 90° clockwise, as computed. An earlier traced
+  drag had jumps to a second pointer position (the owner's own mouse while my window was
+  briefly in front), which explains the odd results of the first Shift and Option tries and,
+  probably, a slideshow that started during one of them.
+- **Not verified:** a real trackpad twist (cmux-cua can't synthesize one; the FFI and handler
+  are trivial, and the core path is tested), and Windows at runtime. ⚠ Windows: Alt pressed
+  and released can activate the menu bar; check whether an Alt+drag leaves the menu bar focused
+  afterwards, and if it does, consider Ctrl+drag there instead.
+
 ### 2026-11-26 — Shift+drag slides a model (Mac session)
 
 The owner asked for the usual 3D-app modifier for changing what a drag does. Shift is the

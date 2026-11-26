@@ -587,6 +587,13 @@ final class CoreModel {
         drainEffects()
     }
 
+    /// Trackpad twist (incremental rotation in degrees, counterclockwise positive).
+    func twist(degrees: Float) {
+        core.twist(degrees)
+        kick()
+        drainEffects()
+    }
+
     /// Trackpad pinch (incremental magnification).
     func pinch(delta: Float) {
         core.pinch(delta)

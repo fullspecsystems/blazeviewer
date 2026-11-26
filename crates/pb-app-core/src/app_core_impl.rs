@@ -874,6 +874,10 @@ impl AppCore {
             CoreEvent::Pinch { delta } => {
                 self.zoom_about_cursor(1.0 + delta * PINCH_GAIN);
             }
+            // Trackpad twist: roll a 3D model (a photo has nothing to roll).
+            CoreEvent::Twist { degrees } => {
+                self.live_model_roll(degrees.to_radians());
+            }
             // Trackpad double-tap ("smart magnify"): toggle 100%, sharing the `0` / menu path.
             CoreEvent::DoubleTap => self.dispatch_action(Action::ToggleOriginal),
             // A touch pan ended in a flick — glide on, decaying (see `PanInertia`).

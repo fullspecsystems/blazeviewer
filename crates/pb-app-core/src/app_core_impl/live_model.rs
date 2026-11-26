@@ -5,7 +5,8 @@
 //! The routing rule (owner decision D1): once the model on screen is ready, the input that would
 //! pan or zoom a photo turns or zooms the model instead. That covers drag, the two-finger swipe,
 //! pinch, the scroll-wheel zoom, the held `=`/`-` keys and the arrows; with Shift held, a drag or
-//! swipe slides the model across the window instead of turning it. The first such input
+//! swipe slides the model across the window instead of turning it, and with Option (Alt) held it
+//! rolls it, as a trackpad twist does. The first such input
 //! swaps the still for the live view. Fit (`8`), 100% (`0`) and the smart-magnify double-tap
 //! put the still back. Navigation leaves, always: presenting any photo stops the renderer
 //! drawing the mesh, and the next tick frees it.
@@ -318,6 +319,26 @@ impl AppCore {
         took
     }
 
+    /// Roll the model `radians` about the line of sight (counterclockwise on screen is
+    /// positive), and draw: a trackpad twist. Like zoom, it leaves the turntable spinning.
+    pub fn live_model_roll(&mut self, radians: f32) -> bool {
+        let took = self.live_model_apply(|v, _| v.roll_by(radians));
+        if took {
+            self.draw();
+        }
+        took
+    }
+
+    /// Roll the model by an Option+drag (Alt elsewhere) of `dx` pixels sideways, and draw: the
+    /// twist for a mouse.
+    pub fn live_model_roll_drag(&mut self, dx: f32) -> bool {
+        let took = self.live_model_apply(|v, vp| v.roll_by_drag(dx, vp));
+        if took {
+            self.draw();
+        }
+        took
+    }
+
     /// Zoom the model by `factor`, about the centre, without drawing.
     pub fn live_model_zoom_quiet(&mut self, factor: f32) -> bool {
         self.live_model_apply(|v, _| v.zoom_by(factor))
@@ -422,9 +443,9 @@ impl AppCore {
 
     /// A drag moved the model `(dx, dy)` px at `at`: remember it for the throw on release. Only a
     /// turn is thrown; a Shift+drag slides the model the way a drag slides a photo, and stops
-    /// dead like one.
+    /// dead like one, and an Option+drag rolls it.
     pub fn live_model_drag_moved(&mut self, at: Instant, dx: f32, dy: f32) {
-        if self.mods.shift {
+        if self.mods.shift || self.mods.alt {
             self.live_model.drag.clear();
         } else if self.live_model.active && self.live_model_ready() {
             self.live_model.drag.push(at, dx, dy);
@@ -442,11 +463,12 @@ impl AppCore {
             .flatten()
     }
 
-    /// The on-screen model's camera height, while one is ready: how a glide spots a pole.
-    pub(crate) fn live_model_elevation(&self) -> Option<f32> {
+    /// A glide's velocity with any push past a pole taken out, while a model is ready (see
+    /// [`pb_mesh::LiveView::stop_at_poles`]).
+    pub(crate) fn live_model_stop_at_poles(&self, v: [f32; 2]) -> Option<[f32; 2]> {
         self.live_model
             .ready_for(self.displayed_item?, self.content_gen)
-            .map(|r| r.view.elevation())
+            .map(|r| r.view.stop_at_poles(v))
     }
 
     /// The frame to draw this time, while the live view is up for the item on screen.
@@ -694,6 +716,60 @@ mod tests {
         core.mods.shift = false;
         core.pan_by_pixels(40.0, 10.0);
         assert_ne!(eye(&core), eye0, "without Shift a drag turns it");
+    }
+
+    /// A trackpad twist rolls the model about the line of sight (so an upside-down model can be
+    /// stood up), without moving the camera, and leaves a spinning model spinning.
+    #[test]
+    fn a_twist_rolls_the_model() {
+        let (mut core, seen) = core_on(0);
+        settle(&mut core);
+        core.toggle_play_pause();
+        let eye0 = eye(&core);
+        core.handle(contract::CoreEvent::Twist { degrees: 180.0 });
+        assert!(core.live_model.active);
+        assert!(seen.lock().unwrap().showing, "the draw pushed a frame");
+        assert!(!core.live_model.ready.as_ref().unwrap().view.is_home());
+        assert_eq!(eye(&core), eye0, "turned in place");
+        assert!(core.live_model_spinning());
+    }
+
+    #[test]
+    fn a_twist_does_nothing_to_a_photo() {
+        let (mut core, _) = core_on(1);
+        core.handle(contract::CoreEvent::Twist { degrees: 90.0 });
+        assert!(!core.live_model.active);
+        assert_eq!(core.view.pan, [0.0, 0.0]);
+        assert!(core.rotations.is_empty());
+    }
+
+    /// Without a trackpad, Option+drag (Alt on Windows) rolls it; it is never thrown.
+    #[test]
+    fn an_option_drag_rolls_the_model() {
+        let (mut core, _) = core_on(0);
+        settle(&mut core);
+        let home = core.live_model.ready.as_ref().unwrap().view;
+        let eye0 = eye(&core);
+        core.mods.alt = true;
+        core.pan_by_pixels(150.0, 0.0);
+        assert_ne!(core.live_model.ready.as_ref().unwrap().view, home);
+        assert_eq!(eye(&core), eye0, "rolled, not turned");
+        flick(&mut core, 16.0, 20, Duration::from_millis(4));
+        assert!(core.pan_inertia.is_none());
+    }
+
+    /// A flick on a rolled model glides the way it was thrown: up and down on screen is a turn
+    /// there, not a tip that the pole test would stop.
+    #[test]
+    fn a_rolled_model_glides_the_way_it_was_thrown() {
+        let (mut core, _) = core_on(0);
+        settle(&mut core);
+        core.handle(contract::CoreEvent::Twist { degrees: 90.0 });
+        core.fling_pan(0.0, 2000.0);
+        let mut t = Instant::now();
+        let before = eye(&core);
+        assert!(glide_for(&mut core, &mut t, 0.3) > 20);
+        assert_ne!(eye(&core), before);
     }
 
     /// Moving a spinning model leaves it spinning, as zooming does: neither takes it in hand.

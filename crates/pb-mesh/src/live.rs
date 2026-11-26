@@ -14,7 +14,7 @@
 
 use std::f32::consts::{FRAC_PI_2, PI};
 
-use crate::camera::{dot, Orbit};
+use crate::camera::{dot, Camera, Orbit};
 use crate::raster::{
     light_dirs, padded_spans, project, silhouette, AMBIENT, FILL, FILL_LIGHT, KEY, SKY,
 };
@@ -41,6 +41,9 @@ pub struct LiveView {
     /// The home silhouette's padded spans in tan units, which set the fit scale.
     span: [f32; 2],
     zoom: f32,
+    /// Radians the picture is turned about the line of sight, counterclockwise on screen, in
+    /// `[0, 2π)`: a trackpad twist. It never changes which way is up for the turntable.
+    roll: f32,
 }
 
 /// Everything a GPU mesh pass needs for one frame.
@@ -74,17 +77,21 @@ impl LiveView {
             home_centre: centre,
             span: [span_x, span_y],
             zoom: 1.0,
+            roll: 0.0,
         })
     }
 
     /// Turn the model by a pointer drag of `(dx, dy)` pixels in a `viewport` (y down). Dragging
-    /// right turns the model to the right; dragging down tips its top towards you.
+    /// right turns the model to the right; dragging down tips its top towards you. On a rolled
+    /// model those are the model's own right and down as they appear on screen, so it still
+    /// turns the way the pointer moves.
     pub fn orbit_by(&mut self, dx: f32, dy: f32, viewport: [f32; 2]) {
         let short = viewport[0].min(viewport[1]).max(1.0);
         let per_px = ORBIT_PER_SHORT_SIDE / short;
         if !(dx.is_finite() && dy.is_finite()) {
             return;
         }
+        let [dx, dy] = self.unroll([dx, dy]);
         self.orbit.azimuth = (self.orbit.azimuth - dx * per_px).rem_euclid(2.0 * PI);
         self.orbit.elevation =
             (self.orbit.elevation + dy * per_px).clamp(-MAX_ELEVATION, MAX_ELEVATION);
@@ -97,6 +104,47 @@ impl LiveView {
         if radians.is_finite() {
             self.orbit.azimuth = (self.orbit.azimuth - radians).rem_euclid(2.0 * PI);
         }
+    }
+
+    /// Turn the picture `radians` about the model's centre on screen, counterclockwise for a
+    /// positive angle: a trackpad twist, so an upside-down model can be stood the right way up.
+    /// Like zoom and pan, it leaves the turntable's axis alone.
+    pub fn roll_by(&mut self, radians: f32) {
+        if radians.is_finite() {
+            self.roll = (self.roll + radians).rem_euclid(2.0 * PI);
+        }
+    }
+
+    /// Roll by a sideways drag of `dx` pixels (Option+drag): right turns the model clockwise, as
+    /// if pushing its top, at the rate a drag turns it.
+    pub fn roll_by_drag(&mut self, dx: f32, viewport: [f32; 2]) {
+        let short = viewport[0].min(viewport[1]).max(1.0);
+        self.roll_by(-dx * ORBIT_PER_SHORT_SIDE / short);
+    }
+
+    /// A glide's screen velocity with any push past the pole the camera rests on taken out, so
+    /// the glide stops there rather than grinding on invisibly, and keeps the rest of its motion.
+    pub fn stop_at_poles(&self, v: [f32; 2]) -> [f32; 2] {
+        let [turn, tip] = self.unroll(v);
+        let e = self.orbit.elevation;
+        if (e >= MAX_ELEVATION && tip > 0.0) || (e <= -MAX_ELEVATION && tip < 0.0) {
+            self.reroll([turn, 0.0])
+        } else {
+            v
+        }
+    }
+
+    /// A screen vector (y down) in the unrolled picture's terms: what it would be had the
+    /// picture not been rolled.
+    fn unroll(&self, [x, y]: [f32; 2]) -> [f32; 2] {
+        let (s, c) = self.roll.sin_cos();
+        [x * c - y * s, x * s + y * c]
+    }
+
+    /// The inverse of [`unroll`](Self::unroll).
+    fn reroll(&self, [x, y]: [f32; 2]) -> [f32; 2] {
+        let (s, c) = self.roll.sin_cos();
+        [x * c + y * s, y * c - x * s]
     }
 
     /// Zoom by `factor` (> 1 is closer) about the viewport's centre.
@@ -134,22 +182,20 @@ impl LiveView {
         self.orbit = self.home;
         self.centre = self.home_centre;
         self.zoom = 1.0;
+        self.roll = 0.0;
     }
 
     /// Whether the view is exactly the still's: the moment the live view and the picture agree.
     pub fn is_home(&self) -> bool {
-        self.orbit == self.home && self.centre == self.home_centre && self.zoom == 1.0
+        self.orbit == self.home
+            && self.centre == self.home_centre
+            && self.zoom == 1.0
+            && self.roll == 0.0
     }
 
     /// Current zoom as a multiple of the framed size.
     pub fn zoom(&self) -> f32 {
         self.zoom
-    }
-
-    /// The camera's height angle (radians above the model's equator). It stops short of the
-    /// poles, which is how a glide knows it has run into one.
-    pub fn elevation(&self) -> f32 {
-        self.orbit.elevation
     }
 
     /// Pixels per tan unit in a `viewport`: the still's fit scale times the zoom.
@@ -161,7 +207,7 @@ impl LiveView {
 
     /// The uniforms for drawing one frame into a `viewport` (pixels).
     pub fn frame(&self, viewport: [f32; 2]) -> LiveFrame {
-        let cam = self.orbit.camera();
+        let cam = self.camera();
         let k = self.pixels_per_unit(viewport);
         let kx = 2.0 * k / viewport[0].max(1.0);
         let ky = 2.0 * k / viewport[1].max(1.0);
@@ -197,6 +243,21 @@ impl LiveView {
             fill_dir,
             lighting: [AMBIENT, SKY, KEY, FILL_LIGHT],
         }
+    }
+}
+
+impl LiveView {
+    /// The orbit's camera turned about its line of sight by the roll. The target stays on that
+    /// line, so the model turns about its own centre on screen. The lights are camera-relative,
+    /// so they stay put on screen like a lamp while the model turns under them.
+    fn camera(&self) -> Camera {
+        let mut cam = self.orbit.camera();
+        let (s, c) = self.roll.sin_cos();
+        let (right, up) = (cam.right, cam.up);
+        // Image coordinates (right·d, up·d) turn counterclockwise by the roll.
+        cam.right = std::array::from_fn(|i| c * right[i] - s * up[i]);
+        cam.up = std::array::from_fn(|i| s * right[i] + c * up[i]);
+        cam
     }
 }
 
@@ -455,6 +516,86 @@ mod tests {
         assert!((spun.orbit.azimuth - before).abs() < 1e-4);
         spun.spin_by(f32::NAN);
         assert!(spun.orbit.azimuth.is_finite());
+    }
+
+    /// A roll turns the picture about the model's centre on screen (counterclockwise for a
+    /// positive angle), wherever the model has been moved to. The camera stays where it is.
+    #[test]
+    fn rolling_turns_the_picture_about_the_models_centre() {
+        let vp = [800.0, 600.0];
+        let mut v = LiveView::new(&cube()).unwrap();
+        v.pan_by(40.0, -20.0, vp); // off-centre: the pivot is the model, not the window
+        let (centre, p) = (v.orbit.target, [1.0, 0.0, 1.0]);
+        let f0 = v.frame(vp);
+        let (c0, p0) = (to_px(&f0, centre, vp), to_px(&f0, p, vp));
+        v.roll_by(FRAC_PI_2);
+        assert!(!v.is_home());
+        let f1 = v.frame(vp);
+        let (c1, p1) = (to_px(&f1, centre, vp), to_px(&f1, p, vp));
+        assert!((c0[0] - c1[0]).abs() < 0.01 && (c0[1] - c1[1]).abs() < 0.01);
+        // A quarter turn counterclockwise on a y-down screen: (x, y) → (y, −x) about the centre.
+        let d0 = [p0[0] - c0[0], p0[1] - c0[1]];
+        let d1 = [p1[0] - c1[0], p1[1] - c1[1]];
+        assert!(
+            (d1[0] - d0[1]).abs() < 0.05 && (d1[1] + d0[0]).abs() < 0.05,
+            "{d0:?} → {d1:?}"
+        );
+        assert_eq!(f1.eye, f0.eye, "the camera turned, it didn't move");
+        v.reset();
+        assert!(v.is_home());
+        v.roll_by(f32::NAN);
+        assert!(v.is_home());
+    }
+
+    /// Dragging right rolls the model clockwise, as if pushing its top, at the rate a drag turns
+    /// it: half a turn across the viewport's short side.
+    #[test]
+    fn a_sideways_drag_rolls_clockwise() {
+        let vp = [800.0, 600.0];
+        let mut v = LiveView::new(&cube()).unwrap();
+        v.roll_by_drag(300.0, vp);
+        assert!((v.roll - 1.5 * PI).abs() < 1e-4, "a quarter turn clockwise");
+        v.roll_by_drag(f32::NAN, vp);
+        assert!(v.roll.is_finite());
+    }
+
+    /// Once rolled, a drag still turns the model the way the pointer moves on screen.
+    #[test]
+    fn a_drag_on_a_rolled_model_follows_the_pointer() {
+        let vp = [800.0, 600.0];
+        let mut rolled = LiveView::new(&cube()).unwrap();
+        let mut plain = rolled;
+        rolled.roll_by(FRAC_PI_2);
+        // Rolled a quarter turn counterclockwise, the model's left is screen-down.
+        rolled.orbit_by(0.0, 60.0, vp);
+        plain.orbit_by(-60.0, 0.0, vp);
+        assert!((rolled.orbit.azimuth - plain.orbit.azimuth).abs() < 1e-4);
+        assert!((rolled.orbit.elevation - plain.orbit.elevation).abs() < 1e-4);
+    }
+
+    /// A glide stops pushing at a pole (the camera can't go over the top) and keeps the rest of
+    /// its motion, whichever way the model is rolled.
+    #[test]
+    fn only_a_push_past_a_pole_is_stopped() {
+        let mut v = LiveView::new(&cube()).unwrap();
+        assert_eq!(
+            v.stop_at_poles([0.0, 500.0]),
+            [0.0, 500.0],
+            "not at a pole yet"
+        );
+        v.orbit_by(0.0, 1e6, [800.0, 600.0]); // up against the top
+        assert_eq!(v.stop_at_poles([300.0, 500.0]), [300.0, 0.0]);
+        assert_eq!(
+            v.stop_at_poles([0.0, -500.0]),
+            [0.0, -500.0],
+            "back down is fine"
+        );
+        // Rolled a quarter turn counterclockwise, screen-right is the push and down is a turn.
+        v.roll_by(FRAC_PI_2);
+        let [x, y] = v.stop_at_poles([500.0, 0.0]);
+        assert!(x.abs() < 1e-3 && y.abs() < 1e-3, "{x}, {y}");
+        let [x, y] = v.stop_at_poles([0.0, 500.0]);
+        assert!(x.abs() < 1e-3 && (y - 500.0).abs() < 1e-3, "{x}, {y}");
     }
 
     #[test]

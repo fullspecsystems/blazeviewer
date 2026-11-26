@@ -191,6 +191,11 @@ final class MetalCanvasNSView: NSView {
         model?.pinch(delta: Float(event.magnification))
     }
 
+    /// Two-finger twist: rolls a 3D model so an upside-down one can be stood up.
+    override func rotate(with event: NSEvent) {
+        model?.twist(degrees: event.rotation)
+    }
+
     override func smartMagnify(with event: NSEvent) {
         model?.doubleTap()
     }

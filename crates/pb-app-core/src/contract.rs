@@ -382,6 +382,9 @@ pub enum CoreEvent {
     Scroll(ScrollDelta),
     /// Pinch / magnify gesture (zoom).
     Pinch { delta: f32 },
+    /// Trackpad twist (rotate gesture), counterclockwise positive: rolls a 3D model about the
+    /// line of sight. Does nothing to a photo.
+    Twist { degrees: f32 },
     /// Double-tap / double-click (toggle 1:1 ↔ fit).
     DoubleTap,
     /// A touch pan ended in a flick: keep panning, decaying, until it stops or reaches an

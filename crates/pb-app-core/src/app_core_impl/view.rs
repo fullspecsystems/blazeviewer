@@ -329,8 +329,11 @@ impl AppCore {
             return;
         }
         // A drag or two-finger swipe over a ready 3D model turns it (task #153, owner D1); with
-        // Shift held it slides the model instead, as in most 3D apps.
-        let took = if self.mods.shift {
+        // Shift held it slides the model instead, as in most 3D apps, and with Option (Alt) held
+        // a sideways drag rolls it, the twist for a mouse.
+        let took = if self.mods.alt {
+            self.live_model_roll_drag(dx)
+        } else if self.mods.shift {
             self.live_model_pan(dx, dy)
         } else {
             self.live_model_orbit(dx, dy)
@@ -557,21 +560,18 @@ impl AppCore {
         if dt > 0.0 {
             // A ready 3D model turns instead of panning (task #153), and `view.pan` never moves,
             // so the photo's edge test would kill the glide on its first tick. Turning has no
-            // edge sideways; up and down it stops at the poles.
-            // Only a turn is ever thrown, so a model's glide turns it even if Shift goes down
-            // mid-coast.
-            let elevation = self.live_model_elevation();
-            let before = self.view.pan;
-            if elevation.is_some() {
+            // edge sideways; the push past a pole is taken out (whichever way the model is
+            // rolled, that may be any direction on screen). Only a turn is ever thrown, so a
+            // model's glide turns it even if Shift or Option goes down mid-coast.
+            if self.live_model_ready() {
                 self.live_model_orbit(glide.vx * dt, glide.vy * dt);
-            } else {
-                self.pan_by_pixels(glide.vx * dt, glide.vy * dt);
-            }
-            if let Some(e0) = elevation {
-                if glide.vy != 0.0 && self.live_model_elevation() == Some(e0) {
-                    glide.vy = 0.0;
+                if let Some([vx, vy]) = self.live_model_stop_at_poles([glide.vx, glide.vy]) {
+                    glide.vx = vx;
+                    glide.vy = vy;
                 }
             } else {
+                let before = self.view.pan;
+                self.pan_by_pixels(glide.vx * dt, glide.vy * dt);
                 let after = self.view.pan;
                 if glide.vx != 0.0 && (after[0] - before[0]).abs() < f32::EPSILON {
                     glide.vx = 0.0;

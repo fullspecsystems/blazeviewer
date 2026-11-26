@@ -1163,6 +1163,13 @@ impl AppCoreHandle {
             .handle(CoreEvent::Scroll(contract::ScrollDelta::Pixels { x, y }));
     }
 
+    /// Trackpad twist: `degrees` is the incremental rotation (`NSEvent.rotation`,
+    /// counterclockwise positive). Rolls a 3D model; a photo ignores it.
+    fn twist(&mut self, degrees: f32) {
+        self.core.now = Instant::now();
+        self.core.handle(CoreEvent::Twist { degrees });
+    }
+
     /// Trackpad pinch: `delta` is the incremental magnification (`NSEvent.magnification`,
     /// + spread to zoom in, − pinch to zoom out) — zooms about the cursor.
     fn pinch(&mut self, delta: f32) {
@@ -5122,6 +5129,7 @@ mod ffi {
         fn scroll_lines(&mut self, x: f32, y: f32);
         fn scroll_pixels(&mut self, x: f32, y: f32);
         fn pinch(&mut self, delta: f32);
+        fn twist(&mut self, degrees: f32);
         fn double_tap(&mut self);
         fn work_pending(&self) -> bool;
         fn toast(&mut self, msg: &str);
