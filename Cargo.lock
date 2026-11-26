@@ -4537,6 +4537,7 @@ dependencies = [
  "libwebp-sys",
  "moxcms",
  "pb-color",
+ "pb-jpegli",
  "png 0.18.1",
  "proptest",
  "ravif",
@@ -4551,6 +4552,15 @@ dependencies = [
  "cosmic-text",
  "fontdue",
  "resvg",
+]
+
+[[package]]
+name = "pb-jpegli"
+version = "0.1.0"
+dependencies = [
+ "cc",
+ "image 0.25.10",
+ "jxl-sys",
 ]
 
 [[package]]

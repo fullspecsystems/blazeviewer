@@ -196,6 +196,17 @@ fn grid() -> Vec<(&'static str, u8, Encode)> {
     add("HEIC", &[50, 55, 60, 65, 70, 75, 80, 85, 90], |quality| {
         ExportFormat::Heic { quality }
     });
+    // The `image` crate's encoder: export's JPEG before jpegli (task #157), and the anchor the
+    // other formats' defaults were matched to. Only a separate row when JPEG is jpegli.
+    if pb_encode::jpeg::JPEGLI {
+        for q in [70u8, 75, 80, 85, 90, 95] {
+            g.push((
+                "JPEG-base",
+                q,
+                Box::new(move |i| pb_encode::encode_jpeg_baseline(i, q)),
+            ));
+        }
+    }
     g
 }
 
@@ -238,7 +249,7 @@ fn quality_pass(files: &[PathBuf]) {
     }
 
     println!(
-        "\n{:<8} {:>4} {:>8} {:>8} {:>9} {:>8}",
+        "\n{:<9} {:>4} {:>8} {:>8} {:>9} {:>8}",
         "codec", "q", "ssim2", "p10", "bits/px", "ms p50"
     );
     let mut by_codec: BTreeMap<&str, Vec<(u8, f64, f64)>> = BTreeMap::new();
@@ -249,24 +260,30 @@ fn quality_pass(files: &[PathBuf]) {
             median(&mut b),
             median(&mut t),
         );
-        println!("{codec:<8} {q:>4} {m:>8.2} {p10:>8.2} {bpp:>9.3} {ms:>8.0}");
+        println!("{codec:<9} {q:>4} {m:>8.2} {p10:>8.2} {bpp:>9.3} {ms:>8.0}");
         by_codec.entry(codec).or_default().push((q, m, bpp));
     }
-    // Each codec's setting that matches JPEG 85's median score, and its size against JPEG's.
+    // Each codec's setting that matches the baseline JPEG 85's median score (the anchor every
+    // default was picked against), and its size against it.
+    let anchor = if by_codec.contains_key("JPEG-base") {
+        "JPEG-base"
+    } else {
+        "JPEG"
+    };
     let Some(&(_, target, jpeg_bpp)) = by_codec
-        .get("JPEG")
+        .get(anchor)
         .and_then(|v| v.iter().find(|(q, _, _)| *q == 85))
     else {
         return;
     };
-    println!("\nJPEG 85: median SSIMULACRA2 {target:.2} at {jpeg_bpp:.3} bits/px. Closest match per codec:");
+    println!("\n{anchor} 85: median SSIMULACRA2 {target:.2} at {jpeg_bpp:.3} bits/px. Closest match per codec:");
     for (codec, rows) in &by_codec {
         if let Some(&(q, s, bpp)) = rows
             .iter()
             .min_by(|a, b| (a.1 - target).abs().total_cmp(&(b.1 - target).abs()))
         {
             println!(
-                "  {codec:<8} q{q:<3} score {s:>6.2}  {bpp:.3} bits/px  ({:+.0}% vs JPEG 85)",
+                "  {codec:<9} q{q:<3} score {s:>6.2}  {bpp:.3} bits/px  ({:+.0}% vs {anchor} 85)",
                 (bpp / jpeg_bpp - 1.0) * 100.0
             );
         }

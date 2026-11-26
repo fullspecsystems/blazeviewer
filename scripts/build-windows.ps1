@@ -22,10 +22,12 @@
 
   Export's C/C++ codecs (task #89 rung 4) are on too: `export-codecs` = WebP (libwebp, built with
   cc) + JPEG XL (libjxl, built with CMake; its bindings need libclang, so the Developer shell is
-  entered for it as for FFmpeg). CMake must be on PATH (Visual Studio's "C++ CMake tools", or
+  entered for it as for FFmpeg) + jpegli for JPEG (crates/pb-jpegli, built with cc against
+  libjxl's Highway; task #157). CMake must be on PATH (Visual Studio's "C++ CMake tools", or
   `winget install Kitware.CMake`). With NASM 2.15 or newer on PATH (x64), `avif-asm` adds rav1e's
   assembly — AVIF exports several times faster. The codecs build from source (no vcpkg), so
-  -NoNative leaves them in; -NoCodecs leaves them out (PNG, JPEG, TIFF and AVIF still export).
+  -NoNative leaves them in; -NoCodecs leaves them out (PNG, JPEG, TIFF and AVIF still export; JPEG with the `image` crate's
+  encoder).
 
 .EXAMPLE
   pwsh scripts/build-windows.ps1               # debug build, libheif + dav1d + ffprobe (film audio)

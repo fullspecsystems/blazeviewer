@@ -1,0 +1,20 @@
+[package]
+name = "pb-jpegli"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+description = "JPEG export through jpegli (libjxl's JPEG encoder, BSD-3-Clause), built against jxl-sys's Highway so the app carries one copy (task #157)."
+build = "build.rs"
+links = "pb_jpegli"
+
+[dependencies]
+# Pinned exactly: vendor/highway is a copy of the Highway headers this jxl-sys builds (1.2.0),
+# and jpegli links against its libhwy (build.rs). Bump the two together (vendor/README.md).
+jxl-sys = "=0.1.12"
+
+[build-dependencies]
+cc = "1"
+
+[dev-dependencies]
+# Read the files back the way the viewer's commodity path does.
+image = { version = "0.25.10", default-features = false, features = ["jpeg"] }

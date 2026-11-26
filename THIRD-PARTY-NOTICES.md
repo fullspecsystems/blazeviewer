@@ -25,6 +25,7 @@ missing rather than shipping a binary without them:
 | Sparkle (macOS only) | 2.9.4 | `mac/Package.resolved` (SwiftPM) |
 | libwebp (export) | 1.6.0 | vendored in the `libwebp-sys` 0.14.4 crate (`Cargo.lock`) |
 | libjxl (export) | 0.12.0 | vendored in the `jxl-sys` 0.1.12+libjxl-0.12.0 crate (`Cargo.lock`), with its Highway, Brotli and skcms |
+| jpegli (JPEG export) | libjxl v0.10.2 | vendored in `crates/pb-jpegli/vendor` (with libjpeg-turbo 2.1.5.1's API headers), built against the Highway above (`vendor/README.md`) |
 | rav1e / ravif / avif-serialize (export) | 0.8.1 / 0.13.0 / 0.8.9 | `Cargo.lock` |
 | kamadak-exif / mutate_once (EXIF read + export metadata) | 0.6.1 / 0.1.2 | `Cargo.lock` |
 
@@ -117,7 +118,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ## Image export encoders (task #89 rung 4) — BSD-3-Clause, BSD-2-Clause, MIT
 
-Export writes WebP, AVIF and JPEG XL (and the EXIF it copies) through these, all **statically
+Export writes JPEG, WebP, AVIF and JPEG XL (and the EXIF it copies) through these, all **statically
 linked** and all permissive — the house rule is that we encode only with permissive code
 (CLAUDE.md, *Licensing*), and every crate in each chain was checked before it landed
 (export-plan.md rung 4). Their license texts, verbatim, are in `licenses/`.
@@ -130,6 +131,14 @@ linked** and all permissive — the house rule is that we encode only with permi
   **Brotli** (MIT) and **skcms** (colour management; BSD-3-Clause). Built from the source the
   `jxl-sys` crate (MIT OR Apache-2.0) vendors — never `jpegxl-rs` / `jpegxl-sys`, which are GPL.
   Homepage: https://github.com/libjxl/libjxl
+- **jpegli** (JPEG, in the builds with the C codecs: the Mac, and Windows) — libjxl v0.10.2's
+  JPEG encoder, BSD-3-Clause with the same patent grant (the `libjxl-*` texts; identical in
+  v0.10.2). Vendored in `crates/pb-jpegli` and built against the Highway above, so the app links
+  one Highway. It implements the libjpeg API, so it compiles against **libjpeg-turbo** 2.1.5.1's
+  API headers (`jpeglib.h`, `jmorecfg.h`, `jerror.h`), which are under the IJG License
+  (`libjpeg-turbo-README.ijg.txt`). As that license asks: *this software is based in part on
+  the work of the Independent JPEG Group.*
+  Homepage: https://github.com/google/jpegli
 - **rav1e** 0.8.1 (AV1 encoding for AVIF) — BSD-2-Clause, plus the Alliance for Open Media Patent
   License 1.0 (`rav1e-PATENTS.txt`). Rust, built with its hand-written assembly on the Mac (ARM64)
   and on Windows when nasm is present (x86-64); much of that assembly comes from dav1d and carries

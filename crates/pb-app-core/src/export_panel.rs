@@ -433,14 +433,17 @@ impl SizeDialog {
 pub const QUALITY_MIN: u8 = 10;
 pub const QUALITY_MAX: u8 = 100;
 pub const QUALITY_STEP: u8 = 5;
-/// The default JPEG quality: rung 2's corpus run used 85 (visually clean on every file at a
-/// sensible size).
+/// The default JPEG quality: rung 2's corpus run used 85 with the `image` crate's encoder
+/// (visually clean on every file at a sensible size), and it stays 85 with jpegli (task #157):
+/// the grid setting whose median SSIMULACRA2 is closest to that encoder's 85 (83.6), as for
+/// every format below. jpegli 85 scores 82.3 at −24 % of the size (90: 85.9 at +5 %).
 pub const JPEG_QUALITY_DEFAULT: u8 = 85;
 /// The other lossy formats' defaults, each codec on its own scale: the grid setting whose
-/// median SSIMULACRA2 over the corpus is closest to JPEG 85's (83.6), so switching formats
-/// keeps a typical photo looking the same (`examples/codec_bench.rs`, rung 4, 2048 px):
-/// WebP 90 scores 83.7 at −10 % of JPEG 85's size, AVIF 85 80.6 at −46 %, JPEG XL 85 82.5 at
-/// −37 %, and HEIC 90 84.1 at **+30 %** — Image I/O's HEIC is no smaller than JPEG.
+/// median SSIMULACRA2 over the corpus is closest to the `image` crate's JPEG 85 (83.6), so
+/// switching formats keeps a typical photo looking the same (`examples/codec_bench.rs`,
+/// rung 4, 2048 px): WebP 90 scores 83.7 at −10 % of that JPEG's size, AVIF 85 80.6 at −46 %,
+/// JPEG XL 85 82.5 at −37 %, and HEIC 90 84.1 at **+30 %**. Against jpegli's 85 (1.07 bits/px)
+/// those sizes are +19 %, −29 %, −17 % and +71 %.
 pub const WEBP_QUALITY_DEFAULT: u8 = 90;
 pub const AVIF_QUALITY_DEFAULT: u8 = 85;
 pub const JXL_QUALITY_DEFAULT: u8 = 85;

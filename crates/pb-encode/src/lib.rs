@@ -12,8 +12,9 @@
 //! - [`encoder`] — the `Encoder` seam + [`Caps`] (rung 2); [`ExportFormat`] picks a codec and
 //!   [`Codec::available`] says which this build carries.
 //! - Encoders behind features: `png` (rung 0c), `jpeg` (rung 2; Describe's helper moved from
-//!   `pb-decode`), and rung 4's `tiff`, `avif` (pure Rust, on by default), `webp` and `jxl`
-//!   (C/C++ libraries, turned on by the shells' build scripts), and `heic` (macOS Image I/O).
+//!   `pb-decode`), and rung 4's `tiff`, `avif` (pure Rust, on by default), `webp`, `jxl` and
+//!   `jpegli` (C/C++ libraries, turned on by the shells' build scripts; `jpegli` replaces the
+//!   `image` crate's JPEG encoder for export, task #157), and `heic` (macOS Image I/O).
 //! - [`resize`] — linear-light Lanczos downscaling for `prepare` (rung 2).
 //!
 //! Everything is pure — no I/O, no threads of its own, no platform code — except the HEIC
@@ -51,7 +52,7 @@ pub mod webp;
 
 pub use encoder::{Caps, Codec, Encoder, ExportFormat, PngEffort};
 #[cfg(feature = "jpeg")]
-pub use jpeg::{encode_jpeg, encode_jpeg_rgba8, JpegEncoder};
+pub use jpeg::{encode_jpeg, encode_jpeg_baseline, encode_jpeg_rgba8, JpegEncoder};
 pub use metadata::{MetadataChoice, OutputMetadata, SourceMetadata};
 #[cfg(feature = "png")]
 pub use png::{encode_png, PngEncoder};

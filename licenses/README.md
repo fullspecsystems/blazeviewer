@@ -11,10 +11,13 @@ binary, in words that leave no room:
   GPL and this License."* — both documents, which is why those two files are large: upstream's
   `COPYING` concatenates the LGPL-3.0 **and** the GPL-3.0 it builds on.
 - **BSD-2-Clause / BSD-3-Clause / MIT** (dav1d; export's encoders — libwebp, libjxl and its
-  Highway / Brotli / skcms, rav1e, ravif, avif-serialize, and kamadak-exif with mutate_once,
-  which write export's EXIF): binary redistribution must reproduce
-  the copyright notice and disclaimer. libwebp, libjxl and rav1e also carry patent grants
-  (their `PATENTS` files), shipped beside them.
+  Highway / Brotli / skcms, jpegli (libjxl's, so libjxl's texts cover it), rav1e, ravif,
+  avif-serialize, and kamadak-exif with mutate_once, which write export's EXIF): binary
+  redistribution must reproduce the copyright notice and disclaimer. libwebp, libjxl and rav1e
+  also carry patent grants (their `PATENTS` files), shipped beside them.
+- **IJG License** (libjpeg-turbo's libjpeg API headers, which jpegli compiles against): the
+  product documentation must say the software is based in part on the work of the Independent
+  JPEG Group (`THIRD-PARTY-NOTICES.md` does), and the IJG README travels with it.
 
 `THIRD-PARTY-NOTICES.md` at the repo root is the human-readable summary (what is used, how it
 is linked, and why that linkage complies). It points here; this is the legal text.
@@ -26,7 +29,8 @@ is linked, and why that linkage complies). It points here; this is the legal tex
 | `ffmpeg-COPYING.LGPLv2.1.txt` | FFmpeg 8.1.3 (Windows + macOS) | LGPL-2.1-or-later |
 | `dav1d-COPYING.txt` | dav1d 1.5.3 | BSD-2-Clause |
 | `libwebp-COPYING.txt`, `libwebp-PATENTS.txt` | libwebp 1.6.0 (WebP export) | BSD-3-Clause + Google's patent grant |
-| `libjxl-LICENSE.txt`, `libjxl-PATENTS.txt` | libjxl 0.12.0 (JPEG XL export) | BSD-3-Clause + Google's patent grant |
+| `libjxl-LICENSE.txt`, `libjxl-PATENTS.txt` | libjxl 0.12.0 (JPEG XL export) and jpegli (libjxl v0.10.2's JPEG encoder; the same texts) | BSD-3-Clause + Google's patent grant |
+| `libjpeg-turbo-README.ijg.txt` | libjpeg-turbo 2.1.5.1's libjpeg API headers (jpegli builds against them) | IJG License |
 | `highway-LICENSE-BSD3.txt` | Highway (libjxl's SIMD) | BSD-3-Clause (dual Apache-2.0; BSD chosen) |
 | `brotli-LICENSE.txt` | Brotli (libjxl's compression) | MIT |
 | `skcms-LICENSE.txt` | skcms (libjxl's colour management) | BSD-3-Clause |
@@ -43,7 +47,8 @@ Copied verbatim from the pinned upstream sources — the same trees the shipped 
 built from (the vcpkg commit recorded in `scripts/setup-libheif.ps1 -VcpkgRef`, the pinned
 FFmpeg tarball in `scripts/build-ffmpeg-macos.sh`, and for export's encoders the sources
 vendored in the crates `Cargo.lock` pins: `libwebp-sys` 0.14.4, `jxl-sys` 0.1.12+libjxl-0.12.0,
-`rav1e`, `ravif`, `avif-serialize`, `kamadak-exif` 0.6.1, `mutate_once` 0.1.2). Not fetched
+`rav1e`, `ravif`, `avif-serialize`, `kamadak-exif` 0.6.1, `mutate_once` 0.1.2; and jpegli's
+in `crates/pb-jpegli/vendor`, from libjxl tag v0.10.2 and libjpeg-turbo `8ecba36`). Not fetched
 from the web, not retyped. The
 FFmpeg text was re-checked against 8.1.3's `COPYING.LGPLv2.1` when Windows moved to that pin
 (task #141): identical apart from line endings.

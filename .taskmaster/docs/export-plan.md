@@ -1023,7 +1023,7 @@ through a batch of them". mozjpeg and oxipng are not in this batch.
 
   | Encoder | q70 | q75 | q80 | q85 | q90 | q95 | ms @ 2048 px |
   |---|---|---|---|---|---|---|---|
-  | **jpegli** 0.1.0 (C++, libjxl 0.10.2's; defaults: 4:4:4, adaptive quant, progressive) | −11.7 % | −8.6 % | −9.0 % | **−8.3 %** | −9.6 % | −22.1 % | **5** (current 8) |
+  | **jpegli** 0.1.0 (C++, libjxl 0.10.2's; defaults: 4:4:4, adaptive quant, **sequential** — see the correction below) | −11.7 % | −8.6 % | −9.0 % | **−8.3 %** | −9.6 % | −22.1 % | **5** (current 8) |
   | mozjpeg 0.10.13 (C), 4:2:0 | −11.3 % | −7.9 % | −2.7 % | −1.1 % | −1.3 % | — | 40–80 |
   | mozjpeg (C), 4:4:4 | −9.4 % | −1.0 % | +0.9 % | +1.0 % | +0.6 % | — | 50–110 |
   | mozjpeg-rs 0.9.2 (pure Rust), 4:2:0 | −10.9 % | −7.5 % | −2.7 % | −0.8 % | −0.5 % | — | 30–60 |
@@ -1043,6 +1043,44 @@ through a batch of them". mozjpeg and oxipng are not in this batch.
     equal). jpegli itself only imports `hwy::AllocateAlignedBytes` / `FreeAlignedBytes`
     (identical). The fix is a jpegli built against the same Highway 1.2.0 as jxl-sys. **This
     release keeps the current encoder.**
+  - **Built (2026-11-26, task #157): `crates/pb-jpegli`.** The owner chose to do it before the
+    release. jpegli's encoder (libjxl tag v0.10.2, 17 files) and a C++ shim are compiled with
+    `cc` against a copy of **jxl-sys's own Highway headers** (1.2.0, `457c891`); no Highway is
+    built or linked there, so jpegli's calls resolve against jxl-sys's libhwy and the app has one
+    Highway. jxl-sys is pinned `=0.1.12` and `build.rs` fails on a Highway version mismatch;
+    `vendor/README.md` + `refresh.sh` reproduce the tree byte for byte. The shim runs a whole
+    encode behind a C ABI: `error_exit` throws a C++ exception the shim catches (jpegli is built
+    with exceptions on, unlike libjxl's own build), the output goes to a `std::vector`, and the
+    bytes reach Rust through one callback, so no libjpeg struct or Rust panic crosses the FFI.
+    `JpegEncoder` uses it under pb-encode's `jpegli` feature (in `export-codecs`); without it
+    (Linux, plain builds) export keeps the `image` crate's encoder, now `encode_jpeg_baseline`.
+    Describe's upload JPEG stays on the `image` crate everywhere.
+  - **Corrections to the trial:** (1) it ran jpegli **sequential**: the library's default
+    progressive level is 0, not 2; its "5 ms" is the sequential time. (2) "jpegli only imports
+    two Highway functions" held only for that build on Apple Silicon, where Highway 1.1 compiled
+    one target and dispatch collapsed to a static call. Built against 1.2.0's headers, jpegli
+    also imports `hwy::GetChosenTarget` and `SupportedTargets` (it uses `HWY_DYNAMIC_DISPATCH`),
+    and on x86-64 it always would have: the shared-Highway build was the right fix, not a nicety.
+  - **Progressive level, measured** (`codec_bench`, same corpus and settings; the baseline's
+    rows reproduce rung 4's 83.58 at 1.414 bits/px exactly). Scores are identical across levels
+    (the quantization doesn't change), only the entropy coding:
+
+    | jpegli | q85 bits/px | vs baseline q85 | ms @ 2048 px |
+    |---|---|---|---|
+    | level 0 (sequential, the library default) | 1.259 | −11 % | 5 |
+    | level 1 | 1.079 | −24 % | 10 |
+    | **level 2 (shipped; cjpegli's default)** | **1.071** | **−24 %** | 12 |
+    | `image` crate baseline | 1.414 | — | 7 |
+
+    jpegli's grid at level 2: q70 74.9 / 0.758 · q75 76.7 / 0.827 · q80 79.2 / 0.923 ·
+    q85 82.3 / 1.071 · q90 85.9 / 1.485 · q95 90.4 / 2.038 (median SSIMULACRA2 / bits/px).
+    Interpolated to the baseline 85's score (83.6), jpegli needs ~1.22 bits/px: **−14 % at equal
+    quality** (the trial's sequential −8 %, plus progressive's entropy coding).
+  - **The default stays 85:** by the rule every default follows (the grid setting whose median
+    is closest to the baseline JPEG 85's 83.6), jpegli 85 (82.3) beats 90 (85.9). So the
+    owner's saved setting keeps its meaning, and a default export is 24 % smaller at a score 1.3
+    lower — still above JPEG XL 85's 82.5. With jpegli as the JPEG, WebP 90 is +19 % of JPEG
+    85's size rather than −10 %.
 - **Independent review** (Codex, gpt-6.2-astra at xhigh, read-only, of b0e0c01d): no
   use-after-free, leak, ABI or buffer-size problem in the WebP / libjxl / CoreFoundation FFI, and
   `add_icc` verified against avif-serialize's opaque and alpha layouts. Twelve findings, all fixed
@@ -1270,6 +1308,13 @@ confirmed directly). **All accepted.**
 
 ## Handoff
 
+**Status (2026-11-26):** **JPEG export goes through jpegli** (task #157, `crates/pb-jpegli`;
+Rung 4's "JPEG encoder trial" has the build notes and measurements) and **zip 9 for archive doors**
+(task #155's zip half). Verified on the Mac: pb-jpegli's tests (progressive 4:4:4, ICC chunks from
+1 across three markers, EXIF in APP1, a jpegli error returns `Err` instead of exiting, eight
+encodes in parallel), pb-encode's JPEG tests against both encoders, `codec_bench` on the corpus.
+**Not verified:** jpegli on Windows at all (see Cross-platform debt).
+
 **Status (2026-11-24, session 8):** **rung 4's first batch is built** — WebP, AVIF, JPEG XL, HEIC
 (Mac) and TIFF; see Rung 4's session-8 note, which also records four colour bugs measuring found
 (moxcms's `chad`, "sRGB" descriptions on P3 profiles, an unnameable P3 profile, and jxl-oxide's
@@ -1382,6 +1427,17 @@ test script: `.taskmaster/docs/export-rung1-manual-test.md`. Rung 0a (#81) not s
 - Quit waits up to 4 s for an in-flight export (`finish_exports_for_exit`), from both shells.
 
 **Cross-platform debt**
+
+- **Windows (2026-11-26, jpegli, task #157):** `crates/pb-jpegli` has only been compiled with
+  Apple clang. With MSVC it adds `/EHsc` (the shim's error path throws through jpegli; `cc`
+  doesn't add it), `/bigobj`, `/std:c++17`, `HWY_STATIC_DEFINE` and `_CRT_SECURE_NO_WARNINGS`;
+  jxl-sys builds the same Highway with MSVC, so the headers should compile, but jpegli's own code
+  never has here. Owed, on x64 **and** ARM64: `build-windows.ps1` builds; `cargo test -p
+  pb-jpegli` and `cargo test -p pb-encode --features jpegli jpeg` pass; a JPEG export opens in
+  Photos with its profile. **The lever if MSVC can't build it:** remove `"pb-encode/jpegli"` from
+  pb-app-core's `export-codecs`, and JPEG export falls back to the `image` crate's encoder (the
+  default quality is 85 for both, so nothing else changes). jpegli then ships Mac-only, and the
+  changelog line saying so stays true.
 
 - **Windows (2026-11-25, metadata):** the egui panel's five category switches (under Strip
   metadata) are compile-checked only. The library half's WebP / AVIF / JPEG XL / TIFF embedding is

@@ -16,6 +16,7 @@ members = [
     "crates/pb-color",
     "crates/pb-decode",
     "crates/pb-encode",
+    "crates/pb-jpegli",
     "crates/pb-mesh",
     "crates/pb-source",
     "crates/pb-render",

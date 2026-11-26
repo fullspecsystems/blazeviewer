@@ -129,8 +129,10 @@ crates/
   pb-encode   the export pipeline (task #89): ExportSource/ExportImage types, `prepare`
               (rotation, HDR→P3 tone-map, colour resolution), the ICC sanitizer behind
               "Strip metadata", and the encoders behind features: PNG, JPEG, TIFF, AVIF
-              (rav1e), WebP + JPEG XL (C libs, `export-codecs`), HEIC (macOS Image I/O).
-              Pure apart from HEIC; pb-decode uses it for types only
+              (rav1e), WebP + JPEG XL + jpegli for JPEG (C libs, `export-codecs`), HEIC (macOS
+              Image I/O). Pure apart from HEIC; pb-decode uses it for types only
+  pb-jpegli   jpegli's encoder (vendored libjxl v0.10.2) + a C++ shim, built with cc against
+              jxl-sys's Highway so the app links one Highway (task #157; vendor/README.md)
   pb-mesh     3D models (tasks #151/#153): STL / OBJ / 3MF parsed from bytes into one Z-up
               mesh, auto-framed, rendered to a still on the CPU (`MeshRasterizer` seam), plus
               the live view's camera (`LiveView`); pure, no I/O or GPU. pb-decode::model
